@@ -9,16 +9,10 @@ typedef struct {
     void           *user_data;
 } ui_confirm_ctx_t;
 
-/* Stashed in the msgbox's own user_data (lv_obj_set_user_data), not a static
- * -- more than one confirm dialog is never on screen at once in practice, but
- * there is no reason to make that a hidden assumption when the mbox object
- * already has a slot to carry it. Freed in confirm_close_cb() and
- * confirm_yes_cb(), whichever runs (each dialog closes exactly once). */
-static void free_ctx(lv_obj_t *mbox)
-{
-    ui_confirm_ctx_t *ctx = (ui_confirm_ctx_t *)lv_obj_get_user_data(mbox);
-    lv_free(ctx);
-}
+/* Stashed in the msgbox's own user_data (lv_obj_set_user_data), not a static.
+ * Freed ONLY in mbox_deleted_cb (LV_EVENT_DELETE), so every close path --
+ * Yes, Cancel, relock via ui_confirm_close_open() -- frees it exactly once
+ * (audit L18). */
 
 /* The most recently shown, still-open dialog, for ui_confirm_close_open().
  * Cleared by mbox_deleted_cb() whenever that msgbox is deleted, whichever
@@ -27,15 +21,17 @@ static lv_obj_t *s_open_mbox;
 
 static void mbox_deleted_cb(lv_event_t *e)
 {
-    if (lv_event_get_target(e) == s_open_mbox) {
+    lv_obj_t *mbox = lv_event_get_target(e);
+    if (mbox == s_open_mbox) {
         s_open_mbox = NULL;
     }
+    lv_free(lv_obj_get_user_data(mbox));
+    lv_obj_set_user_data(mbox, NULL);
 }
 
 static void confirm_close_cb(lv_event_t *e)
 {
     lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
-    free_ctx(mbox);
     lv_msgbox_close(mbox);
 }
 
@@ -46,8 +42,6 @@ void ui_confirm_close_open(void)
         return;
     }
     s_open_mbox = NULL;
-    free_ctx(mbox);
-    lv_obj_set_user_data(mbox, NULL);
     lv_msgbox_close(mbox);
 }
 
@@ -62,7 +56,6 @@ static void confirm_yes_cb(lv_event_t *e)
     ui_confirm_ctx_t *ctx = (ui_confirm_ctx_t *)lv_obj_get_user_data(mbox);
     ui_confirm_cb_t on_confirm = ctx ? ctx->on_confirm : NULL;
     void *user_data = ctx ? ctx->user_data : NULL;
-    lv_free(ctx);
     lv_msgbox_close(mbox);
     if (on_confirm) {
         on_confirm(user_data);
@@ -86,7 +79,15 @@ void ui_confirm_show(const ui_confirm_params_t *params)
         return;
     }
 
+    ui_confirm_ctx_t *ctx = lv_malloc(sizeof(*ctx));
+    if (!ctx) {
+        return; /* no dialog without its context (audit L18) */
+    }
     lv_obj_t *mbox = lv_msgbox_create(NULL);
+    if (!mbox) {
+        lv_free(ctx);
+        return;
+    }
     lv_obj_set_width(mbox, UI_CONFIRM_WIDTH_PX);
     if (params->title) {
         lv_msgbox_add_title(mbox, params->title);
@@ -95,7 +96,6 @@ void ui_confirm_show(const ui_confirm_params_t *params)
         lv_msgbox_add_text(mbox, params->body);
     }
 
-    ui_confirm_ctx_t *ctx = lv_malloc(sizeof(*ctx));
     ctx->on_confirm = params->on_confirm;
     ctx->user_data = params->user_data;
     lv_obj_set_user_data(mbox, ctx);

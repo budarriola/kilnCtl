@@ -311,7 +311,20 @@ function Invoke-BatchCheck {
     param([string[]]$Exprs, [string]$RepoDir)
     if (-not $Exprs -or $Exprs.Count -eq 0) { return @() }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'git'
+    # Resolve git.exe from PATH, skipping the current directory (CreateProcess
+    # would search it first); falls back to bare 'git' only if none is found.
+    $gitExe = 'git'
+    $cwdFull = [System.IO.Path]::GetFullPath((Get-Location).ProviderPath).TrimEnd('')
+    foreach ($d in ($env:PATH -split ';')) {
+        if (-not $d) { continue }
+        try {
+            $full = [System.IO.Path]::GetFullPath($d).TrimEnd('')
+            if ($full -ieq $cwdFull) { continue }
+            $cand = Join-Path $full 'git.exe'
+            if (Test-Path -LiteralPath $cand) { $gitExe = $cand; break }
+        } catch { }
+    }
+    $psi.FileName = $gitExe
     $repoArg = ''
     if ($RepoDir) { $repoArg = '-C "' + $RepoDir + '" ' }
     $psi.Arguments = $repoArg + 'cat-file --batch-check'
@@ -332,9 +345,13 @@ function Invoke-BatchCheck {
     # The process's stdin writer may emit a UTF-8 BOM, which git reads as part
     # of the FIRST line only. Lead with a sacrificial "HEAD" line and drop its
     # answer, so every real expression is read exactly as written.
-    $p.StandardInput.Write(('HEAD' + [char]10 + ($Exprs -join [string][char]10) + [char]10))
+    # The write is bounded too: a git that never reads stdin would block a
+    # synchronous Write forever, before any wait below is reached.
+    $killTree = { try { & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /T /F /PID $p.Id | Out-Null } catch { } }
+    $writeTask = $p.StandardInput.WriteAsync(('HEAD' + [char]10 + ($Exprs -join [string][char]10) + [char]10))
+    if (-not $writeTask.Wait(120000)) { & $killTree; throw "git cat-file --batch-check: writing stdin did not complete within 120 s (git not reading; repo: '$RepoDir')" }
     $p.StandardInput.Close()
-    $p.WaitForExit()
+    if (-not $p.WaitForExit(120000)) { & $killTree; throw "git cat-file --batch-check did not exit within 120 s (repo: '$RepoDir')" }
     $out = @($stdoutTask.Result -split "`r?`n" | Where-Object { $_ -ne '' })
     $out = @($out | Select-Object -Skip 1)
     if ($out.Count -ne $Exprs.Count) {

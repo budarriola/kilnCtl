@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, safety_log_level_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, safety_log_level_http_client, safety_test_trip_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -241,6 +241,8 @@ def safety_request_enable(enable: bool) -> str:
     that outcome never comes back here. What this DOES report is an ESP-side
     refusal (a truncated frame) caught before the request ever reached the
     Pico.
+
+    Not confirm-gated by design: the Pico decides whether to grant enable; the request cannot override a latched trip.
     """
     try:
         result = _srv._safety.request_enable(enable)
@@ -272,7 +274,7 @@ def safety_set_poll_period(period_ms: int) -> str:
 
 
 @_core._tool()
-def safety_set_fault_out(assert_fault: bool) -> str:
+def safety_set_fault_out(assert_fault: bool, confirm: bool = False) -> str:
     """Drive the isolated Fault line to the safety processor.
 
     This is an ESP **output** (GPIO6 -> optocoupler U1 -> the Pico's mainFault
@@ -282,7 +284,14 @@ def safety_set_fault_out(assert_fault: bool) -> str:
 
     The firmware asserts this by itself on PC-link loss, a thermocouple fault
     or a watchdog trip; this tool is a manual override of that.
+
+    Asserting (True) only makes the safety processor trip, so it is ungated. DE-asserting
+    (False) removes a fault indication the firmware may have raised for a real reason, so it
+    needs `confirm=True` (exactly True).
     """
+    if assert_fault is not True and confirm is not True:
+        return ("refused: de-asserting the fault line can hide a fault the firmware raised for a real "
+                "reason; pass confirm=True (exactly True) to proceed")
     try:
         result = _srv._safety.set_fault_out(assert_fault)
     except SafetyQueryError as exc:
@@ -293,8 +302,12 @@ def safety_set_fault_out(assert_fault: bool) -> str:
     return f"refused - could not set fault out{detail}"
 
 
+_CLEAR_TRIP_READBACK_WINDOW_S = 2.0
+_CLEAR_TRIP_READBACK_POLL_S = 0.25
+
+
 @_core._tool()
-def safety_clear_trip() -> str:
+def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
     """Clear a latched safety trip on the safety processor.
 
     A trip LATCHES on the Pico: once `safety_guards_tick()` sets `is_tripped`
@@ -311,8 +324,135 @@ def safety_clear_trip() -> str:
 
     Fire-and-forget: no reply on the wire. Check `safety_get_status()`
     afterwards to see whether it actually cleared.
+
+    Not confirm-gated by design: clearing a trip is a routine operator step; the Pico refuses it while the cause persists and the post-trip dwell applies.
+
+    Precheck (2026-10-09): reads GET_DIAG first. Refuses when no DIAG was ever received (link not up) or the reported
+    `trip_mask` is not `1 << (trip_reason - 1)` (the mask rule in
+    `link_frame_trip_mask_for_reason()`), i.e. more than the one expected guard is latched or the
+    reading is inconsistent, unless `allow_unexpected_mask=True` after a human has reviewed it.
+    Afterwards the tool re-reads GET_DIAG and reports whether the trip is still latched.
     """
-    return _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
+    try:
+        before = _srv._safety.get_diag()
+    except SafetyQueryError as exc:
+        return f"refused: could not read GET_DIAG before clearing ({exc}) -- state UNKNOWN"
+    if not before.ever_received:
+        return ("refused: no GET_DIAG/DIAG frame has been received yet (safety link not up), so the tool "
+                "cannot show which trip it would clear -- wait for link-up and check safety_get_status()")
+    # Defence in depth only: the Pico derives trip_mask from trip_reason as 1 << (reason-1)
+    # (link_frame_trip_mask_for_reason), so on real firmware this cannot differ; it catches a
+    # corrupted or inconsistent reading.
+    expected = devices.safety_trip_mask_for_reason(before.trip_reason)
+    if before.trip_mask != expected and allow_unexpected_mask is not True:
+        return (f"refused: trip_mask 0x{before.trip_mask:04X} != expected 0x{expected:04X} "
+                f"(1 << (trip_reason {before.trip_reason} - 1)); review safety_get_diag() and pass "
+                f"allow_unexpected_mask=True only if the extra guards are understood")
+    sent = _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
+    if not sent.startswith("ok"):
+        return sent
+    # The clear is fire-and-forget and the Pico applies it a few hundred ms later, so poll
+    # briefly for the cleared state before reporting STILL LATCHED.
+    deadline = time.monotonic() + _CLEAR_TRIP_READBACK_WINDOW_S
+    while True:
+        try:
+            after = _srv._safety.get_diag()
+        except SafetyQueryError as exc:
+            return f"UNVERIFIED -- clear sent ({sent}) but read-back failed ({exc}); state UNKNOWN, check safety_get_status()"
+        if not (after.trip_reason or after.trip_mask) or time.monotonic() >= deadline:
+            break
+        time.sleep(_CLEAR_TRIP_READBACK_POLL_S)
+    left = devices.safety_trip_mask_for_reason(after.trip_reason) if after.trip_reason else 0
+    still = bool(left or after.trip_mask)
+    nothing = "" if (before.trip_reason or before.trip_mask) else " (nothing was latched before the clear)"
+    head = "STILL LATCHED -- " if still else ""
+    return (f"{head}{sent}{nothing}\nread-back: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
+            f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if still else 'cleared'})")
+
+_TEST_TRIP_REASON = 4  # SAFETY_TRIP_TEST
+# TRIPFX4 INFO-2: the Pico sends DIAG every 2000 ms (LINK_DIAG_TX_PERIOD_MS) and none on a trip, so the
+# TRIPPED DIAG can lag the trip by a full period (a lost one: two). The window must exceed
+# SAFETY_LINK_DIAG_FRESH_MS (4500 ms).
+_TEST_TRIP_VERIFY_WINDOW_S = 6.0
+
+
+@_core._tool()
+def safety_test_trip(confirm: bool = False, host: Optional[str] = None) -> str:
+    """Ask the safety processor to latch a TEST trip (reason 4, SAFETY_TRIP_TEST).
+
+    Exercises the trip path end to end (POST /api/safety/test_trip, ADMIN tier,
+    kilnlink TEST_TRIP). It can only CAUSE a trip: this tool never clears one.
+    Clear it afterwards with safety_clear_trip() when ready. The Pico enforces a
+    10 s rate limit. Refuses unless confirm is exactly True, and refuses if the
+    safety processor is already tripped. Afterwards re-reads GET_DIAG and checks
+    trip_reason == 4 and trip_mask == 1 << (4 - 1). Reports trip_seq.
+
+    A Pico that predates TEST_TRIP answers 501 (protocol too old) or never
+    answers (503 no_reply: "peer did not answer; it may predate TEST_TRIP").
+    """
+    if confirm is not True:
+        return ("refused: safety_test_trip latches a real safety trip; pass confirm=True exactly. "
+                "Nothing was sent.")
+    try:
+        before = _srv._safety.get_diag()
+    except SafetyQueryError as exc:
+        return f"refused: could not read GET_DIAG before the test trip ({exc}) -- state UNKNOWN, nothing sent"
+    if not before.ever_received:
+        return "refused: no DIAG received yet (safety link not up); nothing sent"
+    if before.trip_reason or before.trip_mask:
+        return (f"refused: safety processor is already tripped (trip_reason={before.trip_reason} "
+                f"trip_mask=0x{before.trip_mask:04X}); nothing sent")
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import
+
+    resolved = _ota_resolve_host(host)
+    try:
+        status, body = safety_test_trip_http_client.post_test_trip(resolved)
+    except safety_test_trip_http_client.SafetyTestTripHttpError as exc:
+        return f"error: test trip POST failed (host={resolved}): {exc} -- state UNKNOWN, check safety_get_status()"
+    outcome = body.get("outcome") or body.get("error") or "unknown"
+    if status != 200 or not body.get("ok"):
+        if outcome == "no_reply":
+            return (f"NOT CONFIRMED -- HTTP {status} no_reply: peer did not answer; it may predate TEST_TRIP "
+                    f"(or the link is down). Check safety_get_status().")
+        if outcome == "pico_protocol_too_old":
+            return (f"refused -- HTTP {status} pico_protocol_too_old (pico_protocol="
+                    f"{body.get('pico_protocol')}): the safety processor predates TEST_TRIP; nothing latched")
+        return f"refused -- HTTP {status} {outcome}: {body}; no test trip latched by this call"
+    trip_seq = body.get("trip_seq")
+    expected = devices.safety_trip_mask_for_reason(_TEST_TRIP_REASON)
+    deadline = time.monotonic() + _TEST_TRIP_VERIFY_WINDOW_S
+    via_event = False
+    while True:
+        try:
+            after = _srv._safety.get_diag()
+        except SafetyQueryError as exc:
+            return (f"UNVERIFIED -- board accepted (trip_seq={trip_seq}) but read-back failed ({exc}); "
+                    f"check safety_get_status()")
+        if after.trip_reason == _TEST_TRIP_REASON:
+            break
+        # The DIAG may simply not have refreshed yet; TRIP_EVENT (STATUS side) arrives at once. It confirms the
+        # trip only if it carries THIS call's trip_seq and reason 4 -- never an older or different trip.
+        try:
+            ev = _srv._safety.get_trip_event()
+        except SafetyQueryError:
+            ev = None
+        if (ev is not None and isinstance(trip_seq, int) and ev.ever_received
+                and ev.last_seq == trip_seq and ev.trip_reason == _TEST_TRIP_REASON):
+            via_event = True
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_CLEAR_TRIP_READBACK_POLL_S)
+    if via_event:
+        return (f"ok - test trip latched (confirmed by TRIP_EVENT: trip_reason={_TEST_TRIP_REASON} "
+                f"trip_seq={trip_seq}; DIAG had not refreshed yet, last DIAG trip_reason={after.trip_reason}) "
+                f"(host={resolved}). Not cleared; use safety_clear_trip().")
+    if after.trip_reason != _TEST_TRIP_REASON or after.trip_mask != expected:
+        return (f"FAILED VERIFY -- board accepted (trip_seq={trip_seq}) but read-back shows "
+                f"trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X}, expected reason "
+                f"{_TEST_TRIP_REASON} mask 0x{expected:04X}")
+    return (f"ok - test trip latched: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
+            f"trip_seq={trip_seq} (host={resolved}). Not cleared; use safety_clear_trip().")
 
 
 @_core._tool()
@@ -359,7 +499,8 @@ def safety_set_log_level(level: int, peer: Optional[str] = None, host: Optional[
 
 
 @_core._tool()
-def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
+def safety_set_tc_type(tc_type_name: str, confirm: bool = False,
+                       host: Optional[str] = None) -> str:
     """Commission the safety processor's thermocouple type (config_store.h's
     ``tc_type`` field, config_params.c id ``0x0105``).
 
@@ -411,12 +552,18 @@ def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
     safety_set_rate_guard() do; pass `host` explicitly for kilnctl.local or
     a board reachable only from a different network than this link's serial
     port.
+
+    REFUSES UNLESS ``confirm is True`` exactly (audit F3).
     """
     name = tc_type_name.strip().upper()
     if name not in devices.SAFETY_TC_TYPE_NAMES:
         known = ", ".join(sorted(devices.SAFETY_TC_TYPE_NAMES))
         return f"error: unknown tc_type_name {tc_type_name!r} -- expected one of {known}"
     value = devices.SAFETY_TC_TYPE_NAMES[name]
+
+    if confirm is not True:
+        return (f"refused: pass confirm=True, exactly, to write the safety processor's flash "
+                f"(tc_type={name})")
 
     busy = _profile_or_autotune_running()
     if busy is not None:
@@ -1031,7 +1178,8 @@ def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
 
 
 @_core._tool()
-def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str] = None) -> str:
+def safety_set_commissioning_fields(fields: "dict[str, Any]", confirm: bool = False,
+                                    host: Optional[str] = None) -> str:
     """Commission ARBITRARY named fields on the safety processor's config
     record over GET/POST /api/safety/commissioning -- the MCP-facade
     replacement for the paste-ready ``safety_cfg_http_client.apply_safety_
@@ -1080,9 +1228,15 @@ def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str
     safety_set_rate_guard() do; pass `host` explicitly for kilnctl.local or
     a board reachable only from a different network than this link's
     serial port.
+
+    REFUSES UNLESS ``confirm is True`` exactly (audit F3).
     """
     if not fields:
         return "error: fields is empty -- nothing to write"
+
+    if confirm is not True:
+        return ("refused: pass confirm=True, exactly, to write the safety processor's flash "
+                f"(fields: {', '.join(sorted(map(str, fields)))})")
 
     busy = _profile_or_autotune_running()
     if busy is not None:
@@ -1136,16 +1290,22 @@ def _profile_or_autotune_running() -> Optional[str]:
     the wire."""
     try:
         prof = _srv._profiles.get_exec_status()
-        if prof.state in (1, 2):  # running, paused (still armed/heating-capable)
+        # Allow-list, fail closed: only idle/done/faulted are safe; running,
+        # paused or an unknown(N) state from newer firmware refuses.
+        if prof.state_name not in ("idle", "done", "faulted"):
             return f"a profile is currently {prof.state_name} (#{prof.profile_id} {prof.name!r})"
-    except ProfilesQueryError:
-        pass  # link down / no reply -- not this check's job to report that
+    except ProfilesQueryError as exc:
+        # Fail closed (audit F4), like mcp_server_control's twin: a down/slow
+        # link must not read as "nothing is running".
+        return f"could not read profile exec status ({exc}) -- refusing to guess"
     try:
         at = _srv._autotune.get_status()
-        if at.state in (1, 2, 3, 4):  # settling, stepping, relay_approach, relay_cycling
+        # Only idle(0)/done(5)/aborted(6) are non-running; anything else,
+        # including an unknown state, refuses.
+        if at.state not in (0, 5, 6):
             return f"an autotune run is currently {at.state_name} (zone {at.zone})"
-    except AutotuneQueryError:
-        pass
+    except AutotuneQueryError as exc:
+        return f"could not read autotune status ({exc}) -- refusing to guess"
     return None
 
 
@@ -1242,7 +1402,7 @@ def safety_set_rate_guard(max_rate_c_per_min: float, rate_window_s: float = 60.0
     read-back verify -- an ACK is not proof, see that module's docstring) --
     an ``{"ok":true}`` alone is never enough to report success here.
     """
-    if not confirm:
+    if confirm is not True:
         return ("refused: pass confirm=True to actually write S8's rate-of-rise guard -- "
                 f"this would set max_rate_c_per_min={max_rate_c_per_min:g}C/min, "
                 f"rate_window_s={rate_window_s:g}s")
@@ -1333,6 +1493,8 @@ def ota_rollback_pico() -> str:
     NOT YET VERIFIED AGAINST REAL HARDWARE -- no RP2040 attached in this
     environment; only the wire codec and host-tested decision logic are
     exercised here.
+
+    Not confirm-gated by design: a deliberate operator recovery step; the Pico refuses it while ARMED.
     """
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_request_rollback())
 

@@ -5,7 +5,7 @@
 # sweep logic, methodology and allowlists live in the Python script -- see
 # that file's own top comment before editing behaviour here.
 #
-# WHY THIS EXISTS. docs/RELEASE_HARDENING_PLAN.md item 1's acceptance
+# WHY THIS EXISTS. docs/RELEASE_HARDENING.md item 1's acceptance
 # criteria called for a zero-production-caller ("dead code with no caller")
 # sweep on both the C and Python sides. The C-side sweep found a real
 # instance once (a live, wired-in HTTP handler nothing calls --

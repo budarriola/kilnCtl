@@ -14,6 +14,7 @@
 #include "esp_http_server.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
+#include "cfg_fs_refusal_http.h"
 #include "profiles_http.h"
 #include "profiles_http_internal.h" // PROFILE_TARGET_C_MIN/MAX, PROFILE_ON_OFF_RULE_JSON_MAX,
                                      // profiles_http_json_escape() -- Opus review of 5dd23944, finding 3
@@ -260,6 +261,9 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         }
         seg->target_c = (float)dt;
         seg->ramp_c_per_hr = (float)dr;
+        if ((have_t && !isfinite(seg->target_c)) || (have_r && !isfinite(seg->ramp_c_per_hr))) {
+            FAIL("segment target_c/ramp_c_per_hr not finite");
+        }
 
         uint32_t bound_dwell_max = 0;
         profiles_http_get_bounds(NULL, NULL, NULL, NULL, &bound_dwell_max);
@@ -353,31 +357,43 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         double dv = 0.0;
         bool has_v = false;
         r->enable = 0;
-        if (backup_json_field_opt_num(re, "enable", 0, 1, &dv, &has_v, "enable", NULL, 0, rule_i) && has_v) {
+        if (!backup_json_field_opt_num(re, "enable", 0, 1, &dv, &has_v, "enable", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: enable out of range");
+        }
+        if (has_v) {
             r->enable = (uint8_t)dv;
         }
         r->phase_mask = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "phase_mask", 0, 255, &dv, &has_v, "phase_mask", NULL, 0, rule_i) &&
-            has_v) {
+        if (!backup_json_field_opt_num(re, "phase_mask", 0, 255, &dv, &has_v, "phase_mask", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: phase_mask out of range");
+        }
+        if (has_v) {
             r->phase_mask = (uint8_t)dv;
         }
         r->direction_mask = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "direction_mask", 0, 255, &dv, &has_v, "direction_mask", NULL, 0,
-                                       rule_i) &&
-            has_v) {
+        if (!backup_json_field_opt_num(re, "direction_mask", 0, 255, &dv, &has_v, "direction_mask", NULL, 0,
+                                       rule_i)) {
+            FAIL("on_off_rule: direction_mask out of range");
+        }
+        if (has_v) {
             r->direction_mask = (uint8_t)dv;
         }
         r->temp_source = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "temp_source", 0, 3, &dv, &has_v, "temp_source", NULL, 0, rule_i) &&
-            has_v) {
+        if (!backup_json_field_opt_num(re, "temp_source", 0, 3, &dv, &has_v, "temp_source", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: temp_source out of range");
+        }
+        if (has_v) {
             r->temp_source = (uint8_t)dv;
         }
         r->temp_cmp = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "temp_cmp", 0, 255, &dv, &has_v, "temp_cmp", NULL, 0, rule_i) && has_v) {
+        if (!backup_json_field_opt_num(re, "temp_cmp", 0, 255, &dv, &has_v, "temp_cmp", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: temp_cmp out of range");
+        }
+        if (has_v) {
             r->temp_cmp = (uint8_t)dv;
         }
         r->temp_threshold_c = 0.0f;
@@ -389,26 +405,35 @@ static esp_err_t import_post_handler(httpd_req_t *req)
          * validation path skips the range check for a rule whose threshold
          * is unused; bounding at import time keeps a stored-but-dormant
          * value sane regardless of temp_cmp. */
-        if (backup_json_field_opt_num(re, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX,
-                                       &dv, &has_v, "temp_c", NULL, 0, rule_i) &&
-            has_v) {
+        if (!backup_json_field_opt_num(re, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX,
+                                       &dv, &has_v, "temp_c", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: temp_c out of range");
+        }
+        if (has_v) {
             r->temp_threshold_c = (float)dv;
         }
         r->time_start_s = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "time_start_s", 0, 65535, &dv, &has_v, "time_start_s", NULL, 0, rule_i) &&
-            has_v) {
+        if (!backup_json_field_opt_num(re, "time_start_s", 0, 65535, &dv, &has_v, "time_start_s", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: time_start_s out of range");
+        }
+        if (has_v) {
             r->time_start_s = (uint16_t)dv;
         }
         r->time_stop_s = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "time_stop_s", 0, 65535, &dv, &has_v, "time_stop_s", NULL, 0, rule_i) &&
-            has_v) {
+        if (!backup_json_field_opt_num(re, "time_stop_s", 0, 65535, &dv, &has_v, "time_stop_s", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: time_stop_s out of range");
+        }
+        if (has_v) {
             r->time_stop_s = (uint16_t)dv;
         }
         r->invert = 0;
         has_v = false;
-        if (backup_json_field_opt_num(re, "invert", 0, 1, &dv, &has_v, "invert", NULL, 0, rule_i) && has_v) {
+        if (!backup_json_field_opt_num(re, "invert", 0, 1, &dv, &has_v, "invert", NULL, 0, rule_i)) {
+            FAIL("on_off_rule: invert out of range");
+        }
+        if (has_v) {
             r->invert = (uint8_t)dv;
         }
 
@@ -449,6 +474,10 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         profiles_http_json_escape(err_msg, err_escaped, sizeof(err_escaped));
         char errjson[192 + sizeof(err_escaped)];
         int en = snprintf(errjson, sizeof(errjson), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+        if (strcmp(err_msg, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0) {
+            /* PROFILESFX10 MED-1: the save was refused (nothing changed); give the profile remedy, not a bare 400. */
+            return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
+        }
         /* "busy:" = a zone conversion holds the profile store; a conflict, not a bad body. */
         httpd_resp_set_status(req, strncmp(err_msg, "busy:", 5) == 0 ? "409 Conflict" : "400 Bad Request");
         httpd_resp_set_type(req, "application/json");

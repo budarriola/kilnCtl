@@ -9,8 +9,12 @@
 // `may_disclose = !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req)`
 // disjunction as this commit's sibling readiness_http.c fix. The pre-existing
 // on_ap/ap_password narrowing (2026-08-22) is a separate, independent
-// condition and is untouched by this fix -- not covered by these tests
-// (already covered by test_wifi_prov.c's own AP-password tests).
+// condition and is untouched by this fix. Its decision is the header-inline
+// wifi_prov_status_ap_password_view(), pinned by test_ap_password_view()
+// below; test_wifi_prov.c covers wifi_prov_request_arrived_on_ap() (what
+// computes on_ap), NOT the handler's use of it. That the handler calls the
+// helper is not host-testable (wifi_provision_http.c does not host-compile)
+// and is checked by review only.
 //
 // sta_ip is deliberately excluded from this redaction (see
 // wifi_prov_status_redact_field()'s doc comment in wifi_prov.h for the full
@@ -306,6 +310,68 @@ static void test_gate_auth_on_admin_session(void)
     TEST_CHECK(strcmp(static_gateway_field, "\"203.0.113.1\"") == 0, "ADMIN role -- gateway disclosed");
 }
 
+static void test_ap_password_view(void)
+{
+    TEST_SECTION("wifi_prov_status_ap_password_view -- AP password only on AP-arrived requests");
+    TEST_CHECK(strcmp(wifi_prov_status_ap_password_view(true, "apsecret1"), "apsecret1") == 0, "on_ap -- shown");
+    TEST_CHECK(wifi_prov_status_ap_password_view(false, "apsecret1")[0] == '\0', "off AP -- empty");
+    TEST_CHECK(wifi_prov_status_ap_password_view(true, NULL)[0] == '\0', "NULL -- empty");
+}
+
+/* REVIEW_LD01_WWFIX LOW-5: GET /status with every escaped field at its maximum and the saved-networks record
+ * refused is the largest body; it must fit WIFI_PROV_STATUS_JSON_CAP whole (a truncated body is invalid JSON). */
+static bool json_shape_ok(const char *j)
+{
+    size_t len = strlen(j);
+    if (len < 2 || j[0] != '{' || j[len - 1] != '}') return false;
+    int depth = 0;
+    bool in_str = false;
+    for (size_t i = 0; i < len; i++) {
+        char c = j[i];
+        if (in_str) {
+            if (c == '\\') { i++; continue; }
+            if (c == '"') in_str = false;
+        } else if (c == '"') in_str = true;
+        else if (c == '{') depth++;
+        else if (c == '}') { if (--depth < 0) return false; if (depth == 0 && i != len - 1) return false; }
+    }
+    return depth == 0 && !in_str;
+}
+
+static void test_status_json_worst_case_fits(void)
+{
+    TEST_SECTION("GET /status JSON: worst-case fields fit the cap and stay valid (LOW-5)");
+    char ssid[WIFI_PROV_SSID_MAX_LEN * 2 + 3], apssid[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+    char appw[WIFI_PROV_PASSWORD_MAX_LEN * 2 + 1];
+    memset(apssid, 'a', sizeof(apssid) - 1); apssid[sizeof(apssid) - 1] = '\0';
+    memset(appw, 'b', sizeof(appw) - 1); appw[sizeof(appw) - 1] = '\0';
+    snprintf(ssid, sizeof(ssid), "\"%.64s\"", apssid);
+    const char *ip = "\"255.255.255.255\"";
+    const char *hint = "The saved Wi-Fi record is unreadable or from newer firmware; factory reset with scope wifi to recover";
+    wifi_prov_status_json_in_t in = {
+        .mode = "home", .state = "reconnecting", .ssid_field = ssid, .sta_ip_field = ip,
+        .ap_ssid_escaped = apssid, .ap_password_escaped = appw, .ip_mode = "static", .static_ip_field = ip,
+        .static_netmask_field = ip, .static_gateway_field = ip, .static_dns_field = ip, .static_dns2_field = ip,
+        .sta_connected = true, .ap_password_known = true, .ap_password_set = true, .ap_pending_teardown = true,
+        .sta_rssi = -128, .ap_clients = 4294967295u, .recovery_hint = hint,
+    };
+    char buf[WIFI_PROV_STATUS_JSON_CAP];
+    int n = wifi_prov_status_json_format(buf, sizeof(buf), &in);
+    TEST_CHECK(n > 680, "worst case exceeds the old 680 B cap (this is the regression being pinned)");
+    TEST_CHECK(n > 0 && (size_t)n < sizeof(buf), "worst case is not truncated by WIFI_PROV_STATUS_JSON_CAP");
+    TEST_CHECK((size_t)n + 64 < sizeof(buf), "at least 64 B of margin remains");
+    TEST_CHECK(json_shape_ok(buf), "worst-case body is structurally valid JSON");
+    TEST_CHECK(strstr(buf, "\"recovery_hint\":\"The saved") != NULL, "recovery hint present");
+    in.recovery_hint = NULL;
+    n = wifi_prov_status_json_format(buf, sizeof(buf), &in);
+    TEST_CHECK((size_t)n < sizeof(buf) && json_shape_ok(buf) && strstr(buf, "\"saved_nets_refused\":false}") != NULL,
+              "unrefused body valid and ends with saved_nets_refused:false");
+    /* The cap must be what truncates, not a silent pass: a deliberately small buffer reports truncation. */
+    char small[200];
+    n = wifi_prov_status_json_format(small, sizeof(small), &in);
+    TEST_CHECK((size_t)n >= sizeof(small), "a too-small buffer is reported as truncation by the return value");
+}
+
 int main(void)
 {
     test_redact_field_disclosed();
@@ -316,6 +382,8 @@ int main(void)
     test_gate_auth_on_no_session();
     test_gate_auth_on_user_session();
     test_gate_auth_on_admin_session();
+    test_ap_password_view();
+    test_status_json_worst_case_fits();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

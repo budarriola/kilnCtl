@@ -4,7 +4,7 @@ routes (firmware/KilnFW/App/drivers/http/profiles_live_http.c), used by
 mcp_server_profile_live.py's profile_live_* tools.
 
 Wire contract source of truth: profiles_live_http.c itself and
-docs/LIVE_PROFILE_EDIT_PLAN.md section 10. Mirrored here, not re-derived:
+docs/LIVE_PROFILE_EDIT.md section 10. Mirrored here, not re-derived:
 
   GET  /api/profile/live
        -> 200 {"active":bool,"origin_id":uint,"origin_is_builtin":bool,
@@ -57,6 +57,9 @@ docs/LIVE_PROFILE_EDIT_PLAN.md section 10. Mirrored here, not re-derived:
           origin (live_edit_can_overwrite()'s own refusal text).
        -> 409 {"ok":false,"error":"nothing pending"} if there is no pending
           working copy at all.
+       -> 409/500 {"ok":false,"saved":true,"id":N,"error":"saved to slot N; ..."}
+          when the slot WAS saved but the working copy was edited during the
+          save (409) or could not be cleared (500).
        -> 500 {"ok":false,"error":"..."} when the pending record could not be
           cleared (discard, e.g. an NVS failure), on out of memory / an
           unreadable working copy, or when another decision (web or LCD) holds
@@ -102,21 +105,36 @@ class ProfileLiveHttpError(Exception):
     window violation, "fork before editing", ...) rather than a generic
     failure string."""
 
-    def __init__(self, message: str, status: Optional[int] = None, detail: str = ""):
+    def __init__(self, message: str, status: Optional[int] = None, detail: str = "",
+                 saved: bool = False, saved_id: Optional[int] = None):
         super().__init__(message)
         self.status = status
         self.detail = detail
+        # REVIEW_PROFILESFX LOW-2: a decide refusal body may carry "saved":true,"id":N -- the slot WAS saved.
+        self.saved = saved
+        self.saved_id = saved_id
 
 
 def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 
 
-def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
-    """Normalize a request exception into (status, detail-text). For an
-    HTTPError, tries to pull `.error` out of a JSON body first (the house
-    shape every refusal on this surface uses); falls back to the raw text if
-    the body isn't JSON."""
+def _parse_saved(raw: str) -> tuple[bool, Optional[int]]:
+    """(saved, id) from an error body's "saved"/"id" fields. "saved" must be literally true."""
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return False, None
+    if isinstance(obj, dict) and obj.get("saved") is True:
+        i = obj.get("id")
+        return True, (i if isinstance(i, int) and not isinstance(i, bool) else None)
+    return False, None
+
+
+def _error_info(exc: Exception) -> tuple[Optional[int], str, bool, Optional[int]]:
+    """Normalize a request exception into (status, detail, saved, saved_id). The HTTPError body is a
+    one-shot stream (a real http.client.HTTPResponse cannot seek), so it is read exactly once and
+    both the detail text and the saved/id fields are parsed from those bytes."""
     if isinstance(exc, urllib.error.HTTPError):
         try:
             raw = exc.read().decode("utf-8", errors="replace").strip()
@@ -129,10 +147,16 @@ def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
                 detail = obj["error"]
         except Exception:
             pass
-        return exc.code, detail
+        saved, saved_id = _parse_saved(raw)
+        return exc.code, detail, saved, saved_id
     if isinstance(exc, urllib.error.URLError):
-        return None, f"unreachable: {exc.reason}"
-    return None, str(exc)
+        return None, f"unreachable: {exc.reason}", False, None
+    return None, str(exc), False, None
+
+
+def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
+    status, detail, _, _ = _error_info(exc)
+    return status, detail
 
 
 def _get_json(host: str, path: str, timeout: float) -> dict:
@@ -161,8 +185,8 @@ def _post_form(host: str, path: str, fields: dict, timeout: float) -> dict:
         with http_auth.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001 - normalized below
-        status, detail = _error_detail(exc)
-        raise ProfileLiveHttpError(f"POST {path} failed: {detail}", status, detail) from exc
+        status, detail, saved, saved_id = _error_info(exc)
+        raise ProfileLiveHttpError(f"POST {path} failed: {detail}", status, detail, saved, saved_id) from exc
     try:
         return json.loads(body)
     except Exception as exc:
@@ -190,8 +214,17 @@ def fork_live(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
     return _post_form(host, "/api/profile/live/fork", {}, timeout)
 
 
-def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S
-              ) -> dict:
+def _gen_path(path: str, generation: Optional[int]) -> str:
+    """Append ?gen=N (the "generation" from get_live_status()/a prior edit or
+    fork response). The board answers 409 "changed elsewhere" when it no
+    longer matches. None omits it: an ABSENT gen is accepted by the board
+    (compat for callers that did not read first), so pass the generation
+    whenever a read preceded the write."""
+    return path if generation is None else f"{path}?gen={int(generation)}"
+
+
+def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+              generation: Optional[int] = None) -> dict:
     """POST /api/profile/live -- saves `segments` (a list of dicts, each
     shaped like one element of get_live_content()'s "segments" list) into the
     working slot. `kind` defaults to 0 (zone ramp/dwell) when omitted.
@@ -260,30 +293,36 @@ def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: flo
             fields[f"seg{i}_io_blocking"] = str(seg["io_blocking"])
         if "io_leave_on" in seg or "io_leave_on_at_end" in seg:
             fields[f"seg{i}_io_leave_on"] = str(seg.get("io_leave_on", seg.get("io_leave_on_at_end")))
-    return _post_form(host, "/api/profile/live", fields, timeout)
+    return _post_form(host, _gen_path("/api/profile/live", generation), fields, timeout)
 
 
-def decide_live_discard(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
+def decide_live_discard(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+                        generation: Optional[int] = None) -> dict:
     """POST /api/profile/live/decide action=discard -> {"ok":true}. Raises
     ProfileLiveHttpError(status=409) if there is nothing pending, or
     status=500 if the firmware could not clear the pending record (the
     discard did NOT happen and the record is still pending)."""
-    return _post_form(host, "/api/profile/live/decide", {"action": "discard"}, timeout)
+    return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "discard"}, timeout)
 
 
-def decide_live_save_as(host: str, name: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
+def decide_live_save_as(host: str, name: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+                        generation: Optional[int] = None) -> dict:
     """POST /api/profile/live/decide action=save_as&name=... ->
     {"ok":true,"id":uint} (the new profile slot). Raises
     ProfileLiveHttpError(status=400) on a missing/invalid name or a save
-    failure, status=409 if there is nothing pending."""
-    return _post_form(host, "/api/profile/live/decide", {"action": "save_as", "name": name}, timeout)
+    failure, status=409 if there is nothing pending. A 409/500 body with
+    "saved":true,"id":N means the slot WAS saved but the working copy was
+    edited during the save / could not be cleared: do not retry with a new
+    name (duplicate slot)."""
+    return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "save_as", "name": name}, timeout)
 
 
-def decide_live_overwrite(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
+def decide_live_overwrite(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+                          generation: Optional[int] = None) -> dict:
     """POST /api/profile/live/decide action=overwrite&confirm=1 ->
     {"ok":true} (origin slot overwritten in place). Raises
     ProfileLiveHttpError(status=403) if the origin is a builtin profile
     (never overwritable), status=409 if there is nothing pending. This
     function always sends confirm=1 -- the confirm gate belongs at the MCP
     tool layer (profile_live_decide's own `confirm` parameter), not here."""
-    return _post_form(host, "/api/profile/live/decide", {"action": "overwrite", "confirm": "1"}, timeout)
+    return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "overwrite", "confirm": "1"}, timeout)

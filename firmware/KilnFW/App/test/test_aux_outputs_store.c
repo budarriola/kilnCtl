@@ -41,6 +41,7 @@ static int g_probe_crc_max_depth = -1;
     (g_probe_crc_max_depth = (g_test_stub_lock_depth > g_probe_crc_max_depth ? g_test_stub_lock_depth : g_probe_crc_max_depth), \
      ota_image_crc32((p), (n)))
 #include "../drivers/persist/aux_outputs_cfg.c"
+#include "save_section_probe.h"
 #include "../drivers/safety/safety_pico_relay_mask.h"
 
 static const char *AO_SCRATCH_BASE = "cfg_fs_test_aux_outputs";
@@ -122,6 +123,37 @@ static void stash_blob(const void *bytes, size_t len, uint32_t rev)
     hal_kv_close(&h);
 }
 
+/* review web7 LOW-9: an existence-probe ERROR is not "absent"; the erase must report failure and keep the key. */
+static void test_legacy_erase_probe_error_is_not_absent(void)
+{
+    fresh_board();
+    const unsigned char bytes[4] = {1, 2, 3, 4};
+    stash_blob(bytes, sizeof(bytes), 1);
+    const char *const keys[1] = {NVS_KEY_AUX_OUT};
+    fake_kv_script_key_exists_status(1u, HAL_IO);
+    TEST_CHECK(legacy_nvs_erase_keys("t", KILN_NVS_PARTITION, NVS_NAMESPACE, keys, 1) == ESP_FAIL,
+               "probe error is a failure, not absent");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK, "open");
+    TEST_CHECK(hal_kv_key_exists(&h, NVS_KEY_AUX_OUT) == HAL_OK, "key kept after probe error");
+    hal_kv_close(&h);
+    TEST_CHECK(legacy_nvs_erase_keys("t", KILN_NVS_PARTITION, NVS_NAMESPACE, keys, 1) == ESP_OK,
+               "retry with healthy probe erases");
+}
+
+/* REVIEW_WEBGENFX H5b: the first probe passes, the VERIFY-loop probe errors -> still a failure. */
+static void test_legacy_erase_verify_probe_error_is_failure(void)
+{
+    fresh_board();
+    const unsigned char bytes[4] = {1, 2, 3, 4};
+    stash_blob(bytes, sizeof(bytes), 1);
+    const char *const keys[1] = {NVS_KEY_AUX_OUT};
+    fake_kv_script_key_exists_status_after(1u, 1u, HAL_IO);
+    TEST_CHECK(legacy_nvs_erase_keys("t", KILN_NVS_PARTITION, NVS_NAMESPACE, keys, 1) == ESP_FAIL,
+               "a verify-loop probe error is a failure, not 'gone'");
+    fake_kv_script_key_exists_status(0u, HAL_OK); /* clear the script */
+}
+
 static void test_predicate(void)
 {
     TEST_SECTION("aux_outputs_relay_conflict: pure predicate, bit i = relay i+1");
@@ -169,6 +201,45 @@ static void test_set_round_trip(void)
     TEST_CHECK(o.tc_zone == 1 && o.hyst_c == 5.0f && o.min_on_s == 60 && o.min_off_s == 90, "fields round trip");
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x08, "mask survives");
     TEST_CHECK(aux_outputs_cfg_get(1, &o) && !o.enabled, "other relays stay disabled");
+}
+
+/* HTTP audit L37 follow-up (MED-2): aux_outputs_cfg_set() refuses while a factory reset is in flight
+ * (relay_authority_reset_in_flight(), stubbed by test_backup_import.c in this executable), so nothing
+ * is written back over storage the reset is erasing. RAM and NVS stay as they were. */
+extern bool g_test_reset_in_flight;
+static void test_set_refused_during_factory_reset(void)
+{
+    TEST_SECTION("aux_outputs_cfg_set: refused while a factory reset is in flight, nothing persisted");
+    fresh_board();
+    aux_outputs_cfg_start(0x03);
+    aux_output_entry_t e = on_entry();
+
+    g_test_reset_in_flight = true;
+    esp_err_t err = aux_outputs_cfg_set(4, &e, 0x03);
+    g_test_reset_in_flight = false;
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE, "set refuses with ESP_ERR_INVALID_STATE during a reset");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "RAM is unchanged by the refused set");
+
+    simulate_reboot();
+    TEST_CHECK(aux_outputs_cfg_start(0x03) == ESP_OK, "restart ok");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "nothing was persisted by the refused set");
+
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "with no reset the same set lands");
+}
+
+/* "Save mutex vs. flash worker" (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
+ * s_set_lock is a cfg_save_lock_t, so the set reserves the flash worker
+ * before the mutex and releases it after, with its cfg write inside. */
+static void test_set_runs_in_save_section(void)
+{
+    TEST_SECTION("aux_outputs_cfg_set: save inside the reserved save section");
+    fresh_board();
+    aux_outputs_cfg_start(0x03);
+    aux_output_entry_t e = on_entry();
+    ssp_install();
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "set ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation before the mutex, released after, write inside it");
+    ssp_uninstall();
 }
 
 static void test_set_refuses_invalid(void)
@@ -382,19 +453,54 @@ static void test_dual_write_and_file_tiebreak(void)
     TEST_CHECK(aux_outputs_cfg_conflict_mask() == 0x04 && aux_outputs_cfg_enabled_mask() == 0,
                "file-sourced entry is reconciled against the zones too");
 
-    /* A legacy/rollback writer left an NVS copy at the SAME rev with different
-     * content: NVS wins the equal-rev tie (the dangerous case stays visible). */
+    /* persfx3 MED-3: a frozen NVS copy at the SAME rev with different content is never re-adopted; the file
+     * wins and the stale NVS keys are erased. */
     aux_outputs_blob_t legacy = make_blob_one_enabled(0);
     stash_blob(&legacy, sizeof(legacy), 5);
     simulate_reboot();
     aux_outputs_cfg_start(0);
-    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x01, "equal rev, differing bytes: NVS wins");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x04, "equal rev, differing bytes: the file wins, NVS not adopted");
+    hal_kv_handle_t hk;
+    TEST_CHECK(hal_kv_open(&hk, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK ||
+                   hal_kv_key_exists(&hk, NVS_KEY_AUX_OUT) != HAL_OK,
+               "the frozen NVS aux blob was erased once the file was adopted");
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
 }
 
 /* WP-9: the helper the ESP uses to strip aux-bound relays from every mask it sends the Pico. */
+/* persfx MED-3: the NVS aux blob is frozen at the 2026-10-06 dual-write close. When the cfg file is present but
+ * unreadable, adopting that stale (possibly ENABLED) rule could switch on a relay the operator has since disabled;
+ * the store must fall back to all-disabled and refuse saves until a clean reload. */
+static void test_unreadable_file_does_not_adopt_frozen_nvs_enabled_rule(void)
+{
+    TEST_SECTION("unreadable aux file + stale ENABLED NVS blob: all aux stay disabled, saves refused (persfx MED-3)");
+    fresh_board();
+    aux_outputs_blob_t stale = make_blob_one_enabled(0);
+    stash_blob(&stale, sizeof(stale), 5);
+    aux_outputs_blob_t disabled;
+    memset(&disabled, 0, sizeof(disabled));
+    disabled.version = AUX_OUTPUTS_CFG_VERSION;
+    disabled.crc32 = blob_checksum(&disabled);
+    TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &disabled, sizeof(disabled), 9) == ESP_OK,
+               "file: operator-disabled rule at rev 9");
+    simulate_reboot();
+    cfg_fs_test_inject_read_error(AUX_OUTPUTS_FILE_PATH, ESP_FAIL, 8);
+    aux_outputs_cfg_start(0);
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "the frozen NVS enabled rule is NOT adopted");
+    TEST_CHECK(pref_cfg_fs_rev_unknown(AUX_OUTPUTS_FILE_PATH), "the store stays marked rev-unknown");
+    aux_output_entry_t e = on_entry();
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) != ESP_OK, "a save over the unreadable file is refused");
+    simulate_reboot();
+    aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0 && !pref_cfg_fs_rev_unknown(AUX_OUTPUTS_FILE_PATH),
+               "a clean reload reads the rev-9 disabled file and clears the unknown mark");
+    cfg_fs_deinit();
+    pref_cfg_fs_reset_write_fn_for_test();
+}
+
 static void test_pico_mask_strips_aux(void)
 {
     TEST_SECTION("safety_pico_relay_mask: aux bits stripped, non-aux bits untouched, tracks live config");
@@ -529,6 +635,15 @@ static void test_raw_verify_and_journal(void)
     fake_kv_script_next_write_status(HAL_IO);
     w.stage = 4;
     TEST_CHECK(!aux_convert_journal_write(&w), "a failed marker write is reported");
+    /* LOW-1 (rstfence review): the journal write honours the factory-reset writer fence. */
+    extern bool g_test_reset_refuses_writer;
+    w.stage = 5;
+    g_test_reset_refuses_writer = true;
+    TEST_CHECK(!aux_convert_journal_write(&w), "journal write refused while the reset fence is up");
+    g_test_reset_refuses_writer = false;
+    TEST_CHECK(aux_convert_journal_read(&j) && j.stage == 3, "refused journal write left the stored marker untouched");
+    TEST_CHECK(aux_convert_journal_write(&w) && aux_convert_journal_read(&j) && j.stage == 5,
+               "journal write works again once the fence is down");
     TEST_CHECK(aux_convert_journal_clear() && !aux_convert_journal_read(&j), "clear removes the marker");
 }
 
@@ -536,7 +651,7 @@ static void test_start_holds_no_lock_during_io(void)
 {
     fresh_board();
     aux_outputs_blob_t blob = make_blob_one_enabled(1);
-    stash_blob(&blob, sizeof(blob), 3);
+    TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), 3) == ESP_OK, "cfg file seeded");
     g_probe_crc_max_depth = -1;
     g_test_stub_lock_depth = 0;
     TEST_CHECK(aux_outputs_cfg_start(0) == ESP_OK, "start ok");
@@ -548,9 +663,11 @@ static void test_start_holds_no_lock_during_io(void)
 void run_test_aux_outputs_store(void)
 {
     test_start_holds_no_lock_during_io();
+    test_set_runs_in_save_section();
     test_predicate();
     test_defaults_all_disabled();
     test_set_round_trip();
+    test_set_refused_during_factory_reset();
     test_set_refuses_invalid();
     test_set_refuses_zone_claimed_relay();
     test_boot_conflict_forces_aux_off_in_ram_only();
@@ -560,9 +677,12 @@ void run_test_aux_outputs_store(void)
     test_corrupt_blob_defaults();
     test_set_without_cfg_partition_fails_loud();
     test_dual_write_and_file_tiebreak();
+    test_unreadable_file_does_not_adopt_frozen_nvs_enabled_rule();
     test_pico_mask_strips_aux();
     test_pico_mask_call_site_shape();
     test_raw_verify_and_journal();
+    test_legacy_erase_probe_error_is_not_absent();
+    test_legacy_erase_verify_probe_error_is_failure();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

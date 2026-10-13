@@ -141,6 +141,8 @@ def serve(mcp: Any, *, name: str, default_port: int, argv: "Optional[list[str]]"
     ``_add_control_routes``.
     """
     args = build_parser(name, default_port).parse_args(argv)
+    from . import call_log
+    call_log.set_port(args.port)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         stream=sys.stderr,  # stdout is the stdio transport; never log there

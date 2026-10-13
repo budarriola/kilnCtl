@@ -252,6 +252,20 @@ static void test_safety_relay_known_gated_on_link_up_in_source(void)
         return;
     }
 
+    // TRIPFX4 LOW-2 (M1/M2): the TRIPFX3 DIAG-age and boot-gate copies. Pin the right-hand sides EXACTLY so a
+    // dropped line or the STATUS age (sl.age_ms) fed instead is caught.
+    TEST_CHECK(strstr(dense, "out->diag_frame_age_ms=sl.diag_frame_age_ms;") != NULL,
+               "dashboard_get_status() must copy out->diag_frame_age_ms = sl.diag_frame_age_ms (the DIAG's own "
+               "age, not the STATUS age)");
+    TEST_CHECK(strstr(dense, "out->diag_since_reboot=sl.diag_since_reboot;") != NULL,
+               "dashboard_get_status() must copy out->diag_since_reboot = sl.diag_since_reboot");
+    TEST_CHECK(strstr(dense, "out->diag_frame_age_ms=sl.age_ms") == NULL,
+               "diag_frame_age_ms must never be fed the STATUS age");
+    TEST_CHECK(strstr(dense, "out->diag_trip_seq_known=sl.diag_trip_seq_known;") != NULL &&
+               strstr(dense, "out->diag_trip_seq=sl.diag_trip_seq;") != NULL &&
+               strstr(dense, "out->trip_last_seq=sl.trip_last_seq;") != NULL,
+               "dashboard_get_status() must copy the DIAG/TRIP_EVENT trip_seq pair trip_is_test binds on");
+
     // The old, buggy line was a bare `out->safety_relay_known = true;` with
     // nothing else on the statement -- reject that shape outright...
     TEST_CHECK(strstr(dense, "safety_relay_known=true;") == NULL,

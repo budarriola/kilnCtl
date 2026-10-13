@@ -158,6 +158,8 @@ typedef struct {
     uint8_t  zones_config_load_fault_on_disk_version;
     uint8_t  zones_config_load_fault_fw_version;
     char     zones_config_load_fault_reason[96];
+    bool     zones_config_load_fault_file_rejected; /* fault is a rejected zones.json (not a version/NVS-blob fault) */
+    bool     zones_config_load_fault_bad_copy_failed; /* file_rejected and no zones.json.bad copy exists */
 
     /* M13 fix (2026-09-16): see zones_cfg_migration_persist_fault_t's own
      * doc comment (zones_config_accessors.h). Orthogonal to
@@ -180,6 +182,10 @@ typedef struct {
     bool     kiln_cfg_swap_boot_fault;
     int32_t  kiln_cfg_swap_boot_fault_target_id;
     char     kiln_cfg_swap_boot_fault_reason[200];
+    /* LOW-1: kiln_cfg_swap_boot_fault_kind_name() of the latched kind
+     * ("active_id_unsaved" is display-only: both processors agree, heat is
+     * not gated, retried at each boot). Empty when no fault latched. */
+    char     kiln_cfg_swap_boot_fault_kind[32]; /* >= KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX (static-asserted in dashboard_http.c) */
 
     /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
      * power" -- read straight from safety_link_get_status()'s cache
@@ -336,6 +342,14 @@ typedef struct {
      * SAFETY_LINK_STALE_MS (safety_link.h), same threshold
      * safety_link_send_clear_trip() already uses to judge the same data. */
     uint16_t diag_age_ms;
+    /* TRIPFX3 LOW-B/C: age of the DIAG frame itself, and whether it is from the current Pico boot. */
+    uint32_t diag_frame_age_ms;
+    bool     diag_since_reboot;
+    /* TRIPFX4 LOW-1: the DIAG's trip_seq and the TRIP_EVENT's trip_last_seq, so trip_is_test can bind the
+     * two (a TRIP_EVENT newer than the DIAG disagrees on seq and drops the flag). */
+    bool     diag_trip_seq_known;
+    uint8_t  diag_trip_seq;
+    uint8_t  trip_last_seq;
     uint8_t  diag_context_age_100ms;
     uint32_t diag_context_frames_ok;
     uint32_t diag_context_frames_bad;
@@ -639,7 +653,7 @@ typedef enum {
      * fault. Same "must not read as ERR_SAFETY" reasoning as ERR_UPDATING
      * above; appended for the same reason. */
     DASHBOARD_RELAY_ERR_CRASH_UNACK,
-    /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): mirrors
+    /* docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1): mirrors
      * kiln_io_owner.h's new KILN_IO_OWNER_RELAY_ERR_RUNNING -- refused
      * because a firing or autotune run is currently active, BLANKET (any
      * relay, whether or not the run claims it), not because of a live safety

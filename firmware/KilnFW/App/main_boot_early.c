@@ -453,6 +453,9 @@ void main_boot_early(main_boot_ctx_t *ctx)
                  (unsigned)stack_words_before, (unsigned)stack_words_after,
                  (unsigned)(stack_words_before * sizeof(StackType_t)),
                  (unsigned)(stack_words_after * sizeof(StackType_t)));
+        if (cfg_fs_err != ESP_OK && cfg_fs_mount_format_in_progress()) {
+            ESP_LOGW(MAIN_TAG, "cfg_fs: a deferred format is scheduled/running (self-healing), not a hard mount failure");
+        }
 
         /* Loud, easy-to-grep boot-log banner for the "found evidence of
          * content, refused to auto-format" outcome -- same "make the

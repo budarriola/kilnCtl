@@ -1,11 +1,11 @@
 // Host tests for time_sync_tz.c (the pure, dependency-free TZ
-// validation/degrade logic) AND, as of docs/FILESYSTEM_USER_DATA_PLAN.md
+// validation/degrade logic) AND, as of docs/FILESYSTEM_USER_DATA.md
 // item 14's close-out, time_sync.c itself: an esp_netif_sntp.h host stub
 // (test/stubs/esp_netif_sntp.h) now exists, closing the gap time_sync_tz.h's
 // header comment used to document ("no host stub written for it in this
 // pass"). #includes time_sync.c directly, same convention as
 // test_unit_pref.c/test_ramp_assist_cfg.c/test_display_power_cfg.c, to reach
-// its file-scope statics (s_tz_rev, TIME_SYNC_TZ_FILE_PATH, tz_file_validate)
+// its file-scope statics (s_tz_rev, TIME_SYNC_TZ_FILE_PATH, time_sync_tz_file_validate)
 // for the dual-write tests below.
 //
 // OWN, SEPARATE executable (build_host_tests.ps1's own build step), not part
@@ -45,6 +45,7 @@ int g_test_count = 0;
 #include "cfg_fs.h"
 
 #include "../drivers/net/time_sync.c"
+#include "save_section_probe.h"
 
 static const char *TS_SCRATCH_BASE = "cfg_fs_test_time_sync";
 
@@ -94,7 +95,7 @@ static void ts_fresh_mounted(void)
 
 // ---------------------------------------------------------------------
 // time_sync.c: NVS load/dual-write/tie-break coverage
-// (docs/FILESYSTEM_USER_DATA_PLAN.md item 14 close-out).
+// (docs/FILESYSTEM_USER_DATA.md item 14 close-out).
 // ---------------------------------------------------------------------
 
 static void test_ts_default_is_utc_on_empty_nvs(void)
@@ -158,7 +159,7 @@ static void test_ts_save_lands_in_cfg_file_only(void)
     uint8_t file_item[TZ_ITEM_SIZE];
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, tz_file_validate, file_item, &file_rev, &file_valid);
+    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, time_sync_tz_file_validate, file_item, &file_rev, &file_valid);
     TEST_CHECK(file_valid && strcmp((char *)file_item, "EST5EDT,M3.2.0,M11.1.0") == 0,
                "the file decodes to the just-set TZ string");
 
@@ -219,7 +220,7 @@ static void test_ts_divergence_tie_break_higher_rev_wins(void)
     uint8_t file_item[TZ_ITEM_SIZE];
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, tz_file_validate, file_item, &file_rev, &file_valid);
+    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, time_sync_tz_file_validate, file_item, &file_rev, &file_valid);
     TEST_CHECK(file_valid && strcmp((char *)file_item, "PST8PDT,M3.2.0,M11.1.0") == 0 && file_rev == 5,
                "the file was resynced from the winning NVS side");
 
@@ -291,6 +292,40 @@ static void test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc(void)
     time_sync_status_t st;
     time_sync_get_status(&st);
     TEST_CHECK(strcmp(st.tz, TIME_SYNC_TZ_DEFAULT) == 0, "UTC default is applied despite the sntp failure");
+}
+
+/* CFG_STORE_SAVE_RACE audit MED-2 / "Save mutex vs. flash worker": apply,
+ * rev read, commit and rev bump run inside the reserved save section. */
+static void test_ts_set_tz_runs_in_save_section(void)
+{
+    TEST_SECTION("time_sync_set_tz: save inside the reserved save section");
+    ts_fresh_mounted();
+    ssp_install();
+    uint32_t r0 = s_tz_rev;
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "save ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
+    TEST_CHECK(s_tz_rev == r0 + 1, "rev bumped once");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
+static bool s_tsr_mark = false;
+static bool tsr_hook(void) { return s_tsr_mark; }
+static void test_ts_set_tz_refused_under_reset_mark(void)
+{
+    TEST_SECTION("time_sync_set_tz: refused under the save lock while the reset mark is set, nothing written");
+    ts_fresh_mounted();
+    pref_cfg_fs_set_reset_refuse_hook(tsr_hook);
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "precondition: EST5EDT applied");
+    s_tsr_mark = true;
+    uint32_t r0 = s_tz_rev;
+    TEST_CHECK(time_sync_set_tz("CST6CDT") == ESP_ERR_INVALID_STATE, "refused");
+    TEST_CHECK(strcmp(s_status.tz, "EST5EDT") == 0, "live TZ not changed by a refused set");
+    TEST_CHECK(s_tz_rev == r0, "rev not bumped");
+    s_tsr_mark = false;
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "works once the mark clears");
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    cfg_fs_deinit();
 }
 
 static void run_test_time_sync(void)
@@ -437,6 +472,8 @@ static void run_test_time_sync(void)
     test_ts_mount_failed_falls_through_to_nvs_only();
     test_ts_sntp_init_failure_returns_error_and_tz_still_applied();
     test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc();
+    test_ts_set_tz_runs_in_save_section();
+    test_ts_set_tz_refused_under_reset_mark();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

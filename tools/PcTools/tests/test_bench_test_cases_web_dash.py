@@ -332,20 +332,24 @@ class Dash09(unittest.TestCase):
 
 class Dash10to12(unittest.TestCase):
     def test_10(self):
-        pages = {"/app.js": "kc-recovery-banner /api/ota/esp/status st.recovery_mode"}
+        pages = {"/app.js": "kc-recovery-banner /api/status st.recovery_mode"}
 
         def mkc(b):
-            return mk({"/api/ota/esp/status": (200, b)}, pages)
+            return mk({"/api/status": (200, b)}, pages)
 
         self.assertEqual(run("WEB-DASH-10", mkc({"phase": "idle", "recovery_mode": False})).verdict, Verdict.PASS)
         self.assertEqual(run("WEB-DASH-10", mkc({"phase": "idle"})).verdict, Verdict.FAIL)
         self.assertEqual(run("WEB-DASH-10", mkc({"recovery_mode": True})).verdict, Verdict.INCONCLUSIVE)
 
     def test_11(self):
-        pages = {"/app.js": "kc-setup-banner /api/readiness 'not_done'"}
+        pages = {"/app.js": "kc-setup-banner /api/readiness 'not_done' setSetupBanner(incomplete) href = '/setup'"}
 
-        def mkc(s):
-            return mk({"/api/readiness": (200, {"items": [{"key": "a", "status": s}]})}, pages)
+        def mkc(s, pg=pages):
+            return mk({"/api/readiness": (200, {"items": [{"key": "a", "status": s}]})}, pg)
+
+        weak = {"/app.js": "kc-setup-banner /api/readiness 'not_done'"}
+        self.assertEqual(run("WEB-DASH-11", mkc("not_done", weak)).verdict, Verdict.FAIL)
+        self.assertEqual(run("WEB-DASH-11", mkc("ok", weak)).verdict, Verdict.PASS)
 
         self.assertEqual(run("WEB-DASH-11", mkc("not_done")).verdict, Verdict.PASS)
         self.assertEqual(run("WEB-DASH-11", mkc("pending")).verdict, Verdict.FAIL)

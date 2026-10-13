@@ -127,6 +127,7 @@ import { existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { writeFile, mkdtemp, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { sweepStaleProfileDirs } from './_web_commission_sweep.mjs';
 
 const CDP_CALL_TIMEOUT_MS = 20000;
 
@@ -854,28 +855,10 @@ async function main() {
     try {
       // Hard deadline: a non-unref'd timer exits even if rm() hangs on a held
       // handle (these used to leak forever); the rm callback exits early.
-      const rmScript = "setTimeout(()=>process.exit(0),30000);require('fs').rm(process.argv[1],{recursive:true,force:true,maxRetries:10,retryDelay:500},()=>process.exit(0))";
+      const rmScript = "setTimeout(()=>process.exit(0),30000);if(process.platform==='win32'){try{require('child_process').spawnSync('icacls',[process.argv[1],'/grant',require('os').userInfo().username+':(OI)(CI)F','/T','/C','/Q'],{stdio:'ignore',timeout:15000})}catch(e){}}require('fs').rm(process.argv[1],{recursive:true,force:true,maxRetries:10,retryDelay:500},()=>process.exit(0))";
       spawn(process.execPath, ['-e', rmScript, userDataDir], { detached: true, stdio: 'ignore' }).unref();
     } catch { /* best effort */ }
   }
-}
-
-// Best-effort sweep of leftover kc-web-commission-* dirs older than 1 h
-// (a previous run's detached rm can lose to AV/indexer). Bounded to ~2 s.
-function sweepStaleProfileDirs() {
-  const deadline = Date.now() + 2000;
-  try {
-    const tmp = os.tmpdir();
-    for (const name of readdirSync(tmp)) {
-      if (Date.now() > deadline) break;
-      if (!name.startsWith('kc-web-commission-')) continue;
-      const p = path.join(tmp, name);
-      try {
-        if (Date.now() - statSync(p).mtimeMs < 3600 * 1000) continue;
-        rmSync(p, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
-      } catch { /* best effort */ }
-    }
-  } catch { /* best effort */ }
 }
 
 main().then(() => process.exit(0), (err) => {

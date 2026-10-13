@@ -21,12 +21,65 @@ re-deriving what the board was configured with.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 import sys
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+# Review testnet MED-A: mcp_server.py connects to the link hub at import time
+# (bridged to the real bench board by the running kilnctrl MCP server). Disable
+# the hub for the whole run, bench host or not (LOW-2: no live_bench test uses
+# mcp_server's hub link; bench_fixture_session opens its own serial link).
+# Review testnet2 LOW-3 / testnet3 L1: subprocess children must not inherit the real
+# board address or any secret unless a bench host is deliberately selected. Dropping is
+# by PREFIX (every KILNCTL_* variable plus MOUSER_API_KEY and GITHUB_TOKEN), not by an
+# enumerated list, so a newly added secret is covered by default. Exceptions:
+#   * test control variables the runners set (KILNCTL_TEST_*, KILNCTL_SLOW_TESTS,
+#     KILNCTL_BUILD_*, KILNCTL_LIGHT_GATE_*, ...): see _CONTROL_*;
+#   * with a bench host (KILNCTRL_BENCH_HOST, note the CTRL spelling): ONLY what the
+#     live_bench tests use -- KILNCTL_HOST (host_resolve) and the web login pair
+#     KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD (http_auth). bench_fixture_session reads
+#     only KILNCTRL_BENCH_HOST/_PORT. Every other secret is dropped even then.
+# Caveat (testnet3 L3): PowerShell helpers that read the User-scope registry
+# ([Environment]::GetEnvironmentVariable(..., 'User')) bypass this drop; they refuse to
+# run live under KILNCTL_TEST_NO_HUB=1 (tests/test_network_guard.py proves it).
+_CONTROL_PREFIXES = ("KILNCTL_TEST_", "KILNCTL_BUILD_", "KILNCTL_LIGHT_GATE_")
+_CONTROL_NAMES = frozenset({
+    "KILNCTL_SLOW_TESTS", "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS", "KILNCTL_GZIP_ASSETS",
+    "KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"})
+_BENCH_KEEP = frozenset({"KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD"})
+_EXTRA_SECRETS = ("MOUSER_API_KEY", "GITHUB_TOKEN", "KC_REUSE_SID")
+
+
+def _scrub_board_env(environ, bench_host_set):
+    for name in list(environ):
+        if name in _EXTRA_SECRETS:
+            pass
+        elif not name.startswith("KILNCTL_"):
+            continue
+        elif name in _CONTROL_NAMES or name.startswith(_CONTROL_PREFIXES):
+            continue
+        elif bench_host_set and name in _BENCH_KEEP:
+            continue
+        environ.pop(name, None)
+
+
+_scrub_board_env(os.environ, bool(os.environ.get("KILNCTRL_BENCH_HOST")))
+# Review testnet MED-A: disable the hub bench host or not. Set, never setdefault (testnet3 I2): an inherited KILNCTL_TEST_NO_HUB=0 must not re-enable the hub.
+os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+# Review testnet4 L1: redirect the settings.json host/port cache (last_host, last_port) to a
+# per-run temp path BEFORE any kilnctrl module is imported (22 *_AP_DEFAULT_HOST constants
+# resolve the host at import time). Set outright; children inherit it (KILNCTL_TEST_ prefix kept).
+import atexit as _atexit
+import shutil as _shutil
+import tempfile as _tempfile
+_SETTINGS_TMP = _tempfile.mkdtemp(prefix="kilnctl_test_settings_")
+_atexit.register(_shutil.rmtree, _SETTINGS_TMP, ignore_errors=True)
+os.environ["KILNCTL_TEST_SETTINGS_PATH"] = os.path.join(_SETTINGS_TMP, "settings.json")
 
 from bench_fixture_session import (  # noqa: E402
     BENCH_HOST_ENV,
@@ -198,3 +251,207 @@ def cold_bench(bench):
           f"(target {report['target_c']:.2f} C, ambient ref {report['ambient_c']:.2f} C) "
           f"after {report['waited_s']:.0f} s")
     yield bench
+
+
+_FLASH_FIRMWARE_E2E_MODULES = {
+    "test_flash_board_pinning", "test_flash_firmware_erase_partitions",
+    "test_flash_firmware_verify", "test_mcp_server_flash_partition_guard",
+    "test_pico_image_provenance_note",
+}
+
+
+@pytest.fixture(autouse=True)
+def _flash_firmware_idle_board(request, monkeypatch):
+    """flash_firmware() reads the live board state (profile/ARMED/interlock)
+    before touching OpenOCD. The end-to-end flash tests have no board: model
+    an idle one so they keep testing what they were written for. Tests of the
+    state gate itself live in test_flash_firmware_confirm_gate.py."""
+    if request.module.__name__.split(".")[-1] in _FLASH_FIRMWARE_E2E_MODULES:
+        from kilnctrl import mcp_server_flash as mf
+        monkeypatch.setattr(mf, "_recovery_board_state_refusals",
+                            lambda host, allow_link_down=False: ([], [], []))
+
+
+@pytest.fixture(autouse=True)
+def _idle_shared_link_stub(monkeypatch):
+    """Keep unit tests off the real bench board (review mcpfx2 M3).
+
+    ``mcp_server`` builds its clients on the shared link hub, so with the
+    kilnctrl MCP server running a test that reaches the executor/autotune
+    gates sends real queries to the bench ESP (and flakes under xdist). By
+    default every executor/autotune read answers "idle" from a fake, the Wi-Fi
+    status query fails like a link with no reply (WifiUartQueryError, so host
+    resolution falls back to the default), and any raw ``_link.send`` raises. A test needing another state patches
+    the client itself (``um.patch.multiple(_srv, _profiles=..., ...)``); that
+    runs after this fixture and takes precedence.
+    """
+    try:
+        from kilnctrl import mcp_server as srv
+        from kilnctrl.devices_profiles import ProfileExecStatus
+        from kilnctrl.devices_autotune import (
+            AutotuneGains, AutotuneModel, AutotuneRelayResult, AutotuneStatus)
+        from kilnctrl.wifi_uart import WifiUartQueryError
+    except Exception:
+        return
+
+    def _no_reply(*_a, **_k):
+        raise WifiUartQueryError("no reply (conftest _idle_shared_link_stub)")
+
+    def _boom(*_a, **_k):
+        raise OSError("tests must not touch the real link (conftest _idle_shared_link_stub)")
+
+    idle_exec = ProfileExecStatus(
+        state=0, profile_id=0, name="", zone_mask=0, segment_index=0, segment_count=0,
+        dwelling=False, target_c=0.0, segment_elapsed_s=0, dwell_remaining_s=0,
+        ramp_lock_held=False, ramp_lock_lagging_mask=0, fault_guard=0, zones=[])
+    idle_at = AutotuneStatus(
+        state=0, method=0, zone=0, elapsed_s=0, sample_count=0, actual_c=0.0,
+        actual_valid=False, duty=0.0, model_valid=False, model_settled=False,
+        model_extrapolation_converged=False, model_tau_consistent=False,
+        model=AutotuneModel(0.0, 0.0, 0.0), proposed_gains=AutotuneGains(0.0, 0.0, 0.0, 0),
+        predicted_max_ramp_c_per_hr=0.0, relay_valid=False,
+        relay=AutotuneRelayResult(0.0, 0.0, 0.0), abort_reason="")
+    for obj, name, fn in (
+        (getattr(srv, "_profiles", None), "get_exec_status", lambda *a, **k: idle_exec),
+        (getattr(srv, "_autotune", None), "get_status", lambda *a, **k: idle_at),
+        (getattr(srv, "_wifi", None), "get_status", _no_reply),
+        (getattr(srv, "_link", None), "send", _boom),
+    ):
+        if obj is not None:
+            monkeypatch.setattr(obj, name, fn, raising=False)
+
+
+class NetworkGuardError(RuntimeError):
+    """Raised (and recorded) when a test tries to reach a non-loopback address."""
+
+
+_MCP_SERVER_PORTS = (8766, 8767)
+
+
+def _is_hub_addr(address) -> bool:
+    """True for a loopback address on the shared link hub's port."""
+    from kilnctrl.link_hub import HUB_PORT
+    # Testnet4 I1: the long-running MCP servers (kicad 8766, kilnctrl 8767) hold the real
+    # environment and board link; loopback to them is refused like the hub port.
+    return (isinstance(address, tuple) and len(address) >= 2
+            and address[1] in (HUB_PORT, *_MCP_SERVER_PORTS) and _is_loopback_addr(address))
+
+
+_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")
+
+
+def _is_loopback_addr(address) -> bool:
+    """True for AF_UNIX paths, loopback IPs and 'localhost'; False otherwise."""
+    if not isinstance(address, tuple) or not address:
+        return True  # AF_UNIX / unknown family: not a LAN connection
+    host = address[0]
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if host in ("localhost", ""):
+        return True
+    try:
+        return ipaddress.ip_address(str(host).split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False  # an unresolved hostname is not loopback
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_network(request, monkeypatch):
+    """Refuse any non-loopback connect (review confx HIGH-1).
+
+    A host-side pytest run once sent a real POST /api/ota/esp/boot_guard_reset
+    to the bench board's LAN address. Every non-loopback ``connect`` /
+    ``create_connection`` now raises NetworkGuardError AND records the attempt;
+    teardown fails the test if any was recorded, so code that swallows the
+    exception (``except Exception``) cannot hide it. Loopback stays open for
+    local test servers; ``live_bench`` tests opt out.
+    """
+    # LOW-2: the exemption needs the marker AND a selected bench host.
+    if request.node.get_closest_marker("live_bench") and os.environ.get("KILNCTRL_BENCH_HOST"):
+        yield
+        return
+    # LOW-1: a proxy variable would send "direct" HTTP through a loopback listener.
+    for _v in _PROXY_VARS + tuple(v.lower() for v in _PROXY_VARS):
+        monkeypatch.delenv(_v, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    attempts = []
+    real_sendto = socket.socket.sendto
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_create = socket.create_connection
+
+    def _refuse(address):
+        import traceback
+        frames = [f"{os.path.basename(fr.filename)}:{fr.lineno} {fr.name}"
+                  for fr in traceback.extract_stack()[:-2] if "kilnctrl" in fr.filename]
+        attempts.append((address, frames[-3:]))
+        raise NetworkGuardError(
+            f"test tried a real outbound connection to {address!r}; mock the "
+            "client (conftest _no_outbound_network)")
+
+    def guarded_connect(self, address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
+            _refuse(address)
+        return real_connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
+            _refuse(address)
+        return real_connect_ex(self, address)
+
+    def guarded_create(address, *a, **k):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
+            _refuse(address)
+        return real_create(address, *a, **k)
+
+    def guarded_sendto(self, data, *a):
+        address = a[-1] if a else None
+        if address is not None and (not _is_loopback_addr(address) or _is_hub_addr(address)):
+            _refuse(address)
+        return real_sendto(self, data, *a)
+
+    monkeypatch.setattr(socket.socket, "sendto", guarded_sendto)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "create_connection", guarded_create)
+
+    # asyncio bypasses socket.socket.connect: Windows' ProactorEventLoop calls ConnectEx on the
+    # raw fd via IocpProactor.connect, and the selector loop awaits sock_connect (oldpoolb MED-1).
+    import asyncio.selector_events as _ase
+    real_sock_connect = _ase.BaseSelectorEventLoop.sock_connect
+
+    async def guarded_sock_connect(self, sock, address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
+            _refuse(address)
+        return await real_sock_connect(self, sock, address)
+
+    monkeypatch.setattr(_ase.BaseSelectorEventLoop, "sock_connect", guarded_sock_connect)
+    try:
+        import asyncio.windows_events as _awe
+    except ImportError:
+        _awe = None
+    if _awe is not None:
+        real_iocp_connect = _awe.IocpProactor.connect
+
+        def guarded_iocp_connect(self, conn, address):
+            if not _is_loopback_addr(address) or _is_hub_addr(address):
+                _refuse(address)
+            return real_iocp_connect(self, conn, address)
+
+        monkeypatch.setattr(_awe.IocpProactor, "connect", guarded_iocp_connect)
+
+        # testnetfx7 LOW-2: Proactor UDP (datagram transport sendto, loop.sock_sendto) calls
+        # IocpProactor.sendto -> WSASendTo on the raw fd, never socket.socket.sendto.
+        real_iocp_sendto = _awe.IocpProactor.sendto
+
+        def guarded_iocp_sendto(self, conn, buf, flags=0, addr=None):
+            if addr is not None and (not _is_loopback_addr(addr) or _is_hub_addr(addr)):
+                _refuse(addr)
+            return real_iocp_sendto(self, conn, buf, flags, addr)
+
+        monkeypatch.setattr(_awe.IocpProactor, "sendto", guarded_iocp_sendto)
+    yield attempts
+    if attempts:
+        pytest.fail(f"test attempted real outbound network connection(s): {attempts}",
+                    pytrace=False)

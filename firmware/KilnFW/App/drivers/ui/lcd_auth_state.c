@@ -201,6 +201,30 @@ bool lcd_lock_keypad_raise_is_lock_gate(bool currently_locked, bool force_lock_p
     return currently_locked || force_lock_pending;
 }
 
+const char *lcd_touch_cal_exit_target(bool has_user_role, const char *wanted)
+{
+    if (wanted == NULL) {
+        return "home";
+    }
+    return has_user_role ? wanted : "home";
+}
+
+const char *lcd_touch_cal_saved_exit_target(bool has_user_role)
+{
+    /* Documented exception (owner decision 2026-10-10, review A1/A2): the
+     * touch_test canvas shows no data and has only Clear/Done, and is reached
+     * only from a successful calibration save, so it opens without a role.
+     * The exemption lives here, in the calibration-saved flow, not keyed on a
+     * page name inside lcd_touch_cal_exit_target(). */
+    (void)has_user_role;
+    return "touch_test";
+}
+
+bool lcd_safety_strip_needs_pin(bool has_user_role)
+{
+    return !has_user_role;
+}
+
 bool lcd_lock_relock_should_close_keypad(bool keypad_open, bool keypad_is_pending_lock_gate)
 {
     if (!keypad_open) {

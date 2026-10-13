@@ -1,5 +1,5 @@
 // recovery_http.h -- the recovery image's HTTP surface
-// (docs/OTA_SINGLE_SLOT_PLAN.md section 3 item 2).
+// (docs/OTA_SINGLE_SLOT.md section 3 item 2).
 #ifndef RECOVERY_HTTP_H
 #define RECOVERY_HTTP_H
 

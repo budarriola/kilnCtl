@@ -249,7 +249,7 @@ size_t safety_link_build_trip_event_payload(SafetyLinkClass *link, uint8_t *out)
  * placeholder commit here would put a confident wrong build identity on a
  * safety diagnostics surface, which is worse than an explicit "unknown".
  *
- * Worst-case length is 9 + 64 + 32 = 105 bytes, inside
+ * Worst-case length is 12 + 64 + 32 = 108 bytes, inside
  * UART_PROTO_MAX_PAYLOAD (253); the caller's buffer is BRIDGE_REPLY_MAX,
  * which is that same constant. */
 size_t safety_link_build_fw_version_payload(SafetyLinkClass *link, uint8_t *out)

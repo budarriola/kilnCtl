@@ -22,6 +22,10 @@
 # Exit 0 pass, 1 fail. Negative-tested when added (see docs/RELEASING.md).
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+# testnet4 L3: make_release.ps1 refuses -Publish / network git under the PcTools test env; this
+# check expects its own later gate messages, so run it (and its children) without those switches.
+Remove-Item Env:KILNCTL_TEST_NO_HUB -ErrorAction SilentlyContinue
+Remove-Item Env:KILNCTL_TEST_GUARD_PROBE -ErrorAction SilentlyContinue
 $failures = New-Object System.Collections.Generic.List[string]
 function Note-Fail([string]$m) { $failures.Add($m); Write-Host "FAIL: $m" -ForegroundColor Red }
 

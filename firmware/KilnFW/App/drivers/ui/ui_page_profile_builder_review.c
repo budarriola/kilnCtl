@@ -10,6 +10,7 @@
 #include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "ui_confirm.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profiles.h"
 #include "ui_theme.h"
@@ -67,18 +68,50 @@ static lv_obj_t *s_peak_label;
 
 static lv_obj_t *s_slot_modal;
 static lv_obj_t *s_slot_grid;
+/* Audit L13: the grid shows SLOT_CELLS_PER_PAGE cells (2 rows x 4 cols, the
+ * only ones that fit the no-scroll box) and pages through all
+ * PROFILES_MAX_COUNT slots; only the visible page's slots are read. */
+#define SLOT_CELLS_PER_PAGE 8
+#define SLOT_PAGE_COUNT ((PROFILES_MAX_COUNT + SLOT_CELLS_PER_PAGE - 1) / SLOT_CELLS_PER_PAGE)
+static uint8_t s_slot_page;
+static lv_obj_t *s_slot_page_label;
+
+/* Review web7 LOW-5: the slot revision the operator saw when picking a slot. The save (after the PIN prompt and,
+ * for an occupied slot, the overwrite confirm) refuses if the slot was saved/deleted by anyone else in between. */
+static uint8_t s_pick_slot = 0xFF;
+static uint32_t s_pick_rev;
 
 static profile_t *draft(void)
 {
     return ui_page_profile_builder_draft();
 }
 
-static void do_save(uint8_t slot)
+static void do_save_apply(void *user_data)
 {
+    uint8_t slot = (uint8_t)(uintptr_t)user_data;
     profile_t *d = draft();
-    char err_msg[64] = "";
+    char err_msg[PROFILES_SAVE_ERR_MSG_LEN] = "";
     uint8_t out_id = 0;
     uint8_t warn_count = 0;
+
+    if (s_pick_slot == slot && (s_pick_rev & 1u) != 0u) {
+        s_pick_slot = 0xFF; /* picked mid-write: stale by definition */
+    }
+    if (s_pick_slot != slot) {
+        ESP_LOGW(TAG, "slot %u changed since it was picked; save refused", (unsigned)slot);
+        s_pick_slot = 0xFF;
+        ui_confirm_params_t stale = {
+            .title = "Cannot Save",
+            .body = "That slot changed since you opened this draft. Reopen the profile, or save to a different slot.",
+            .confirm_label = "OK",
+            .confirm_color = UI_THEME_COLOR_CARD,
+            .on_confirm = NULL,
+            .user_data = NULL,
+        };
+        ui_confirm_show(&stale);
+        return;
+    }
+    s_pick_slot = 0xFF;
 
     /* profiles_http_save() writes NVS on the calling task. That is safe from
      * here: lvgl_port.c gives the LVGL task (this callback runs on it) an
@@ -87,7 +120,8 @@ static void do_save(uint8_t slot)
      * uart_bridge_ext.c documents for its own NVS-writing call) -- an
      * external-PSRAM stack is what NVS's flash operations cannot tolerate,
      * and that isn't this task's stack. */
-    bool ok = profiles_http_save(slot, d, &out_id, &warn_count, err_msg, sizeof(err_msg));
+    /* The rev compare runs inside the save, under the profiles save lock (LOW-B). */
+    bool ok = profiles_http_save_expect_rev(slot, d, s_pick_rev, &out_id, &warn_count, err_msg, sizeof(err_msg));
 
     if (!ok) {
         ESP_LOGW(TAG, "profiles_http_save(%u) refused: %s", (unsigned)slot, err_msg);
@@ -124,6 +158,15 @@ static void do_save(uint8_t slot)
     kiln_ui_show("profiles");
 }
 
+/* L2 (LCD UI audit 2026-10-09): POST /api/profile is ROUTE_TIER_ADMIN, so a
+ * save/overwrite from the LCD needs the same admin gate (open when LCD auth
+ * is off). Every save path funnels through here. */
+static void do_save(uint8_t slot)
+{
+    ui_lcd_lock_run_gated("Admin PIN to save profile", LCD_PIN_ROLE_ADMIN, do_save_apply,
+                          (void *)(uintptr_t)slot);
+}
+
 static void confirm_overwrite_cb(void *user_data)
 {
     uint8_t slot = (uint8_t)(uintptr_t)user_data;
@@ -134,6 +177,13 @@ static void slot_clicked_cb(lv_event_t *e)
 {
     uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
     profile_t existing;
+    s_pick_rev = profiles_http_slot_rev(slot); /* before the read, so a racing save makes the later check fail */
+    if (slot == ui_page_profile_builder_source_slot()) {
+        /* LOW-B: overwriting the slot this edit was loaded from -- compare against the rev at LOAD time, so a
+         * save made during the whole edit is caught, not just one after this pick. */
+        s_pick_rev = ui_page_profile_builder_source_rev();
+    }
+    s_pick_slot = slot;
     bool occupied = profiles_http_get(slot, &existing);
     if (!occupied) {
         do_save(slot);
@@ -162,7 +212,20 @@ static void slot_cancel_cb(lv_event_t *e)
 static void render_slot_grid(void)
 {
     lv_obj_clean(s_slot_grid);
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+    if (s_slot_page >= SLOT_PAGE_COUNT) {
+        s_slot_page = 0;
+    }
+    if (s_slot_page_label) {
+        char pg[16];
+        snprintf(pg, sizeof(pg), "%u/%u", (unsigned)(s_slot_page + 1), (unsigned)SLOT_PAGE_COUNT);
+        lv_label_set_text(s_slot_page_label, pg);
+    }
+    for (unsigned n = 0; n < SLOT_CELLS_PER_PAGE; n++) {
+        unsigned slot = (unsigned)s_slot_page * SLOT_CELLS_PER_PAGE + n;
+        if (slot >= PROFILES_MAX_COUNT) {
+            break;
+        }
+        uint8_t id = (uint8_t)slot;
         profile_t existing;
         bool used = profiles_http_get(id, &existing);
 
@@ -192,9 +255,24 @@ static void render_slot_grid(void)
     }
 }
 
+static void slot_prev_cb(lv_event_t *e)
+{
+    (void)e;
+    s_slot_page = (uint8_t)((s_slot_page + SLOT_PAGE_COUNT - 1) % SLOT_PAGE_COUNT);
+    render_slot_grid();
+}
+
+static void slot_next_cb(lv_event_t *e)
+{
+    (void)e;
+    s_slot_page = (uint8_t)((s_slot_page + 1) % SLOT_PAGE_COUNT);
+    render_slot_grid();
+}
+
 static void save_btn_cb(lv_event_t *e)
 {
     (void)e;
+    s_slot_page = 0;
     render_slot_grid();
     lv_obj_remove_flag(s_slot_modal, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_slot_modal);
@@ -232,17 +310,38 @@ static void build_slot_picker(lv_obj_t *scr)
     lv_obj_set_style_pad_gap(s_slot_grid, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(s_slot_grid, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *cancel_btn = lv_button_create(s_slot_modal);
-    lv_obj_set_size(cancel_btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(cancel_btn, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(cancel_btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(cancel_btn, slot_cancel_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *cancel_label = lv_label_create(cancel_btn);
-    lv_obj_set_style_text_color(cancel_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(cancel_label, "Cancel");
-    lv_obj_center(cancel_label);
-    lv_obj_update_layout(cancel_btn);
-    ui_theme_apply_touch_area(cancel_btn, false);
+    /* Footer: Prev / Cancel / Next with the page counter (same 44 px row the
+     * lone Cancel button used, so the overlay arithmetic above is unchanged). */
+    lv_obj_t *footer = lv_obj_create(s_slot_modal);
+    lv_obj_set_width(footer, lv_pct(100));
+    lv_obj_set_height(footer, 44);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(footer, 0, 0);
+    lv_obj_set_style_pad_all(footer, 0, 0);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(footer, UI_THEME_PADDING_PX, 0);
+    lv_obj_remove_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
+
+    static const struct { const char *text; lv_event_cb_t cb; } k_btns[3] = {
+        { "Prev", slot_prev_cb }, { "Cancel", slot_cancel_cb }, { "Next", slot_next_cb },
+    };
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *btn = lv_button_create(footer);
+        lv_obj_set_size(btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
+        lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
+        lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+        lv_obj_add_event_cb(btn, k_btns[i].cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *bl = lv_label_create(btn);
+        lv_obj_set_style_text_color(bl, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_label_set_text(bl, k_btns[i].text);
+        lv_obj_center(bl);
+        lv_obj_update_layout(btn);
+        ui_theme_apply_touch_area(btn, false);
+    }
+    s_slot_page_label = lv_label_create(footer);
+    lv_obj_set_style_text_color(s_slot_page_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_slot_page_label, "1/1");
 }
 
 void ui_page_profile_builder_review_prepare(void)

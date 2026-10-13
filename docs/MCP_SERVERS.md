@@ -104,6 +104,12 @@ re-check with `status` rather than assuming it failed.
    a live one holds a `*.lock` file under
    `%TEMP%\kilnctl-builds\locks\` (age vs. the 2100s stale timeout tells you
    if it's a live holder or an abandoned one — see that file's docstring).
+   A lock held by a confirmed-alive PID (this server) is never age-reclaimed,
+   so a *leaked* lock (release rename gave up; `buildlock: LEAKED LOCK` on
+   stderr) blocks that build directory until the server restarts. The
+   `BuildLockTimeout` message names the lock file and, when the holder is this
+   same server process, says so. Recover by restarting the MCP server or
+   deleting the named `*.lock` file once no build is running.
    Tail the newest `tools/PcTools/logs/session_*.log` for recent
    `flash_firmware`/`build_kilnfw` activity as a second signal. Then call
    `safety_get_status` — restart only once it shows no active firing (heating
@@ -153,7 +159,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 221 published tools
 
-`kilnctrl` registers 231 tools (229 before `latency_soak`/`latency_soak_start` were added 2026-10-07 (`mcp_server_latency_soak.py`; read-only GET soak, see `latency_soak.py`); 228 before `profile_save_bench_aux_rule` was added 2026-10-06 (`mcp_server_aux.py`; confirm-gated, read-back-verified writer of the single `BENCH_AUX_RULE` bench profile carrying an aux on/off rule, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a); 227 before `control_convert_onoff_zone_to_aux` was added 2026-10-06 (`mcp_server_aux.py`; wraps the firmware `move_zone_to_aux` field on `POST /api/zones`); 221 before `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated) were added 2026-10-06 (`mcp_server_update.py`, WP10 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`; `update_stage_release` and `update_set_settings` are verified by read-back; release signing was removed 2026-10-07, the board accepts an image only for the correct project); 220 before `control_set_relay_type` was added 2026-10-06 (`mcp_server_control.py`; POST key `relay<N>_type`, N 1-based, enum 0-6 unset/damper/outlet/valve/fan/light/other; `control_get_zones` also prints `relay_types`); 217 before `control_get_aux_outputs`/`control_set_aux_output`/`control_set_aux_manual` were added 2026-10-05 (`mcp_server_aux.py`); 214 before `bench_test_start`/`bench_test_job_status`/`ota_matrix_start` were added 2026-10-05; 212 before `recovery_apply_status`/`recovery_apply_staged` were added 2026-10-05; 209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 233 tools (232 before `safety_test_trip` was added 2026-10-11 (`mcp_server_safety.py`, `POST /api/safety/test_trip`); 231 before `control_set_zone_relay_mask` was added 2026-10-10 (`mcp_server_control.py`; confirm-gated, read-back-verified narrow writer of one zone's `relay_mask`, used by bench case AX-C03); 229 before `latency_soak`/`latency_soak_start` were added 2026-10-07 (`mcp_server_latency_soak.py`; read-only GET soak, see `latency_soak.py`); 228 before `profile_save_bench_aux_rule` was added 2026-10-06 (`mcp_server_aux.py`; confirm-gated, read-back-verified writer of the single `BENCH_AUX_RULE` bench profile carrying an aux on/off rule, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a); 227 before `control_convert_onoff_zone_to_aux` was added 2026-10-06 (`mcp_server_aux.py`; wraps the firmware `move_zone_to_aux` field on `POST /api/zones`); 221 before `update_fetch_status`/`update_get_settings` (read-only), `update_check` (starts a board-side GitHub check job via POST /api/update/check; not read-only, no confirm gate) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated) were added 2026-10-06 (`mcp_server_update.py`, WP10 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`; `update_stage_release` and `update_set_settings` are verified by read-back; release signing was removed 2026-10-07, the board accepts an image only for the correct project); 220 before `control_set_relay_type` was added 2026-10-06 (`mcp_server_control.py`; POST key `relay<N>_type`, N 1-based, enum 0-6 unset/damper/outlet/valve/fan/light/other; `control_get_zones` also prints `relay_types`); 217 before `control_get_aux_outputs`/`control_set_aux_output`/`control_set_aux_manual` were added 2026-10-05 (`mcp_server_aux.py`); 214 before `bench_test_start`/`bench_test_job_status`/`ota_matrix_start` were added 2026-10-05; 212 before `recovery_apply_status`/`recovery_apply_staged` were added 2026-10-05; 209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -238,7 +244,7 @@ KiCad server has no equivalent -- there is nothing to compile there:
 
 | tool | server | notes |
 |------|--------|-------|
-| `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE_PLAN.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
+| `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
 | `build_kilnfw_start(target, jobs, skip_saftyfw, kiln_fw_root)` | kilnctrl | **2026-10-04:** runs `build_kilnfw` on a background thread (`mcpkit/build_jobs.py`) and returns a job id immediately. A full build (SaftyFW first) can exceed the client's 300 s idle watchdog, which dropped the result while the build finished unseen. Same gate/lock as `build_kilnfw`; the synchronous tool is unchanged. |
 | `build_job_status(job_id, wait_s)` | kilnctrl | RUNNING/OK/FAILED, artifact sizes and ages (`KilnCtrl.bin/.elf`, SaftyFW slot bins) and the full report once finished. `wait_s` blocks up to 120 s. Results persist to `<tmp>/kilnctl-builds/job-<id>.json` so they survive a registry eviction or server restart; a job running at restart reports unknown. |
 | (build step timeout) | kilnctrl | `build_kilnfw`/`build_kilnfw_start` no longer use a fixed 1800 s cap. The idf.py/ninja step is killed only when stdout/stderr has not grown for `KILNCTL_BUILD_STALL_S` (default 900 s), or at an absolute ceiling `KILNCTL_BUILD_CEILING_S` (default 10800 s, clamped to 60 s under the build gate's hard max-hold, `DEFAULT_MAX_HOLD_HARD_SEC` = 7200 s, which would otherwise kill first with no `KILLED:` reason; so the effective default is 7140 s, and the lock wait is that plus 90 s). Both kill paths kill the whole process tree (`buildgate._kill_tree`), not just the PowerShell wrapper, and join the drain threads before the lock and slot are released. A kill is reported as `KILLED: stalled: no build output for N s ...` or `KILLED: absolute ceiling ...` in the report `build_job_status` returns. Tests: `tools/PcTools/tests/test_workbench_stall_timeout.py`. |
@@ -362,7 +368,9 @@ process -- and left a second live consequence (a client/firmware field
 mismatch on `/api/zones` that blocks `load_config_preset` for every preset).
 
 `flash_firmware()` (`kilnctrl/mcp_server_flash.py`, guard logic in
-`kilnctrl/flash_provenance.py`) now:
+`kilnctrl/flash_provenance.py`) requires `confirm=True` (exactly), refuses
+on a recovery-image or unreadable board state unless
+`allow_unreadable_board_state=True`, and now:
 
 1. **Always records** `git status --porcelain` (unscoped -- the whole repo,
    not just KilnFW/CommonFW the way `stale_check.py`'s staleness comparison
@@ -409,7 +417,7 @@ confirms the assertions fail, naming the file that slipped through.
 
 **2026-09-20: the provenance report also names the embedded Pico (SaftyFW)
 image identity.** Since the ESP application now embeds both SaftyFW slot
-images (`docs/PICO_AUTO_UPDATE_PLAN.md`), `flash_firmware()`'s provenance
+images (`docs/PICO_AUTO_UPDATE.md`), `flash_firmware()`'s provenance
 note gains one more line reading the `saftyfw_image_identity_t` record(s)
 found by scanning the app binary about to be flashed (same scanning parser
 as `check_embedded_pico_image_fresh.ps1`,
@@ -427,7 +435,7 @@ their native USB-Serial-JTAG interface -- indistinguishable to OpenOCD's
 now pins `adapter serial` to the main board's USB serial number and refuses,
 before calling OpenOCD at all, if that serial isn't currently enumerated
 (naming whichever 303A:1001 serial(s) are seen instead); a parallel
-`fixture_flash()` tool does the same pinned to the fixture's serial.
+`fixture_flash()` Python helper (not a registered MCP tool) does the same pinned to the fixture's serial.
 `serial_link.recommend_port()` (the main board's own port picker) and
 `fixture.recommend_fixture_port()` got the same serial/VID:PID-anchored
 identity check, since either picker returning the other board's port
@@ -466,7 +474,7 @@ dropped its own AP-password HMAC on 2026-10-02: it is now unauthenticated
 
 **`recovery_enter` (2026-10-02):** wraps `POST /api/ota/esp/recovery_boot` (`ROUTE_TIER_ADMIN`), the deliberate way from the
 application into the recovery image once `ota_rollback_esp()` has nothing to roll back to
-(`docs/OTA_SINGLE_SLOT_PLAN.md` section 4). Lives in `mcp_server_ota.py` (it talks to the APPLICATION, unlike the
+(`docs/OTA_SINGLE_SLOT.md` section 4). Lives in `mcp_server_ota.py` (it talks to the APPLICATION, unlike the
 `recovery_*` tools below). Refuses unless `confirm is True` exactly, before any network access, and prints no
 credential. The board refuses 409 while a firing/autotune runs or any relay is on/unreadable, on an unmet OTA
 interlock, with another update in flight, on the old single-image layout, and when the recovery partition does not
@@ -748,6 +756,10 @@ it exists to prevent). None of them assert anything standing about the
 repository's current state, so none is wired into `run_all_checks.ps1` --
 they are invoked by hand at the workflow moment they apply.
 
+`tools/check_push_verify.ps1` pins the SHA-256 of `push_verify.ps1` + `lib_push_verify_walk.ps1`; a pin bump needs a review: the pin line carries `# reviewed: docs/audits/<file>.md`, that file must exist and contain the hash, and exact-count asserts on the kill surface (one Add-Type/Launch, Kill/KillProc once, no OpenProcess/EntryPoint) must still pass.
+
+**Landing and promotion evidence (2026-10-09, `docs/audits/DEV_FLOW_SCRIPTS_REVIEW_2026-10-09.md` F1-F3, F6-F12).** `run_all_checks.ps1` prints a `Run tree: <HEAD^{tree}> dirty=<0|1> partial=<0|1>` line before `Run mode:`; `land.ps1 -CheckLog` and `dev_promote.ps1 -CheckLog` bind a log to a tree through it (last run in the file wins; missing line, other tree, dirty or filtered run is refused). `land.ps1 -Target main` is refused unless `-Coordinator` AND `-CheckLog` are both given; the parsed FAIL-line count must equal the summary count; a push is retried (at most 3 attempts) only when `git push --porcelain` reports a lost race (`[rejected] (fetch first|non-fast-forward|stale info)`, or `[remote rejected]` with `incorrect old value provided` / GitHub's `cannot lock ref ...: is at <sha> but expected <sha>`); hook, protected-branch and every other `[remote rejected]` reason is refused at once. `dev_promote.ps1 -Push` requires `-CheckLog` (full, clean, unfiltered run of exactly that commit tree, no NEW failures) and checks afterwards that origin/main CONTAINS the promote commit. `push_verify.ps1` resolves `-Branch` against `origin/<branch>` after a fetch; `commit_guard.ps1` fetches before comparing. Baseline lookup (`main_baseline_lib.ps1`) also accepts a baseline whose recorded tree equals a tree in HEAD history (squash-promoted main). `land -RestartMcp` runs `mcp_servers.ps1 restart|status` through `Run-Bounded`, which now exists.
+
 **`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
 `origin/dev` (default; `-Base <ref>` overrides, e.g. `-Base origin/main` for the coordinator) under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
 concurrent session on this machine, and two constraints have bitten
@@ -837,6 +849,9 @@ argument order and reads only `$LASTEXITCODE`, never `$?`, never push output.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
+    # -Commit is REQUIRED (no HEAD default: a forgotten commit would report the base commit
+    # LANDED). The fetch uses an explicit refspec for the branch, so a narrowed remote.origin.fetch
+    # cannot leave a stale ref; -FetchTimeoutSec must be > 0 and the fetch tree is killed on timeout.
     # prints "VERDICT: LANDED -- ..." or "VERDICT: NOT LANDED -- ...",
     # and on NOT LANDED also names the local branch(es) the commit IS
     # reachable from, if any (the actual common root cause)
@@ -871,12 +886,12 @@ refuses on tracked modifications or no commits ahead of the target branch;
 optionally waits (`-WaitPid`, `-CheckLog`, bounded, UTF-16-aware) for a
 `run_all_checks` run and refuses on any `FAIL`/`FAILED:`/BUSY not matched by
 `-AllowFail <regex>` (allowed FAILs are echoed loudly and listed in the result);
-runs `git fetch` + `git rebase origin/main` (a conflict or Windows "unable to
+runs `git fetch` + `git rebase origin/<target>` (`-Target dev` by default, `main` only with `-Coordinator` and `-CheckLog`; a conflict or Windows "unable to
 unlink" error aborts the rebase, lists the files and exits nonzero, never
 leaving a half-rebased tree); re-runs a NARROW post-rebase set via
 `run_all_checks -Only` (`check_mcp_tool_count_doc`, `check_mcp_facade_coverage`
 plus `-PostRebaseChecks <regex>`; not the full suite); `git push origin
-HEAD:main` (never force; a non-fast-forward rejection loops back to the
+HEAD:<target>` (never force; a lost race loops back to the
 rebase, at most 3 tries); `push_verify.ps1` must say LANDED; then optionally
 `-RestartMcp` (restart then status, bounded by `-McpTimeoutMin`, default 10)
 and `-RemoveWorktree` (only after LANDED). `-DryRun` does the refusals, log
@@ -1018,3 +1033,17 @@ The MCP tool retries a 503 each second, polls the read-back after a 202 or a POS
 after a 30 s deadline; a record or image still present, or `clear_in_progress` still true, is reported as FAILED.
 The POST timeout in `crash_report_clear_http_client.py` is 20 s. Host-unit-tested with a fake board only; the
 after-change stall has not been measured on the bench.
+
+## Wi-Fi secrets and fail-closed reads (2026-10-10)
+
+`wifi_add_network` and `wifi_set_ap_identity` read the password from
+`KILNCTL_WIFI_PASSWORD` / `KILNCTL_WIFI_AP_PASSWORD` ONLY when called with
+`password_from_env=True` / `ap_password_from_env=True` (refused when the variable
+is unset, or when the plain argument is also given); the environment is never
+consulted implicitly, so an SSID-only AP rename leaves the AP password unchanged
+and an open network is saved without a password. The AP password is verified by
+presence only (the firmware reports a "[set]"/"" marker, never the value).
+`wifi_set_ap_identity` needs
+`confirm=True`, refuses mid-run and verifies by read-back. `capability_preflight`
+treats an unreadable crash report, readiness or task-liveness as "could not
+determine" and refuses unless `allow_undetermined=True` (a 401 means no admin session; a Wi-Fi-only host with no serial link is refused on task liveness; `bench_test_run` and `run_queue` have no override).

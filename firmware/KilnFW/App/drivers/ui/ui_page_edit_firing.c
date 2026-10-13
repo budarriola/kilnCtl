@@ -377,6 +377,8 @@ static void open_decide_gated_cb(void *user_data)
     kiln_ui_show("live_decide");
 }
 
+static void apply_live_gated(void *user_data);
+
 static void apply_cb(lv_event_t *e)
 {
     (void)e;
@@ -384,10 +386,18 @@ static void apply_cb(lv_event_t *e)
         /* End of run: the button opens the Discard / Save as / Overwrite
          * page. Same PIN gate as the home Edit button -- a session that
          * expired while this page sat open must not reach a write action. */
-        ui_lcd_lock_run_gated("Enter PIN to keep/discard edit", LCD_PIN_ROLE_USER, open_decide_gated_cb, NULL);
+        ui_lcd_lock_run_gated("Enter admin PIN to keep/discard edit", LCD_PIN_ROLE_ADMIN, open_decide_gated_cb, NULL);
         return;
     }
     if (!s_pg || !s_pg->active || !s_pg->working) return;
+    /* L11: live-edit apply is POST /api/profile/live (ADMIN). */
+    ui_lcd_lock_run_gated("Enter admin PIN to apply edit", LCD_PIN_ROLE_ADMIN, apply_live_gated, NULL);
+}
+
+static void apply_live_gated(void *user_data)
+{
+    (void)user_data;
+    if (!s_pg || !s_pg->active || !s_pg->working || !ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) return;
 
     char err[128];
     if (!edit_firing_apply(s_pg->working, &s_pg->ctx, err, sizeof(err))) {

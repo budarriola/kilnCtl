@@ -14,6 +14,8 @@
       "kilnlink_ceiling.h:KILNLINK_CEILING_LEN=5u",
       "kilnlink_clear_trip.h:KILNLINK_CLEAR_TRIP_CMD=0x0Au",
       "kilnlink_clear_trip.h:KILNLINK_CLEAR_TRIP_LEN=3u",
+      "kilnlink_clear_trip.h:KILNLINK_CLEAR_TRIP_LEN_V2=4u",
+      "kilnlink_clear_trip.h:KILNLINK_CLEAR_TRIP_LEN_V3=5u",
       "kilnlink_commit_config.h:KILNLINK_COMMIT_CONFIG_CMD=0x1Du",
       "kilnlink_commit_config.h:KILNLINK_COMMIT_CONFIG_LEN=1u",
       "kilnlink_commit_config_rejected.h:KILNLINK_COMMIT_CONFIG_REJECTED_CMD=0x20u",
@@ -37,6 +39,8 @@
       "kilnlink_ct_cal.h:KILNLINK_CT_CAL_NUM_CHANNELS=3u",
       "kilnlink_diag.h:KILNLINK_DIAG_CMD=0x08u",
       "kilnlink_diag.h:KILNLINK_DIAG_LEN=30u",
+      "kilnlink_diag.h:KILNLINK_DIAG_LEN_V2=31u",
+      "kilnlink_diag.h:KILNLINK_DIAG_LEN_V3=32u",
       "kilnlink_frame.h:KILNLINK_FRAME_CRC_LEN=2u",
       "kilnlink_frame.h:KILNLINK_FRAME_HEADER_LEN=8u",
       "kilnlink_frame_a_offsets.h:KILNLINK_FRAME_A_CMD=0x01u",
@@ -107,6 +111,10 @@
       "kilnlink_status.h:KILNLINK_STATUS_LEN=KILNLINK_STATUS_LEN_V1",
       "kilnlink_status.h:KILNLINK_STATUS_LEN_V1=23u",
       "kilnlink_status.h:KILNLINK_STATUS_LEN_V2=24u",
+      "kilnlink_test_trip.h:KILNLINK_TEST_TRIP_CMD=0x2Eu",
+      "kilnlink_test_trip.h:KILNLINK_TEST_TRIP_LEN=4u",
+      "kilnlink_test_trip_result.h:KILNLINK_TEST_TRIP_RESULT_CMD=0x2Fu",
+      "kilnlink_test_trip_result.h:KILNLINK_TEST_TRIP_RESULT_LEN=4u",
       "kilnlink_trip.h:KILNLINK_TRIP_CMD=0x0Du",
       "kilnlink_trip.h:KILNLINK_TRIP_LEN=29u",
       "link_frame.h:LINK_FRAME_ANNOUNCE_REBOOT_CMD=0x18u",
@@ -127,14 +135,16 @@
       "link_frame.h:LINK_FRAME_SET_FIRING_CEILING_CMD=0x09u",
       "link_frame.h:LINK_FRAME_STACK_MARGIN_CMD=0x2Cu",
       "link_frame.h:LINK_FRAME_STATUS_CMD=KILNLINK_FRAME_A_CMD",
+      "link_frame.h:LINK_FRAME_TEST_TRIP_CMD=0x2Eu",
+      "link_frame.h:LINK_FRAME_TEST_TRIP_RESULT_CMD=0x2Fu",
       "link_frame.h:LINK_FRAME_UPDATE_ABORT_CMD=0x13u",
       "link_frame.h:LINK_FRAME_UPDATE_BEGIN_CMD=0x10u",
       "link_frame.h:LINK_FRAME_UPDATE_DATA_CMD=0x11u",
       "link_frame.h:LINK_FRAME_UPDATE_END_CMD=0x12u",
       "link_frame.h:LINK_FRAME_UPDATE_STATUS_CMD=0x14u"
     ],
-    "fingerprint": "85b22a317e20c15e",
-    "version": 16
+    "fingerprint": "7d657c5268e202b0",
+    "version": 18
   },
   "uart": {
     "defs": [

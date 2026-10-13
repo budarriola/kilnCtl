@@ -1,7 +1,7 @@
 # Release gate vacuity audit — 2026-09-16, part 7
 
 Continuation of `docs/audits/release_gate_vacuity_audit_2026-09-16.md` and
-`...16b.md`, blocker 3 of `docs/RELEASE_HARDENING_PLAN.md`. This pass has two
+`...16b.md`, blocker 3 of `docs/RELEASE_HARDENING.md`. This pass has two
 parts: (1) fix a real, previously-identified defect in
 `tools/check_duplicate_symbols.ps1` that was silently excluding a genuine
 component object from every duplicate-symbol scan, and (2) negative-test the
@@ -137,9 +137,9 @@ convention), since superseded
 by later unrelated edits to the file; the underlying finding -- that
 `json_escape()` is where the negative test was inserted and that the
 restore was byte-exact -- is unchanged, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`dd0478dc` (citation
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`b6c94db7` (citation
 refreshed 2026-09-24, again 2026-09-28 after HP-02, again 2026-10-05 after
-spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers)) matched HEAD. Re-run: PASS.
+spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers, again 2026-10-09)) matched HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
@@ -150,18 +150,17 @@ permanently block another claimant.
 
 **Negative test:** commented out (prefix `//ZZ_AUDIT `) the three real
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` calls in
-`firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c` (line 505)
+`firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c` (the call in the run-stop path; located by symbol, not line)
 and `profile_executor_status.c` (lines 59, 153). Result: FAILED —
 "profile_executor ... no heat_enable_release() call...". Restored via sed
 removing the prefix; `git diff --quiet` empty on both files;
 `git hash-object` (first 8 chars
 blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
 489bc22c (not backtick-quoted here, per this repo's superseded-citation
-convention), since superseded by a later unrelated edit; line 505 still holds the same
+convention), since superseded by a later unrelated edit; the file still holds the same
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
-targeted, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`0ca1a2b0`
-(citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, 2026-10-05 after spare-relay WP-3 added the aux functions, and 2026-10-07 after the on/off min_off_s seed helper, and 2026-10-09 after later unrelated edits, and again 2026-10-09 after 45c2b4de and 8c287553; the heat_enable_release() call this test targets is unchanged))
+targeted, so the byte-identity pin is dropped (2026-10-11): the claim is only that
+profile_executor_relay_io.c still holds that call, not that its blob is unchanged)
 and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
 -- that file has since changed, so its blob id is no longer cited as
 resolvable against current HEAD) matched HEAD on both at audit time. Re-run:
@@ -198,7 +197,7 @@ superseded) was itself superseded by `93a8716f`'s shared AP-subnet helper/
 HTTP-layer message/confirm-side guard change, unrelated to this check's
 subject (the auth/gate logic the negative test exercises is unchanged);
 the underlying claim still holds, refreshed to
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`cebd2f59` (citation refreshed 2026-10-05)
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`c5ae34d9` (citation refreshed 2026-10-09)
 is the current one (citation refreshed 2026-09-30); see
 check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3

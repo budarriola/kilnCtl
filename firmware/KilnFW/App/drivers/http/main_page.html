@@ -866,7 +866,7 @@ function attachLongPress(el, onLongPress) {
 //
 // Correction, 2026-09-25 (system_mode_gate review): this endpoint's
 // carve-out -- letting a PID-only edit through even DURING a running
-// firing -- was revoked per owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md):
+// firing -- was revoked per owner decision Q2 (docs/SYSTEM_MODE_GATE.md):
 // zones_http_pid.c now runs the same system_mode_gate_check(
 // SYS_ACTION_WRITE_ZONES_CONFIG) every other zone/config writer runs, and
 // refuses (409) while a firing or autotune run is active, PAUSED included.
@@ -1002,7 +1002,7 @@ function renderPidPopup(z) {
   var atUsable = !!(at && at.zone === pidPopupZone && (at.state === 'done' || at.state === 'aborted') &&
     (at.method === 'relay' ? at.relay_valid : at.model_valid));
   var proposedHtml = atUsable
-    ? ('<div class="proposed">Last autotune this session proposed (' + at.state + '): ' +
+    ? ('<div class="proposed">Last autotune this session proposed (' + window.kcEscapeHtml(at.state) + '): ' +
        'Kp=' + at.proposed_kp.toFixed(4) + ' Ki=' + at.proposed_ki.toFixed(5) + ' Kd=' + at.proposed_kd.toFixed(4) +
        '<button type="button" id="pidPopupUseProposed">Use these</button></div>')
     : '<div class="proposed">No usable autotune result for this zone this session.</div>';
@@ -1020,11 +1020,11 @@ function renderPidPopup(z) {
     '<label style="display:inline;font-weight:normal"><input type="checkbox" id="pidPopupBumplessAck"> ' +
     'I understand this may cause a duty step</label></p>' +
     proposedHtml +
-    '<label>Kp (current ' + z.pid_kp + ')<input type="number" id="pidPopupKp" value="' + z.pid_kp +
+    '<label>Kp (current ' + window.kcEscapeHtml(String(z.pid_kp)) + ')<input type="number" id="pidPopupKp" value="' + window.kcEscapeHtml(String(z.pid_kp)) +
       '" step="any" min="0"></label>' +
-    '<label>Ki (current ' + z.pid_ki + ') -- small values matter here, e.g. 0.00012; do not round this' +
-      '<input type="number" id="pidPopupKi" value="' + z.pid_ki + '" step="any" min="0"></label>' +
-    '<label>Kd (current ' + z.pid_kd + ')<input type="number" id="pidPopupKd" value="' + z.pid_kd +
+    '<label>Ki (current ' + window.kcEscapeHtml(String(z.pid_ki)) + ') -- small values matter here, e.g. 0.00012; do not round this' +
+      '<input type="number" id="pidPopupKi" value="' + window.kcEscapeHtml(String(z.pid_ki)) + '" step="any" min="0"></label>' +
+    '<label>Kd (current ' + window.kcEscapeHtml(String(z.pid_kd)) + ')<input type="number" id="pidPopupKd" value="' + window.kcEscapeHtml(String(z.pid_kd)) +
       '" step="any" min="0"></label>' +
     '<div id="pidPopupMsg" class="msg"></div>' +
     '<div class="btnrow"><button type="button" id="pidPopupApplyBtn" onclick="applyPidPopup()">Apply</button>' +
@@ -1933,6 +1933,7 @@ function renderProgress(st) {
 var SAFETY_TRIP_WORDS = {
   0: 'none', 1: 'chamber over absolute temperature limit (S1)',
   2: 'chamber over setpoint for too long (S2)', 3: 'relay/contactor stuck on, no heat commanded (S3)',
+  4: 'safety test trip requested by administrator (TEST)',
   5: 'safety thermocouple reading invalid or missing (S5)', 6: 'main controller (ESP) reported a fault (S6a)',
   7: 'safety link to main controller went silent (S6b)', 8: 'E-stop pressed (S7)',
   9: 'rising faster than physically possible (S8)', 10: 'contactor welded on, trip did NOT cut power (S9)',
@@ -1974,12 +1975,15 @@ var SAFETY_LINK_STALE_MS = 1500;
 // here, so cause/remedy text cannot drift from the LCD's. safetyTripWords()/
 // SAFETY_TRIP_WORDS above are kept only as an old-firmware fallback for a
 // board that hasn't picked up the new fields yet.
+var clearTripMsg = { text: '', until: 0, reason: null };
 function renderSafetyTrip(data) {
   var el = document.getElementById('safetyTripBanner');
   var tripped = data.diag_ever_received && data.diag_state === SAFETY_LINK_DIAG_STATE_TRIPPED &&
                 typeof data.diag_age_ms === 'number' && data.diag_age_ms < SAFETY_LINK_STALE_MS;
-  if (!tripped) { el.innerHTML = ''; return; }
+  if (!tripped) { clearTripMsg = { text: '', until: 0, reason: null }; el.innerHTML = ''; return; }
   var reason = data.diag_trip_reason;
+  // A refusal belongs to the trip it answered: a different trip reason drops it.
+  if (clearTripMsg.reason !== reason) clearTripMsg = { text: '', until: 0, reason: null };
   var ineffective = reason === 10;
   var isMainFault = reason === 6; // S6a -- the safety processor sees one bit, ESP knows the source
   var words = data.diag_trip_reason_words || safetyTripWords(reason);
@@ -1998,7 +2002,8 @@ function renderSafetyTrip(data) {
     : (data.diag_trip_reason_cause || 'Detail not available on this firmware build.');
   var remedy = data.diag_trip_reason_remedy || 'Check the safety processor documentation for this trip reason.';
   var html = '<div class="banner safety-trip">' +
-    '<h3>' + (ineffective ? '!! SAFETY TRIP -- TRIP_INEFFECTIVE !!' : 'SAFETY PROCESSOR TRIPPED') + '</h3>' +
+    '<h3>' + (ineffective ? '!! SAFETY TRIP -- TRIP_INEFFECTIVE !!' : 'SAFETY PROCESSOR TRIPPED') +
+      (reason === 4 ? ' <span class="trip-test-badge">TEST</span>' : '') + '</h3>' + // reason 4 = admin test trip, never a real fault
     '<div class="row"><span>Reason</span><span>' + window.kcEscapeHtml(words) + '</span></div>' +
     '<div class="row"><span>Detected</span><span>' + window.kcEscapeHtml(cause) + '</span></div>';
   if (isMainFault) {
@@ -2033,19 +2038,50 @@ function renderSafetyTrip(data) {
     (reason !== 10
       ? '<button class="run-btn" id="clearTripBtn">Clear Trip</button>'
       : '') +
+    (clearTripMsg.text && Date.now() < clearTripMsg.until
+      ? '<div class="row fault" id="clearTripMsg">' + window.kcEscapeHtml(clearTripMsg.text) + '</div>'
+      : '') +
     '</div>';
   el.innerHTML = html;
   var btn = document.getElementById('clearTripBtn');
   if (btn) {
     btn.addEventListener('click', function () {
-      fetch('/api/safety/clear_trip', { method: 'POST' })
-        .then(function (r) { return r.json().catch(function () { return {}; }); })
-        .then(function (j) {
-          if (j && j.ok === false && j.error) {
-            btn.insertAdjacentHTML('afterend', '<div class="row fault">' + window.kcEscapeHtml(j.error) + '</div>');
+      // L-2: keep the refusal in clearTripMsg so the next poll's re-render shows it
+      // again instead of erasing it; one row, replaced (not appended) per click.
+      function showClearTripMsg(text) {
+        clearTripMsg = { text: text, until: Date.now() + 30000, reason: reason };
+        /* REVIEW_WEBFX7 LOW-1: a status poll may have re-rendered the banner since the click, so `btn` can be
+         * detached. Look the live row/button up now; if neither exists the state above is shown by the next render. */
+        var row = document.getElementById('clearTripMsg');
+        if (!row) {
+          var liveBtn = document.getElementById('clearTripBtn');
+          if (liveBtn && liveBtn.insertAdjacentHTML) {
+            liveBtn.insertAdjacentHTML('afterend', '<div class="row fault" id="clearTripMsg"></div>');
+            row = document.getElementById('clearTripMsg');
           }
-        })
-        .catch(function () {});
+        }
+        if (row) row.textContent = text;
+      }
+      function onClearTripErr(err) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+        showClearTripMsg('Clear Trip was not sent (network error).');
+      }
+      function onClearTripText(r, t) {
+        var j = null;
+        try { j = JSON.parse(t); } catch (e) { j = null; }
+        if (j && j.ok === false && (j.reason || j.error)) showClearTripMsg(String(j.reason || j.error));
+        else if (!r.ok) showClearTripMsg('Clear Trip was refused (HTTP ' + r.status + '): ' + (t || '').slice(0, 120));
+        else {
+          clearTripMsg = { text: '', until: 0, reason: null };
+          var old = document.getElementById('clearTripMsg');
+          if (old && old.remove) old.remove();
+        }
+      }
+      /* then(onOk, onErr): a throw inside the response handler is not a network error. */
+      fetch('/api/safety/clear_trip', { method: 'POST' })
+        .then(function (r) {
+          return r.text().then(function (t) { onClearTripText(r, t); }, onClearTripErr);
+        }, onClearTripErr);
     });
   }
 }
@@ -2078,9 +2114,15 @@ function renderZonesConfigLoadFault(data) {
     detail = 'Stored zone config is version ' + onDisk + '; this firmware only understands up to version ' +
       fwVer + ' -- likely an OTA rollback past a config schema bump.';
     remedy = 'Reflash the matching (or newer) firmware to restore the tuned config.';
+  } else if (data.zones_config_load_fault_file_rejected) {
+    // A rejected zones.json (bad CRC, too short, failed validation): NOT a version problem, so no version
+    // number and no "reflash" advice.
+    detail = 'The stored zone config file was rejected as damaged or invalid (' + reason + ').';
+    remedy = 'Reconfigure and save zones on the zones page (the damaged file is kept as zones.json.bad' +
+      (data.zones_config_load_fault_bad_copy_failed ? ', but that backup copy could NOT be written' : '') + ').';
   } else {
     detail = 'Stored zone config is version ' + onDisk + ' and this firmware (version ' + fwVer +
-      ') cannot migrate it forward: ' + window.kcEscapeHtml(reason) + '.';
+      ') cannot migrate it forward: ' + reason + '.';
     remedy = 'Reflash the firmware version that saved this config, or reconfigure zones from scratch.';
   }
   el.innerHTML = '<div class="banner safety-trip">' +
@@ -2134,8 +2176,16 @@ function renderKilnCfgSwapBootFault(data) {
   if (!el) return;
   if (!data.kiln_cfg_swap_boot_fault) { el.innerHTML = ''; return; }
   var reason = data.kiln_cfg_swap_boot_fault_reason || '';
-  el.innerHTML = '<div class="banner interrupted">' +
-    '<h3>KILN CONFIG SWAP INTERRUPTED -- NOT RECOVERED</h3>' +
+  // LOW-1: "active_id_unsaved" is display-only -- both processors agree on
+  // the applied config and heat is not gated; only the saved "which kiln is
+  // active" marker failed, and boot retries it. Neutral banner, softer text.
+  var kind = data.kiln_cfg_swap_boot_fault_kind;
+  var rolledBack = kind === 'rollback_active_id_unsaved';
+  var unsaved = kind === 'active_id_unsaved' || rolledBack;
+  el.innerHTML = '<div class="banner' + (unsaved ? '' : ' interrupted') + '">' +
+    (rolledBack ? '<h3>KILN CONFIG ROLLED BACK -- ACTIVE KILN NOT SAVED (retried each boot)</h3>' :
+     unsaved ? '<h3>KILN CONFIG APPLIED -- ACTIVE KILN NOT SAVED (retried each boot)</h3>'
+             : '<h3>KILN CONFIG SWAP INTERRUPTED -- NOT RECOVERED</h3>') +
     '<div class="row"><span>' + window.kcEscapeHtml(reason) + '</span></div>' +
     '</div>';
 }
@@ -2279,7 +2329,7 @@ function renderLastRun(st) {
   var html = '<div class="banner' + (lr.interrupted ? ' interrupted' : '') + '">' +
     '<h3>' + (lr.interrupted
       ? 'Previous firing was interrupted &mdash; it never ended cleanly'
-      : 'Previous firing ended (' + lr.phase + ')') + '</h3>' +
+      : 'Previous firing ended (' + window.kcEscapeHtml(lr.phase) + ')') + '</h3>' +
     '<div class="row"><span>Profile</span><span>' +
       window.kcEscapeHtml(profileTitleById[lr.profile_id] || lr.profile_name || ('id ' + lr.profile_id)) +
       ' &mdash; ' + (names.join(', ') || 'no zones') + '</span></div>' +
@@ -2328,6 +2378,16 @@ var lastExecStData = null;
 // "a run with many dropped samples must read as untrustworthy" is exactly
 // the kind of thing a one-line dashboard summary must not hide behind a
 // click-through, so a non-zero total gets its own short warning inline.
+// Human-readable text for /api/profile_exec's pause_reason (executor-initiated pause, or the Pico-reboot heat
+// withhold while RUNNING). Mirrors ui_page_home_pause_reason_text() on the LCD. Returns plain text -- callers
+// MUST pass it through kcEscapeHtml(); an unknown reason is shown verbatim (escaped by the caller), never hidden.
+function pauseReasonText(reason) {
+  if (!reason) return '';
+  if (reason === 'pico_reboot_undecided') return 'Heat withheld: the safety processor rebooted and the cause is not yet known';
+  if (reason === 'pico_fatal_reboot') return 'Paused: the safety processor rebooted after a fatal fault';
+  if (reason === 'heat_grant_unconfirmed') return 'Paused: heat grant not confirmed by the safety processor';
+  return 'Paused: ' + reason;
+}
 function renderRunQualityHeadline(st) {
   if (st.state !== 'done' && st.state !== 'faulted') return '';
   var worst = null;
@@ -2374,7 +2434,7 @@ function renderExec(st) {
   let html = '<div class="exec-card">' +
     '<div class="row"><span>' + window.kcEscapeHtml(profileTitleById[st.profile_id] || st.profile_name) +
     ' &mdash; ' + zoneNames.join(', ') + '</span>' +
-    '<span class="exec-state state-' + st.state + ' kc-live-value">' + st.state + '</span></div>' +
+    '<span class="exec-state state-' + window.kcEscapeHtml(st.state) + ' kc-live-value">' + window.kcEscapeHtml(st.state) + '</span></div>' +
     '<div class="row"><span>Segment</span><span class="kc-live-value">' + (st.segment_index + 1) + ' / ' + st.segment_count +
     ' (' + (st.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
     '<div class="row"><span>Shared target</span><span class="kc-live-value">' + window.kcUnit.fmt(st.target_c) + '</span></div>';
@@ -2397,6 +2457,9 @@ function renderExec(st) {
   }
   if (st.state === 'faulted' && st.fault_reason) {
     html += '<div class="row fault kc-live-value">' + window.kcEscapeHtml(st.fault_reason) + '</div>';
+  }
+  if (st.pause_reason) {
+    html += '<div class="row fault kc-live-value">' + window.kcEscapeHtml(pauseReasonText(st.pause_reason)) + '</div>';
   }
   html += renderRunQualityHeadline(st);
   html += '</div>';
@@ -2878,7 +2941,7 @@ function openLimitInfoPopup() {
   if (!summary) return;
   var name = profileTitleById[id] || ('profile ' + id);
   var box = document.getElementById('feasPopupBox');
-  box.innerHTML = '<h3>Configured-limit notice — ' + name + '</h3>' + limitBodyHtml(summary) +
+  box.innerHTML = '<h3>Configured-limit notice — ' + window.kcEscapeHtml(name) + '</h3>' + limitBodyHtml(summary) +
     '<div class="btnrow"><button type="button" id="feasPopupCloseBtn">Close</button></div>';
   document.getElementById('feasPopupOverlay').removeAttribute('hidden');
   document.getElementById('feasPopupCloseBtn').addEventListener('click', closeFeasPopup);
@@ -2932,7 +2995,7 @@ function openFeasInfoPopup() {
   if (!summary) return;
   var name = profileTitleById[id] || ('profile ' + id);
   var box = document.getElementById('feasPopupBox');
-  box.innerHTML = '<h3>Feasibility notice — ' + name + '</h3>' + feasBodyHtml(summary) +
+  box.innerHTML = '<h3>Feasibility notice — ' + window.kcEscapeHtml(name) + '</h3>' + feasBodyHtml(summary) +
     '<div class="btnrow"><button type="button" id="feasPopupCloseBtn">Close</button></div>';
   document.getElementById('feasPopupOverlay').removeAttribute('hidden');
   document.getElementById('feasPopupCloseBtn').addEventListener('click', closeFeasPopup);
@@ -2944,7 +3007,7 @@ function openFeasInfoPopup() {
 // equivalent) leaves proceedToStart() uncalled, so no POST goes out.
 function openFeasStartPopup(name, summary, onProceed) {
   var box = document.getElementById('feasPopupBox');
-  box.innerHTML = '<h3>Start "' + name + '" anyway?</h3>' + feasBodyHtml(summary) +
+  box.innerHTML = '<h3>Start "' + window.kcEscapeHtml(name) + '" anyway?</h3>' + feasBodyHtml(summary) +
     '<div class="btnrow"><button type="button" id="feasPopupCancelBtn">Cancel</button>' +
     '<button type="button" id="feasPopupProceedBtn" class="primary">Start firing anyway</button></div>';
   document.getElementById('feasPopupOverlay').removeAttribute('hidden');

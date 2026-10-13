@@ -49,7 +49,7 @@ urgent.
 | `thermo_uart_bridge` | 5 | 4096 | UART bridge subsystem task, THERMO command family — dispatches into `thermo_owner` | `App/drivers/bridge/uart_bridge_thermo.c:475` (split out of `uart_bridge.c`) |
 | `io_uart_bridge` | 5 | 4096 | UART bridge subsystem task, IO command family — dispatches into `kiln_io_owner` | `App/drivers/bridge/uart_bridge_io.c:652` (split out of `uart_bridge.c`) |
 | `touch_uart_bridge` | 5 | 4096 | UART bridge subsystem task, TOUCH command family | `App/drivers/bridge/uart_bridge_touch.c:274` (split out of `uart_bridge.c`) |
-| `safety_uart_bridge` | 5 | 4096 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/bridge/uart_bridge_safety.c:294` (split out of `uart_bridge.c`) |
+| `safety_uart_bridge` | 5 | 4608 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/bridge/uart_bridge_safety.c:294` (split out of `uart_bridge.c`) |
 | `system_uart_bridge` | 5 | 3072 | UART bridge subsystem task, SYSTEM command family (`FACTORY_RESET` reboots immediately after, so blocking briefly is accepted) | `App/drivers/bridge/uart_bridge_system.c:162` (split out of `uart_bridge.c`) |
 | `info_uart_bridge` | 5 | 4096 (was 3584, corrected 2026-09-30 — bench LOW reading) | UART bridge subsystem task, INFO/version command family | `App/drivers/bridge/uart_bridge_info.c:347` (split out of `uart_bridge.c`) |
 | `info_boot_push` | 5 | 3072 | One-shot: pushes firmware version/boot info to the PC link right after boot | `App/drivers/bridge/uart_bridge_info.c:369` (split out of `uart_bridge.c`) |
@@ -234,7 +234,7 @@ choke point for Phase 6 (§3) — not a bug fix.
 
 ### Phase 6 — system-mode command gate
 
-**BUILT** (slices 1-7 of `docs/SYSTEM_MODE_GATE_PLAN.md` landed): `system_mode_gate_check()` in `App/drivers/safety/system_mode_gate.c`, HTTP wiring in `App/drivers/http/system_mode_gate_http.c`, call-site lint `tools/check_system_mode_gate_call_sites.ps1`. The text below is the original design sketch (policy layer name was TBD; it shipped as `system_mode_gate`), recorded in `TODO.md` §10.14 and the
+**BUILT** (slices 1-7 of `docs/SYSTEM_MODE_GATE.md` landed): `system_mode_gate_check()` in `App/drivers/safety/system_mode_gate.c`, HTTP wiring in `App/drivers/http/system_mode_gate_http.c`, call-site lint `tools/check_system_mode_gate_call_sites.ps1`. The text below is the original design sketch (policy layer name was TBD; it shipped as `system_mode_gate`), recorded in `TODO.md` §10.14 and the
 approved plan. Distinct question from single-writer ownership: not "can two
 writers race on this state" (which the owner tasks already answer) but "is
 this *class* of command allowed at all, given what the system is doing

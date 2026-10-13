@@ -163,7 +163,7 @@ typedef enum {
      * numeric values and crosses neither the UART wire nor NVS" reasoning as
      * ERR_UPDATING's own comment above. */
     KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK,
-    /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): refused
+    /* docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1): refused
      * because a firing or autotune run is currently active -- system_mode_
      * gate.h's SYS_ACTION_RAW_RELAY_DEBUG_WRITE, checked in relay_on_blocked()
      * below. BLANKET refusal, not scoped to relays the run actually claims
@@ -226,6 +226,11 @@ kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, 
  * existing callers' "if (err != ESP_OK) log and continue" shape is
  * unchanged. */
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value);
+
+/* LOW-E: same, but the caller sampled kiln_io_relay_off_epoch() BEFORE its own gate decision
+ * and passes it here. If an all-off ran since, an ON is dropped to OFF (ESP_ERR_INVALID_STATE). */
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value,
+                                                                 uint32_t since_epoch);
 
 /* ---- Digital IO (IO_1..IO_7) ---- */
 esp_err_t kiln_io_owner_command_set_io(uint8_t index, bool level);

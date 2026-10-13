@@ -2,6 +2,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "freertos/task.h"
 
 /* Deliberately not MAX31856_CHANNEL_COUNT -- this module stays free of a
  * MAX31856.h dependency (see relay_authority.h's minimal-include
@@ -199,8 +200,17 @@ void relay_authority_heat_sweep_claim_end(void)
     portEXIT_CRITICAL(&s_heat_claim_mux);
 }
 
+bool relay_authority_heat_sweep_active(void)
+{
+    bool active;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    active = s_heat_sweep_active;
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return active;
+}
+
 /* Leaf getter for kiln_io_owner.c's system_mode_gate_blocks_relay() --
- * docs/SYSTEM_MODE_GATE_PLAN.md review, 2026-09-25. Deliberately reads only
+ * docs/SYSTEM_MODE_GATE.md review, 2026-09-25. Deliberately reads only
  * these two bools under the existing s_heat_claim_mux spinlock, mirroring
  * the other accessors in this section: no call into profile_executor.c or
  * autotune_engine.c, and no FreeRTOS mutex. owner_task (kiln_io_owner.c) is
@@ -223,4 +233,97 @@ void relay_authority_heat_run_active(bool *profile, bool *autotune)
         *autotune = s_heat_autotune_active;
     }
     portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+/* Factory reset in flight -- relay_authority.h's doc comment above these declarations has the "why".
+ * Shares s_heat_claim_mux with the heat claims it pairs against. */
+static uint8_t s_reset_in_flight_depth = 0;
+static bool s_reset_erases_kiln_nvs = false;
+
+void relay_authority_reset_in_flight_begin(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (s_reset_in_flight_depth < UINT8_MAX) {
+        s_reset_in_flight_depth++;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+void relay_authority_reset_in_flight_end(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (s_reset_in_flight_depth > 0) {
+        s_reset_in_flight_depth--;
+    }
+    if (s_reset_in_flight_depth == 0) {
+        s_reset_erases_kiln_nvs = false;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_in_flight(void)
+{
+    bool in_flight;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    in_flight = (s_reset_in_flight_depth != 0);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return in_flight;
+}
+
+static void *s_reset_job_task = NULL;
+
+void relay_authority_reset_job_enter(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_reset_job_task = (void *)xTaskGetCurrentTaskHandle();
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+void relay_authority_reset_job_exit(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_reset_job_task = NULL;
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_refuses_writer(void)
+{
+    void *me = (void *)xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    bool refuse = (s_reset_in_flight_depth != 0) && (s_reset_job_task == NULL || s_reset_job_task != me);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return refuse;
+}
+
+void relay_authority_reset_set_erases_kiln_nvs(bool erases)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    /* fwlow16 L2: sticky while a reset is in flight -- a narrower reset must not drop the fence of one that
+     * erased kiln_nvs. At depth 0 it assigns (a stale value never leaks into the next reset). */
+    if (erases || s_reset_in_flight_depth == 0) {
+        s_reset_erases_kiln_nvs = erases;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_try_begin(bool erases_kiln_nvs)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    bool ok = (s_reset_in_flight_depth == 0);
+    if (ok) {
+        s_reset_erases_kiln_nvs = erases_kiln_nvs;
+        s_reset_in_flight_depth = 1;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return ok;
+}
+
+bool relay_authority_reset_refuses_kiln_nvs_writer(void)
+{
+    void *me = (void *)xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    bool refuse = (s_reset_in_flight_depth != 0) && s_reset_erases_kiln_nvs &&
+                  (s_reset_job_task == NULL || s_reset_job_task != me);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return refuse;
 }

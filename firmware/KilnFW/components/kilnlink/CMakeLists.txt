@@ -27,6 +27,8 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_context.c"
          "${KILNLINK_DIR}/src/kilnlink_announce.c"
          "${KILNLINK_DIR}/src/kilnlink_clear_trip.c"
+         "${KILNLINK_DIR}/src/kilnlink_test_trip.c"
+         "${KILNLINK_DIR}/src/kilnlink_test_trip_result.c"
          "${KILNLINK_DIR}/src/kilnlink_set_config.c"
          "${KILNLINK_DIR}/src/kilnlink_rollback.c"
          "${KILNLINK_DIR}/src/kilnlink_announce_reboot.c"
@@ -99,7 +101,7 @@ idf_component_register(
          # safety_get_param tool.
          "${KILNLINK_DIR}/src/kilnlink_get_param.c"
          "${KILNLINK_DIR}/src/kilnlink_param.c"
-         # docs/PICO_AUTO_UPDATE_PLAN.md G1/G2 -- the pure scanner that finds
+         # docs/PICO_AUTO_UPDATE.md G1/G2 -- the pure scanner that finds
          # a SaftyFW image's self-declared build identity. Not a wire codec,
          # but shared between the two firmwares for the same reason every
          # codec above is, and subject to the same rule this list's comments

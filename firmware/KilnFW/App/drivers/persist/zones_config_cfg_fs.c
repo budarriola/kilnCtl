@@ -2,12 +2,14 @@
 #include "zones_config_cfg_fs.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "pref_cfg_fs.h"
 #include "persist_scratch.h"
 
 static const char *ZCFG_FS_TAG = "zones_cfg_fs";
@@ -29,6 +31,16 @@ zones_cfg_fs_write_fn_t zones_config_cfg_fs_get_write_fn(void)
     return s_write_fn;
 }
 
+static zones_cfg_fs_reject_t s_last_reject;
+
+bool zones_config_cfg_fs_get_last_reject(zones_cfg_fs_reject_t *out)
+{
+    if (out) {
+        *out = s_last_reject;
+    }
+    return s_last_reject.occurred;
+}
+
 /* rev(4 bytes LE) + the on-flash blob. Sized generously above
  * sizeof(zones_cfg_t) (itself capped at ZONES_CONFIG_BLOB_MAX_SIZE by
  * zones_config_accessors.h's own _Static_assert) so a future field growth
@@ -48,6 +60,50 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Keeps one copy of a rejected zones.json as zones.json.bad before a later save of an empty/default
+ * RAM config can overwrite it. Same write seam as the real file (the device routes it through the
+ * flash worker). Skips an identical existing copy so a file rejected every boot is not rewritten
+ * every boot, and a factory reset in flight (the reset barrier's fence). Returns whether a copy of
+ * these bytes now exists; a failure is logged and reported through the reject record (review 11 LOW-2).
+ * Only the resolve path preserves; the read-only load_raw callers never write (review 11 LOW-1). */
+static bool preserve_rejected_file(const uint8_t *raw, size_t len)
+{
+    if (!raw || len == 0 || len > (size_t)ZCFG_FILE_BUF_MAX) {
+        return false;
+    }
+    if (pref_cfg_fs_reset_refuses_write()) {
+        ESP_LOGW(ZCFG_FS_TAG, "rejected zones config file NOT preserved: factory reset in progress");
+        return false;
+    }
+    uint8_t *old = persist_scratch_alloc(ZCFG_FILE_BUF_MAX);
+    if (old) {
+        size_t olen = 0;
+        bool same = cfg_fs_read(ZONES_CFG_BAD_FILE_PATH, old, ZCFG_FILE_BUF_MAX, &olen) == ESP_OK && olen == len &&
+                    memcmp(old, raw, len) == 0;
+        free(old);
+        if (same) {
+            return true;
+        }
+    }
+    esp_err_t err = s_write_fn(ZONES_CFG_BAD_FILE_PATH, raw, len);
+    if (err == ESP_OK) {
+        ESP_LOGE(ZCFG_FS_TAG, "rejected zones config file preserved as %s (%u bytes)", ZONES_CFG_BAD_FILE_PATH,
+                 (unsigned)len);
+    } else {
+        ESP_LOGE(ZCFG_FS_TAG, "could not preserve rejected zones config file as %s: %s", ZONES_CFG_BAD_FILE_PATH,
+                 esp_err_to_name(err));
+    }
+    return err == ESP_OK;
+}
+
+static void note_reject(bool newer, uint8_t ver, const char *reason)
+{
+    s_last_reject.occurred = true;
+    s_last_reject.newer = newer;
+    s_last_reject.on_disk_version = ver;
+    snprintf(s_last_reject.reason, sizeof(s_last_reject.reason), "cfg file: %s", reason ? reason : "");
+}
+
 /* Shared body for zones_config_cfg_fs_load_raw() and
  * zones_config_cfg_fs_resolve() -- out_on_disk_version is the extra output
  * only resolve() needs (the file blob's own claimed version byte, for the
@@ -57,7 +113,8 @@ static uint32_t get_u32_le(const uint8_t *p)
  * zones_config_cfg_fs_load_raw()'s own public signature, which has over a
  * dozen call sites in test_zones_config_cfg_fs.c that do not need this
  * value. */
-static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid, uint8_t *out_on_disk_version)
+static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid, uint8_t *out_on_disk_version,
+                          bool preserve)
 {
     if (out_cfg) {
         memset(out_cfg, 0, sizeof(*out_cfg));
@@ -71,6 +128,7 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
     if (out_on_disk_version) {
         *out_on_disk_version = 0;
     }
+    memset(&s_last_reject, 0, sizeof(s_last_reject));
     if (!out_cfg || !out_rev || !out_valid) {
         return;
     }
@@ -94,18 +152,28 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
     esp_err_t err = cfg_fs_read(ZONES_CFG_FILE_PATH, raw, ZCFG_FILE_BUF_MAX, &len);
     if (err != ESP_OK) {
         free(raw);
-        /* ESP_ERR_NOT_FOUND (never migrated yet), ESP_ERR_INVALID_SIZE (file
-         * larger than this buffer -- cannot happen for a well-formed file,
-         * but a corrupted length must not be trusted either), or any other
-         * read failure: none of these are "found but bad", so nothing is
-         * logged here -- the caller's resolve() logic decides whether that
-         * is worth a divergence warning (it is not, on its own; an absent
-         * file is the normal state on every board today). */
+        /* ESP_ERR_NOT_FOUND (never migrated yet) is the one "absent" answer: the normal state on
+         * every board that has not migrated, and nothing is logged. Any OTHER failure
+         * (ESP_ERR_INVALID_SIZE for a file larger than this buffer -- e.g. written by newer
+         * firmware -- or a transient I/O error) means a file may EXIST that we could not read, so
+         * it is "cannot decide", never "absent" (review 15 LOW-3): resolve() must not fall back to
+         * NVS and overwrite it. */
+        if (err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(ZCFG_FS_TAG, "zones config file unreadable (%s) -- cannot decide, not treating it as absent",
+                     esp_err_to_name(err));
+            if (out_on_disk_version) {
+                *out_on_disk_version = ZONES_CFG_RESOLVE_OOM_VERSION;
+            }
+        }
         return;
     }
     if (len < 5) { /* need at least the rev prefix + a 1-byte version */
-        ESP_LOGW(ZCFG_FS_TAG, "zones config file is %u bytes, too short to hold a rev + blob -- ignoring",
+        ESP_LOGE(ZCFG_FS_TAG, "zones config file is %u bytes, too short to hold a rev + blob -- ignoring",
                  (unsigned)len);
+        note_reject(false, 0, "too short");
+        if (preserve) {
+            s_last_reject.preserved = preserve_rejected_file(raw, len);
+        }
         free(raw);
         return;
     }
@@ -123,6 +191,12 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
      * out_cfg is re-zeroed on rejection so a caller that ignores *out_valid
      * still sees the same all-zero struct it did before. */
     zones_decode_result_t result = zones_config_json_decode_blob(raw + 4, len - 4, out_cfg, &reason);
+    if (result != ZONES_DECODE_OK && result != ZONES_DECODE_OOM) {
+        note_reject(result == ZONES_DECODE_NEWER, on_disk_version, reason);
+        if (preserve) {
+            s_last_reject.preserved = preserve_rejected_file(raw, len);
+        }
+    }
     free(raw);
     if (result == ZONES_DECODE_OOM) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file decode ran out of memory -- cannot decide");
@@ -133,7 +207,7 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
         return;
     }
     if (result != ZONES_DECODE_OK) {
-        ESP_LOGW(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
+        ESP_LOGE(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
                  (unsigned long)rev, reason);
         memset(out_cfg, 0, sizeof(*out_cfg));
         return;
@@ -161,7 +235,7 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
 
 void zones_config_cfg_fs_load_raw(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_valid)
 {
-    load_raw_impl(out_cfg, out_rev, out_valid, NULL);
+    load_raw_impl(out_cfg, out_rev, out_valid, NULL, false);
 }
 
 esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
@@ -279,7 +353,7 @@ static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, ui
     uint32_t file_rev = 0;
     bool file_valid = false;
     uint8_t file_on_disk_version = 0;
-    load_raw_impl(file_cfg, &file_rev, &file_valid, &file_on_disk_version);
+    load_raw_impl(file_cfg, &file_rev, &file_valid, &file_on_disk_version, true);
 
     if (!file_valid && file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION) {
         /* Could not read/decode the file: unknown, NOT absent. Do not fall back to (and
@@ -302,6 +376,22 @@ static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, ui
         *out_cfg = *nvs_cfg;
         *out_rev = nvs_rev;
         *out_used_file = false;
+        if (nvs_valid && s_last_reject.occurred && s_last_reject.newer) {
+            /* Review 11 MED-1: a file from NEWER firmware is protected data. NEVER rewrite it
+             * from the older NVS copy, and do not adopt that older copy either (it would let a
+             * firing run on a stale config); no trustworthy copy -> the caller latches the fault. */
+            ESP_LOGE(ZCFG_FS_TAG, "zones config file is from NEWER firmware (v%u) -- NOT overwriting it from the "
+                     "older NVS copy and NOT adopting that copy", (unsigned)s_last_reject.on_disk_version);
+            memset(out_cfg, 0, sizeof(*out_cfg));
+            return false;
+        }
+        if (nvs_valid && s_last_reject.occurred && !s_last_reject.preserved) {
+            /* Rejected (corrupt) file and no zones.json.bad copy exists: do not destroy the only
+             * copy. The NVS copy is still adopted for this boot. */
+            ESP_LOGE(ZCFG_FS_TAG, "rejected zones config file has no %s copy -- NOT overwriting it from NVS",
+                     ZONES_CFG_BAD_FILE_PATH);
+            return true;
+        }
         if (nvs_valid) {
             esp_err_t werr = zones_config_cfg_fs_save(nvs_cfg, nvs_rev);
             if (werr != ESP_OK && werr != ESP_ERR_INVALID_STATE) {
@@ -359,7 +449,7 @@ static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, ui
      *
      * `>=` here silently discarded every edit made on rolled-back firmware
      * and then overwrote it on the next save -- exactly the downgrade
-     * hazard docs/FILESYSTEM_USER_DATA_PLAN.md section 4 introduced the rev
+     * hazard docs/FILESYSTEM_USER_DATA.md section 4 introduced the rev
      * counter to close. Fixed 2026-09-07
      * (docs/audits/filesystem_migration_review_2026-09-07.md), pinned by
      * check_cfg_fs_tie_break.ps1 and by

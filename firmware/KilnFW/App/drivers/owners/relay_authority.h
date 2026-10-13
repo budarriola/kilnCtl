@@ -20,7 +20,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <stdio.h>
+#include <string.h>
+
 #include "safety_link.h"
+#include "safety_trip_words.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -273,6 +277,12 @@ relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void);
  * never held it. */
 void relay_authority_heat_sweep_claim_end(void);
 
+/* True while the zone current sweep holds its exclusive claim. Leaf read under s_heat_claim_mux.
+ * factory_reset.c's late check after relay_authority_reset_in_flight_begin() reads this, and the sweep
+ * start reads relay_authority_reset_in_flight() after publishing its claim, so a sweep and a factory
+ * reset cannot both proceed (paired-mark shape, see the reset-in-flight comment below). */
+bool relay_authority_heat_sweep_active(void);
+
 /* True/false for whether profile_executor / autotune_engine currently hold
  * the shared heat claim (RUNNING or PAUSED for profile -- claim_end() is
  * only called from a terminal transition, see profile_executor_status.c's
@@ -282,6 +292,122 @@ void relay_authority_heat_sweep_claim_end(void);
  * owner_task, in particular -- see relay_authority.c's doc comment above
  * this function). Either out-pointer may be NULL. */
 void relay_authority_heat_run_active(bool *profile, bool *autotune);
+
+/* Factory reset in flight (HTTP audit: factory_reset.c checked the system mode gate only before its
+ * body read and flash-worker dispatch, so a firing or autotune could start between that check and the
+ * erase). Same paired shape as the zones POST late check (5c638423): factory_reset.c's execute_scope()
+ * calls _begin(), THEN re-reads relay_authority_heat_run_active() and refuses (calling _end()) if a run
+ * holds the heat claim; profile_executor_run() and autotune_begin_run_locked() publish their heat claim,
+ * THEN read relay_authority_reset_in_flight() and refuse, releasing their claims, if it is set. Every
+ * access is under the same leaf s_heat_claim_mux, so at least one of the two sides sees the other.
+ *
+ * A depth counter; a second reset while one is in flight is refused by relay_authority_reset_try_begin()
+ * (fwlow16 L2), so the counter never exceeds 1 in production.
+ * _end() is called only on a path where no erase ran; once the erase has run the board reboots, and the
+ * mark deliberately stays set until then. Spinlock only, never blocks. */
+void relay_authority_reset_in_flight_begin(void);
+void relay_authority_reset_in_flight_end(void);
+bool relay_authority_reset_in_flight(void);
+
+/* Writer fence (pref_cfg_fs.h "FACTORY-RESET WRITER FENCE"): the reset job records the task it runs on
+ * (_job_enter at the top of execute_scope_job(), _job_exit at the end) so its own cfg writes
+ * (profiles_builtin_restore_all()) are not refused by the mark. relay_authority_reset_refuses_writer()
+ * is the predicate main.c installs with pref_cfg_fs_set_reset_refuse_hook(): the mark is set AND the
+ * caller is not that job's task. Spinlock only. */
+void relay_authority_reset_job_enter(void);
+void relay_authority_reset_job_exit(void);
+bool relay_authority_reset_refuses_writer(void);
+
+/* kiln_nvs fence refinement (fwbatch13 LOW-4): main.c's hal_kv hook refuses a kiln_nvs mutation from another
+ * task only when the in-flight reset's scope ERASES kiln_nvs ("kiln"/"all"); a "wifi" or "profiles" reset
+ * leaves kiln_nvs alone, so wear counters / lockout counters / boot_guard keep writing normally. The caller
+ * (factory_reset.c) uses relay_authority_reset_try_begin(), which sets the flag and begins the mark in one step;
+ * the last _end() clears it.
+ * Remaining behaviour for an erasing scope: every other-task kiln_nvs write between the mark and the reboot
+ * (~500 ms after the erase) is refused and lost -- there are no shutdown handlers. */
+void relay_authority_reset_set_erases_kiln_nvs(bool erases);
+/* fwlow16 L2: atomic "set the erase flag and begin the in-flight mark, unless a reset is already in flight".
+ * Returns false (nothing changed, do NOT call _end()) when one is: a second, narrower reset must not overwrite
+ * the first one's fence or run under its erase. factory_reset.c's execute_scope() uses this; on true the caller
+ * pairs it with _end() exactly as with _begin(). */
+bool relay_authority_reset_try_begin(bool erases_kiln_nvs);
+bool relay_authority_reset_refuses_kiln_nvs_writer(void);
+
+/* LD-01 (HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09): the ONE start gate for the two engines that
+ * heat (autotune_begin_run_locked(), profile_executor_run()). relay_authority_on_blocked() alone
+ * is not enough: the SAFETY_LINK fault source is raised only by the poll task and only when
+ * fault_on_link_loss is on, so a never-up / stale-within-one-period / override-off / uninitialised
+ * link reads fault_sources == 0 and a run would start and enable the safety link. This refuses
+ * unless no fault source is asserted AND the link is positively up and fresh
+ * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down) and the
+ * Pico's DIAG is fresh and does not report TRIPPED (F5HOLDERFX3 LOW-1, F5HOLDERFX4 MED-1).
+ * Fail closed. Never consults fault_on_link_loss, so the bench override opens no start path.
+ * Writes a decoded refusal (<128 chars) to err when non-NULL; `what` completes the sentence
+ * ("autotune cannot drive the element"). Returns true when the start must be refused. */
+/* F5HOLDERFX4 MED-1: fail closed on the Pico's DIAG. "Tripped" = a DIAG was ever received and its cached state is
+ * TRIPPED, at ANY age (a stale TRIPPED never reads as OK; the Pico reboot path keeps the cache on purpose). Note
+ * st->age_ms is the STATUS frame's age, not the DIAG's, so it must not be used here. */
+static inline bool relay_authority_pico_tripped(const safety_link_status_t *st)
+{
+    if (st->diag_ever_received && st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+        return true;
+    }
+    /* SAFETYFX8 LOW-3 / SAFETYFX10 MED-1: a TRIP_EVENT that arrived after the last DIAG (or with no DIAG ever) means
+     * the Pico tripped and no DIAG has said otherwise yet -- DIAG frames can be lost while STATUS/TRIP_EVENT still
+     * arrive. Fail toward OFF. Order is arrival order (trip_event_after_diag), never a comparison of the two ages,
+     * which wrap every 2^32 ms. No auto-clear: the next DIAG of any state supersedes the event, which is exactly the
+     * normal trip-clear flow. The Pico sends one 4-copy, 750 ms TRIP_EVENT burst per new trip_seq (it does not repeat
+     * while latched), so this holds until the next DIAG (at most ~2 s); after that only diag_state matters. */
+    if (st->trip_event_ever_received &&
+        (!st->diag_ever_received || st->trip_event_after_diag)) {
+        return true;
+    }
+    return false;
+}
+
+/* A DIAG report we may act on to PERMIT heat/switch-on: received since the Pico's last reboot and no older than
+ * SAFETY_LINK_DIAG_FRESH_MS (inclusive: age == FRESH is fresh, FRESH+1 is not). */
+static inline bool relay_authority_pico_diag_fresh(const safety_link_status_t *st)
+{
+    return st->diag_ever_received && st->diag_since_reboot && st->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS;
+}
+
+static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *err, size_t cap, const char *what)
+{
+    uint32_t sources = 0;
+    if (relay_authority_on_blocked(safety, &sources)) {
+        if (err && cap) {
+            char words[160];
+            safety_fault_source_words(sources, words, sizeof(words));
+            char *comma = strchr(words, ',');
+            bool more = (comma != NULL);
+            if (comma) *comma = '\0';
+            snprintf(err, cap, "heat is blocked (%.32s%s, usually the safety link down) -- %s",
+                     words, more ? " (+more)" : "", what);
+        }
+        return true;
+    }
+    safety_link_status_t st;
+    if (safety_link_get_status(safety, &st) != ESP_OK || !st.link_up) {
+        if (err && cap) {
+            snprintf(err, cap, "safety link is down or not yet confirmed up -- %s", what);
+        }
+        return true;
+    }
+    if (relay_authority_pico_tripped(&st)) {
+        if (err && cap) {
+            snprintf(err, cap, "the safety processor is tripped (clear the trip first) -- %s", what);
+        }
+        return true;
+    }
+    if (!relay_authority_pico_diag_fresh(&st)) {
+        if (err && cap) {
+            snprintf(err, cap, "waiting for the safety processor's status report -- retry in a few seconds -- %s", what);
+        }
+        return true;
+    }
+    return false;
+}
 
 #ifdef __cplusplus
 }

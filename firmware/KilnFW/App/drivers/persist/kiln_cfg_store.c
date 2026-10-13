@@ -78,7 +78,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_STORE_REV);
  * kiln_cfg_entry_t/kiln_cfg_store_blob_t layout now live in
  * kiln_cfg_store_internal.h, shared with kiln_cfg_store_cfg_fs.c (the `cfg`
  * LittleFS dual-write bridge for this whole store, docs/
- * FILESYSTEM_USER_DATA_PLAN.md section 5's "kiln config slots" item) -- see
+ * FILESYSTEM_USER_DATA.md section 5's "kiln config slots" item) -- see
  * that header for the version-bump/migration discipline this mirrors from
  * zones_http.c's ZONES_CFG_VERSION. The frozen v1 layout below stays
  * private here: nothing outside this file's own migration path ever needs
@@ -241,6 +241,37 @@ static void migrate_store_v2_to_v3(const kiln_cfg_store_blob_v2_t *src, kiln_cfg
         /* pico_populated/pkg_schema/pkg_hash/pico already zeroed by the
          * memset above -- explicitly NOT set here. */
     }
+}
+
+/* Topology override (review 14 LOW-4): owned by the task that installed it.
+ * The restore path installs the backup's planned counts so the compatibility
+ * check runs against the topology being restored; any OTHER task validating a
+ * kiln_configs upload meanwhile must see the live counts, never the planned
+ * ones. Readers therefore honour the override only on the owning task.
+ * Writer order: fields, then owner, then active (clear: active, then owner). */
+static bool s_topology_override_active = false;
+static uint8_t s_topology_override_thermo = 0;
+static uint8_t s_topology_override_relay = 0;
+static void *s_topology_override_owner = NULL;
+
+void kiln_cfg_store_restore_topology_override(bool active, uint8_t thermo_count, uint8_t relay_count)
+{
+    if (!active) {
+        s_topology_override_active = false;
+        s_topology_override_owner = NULL;
+        s_topology_override_thermo = 0;
+        s_topology_override_relay = 0;
+        return;
+    }
+    s_topology_override_thermo = thermo_count;
+    s_topology_override_relay = relay_count;
+    s_topology_override_owner = (void *)xTaskGetCurrentTaskHandle();
+    s_topology_override_active = true;
+}
+
+static bool topology_override_applies_here(void)
+{
+    return s_topology_override_active && s_topology_override_owner == (void *)xTaskGetCurrentTaskHandle();
 }
 
 static kiln_cfg_store_blob_t s_store;
@@ -569,7 +600,7 @@ static uint32_t kiln_cfg_rev_load(void)
 }
 
 /* Wraps nvs_load_store() with the `cfg` LittleFS read-through/dual-write
- * policy (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln config slots"
+ * policy (docs/FILESYSTEM_USER_DATA.md section 5, "kiln config slots"
  * item) -- exactly the shape zones_config_store.c's nvs_load() wraps
  * nvs_load_from() with. kiln_cfg_store_cfg_fs_resolve() never touches NVS
  * itself; it only decides whether the file or the NVS candidate above wins,
@@ -930,6 +961,13 @@ esp_err_t kiln_cfg_store_init(void)
             reason[0] = '\0';
             if (!zones_config_import_blob(s_store.entries[idx].blob, s_store.entries[idx].blob_len,
                                           reason, sizeof(reason))) {
+                if (strcmp(reason, ZONES_IMPORT_REASON_RUN_CLAIMED) == 0) {
+                    /* Review 15 LOW-1: refused only because a run holds the claim (HTTP/LCD are up before this
+                     * init); the config is valid. Keep the active id and the loaded zones config. */
+                    ESP_LOGW(TAG, "active kiln config id=%ld not applied at boot: %s -- kept as active",
+                             (long)s_store.active_id, reason);
+                    return ESP_OK;
+                }
                 ESP_LOGW(TAG, "active kiln config id=%ld failed validation at boot (%s) -- clearing "
                               "it, keeping whatever zones config already loaded",
                          (long)s_store.active_id, reason);
@@ -1058,17 +1096,23 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
             e->pkg_schema = 0;
             return;
         }
-        uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+        /* Heap, not stack: this runs on the shared 8 KB httpd stack
+         * (check_httpd_task_stack_budget); an alloc failure is the same
+         * "canonical encoding failed" outcome below. Freed on every path. */
+        uint8_t *canonical = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
         size_t canonical_len = 0;
-        if (!zones_config_export_canonical(cfg, canonical, sizeof(canonical), &canonical_len)) {
+        if (!canonical || !zones_config_export_canonical(cfg, canonical, ZONES_CONFIG_BLOB_MAX_SIZE, &canonical_len)) {
+            free(canonical);
             ESP_LOGW(TAG, "kiln_cfg_store: canonical ESP-half encoding failed for '%s' while keeping "
                           "the existing Pico half -- package hash left unchanged",
                      e->name);
             return;
         }
         uint32_t hash = 0;
-        if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
-            hash != 0) {
+        bool hash_ok =
+            kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash);
+        free(canonical);
+        if (hash_ok && hash != 0) {
             e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
             e->pkg_hash = hash;
         } else {
@@ -1102,9 +1146,10 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
      * e->blob itself is UNCHANGED -- still the raw struct, still what
      * kiln_cfg_store_apply() hands to zones_config_import_blob(), which does
      * its own CRC/version checking independently of this hash. */
-    uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint8_t *canonical = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE); /* heap: httpd stack budget */
     size_t canonical_len = 0;
-    if (!zones_config_export_canonical(cfg, canonical, sizeof(canonical), &canonical_len)) {
+    if (!canonical || !zones_config_export_canonical(cfg, canonical, ZONES_CONFIG_BLOB_MAX_SIZE, &canonical_len)) {
+        free(canonical);
         memset(&e->pico, 0, sizeof(e->pico));
         e->pico_populated = 0;
         e->pkg_schema = 0;
@@ -1125,8 +1170,10 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
      * this slot to the same "not yet captured" state an unreachable capture
      * failure already produces above, rather than a half-marked one. */
     uint32_t hash = 0;
-    if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
-        hash != 0) {
+    bool hash_ok =
+        kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash);
+    free(canonical);
+    if (hash_ok && hash != 0) {
         e->pico_populated = 1;
         e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
         e->pkg_hash = hash;
@@ -2219,8 +2266,9 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
      * DIFFERENT (different names/gains/a CT-less package on a CT-equipped
      * controller) is accepted -- only what this hardware cannot run at all
      * is refused. */
-    uint8_t live_relay_count = zones_config_get_relay_count();
-    uint8_t live_thermo_count = zones_config_get_thermo_count();
+    const bool topo_override_here = topology_override_applies_here();
+    uint8_t live_relay_count = topo_override_here ? s_topology_override_relay : zones_config_get_relay_count();
+    uint8_t live_thermo_count = topo_override_here ? s_topology_override_thermo : zones_config_get_thermo_count();
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
         const zone_cfg_t *zc = &s->cand.zones[z];
         for (uint8_t bit = 0; bit < 8; bit++) {

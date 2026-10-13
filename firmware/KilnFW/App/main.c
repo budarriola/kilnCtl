@@ -39,7 +39,15 @@
 #include "esp_log.h"
 
 #include "dram_margin.h"
+#include "flash_worker.h"
 #include "kiln_io.h"
+#include "pref_cfg_fs.h"
+#include "profile_executor.h"
+#include "cfg_fs.h"
+#include "hal_kv.h"
+#include <string.h>
+#include "cfg_fs_mount.h"
+#include "relay_authority.h"
 #include "safety_link.h"
 #include "uart_log_bridge.h"
 
@@ -171,6 +179,7 @@ void main_kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool saf
     }
 
     if (safety_ok) {
+        if ((fault_sources & SAFETY_FAULT_SRC_APP) != 0u) profile_executor_note_external_app_hold();
         esp_err_t err = safety_link_set_fault_source(safety, fault_sources, true);
         if (err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "could not assert the isolated fault line: %s", esp_err_to_name(err));
@@ -202,6 +211,16 @@ void main_kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool saf
  * Both abort paths call main_kiln_enter_safe_state() first: app_main
  * returning does not stop FreeRTOS, so leaving the board safe has to be an
  * action, not an omission. */
+/* Factory-reset writer fence for the kiln_nvs partition (hal_kv.h "Mutation fence"): every hal_kv_set_*,
+ * hal_kv_erase_key and hal_kv_commit on a kiln_nvs handle is refused while the reset mark is set, except on
+ * the reset job's own task (relay_authority_reset_refuses_kiln_nvs_writer()). One choke point for estop_verification,
+ * firing_shadow, kiln_cfg_swap, adaptive_tune, run_state and every other kiln_nvs writer. */
+static bool kiln_nvs_reset_refuses_write(const char *partition)
+{
+    return partition != NULL && strcmp(partition, "kiln_nvs") == 0 &&
+           relay_authority_reset_refuses_kiln_nvs_writer();
+}
+
 void app_main(void)
 {
     // Installed before anything else touches ESP_LOGx, so every line from
@@ -211,6 +230,18 @@ void app_main(void)
     // see uart_log_bridge_start() (main_bridges_bringup.c) for when the
     // backlog actually flushes.
     uart_log_bridge_early_init();
+
+    // Before any task that can enter a cfg save section exists (LVGL, httpd,
+    // the bridges, main_boot_early's deferred tasks): makes every save section
+    // reserve the flash worker even if it begins before main_control_bringup()
+    // starts that worker. Only creates a static mutex and installs two hooks,
+    // so it is safe in recovery mode too. See uart_bridge_ext.c.
+    uart_bridge_ext_save_reservation_init();
+    // Factory-reset writer fence (pref_cfg_fs.h): refuse cfg saves while the reset mark is set.
+    pref_cfg_fs_set_reset_refuse_hook(relay_authority_reset_refuses_writer);
+    cfg_fs_mount_set_write_refuse_hook(relay_authority_reset_refuses_writer);
+    cfg_fs_set_write_refuse_hook(relay_authority_reset_refuses_writer);
+    hal_kv_set_write_refuse_hook(kiln_nvs_reset_refuses_write);
 
     static main_boot_ctx_t ctx;
 

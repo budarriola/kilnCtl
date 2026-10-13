@@ -4,6 +4,7 @@
 // infrastructure (flash-safe executor, little-endian/reply helpers) this
 // file uses via uart_bridge_ext_* names. MOVE-ONLY: no logic, ordering, or
 // visibility change beyond the widening rename the split required.
+#include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "uart_bridge.h"
 #include "uart_bridge_ext_internal.h"
 
@@ -86,7 +87,7 @@ static size_t control_build_get_zones(uint8_t *out)
  * never on control_task itself: CONTROL_CMD_SET_ZONE_PID/MODEL both end in
  * zones_http.c's nvs_save(). `reply` is a local here on purpose -- that is
  * what moves the BRIDGE_REPLY_MAX buffer onto the worker's internal stack. */
-/* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+/* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
  * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes -- not
  * scoped to which field changed -- while a firing or autotune run is active,
  * PAUSED included. CONTROL_CMD_SET_ZONE_PID/SET_ZONE_MODEL were a real gap
@@ -134,8 +135,9 @@ static void control_handle_message(void *vargs)
                 float kp = uart_bridge_ext_f32_le(&msg.payload[2]);
                 float ki = uart_bridge_ext_f32_le(&msg.payload[6]);
                 float kd = uart_bridge_ext_f32_le(&msg.payload[10]);
-                bool ok = zones_config_set_pid(zi, kp, ki, kd);
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                zones_set_result_t r = zones_config_set_pid_checked(zi, kp, ki, kd);
+                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, r == ZONES_SET_OK,
+                                             r == ZONES_SET_BUSY_RUNNING ? "run active" : NULL);
                 break;
             }
             case CONTROL_CMD_SET_ZONE_MODEL: {
@@ -153,8 +155,9 @@ static void control_handle_message(void *vargs)
                 float k_dc = uart_bridge_ext_f32_le(&msg.payload[2]);
                 float tau_s = uart_bridge_ext_f32_le(&msg.payload[6]);
                 float dead_time_s = uart_bridge_ext_f32_le(&msg.payload[10]);
-                bool ok = zones_config_set_model(zi, k_dc, tau_s, dead_time_s);
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                zones_set_result_t r = zones_config_set_model_checked(zi, k_dc, tau_s, dead_time_s);
+                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, r == ZONES_SET_OK,
+                                             r == ZONES_SET_BUSY_RUNNING ? "run active" : NULL);
                 break;
             }
             case CONTROL_CMD_GET_UNIT_PREF: {
@@ -173,9 +176,11 @@ static void control_handle_message(void *vargs)
                     break;
                 }
                 uint8_t raw = msg.payload[1];
+                bool adopted = false;
                 bool ok = (raw == (uint8_t)UNIT_PREF_CELSIUS || raw == (uint8_t)UNIT_PREF_FAHRENHEIT) &&
-                          unit_pref_set((unit_pref_t)raw) == ESP_OK;
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                          unit_pref_set_ex((unit_pref_t)raw, &adopted) == ESP_OK;
+                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok,
+                                             ok ? NULL : (adopted ? "save not verified, live value now matches file" : NULL));
                 break;
             }
             default:
@@ -374,7 +379,7 @@ static size_t profiles_build_get(uint8_t *out, uint8_t id)
  * see uart_task_ids.h for why. */
 static size_t profiles_build_exec_status(uint8_t *out)
 {
-    /* profile_exec_status_t is 1464 B; this runs on bx_flash_worker, whose
+    /* profile_exec_status_t is 1512 B; this runs on bx_flash_worker, whose
      * stack ceiling profile_executor_get_active_id()'s own doc comment
      * measures at 3792 B (zero headroom on clean main) -- a stack-local
      * instance here would be the same class of regression that function
@@ -559,7 +564,10 @@ static void profiles_handle_message(void *vargs)
                     uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
                     break;
                 }
-                char err_msg[96] = "";
+                /* static: off the stack of the task running this (check_system_uart_bridge_stack_budget.ps1);
+                 * profiles_handle_message() only ever runs on the single flash worker. */
+                static char err_msg[READINESS_GATE_MSG_CAP];
+                err_msg[0] = '\0';
                 bool ok = profile_executor_run(msg.payload[1], err_msg, sizeof(err_msg));
                 uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, ok, err_msg);
                 break;
@@ -621,8 +629,8 @@ static void profiles_task(void *arg)
          * command AND safety_cfg_store's deferred NVS flush -- and
          * additionally behind profile_executor's own s_exec.lock, which the
          * executor task holds for the length of an entire 1 Hz tick
-         * (PID/feedforward/guard math for every active zone, plus an
-         * occasional in-lock NVS write from relay_cycles_maybe_persist()). A
+         * (PID/feedforward/guard math for every active zone;
+         * relay_cycles_maybe_persist()'s NVS write runs after the lock). A
          * caller polling GET_EXEC_STATUS at a fixed cadence during a
          * multi-zone firing could queue behind either of those and miss a
          * 3 s reply deadline -- the frame was already ACKed by the transport

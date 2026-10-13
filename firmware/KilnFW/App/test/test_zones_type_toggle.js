@@ -1,4 +1,4 @@
-/* Node-only test for zones_page.html's ON_OFF_ZONE_PLAN.md step 6 UI gating:
+/* Node-only test for zones_page.html's ON_OFF_ZONE.md step 6 UI gating:
  * toggleZoneTypeUi() must hide every field that does nothing for the zone
  * type currently selected, and must NOT hide anything that still applies.
  *
@@ -26,7 +26,7 @@
 const fs = require('fs');
 const vm = require('vm');
 
-const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const { resolveDriversDir, resolveDriverFile, pickLine } = require('./_drivers_layout.js');
 const PAGE_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'zones_page.html');
 const SRC = fs.readFileSync(PAGE_PATH, 'utf8');
 const LINES = SRC.split('\n');
@@ -237,11 +237,14 @@ function renderZoneFragment(zoneType, overrides) {
   };
   vm.createContext(sandbox);
   vm.runInContext(
-    TEMPLATE_SRC + '\nresult = settingsStackHtml + zoneTypeHtml;',
+    KGR6_SRC + '\n' + TEMPLATE_SRC + '\nresult = settingsStackHtml + zoneTypeHtml;',
     sandbox
   );
   return sandbox.result;
 }
+
+// Real kgR6 helper from the page (fragment calls it for cal/ramp/sanity/max/min).
+const KGR6_SRC = ['function kgR6(', 'function kgRawAttrs(', 'function kgPost('].map((p) => pickLine(LINES, p)).join('\n');
 
 function buildZoneDiv(zoneType, overrides) {
   const html = renderZoneFragment(zoneType, overrides);

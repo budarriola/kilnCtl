@@ -20,6 +20,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "unit_pref.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +59,10 @@ bool ui_page_home_rail_pill_on(bool io_ok, bool relay_on);
  * aux_enabled_mask is dashboard_status_t.aux_enabled_mask (bit = relay-1);
  * relay_idx is 0-based. Never NULL; the pointer is static storage. The LCD
  * shows STATE only -- no control is attached to a pill. */
+/* Number of relays the caption table covers; ui_page_home_refresh.c
+ * _Static_asserts it against KILN_IO_RELAY_COUNT. */
+#define UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT 4u
+
 const char *ui_page_home_rail_aux_caption(uint8_t aux_enabled_mask, uint32_t relay_idx);
 
 /* Clamps a duty fraction (0.0..1.0, but may arrive out of range from a
@@ -70,12 +76,21 @@ int ui_page_home_rail_duty_pct(float duty_fraction);
  * its real last-known number (staleness is surfaced by MEMORY.md's
  * "idealized test input" caution elsewhere on this page via colour, not by
  * blanking a real number here -- this helper only owns the digits). */
-void ui_page_home_rail_format_zone_temp(bool valid, float temp_c, char *out, size_t out_cap);
+/* LCD review N3/N4: temp_c is Celsius and is converted to `unit` with the unit
+ * suffix appended ("1832F", whole degrees to fit the rail); a stale reading
+ * (age >= KILN_TEMP_STALE_AGE_MS) renders "--.-" like an invalid one, the same
+ * rule the Temperature page applies (valid && !stale). */
+void ui_page_home_rail_format_zone_temp(bool valid, bool stale, float temp_c, unit_pref_t unit, char *out,
+                                        size_t out_cap);
 
 /* Formats the rail's single kiln-total watts line into `out`, or writes an
  * empty string (out[0] = '\0') when `power_valid` is false -- the caller
  * must give the label zero height in that case, never show a fake "0 W". */
 void ui_page_home_rail_format_kiln_watts(bool power_valid, float power_w, char *out, size_t out_cap);
+
+/* True when `next` differs from the label's `current` text (or either is
+ * NULL). Lets the rail write a label only on change (L30). */
+bool ui_page_home_rail_text_changed(const char *current, const char *next);
 
 #ifdef __cplusplus
 }

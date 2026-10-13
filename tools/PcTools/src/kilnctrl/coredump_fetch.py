@@ -515,7 +515,7 @@ def find_matching_archived_elf(coredump_path: str, candidate_elves: list[str], *
 # ---------------------------------------------------------------------------
 # Durable, provenance-carrying archive of every raw coredump ever fetched.
 #
-# Why this exists (2026-09-16, RELEASE_HARDENING_PLAN.md blocker 1 item 1):
+# Why this exists (2026-09-16, RELEASE_HARDENING.md blocker 1 item 1):
 # `read_esp_coredump()` used to fetch into a single fixed path
 # (`coredump_<host>.bin` under the OS temp dir), overwritten on every call
 # with no record of which board/build/moment it came from. That is fine for
@@ -558,7 +558,7 @@ def coredump_archive_dir() -> str:
     kiln_archive_dir() moved out of build/ on 2026-09-15: anything inside
     build/ can be silently wiped by `idf.py fullclean` or an equivalent
     fresh-configure, which is exactly what destroyed the ELF this module's
-    own 2026-09-16 investigation needed (see docs/RELEASE_HARDENING_PLAN.md
+    own 2026-09-16 investigation needed (see docs/RELEASE_HARDENING.md
     blocker 1 and the audit trail it cites)."""
     return os.path.join(_repo_root(), "firmware", "KilnFW", "coredump_archive")
 

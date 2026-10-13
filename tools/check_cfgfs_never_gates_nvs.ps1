@@ -6,7 +6,7 @@
 # scan and its rationale live in the Python script -- read that file's own
 # top comment before editing behaviour here.
 #
-# WHY THIS EXISTS. docs/RELEASE_HARDENING_PLAN.md section 10: the `cfg`
+# WHY THIS EXISTS. docs/RELEASE_HARDENING.md section 10: the `cfg`
 # partition is parked (inert on every board actually running today) rather
 # than finished, on the strength of NVS staying authoritative and
 # unconditional. This check is the mechanical guard that keeps that true --

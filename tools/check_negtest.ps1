@@ -36,7 +36,7 @@ if (-not $Group) {
     $groups = 'A', 'A2', 'B', 'C', 'D', 'E', 'F', 'G', 'H1', 'H2', 'I'
     # Per-group minimum assertion counts (recorded from a green run); a group that
     # silently skips its body would report far fewer.
-    $minAssert = @{ 'A' = 14; 'A2' = 15; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
+    $minAssert = @{ 'A' = 14; 'A2' = 18; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
     # 4a: $groups and $minAssert must name exactly the same groups.
     $missingMin = @($groups | Where-Object { -not $minAssert.ContainsKey($_) })
     $extraMin = @($minAssert.Keys | Where-Object { $groups -notcontains $_ })
@@ -171,6 +171,12 @@ Write-Output "failures: $fail"
 if ($fail) { exit 1 }
 exit 0
 '@
+    New-Item -ItemType Directory -Path (Join-Path $repo 'sub\deep') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $repo 'sub\deep\check_fixture.ps1') -Encoding ASCII -Value @'
+if ($env:NEGTEST_FIXTURE_LOG) { Add-Content -LiteralPath $env:NEGTEST_FIXTURE_LOG -Value "ran" }
+Write-Output "FAIL: fixture-check-sentinel-none"
+exit 0
+'@
     Set-Content -LiteralPath (Join-Path $repo ".gitignore") -Encoding ASCII -Value "*.log"
     G init -q -b main $repo
     # Perf: this scratch repo is tiny and short-lived; no daemons, no gc, no optional index writes.
@@ -199,6 +205,13 @@ exit 0
     Assert-True ($r.Json.real_tree_unchanged -eq $true -and $r.Json.copies_removed -eq $true) "caught: guard/cleanup flags not true"
     Assert-True ($r.Text -match '(?m)^CAUGHT\s') "caught: no human CAUGHT line"
     Assert-True (@(Get-Content -LiteralPath $fixtureLog).Count -eq 2) "caught: fixture should have run twice (baseline + mutation)"
+    # quotes, $ and backticks in -Find/-Replace survive via -FindBase64/-ReplaceBase64 (PS 5.1 strips
+    # embedded double quotes from native args, so the plain form cannot carry them).
+    $b64 = { param($t) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t)) }
+    $qf = 'Write-Output "failures: $fail"'
+    $qr = 'Write-Output "failures: $fail"; Write-Output "q`"\x"; exit 1'
+    $r = Run-Neg "quotes_b64" @('-Command', $testCmd, '-File', 'test.ps1', '-FindBase64', (& $b64 $qf), '-ReplaceBase64', (& $b64 $qr))
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "quotes_b64: a find/replace with quotes, dollar, backtick, backslash must match and be CAUGHT (exit $($r.Exit))`n$($r.Text)"
     Step "caught"
     }
     if ($Group -eq 'A2') {
@@ -212,6 +225,117 @@ exit 0
     $r = Run-Neg "otherfail" (@('-Command', $testCmd) + $mutA + @('-ExpectPattern', 'FAIL: Test-Big'))
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "otherfail: a failure without the expect pattern must be MISSED (exit $($r.Exit))"
     Assert-True ("$($r.Json.mutations[0].note)" -match 'another reason') "otherfail: note should say it failed for another reason"
+    # crash vs assertion: a mutation that breaks the script's parse exits nonzero without any assertion
+    # line. Plain run counts it CAUGHT (legacy); -RequireAssertion must call it MISSED, and a real
+    # assertion failure must still be CAUGHT under it.
+    $mutCrash = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "throw 'boom'")
+    $r = Run-Neg "crash_plain" (@('-Command', $testCmd) + $mutCrash)
+    Assert-True ($r.Json.mutations[0].verdict -eq 'CAUGHT') "crash_plain: a crashing mutation is CAUGHT on exit code alone (got $($r.Json.mutations[0].verdict))"
+    $r = Run-Neg "crash_reqassert" (@('-Command', $testCmd, '-RequireAssertion') + $mutCrash)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "crash_reqassert: a crash without an assertion line must be MISSED under -RequireAssertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $r = Run-Neg "assert_reqassert" (@('-Command', $testCmd, '-RequireAssertion') + $mutA)
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "assert_reqassert: a real assertion failure must still be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $src = Get-Content -LiteralPath $script:ScriptUnderTest -Raw
+    $mS = [regex]::Match($src, '\$presetExpect = ''(SAFTYFW HOST TESTS: [^'']*)''')
+    Assert-True ($mS.Success -and $mS.Groups[1].Value -eq 'SAFTYFW HOST TESTS: FAILED') "saftyfw-host preset must default to the real verdict line, never BUILD FAILED (got '$($mS.Groups[1].Value)')"
+    Assert-True ('SAFTYFW HOST TESTS: BUILD FAILED' -notmatch $mS.Groups[1].Value -and 'SAFTYFW HOST TESTS: FAILED (2)' -match $mS.Groups[1].Value) "saftyfw-host pattern: BUILD FAILED must not match, FAILED must"
+    # N3: the pytest preset pattern, applied to sample output the way Get-MatchLines does
+    $mP = [regex]::Match($src, '''pytest''\s*\{\s*\$presetExpect = ''([^'']*)''')
+    Assert-True $mP.Success "pytest preset pattern not found in negtest.ps1"
+    $pp = $mP.Groups[1].Value
+    $pyFail = "x`nFAILED tests/test_a.py::test_one - assert 1 == 2`n1 failed"
+    $pyErr = "x`nERROR tests/test_a.py - ImportError`n1 error"
+    $pyPass = "x`n1 passed`ntests/test_a.py::test_failed_name PASSED"
+    Assert-True (@($pyFail -split "`n" | Where-Object { $_ -match $pp }).Count -eq 1) "pytest pattern: a FAILED summary line must match"
+    Assert-True (@($pyErr -split "`n" | Where-Object { $_ -match $pp }).Count -eq 0) "pytest pattern: a collection ERROR must not match"
+    Assert-True (@($pyPass -split "`n" | Where-Object { $_ -match $pp }).Count -eq 0) "pytest pattern: a passing run must not match"
+    # N2: -RequireAssertion refuses to combine with -ExpectPattern, and rejects 'not ok' / lowercase 'fail:'
+    $r = Run-Neg "reqassert_expect" (@('-Command', $testCmd, '-RequireAssertion', '-ExpectPattern', 'FAIL') + $mutA)
+    Assert-True ($r.Exit -eq 2 -and -not (Ran)) "reqassert_expect: -RequireAssertion with -ExpectPattern must be refused before running (exit $($r.Exit))"
+    $mutNotOk = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'not ok 1 - x'; Write-Host 'fail: x'; throw 'boom'")
+    $r = Run-Neg "reqassert_notok" (@('-Command', $testCmd, '-RequireAssertion') + $mutNotOk)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_notok: 'not ok' and lowercase 'fail:' must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    # B-MEDIUM-1: a process created BEFORE its reported parent (stale PPID / PID reuse) is never adopted.
+    $srcN = Get-Content -LiteralPath $script:ScriptUnderTest -Raw
+    $mA = [regex]::Match($srcN, '(?s)function Test-ChildAdoptable.*?\r?\n\}')
+    Assert-True $mA.Success "Test-ChildAdoptable not found in negtest.ps1"
+    . ([scriptblock]::Create($mA.Value))
+    $tParent = [datetime]'2026-01-01T10:00:00'
+    Assert-True (Test-ChildAdoptable ([pscustomobject]@{ CreationDate = $tParent.AddSeconds(5) }) $tParent) "adopt: a child created after its parent must be adopted"
+    Assert-True (-not (Test-ChildAdoptable ([pscustomobject]@{ CreationDate = $tParent.AddSeconds(-3600) }) $tParent)) "adopt: a process older than its reported parent must NOT be adopted"
+    # Behavioral adoption test: run the real Add-Descendants against a fake process table.
+    $mD = [regex]::Match($srcN, '(?s)function Add-Descendants.*?\r?\n\}')
+    Assert-True $mD.Success "Add-Descendants not found in negtest.ps1"
+    . ([scriptblock]::Create($mD.Value))
+    function Get-CimInstance { param($ClassName, $Filter, $ErrorAction) return $script:fakeProcs }
+    function FP($id, $ppid, $created) { [pscustomobject]@{ ProcessId = $id; ParentProcessId = $ppid; CreationDate = $created; Name = "p$id.exe" } }
+    $script:fakeProcs = @((FP 100 1 $tParent), (FP 200 100 $tParent.AddSeconds(5)), (FP 300 100 $tParent.AddSeconds(-3600)), (FP 400 300 $tParent.AddSeconds(10)), (FP 500 200 $tParent.AddSeconds(7)))
+    $trk = @{}; Add-Descendants 100 $trk
+    Assert-True ($trk.ContainsKey(200) -and $trk.ContainsKey(500)) "adopt: real children (and grandchildren) must be tracked"
+    Assert-True (-not $trk.ContainsKey(300)) "adopt: a stale-PPID process older than its parent must NOT be tracked"
+    Assert-True (-not $trk.ContainsKey(400)) "adopt: the walk must not descend through a stale-PPID node"
+    # LOW-2: root already exited -> final scan still walks its direct children via the supplied creation time
+    $script:fakeProcs = @((FP 200 100 $tParent.AddSeconds(5)), (FP 300 100 $tParent.AddSeconds(-3600)))
+    $trk = @{}; Add-Descendants 100 $trk $tParent
+    Assert-True ($trk.ContainsKey(200) -and -not $trk.ContainsKey(300)) "adopt: exited root with a supplied creation time must still adopt its real children only"
+    $trk = @{}; Add-Descendants 100 $trk
+    Assert-True ($trk.Count -eq 0) "adopt: exited root without a creation time must adopt nothing"
+    Remove-Item Function:\Get-CimInstance
+    # LOW-1/3: no taskkill invocation anywhere in negtest.ps1 may use /T (any argument order)
+    $tk = @($srcN -split "`n" | Where-Object { $_ -match 'taskkill' -and $_ -notmatch '^\s*#' -and $_ -match '(?i)\s/T\b' })
+    Assert-True ($tk.Count -eq 0) "negtest.ps1 must not use taskkill /T anywhere: $($tk -join ' | ')"
+    Assert-True ($srcN -match 'QueryInformationJobObject') "negtest.ps1 must enumerate job members instead of walking PPIDs"
+    # INFO: KilnFW host-test failure format is an assertion under -RequireAssertion; a build failure is not.
+    $mutKiln = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host '  FAIL calc.c:42: expected 3'; exit 1")
+    $r = Run-Neg "reqassert_kilnfw" (@('-Command', $testCmd, '-RequireAssertion') + $mutKiln)
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "reqassert_kilnfw: '  FAIL file:line:' must count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $mutKilnExit0 = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host '  FAIL calc.c:42: informational'; exit 0")
+    $r = Run-Neg "reqassert_exit0" (@('-Command', $testCmd, '-RequireAssertion') + $mutKilnExit0)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_exit0: assertion text with exit 0 must not be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $mutBuild = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'BUILD FAILURES (1)'; Write-Host 'calc.c:42: error: expected'; exit 1")
+    $r = Run-Neg "reqassert_buildfail" (@('-Command', $testCmd, '-RequireAssertion') + $mutBuild)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_buildfail: a build failure must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    # toolfx7 L3: Stop-JobMembers kills job stragglers, spares the SpareNames, never touches a non-member.
+    $mT = [regex]::Match($srcN, '(?s)Add-Type -TypeDefinition @"' + "`r?`n" + '(.*?)' + "`r?`n" + '"@')
+    Assert-True $mT.Success "NegJob Add-Type block not found in negtest.ps1"
+    if (-not ('NegJob' -as [type])) { Add-Type -TypeDefinition $mT.Groups[1].Value }
+    $mS = [regex]::Match($srcN, '(?s)function Stop-JobMembers.*?' + "`r?`n" + '\}')
+    Assert-True $mS.Success "Stop-JobMembers not found in negtest.ps1"
+    . ([scriptblock]::Create($mS.Value))
+    $script:SpareNames = @('ping.exe')
+    $jb = [NegJob]::Create()
+    Assert-True ($jb -ne [IntPtr]::Zero) "NegJob.Create failed"
+    $pStr = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 120'
+    $pSpare = Start-Process ping.exe -WindowStyle Hidden -PassThru -ArgumentList '-n', '120', '127.0.0.1'
+    $pOut = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 120'
+    foreach ($x in $pStr, $pSpare, $pOut) { $null = $x.Handle }
+    $asg1 = [NegJob]::Assign($jb, $pStr.Handle); $asg2 = [NegJob]::Assign($jb, $pSpare.Handle)
+    Assert-True ($asg1 -and $asg2) "jobmembers: could not assign the test processes to a job (nested job?)"
+    Assert-True ([NegJob]::InJob($pStr.Handle, $jb) -and -not [NegJob]::InJob($pOut.Handle, $jb)) "jobmembers: InJob must be true for a member and false for a non-member"
+    Stop-JobMembers $jb
+    Start-Sleep -Milliseconds 700
+    $pStr.Refresh(); $pSpare.Refresh(); $pOut.Refresh()
+    Assert-True $pStr.HasExited "jobmembers: a job straggler must be killed by Stop-JobMembers"
+    Assert-True (-not $pSpare.HasExited) "jobmembers: a SpareNames member must survive Stop-JobMembers"
+    Assert-True (-not $pOut.HasExited) "jobmembers: a process outside the job must never be killed"
+    foreach ($x in $pSpare, $pOut) { try { $x.Kill() } catch { } }
+    [NegJob]::Close($jb)
+    # toolfx7 L2/L7: an Assign failure is flagged (not just printed) and the live job is cleared before Close.
+    Assert-True ($srcN -match '(?s)\$script:liveJob = \$null[^
+]*
+\s*\[NegJob\]::Close\(\$job\)') "negtest.ps1 must clear `$script:liveJob immediately before NegJob.Close"
+    Assert-True ($srcN -notmatch 'falling back to taskkill') "negtest.ps1 must not claim a taskkill fallback that does not exist"
+    # Extra: a detached grandchild (not in the copy's command line, outliving its parent) must be killed
+    # when the run ends, on the normal-exit path (the job object is disarmed there on purpose).
+    $tok = 'negorph' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $orphCmd = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep 300 # $tok'; Start-Sleep 4; if ((Get-Content calc.ps1 -Raw) -match '-gt 10') { exit 0 } else { exit 1 }"
+    $r = Run-Neg "orphan_reaped" @('-Command', $orphCmd, '-File', 'calc.ps1', '-Find', '-gt 10', '-Replace', '-ge 10')
+    Start-Sleep -Milliseconds 800
+    $surv = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($tok) })
+    foreach ($sv in $surv) { & taskkill.exe /F /PID $sv.ProcessId 2>&1 | Out-Null }
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "orphan_reaped: run should be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))`n$($r.Text)"
+    Assert-True ($surv.Count -eq 0) "orphan_reaped: $($surv.Count) detached grandchild process(es) survived the run"
+    Assert-True ($src.Contains('$presetExpect = ''RUN FAILURES \(''')) "kilnfw-host preset must default to its failure-summary header"
     Step "missed"
     }
     if ($Group -eq 'B') {
@@ -237,6 +361,18 @@ exit 0
     Assert-True ("$($r.Json.error)" -match 'BASELINE FAILED') "baselinefail: error does not name the baseline: $($r.Json.error)"
     Assert-True (@($r.Json.mutations | Where-Object { $_.verdict -eq 'CAUGHT' }).Count -eq 0) "baselinefail: a CAUGHT verdict was reported on a failing baseline"
     Assert-True ($r.Json.baseline.passed -eq $false) "baselinefail: baseline.passed should be false"
+    # -Parallel 2 with a failing baseline: non-baseline workers still run, but no per-mutation
+    # verdict may read CAUGHT/MISSED (INFO, batch C review).
+    $mfb = Join-Path $scratch "muts_bf.json"
+    Set-Content -LiteralPath $mfb -Encoding UTF8 -Value (@(
+            @{ name = "minus"; file = "calc.ps1"; find = '$a + $b'; replace = '$a - $b'; expect = 'FAIL: Add-Two' },
+            @{ name = "low"; edits = @(@{ file = "calc.ps1"; find = '-gt 10'; replace = '-gt 4' }) }
+        ) | ConvertTo-Json -Depth 5)
+    $r = Run-Neg "baselinefail_par" @('-Command', ($testCmd + ' -ForceFail'), '-Mutations', $mfb, '-Parallel', '2')
+    Assert-True ($r.Exit -eq 2) "baselinefail_par: exit $($r.Exit), expected 2"
+    Assert-True (@($r.Json.mutations | Where-Object { $_.verdict -in 'CAUGHT', 'MISSED' }).Count -eq 0) "baselinefail_par: a CAUGHT/MISSED verdict was reported on a failing baseline"
+    Assert-True (@($r.Json.mutations).Count -eq 2) "baselinefail_par: expected both mutations listed on a failing baseline, got $(@($r.Json.mutations).Count)"
+    Assert-True ("$($r.Text)" -notmatch '(?m)^CAUGHT\s') "baselinefail_par: printed a CAUGHT line on a failing baseline"
     Step "baseline"
     }
     if ($Group -eq 'D') {
@@ -331,6 +467,29 @@ exit 0
     G -C $repo worktree remove --force $liveCopy
     Remove-Item -LiteralPath "$liveCopy.owner.json" -Force -ErrorAction SilentlyContinue
     Step "stale sweep"
+
+    # ---------------------------------------------------------------- -Preset check name resolution
+    $ckExit = @('-Preset', 'check', '-PresetArg')
+    $mutCk = @('-File', 'sub\deep\check_fixture.ps1', '-Find', 'exit 0', '-Replace', 'exit 1')
+    foreach ($nm in @('check_fixture.ps1', 'sub\deep\check_fixture.ps1')) {
+        $r = Run-Neg "checkname_$nm" ($ckExit + @($nm) + $mutCk)
+        Assert-True ($r.Exit -eq 0 -and $r.Json.verdict -eq 'ALL_CAUGHT') "checkname '$nm': exit $($r.Exit) verdict $($r.Json.verdict)`n$($r.Text)"
+    }
+    $r = Run-Neg "checkname_none" ($ckExit + @('check_nonexistent.ps1') + $mutCk)
+    Assert-True ($r.Exit -eq 2 -and $r.Text -match 'no such check') "checkname none: exit $($r.Exit), expected 2 'no such check'"
+    # L6: an UNTRACKED duplicate (e.g. a stray copy under logs/) must not make the name ambiguous ...
+    $dupDir = Join-Path $repo 'logs\x'
+    New-Item -ItemType Directory -Path $dupDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repo 'sub\deep\check_fixture.ps1') -Destination (Join-Path $dupDir 'check_fixture.ps1')
+    $r = Run-Neg "checkname_untracked_dup" ($ckExit + @('check_fixture.ps1') + $mutCk)
+    Assert-True ($r.Exit -eq 0 -and $r.Json.verdict -eq 'ALL_CAUGHT') "checkname untracked dup must be ignored: exit $($r.Exit) verdict $($r.Json.verdict)`n$($r.Text)"
+    # ... but a TRACKED duplicate is ambiguous (exit 2)
+    G -C $repo add -f logs/x/check_fixture.ps1
+    $r = Run-Neg "checkname_tracked_dup" ($ckExit + @('check_fixture.ps1') + $mutCk)
+    Assert-True ($r.Exit -eq 2 -and $r.Text -match 'ambiguous check name') "checkname tracked dup: exit $($r.Exit), expected 2 'ambiguous'`n$($r.Text)"
+    G -C $repo rm --cached -q logs/x/check_fixture.ps1
+    Remove-Item -LiteralPath $dupDir -Recurse -Force -ErrorAction SilentlyContinue
+    Step "check name resolution"
     }
 }
 finally {

@@ -1,0 +1,145 @@
+# check_submodule_pins_pushed.ps1 -- fail when a submodule pin (the gitlink sha in
+# <Commit>) names a commit that does not exist on the submodule's remote, so a
+# fresh clone of the landed commit could not check the submodule out.
+#
+# For every submodule in .gitmodules: PASS if the pinned sha is the tip of any remote
+# ref (git ls-remote); else PASS if `git fetch --depth 1 <url> <sha>` succeeds in a
+# scratch bare repo; else FAIL. Unreachable remote -> SKIP (exit 3), never PASS.
+#
+# Needs the network, so it is NOT checkcache-able (no "checkcache: ok" marker) and is
+# excluded from run_all_checks.ps1's glob; tools/land.ps1 and tools/dev_promote.ps1 run
+# it before pushing.
+#
+# Exit: 0 PASS, 1 FAIL, 3 SKIP (network unreachable: DNS/connect/timeout only; a bad URL,
+# missing repo or auth failure is FAIL). Git runs with prompts disabled and a bounded wait.
+[CmdletBinding()]
+param(
+    [string]$RepoPath = "",
+    [string]$Commit = 'HEAD'
+)
+$ErrorActionPreference = 'Continue'
+# Never let git raise a credential prompt or hang: a missing/private repo must FAIL, not block.
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'never'
+$TimeoutSec = 60
+if ($env:KILNCTL_SUBPIN_TIMEOUT_SEC) { $TimeoutSec = [int]$env:KILNCTL_SUBPIN_TIMEOUT_SEC }
+# Default resolved in the body: $PSScriptRoot is empty inside a param() default under Windows PowerShell 5.1 -File.
+if (-not $RepoPath) { $RepoPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+# Keep the user's ssh. git's real precedence is GIT_SSH_COMMAND > core.sshCommand > GIT_SSH; default only when all are unset.
+# Batch mode is added only for a command whose program is ssh (-o BatchMode=yes) or plink/TortoisePlink (-batch);
+# any other program (a wrapper, an unknown client) is left alone.
+function Add-SshBatch([string]$cmd) {
+    $c = $cmd.Trim()
+    $first = if ($c.StartsWith('"')) { ($c.Substring(1) -split '"', 2)[0] } else { ($c -split '\s+', 2)[0] }
+    $leaf = ([IO.Path]::GetFileName(($first -replace '\\', '/'))).ToLowerInvariant() -replace '\.exe$', ''
+    if ($leaf -eq 'ssh') { if ($c -notmatch 'BatchMode') { return "$c -o BatchMode=yes" } }
+    elseif ($leaf -eq 'plink' -or $leaf -eq 'tortoiseplink') { if ($c -notmatch '(^|\s)-batch(\s|$)') { return "$c -batch" } }
+    return $c
+}
+$cfgSsh = (& git -C $RepoPath config --get core.sshCommand 2>$null)
+if ($env:GIT_SSH_COMMAND) {
+    $env:GIT_SSH_COMMAND = Add-SshBatch $env:GIT_SSH_COMMAND
+} elseif ($cfgSsh) {
+    $env:GIT_SSH_COMMAND = Add-SshBatch ([string]$cfgSsh)
+} elseif (-not $env:GIT_SSH) {
+    $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=yes -o ConnectTimeout=20'
+}
+
+# Run git with a bounded wait; kill the whole process tree on timeout.
+# Returns @{ Exit; Out; TimedOut }.
+function Invoke-GitBounded([string[]]$GitArgs) {
+    $so = [IO.Path]::GetTempFileName(); $se = [IO.Path]::GetTempFileName()
+    try {
+        $q = ($GitArgs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
+        $p = Start-Process -FilePath 'git' -ArgumentList $q -NoNewWindow -PassThru -RedirectStandardOutput $so -RedirectStandardError $se
+        $null = $p.Handle
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            & taskkill /T /F /PID $p.Id 2>&1 | Out-Null
+            return @{ Exit = -1; Out = "timed out after ${TimeoutSec}s"; TimedOut = $true }
+        }
+        $p.WaitForExit()
+        $txt = (Get-Content -Raw -ErrorAction SilentlyContinue $so) + (Get-Content -Raw -ErrorAction SilentlyContinue $se)
+        return @{ Exit = $p.ExitCode; Out = "$txt"; TimedOut = $false }
+    } finally { Remove-Item -Force -ErrorAction SilentlyContinue $so, $se }
+}
+# Only a genuine network/DNS/timeout failure is "unreachable"; bad URL / auth / not found is a FAIL.
+$netPattern = 'Could not resolve host|Failed to connect|Connection timed out|Connection refused|Network is unreachable|Operation timed out|Connection (was )?reset|errno 10054|schannel: (failed to receive handshake|SEC_E_)|SSL_connect|returned error: 5\d\d|Recv failure|SSL_ERROR_SYSCALL|Temporary failure in name resolution|Name or service not known|No route to host|unable to connect to'
+
+# Read .gitmodules from the commit being checked, not the working tree.
+$treeEntries = & git -C $RepoPath ls-tree -r $Commit 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: cannot read tree of $Commit in $RepoPath" -ForegroundColor Red; exit 2 }
+$gitlinks = @($treeEntries | Where-Object { $_ -match '^160000 commit ' })
+$cfg = & git -C $RepoPath config --blob "${Commit}:.gitmodules" --get-regexp '^submodule\..*\.(path|url)$' 2>$null
+$cfgExit = $LASTEXITCODE
+if (-not $cfg) {
+    if ($gitlinks.Count -gt 0) {
+        Write-Host "FAIL: $Commit has $($gitlinks.Count) gitlink(s) but no readable .gitmodules entries (git exit $cfgExit)" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "PASS: no submodules at $Commit"; exit 0
+}
+$mods = @{}
+foreach ($line in $cfg) {
+    if ($line -match '^submodule\.(.+)\.(path|url)\s+(.+)$') {
+        if (-not $mods.ContainsKey($Matches[1])) { $mods[$Matches[1]] = @{} }
+        $mods[$Matches[1]][$Matches[2]] = $Matches[3].Trim()
+    }
+}
+
+$failed = 0; $skipped = 0
+# S-2b: every gitlink must be named by a .gitmodules path at this commit.
+$modPaths = @($mods.Values | ForEach-Object { $_['path'] })
+foreach ($g in $gitlinks) {
+    $gp = ($g -split "	", 2)[1]
+    if ($modPaths -notcontains $gp) { Write-Host "FAIL: gitlink $gp in $Commit is not named by .gitmodules" -ForegroundColor Red; $failed++ }
+}
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("subpins_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+
+try {
+    foreach ($name in ($mods.Keys | Sort-Object)) {
+        $path = $mods[$name]['path']; $url = $mods[$name]['url']
+        $tree = & git -C $RepoPath ls-tree $Commit -- $path 2>$null
+        if (-not $tree -or $tree -notmatch '^160000 commit ([0-9a-f]{40})\t') {
+            Write-Host "NOTE: $path has no gitlink in $Commit; nothing to check"
+            continue
+        }
+        $sha = $Matches[1]
+        $r = Invoke-GitBounded @('ls-remote', $url)
+        if ($r.Exit -ne 0) {
+            $msg = $r.Out.Trim()
+            if ($r.TimedOut -or $msg -match $netPattern) {
+                Write-Host "SKIP: $path -- cannot reach $url ($msg)" -ForegroundColor Yellow
+                $skipped++; continue
+            }
+            Write-Host "FAIL: $path -- ls-remote $url failed, not a network outage (bad URL, repo not found or auth): $msg" -ForegroundColor Red
+            $failed++; continue
+        }
+        $refs = @($r.Out -split "`r?`n" | Where-Object { $_ })
+        $tips = @($refs | ForEach-Object { ($_ -split "\s+")[0] })
+        if ($tips -contains $sha) { Write-Host "PASS: $path $sha is a remote tip"; continue }
+        if (-not (Test-Path $scratch)) { & git init --bare -q $scratch 2>&1 | Out-Null }
+        $f = Invoke-GitBounded @('-C', $scratch, 'fetch', '--depth', '1', $url, $sha)
+        if ($f.Exit -eq 0) { Write-Host "PASS: $path $sha is fetchable from $url"; continue }
+        if ($f.TimedOut) {
+            Write-Host "FAIL: $path pins $sha; fetch timed out after ${TimeoutSec}s, cannot confirm it is on $url (retry, or raise KILNCTL_SUBPIN_TIMEOUT_SEC)" -ForegroundColor Red
+            $failed++; continue
+        }
+        Write-Host "FAIL: $path pins $sha, not on $url" -ForegroundColor Red
+        Write-Host "      push the submodule commit to its remote before landing" -ForegroundColor Red
+        $failed++
+    }
+} finally {
+    if (Test-Path $scratch) { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+}
+if ($failed -gt 0) { exit 1 }
+if ($skipped -gt 0) {
+    # If origin answers, the network is up and the submodule host failure is real: FAIL, not SKIP.
+    $o = @{ Exit = 1; Out = 'no origin remote'; TimedOut = $true }  # no origin to probe -> stays SKIP
+    & git -C $RepoPath remote get-url origin 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { $o = Invoke-GitBounded @('-C', $RepoPath, 'ls-remote', 'origin', 'HEAD') }
+    if ($o.Exit -eq 0) { Write-Host "FAIL: submodule host unreachable but origin answers; cannot confirm pins are pushed" -ForegroundColor Red; exit 1 }
+    if (-not ($o.TimedOut -or $o.Out -match $netPattern)) { Write-Host "FAIL: origin probe failed, not a network outage (auth?); cannot confirm pins are pushed: $($o.Out.Trim())" -ForegroundColor Red; exit 1 }
+}
+if ($skipped -gt 0) { Write-Host "SKIP: $skipped submodule(s) unchecked (network); this is not a PASS"; exit 3 }
+Write-Host "PASS: all submodule pins are on their remotes"
+exit 0

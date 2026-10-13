@@ -120,6 +120,9 @@ class GpioTestPreflight:
     link_up: Optional[bool]
     #: GET /api/ota/interlock's `needs_ack` (None = not reported / unread).
     ota_interlock_needs_ack: Optional[bool] = None
+    #: True = autotune active, False = idle/done/aborted, None = unread.
+    autotune_active: Optional[bool] = None
+    autotune_state_name: str = "(unknown)"
 
     def refusal_reasons(self) -> "list[str]":
         reasons: "list[str]" = []
@@ -134,6 +137,12 @@ class GpioTestPreflight:
                 f"a profile is running/paused or its state could not be "
                 f"confirmed (profile_state={self.profile_state_name!r}) -- "
                 f"stop any firing first"
+            )
+        if self.autotune_active is not False:
+            reasons.append(
+                f"autotune is active or its state could not be confirmed "
+                f"(autotune_state={self.autotune_state_name!r}) -- autotune "
+                f"drives the heaters"
             )
         if self.ota_interlock_ok is not True:
             reasons.append(

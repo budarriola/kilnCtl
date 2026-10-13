@@ -8,6 +8,7 @@
 #include "lvgl_port.h"
 #include "ui_confirm.h"
 #include "ui_lcd_keypad.h"
+#include "ui_num_pad.h"
 #include "ui_theme.h"
 
 static const char *TAG = "ui_lcd_lock";
@@ -282,6 +283,8 @@ static void tick_timer_cb(lv_timer_t *t)
             ESP_LOGI(TAG, "LCD relock edge: closed open confirm dialog");
         }
 
+        ui_num_pad_close();
+
         if (s_relock_cb) {
             s_relock_cb();
         }
@@ -384,6 +387,13 @@ void ui_lcd_lock_run_gated(const char *prompt, lcd_pin_role_t min_role, ui_lcd_l
         if (action) {
             action(user_data);
         }
+        return;
+    }
+
+    // A keypad is already open for an earlier request: refuse this one rather
+    // than overwrite the single global gate context (audit L19). The earlier
+    // request keeps its action; the new one is dropped (never run ungated).
+    if (ui_lcd_keypad_is_open()) {
         return;
     }
 

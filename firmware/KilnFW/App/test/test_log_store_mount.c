@@ -1,4 +1,4 @@
-// Host test for log_store_mount.c -- docs/FILESYSTEM_PLAN.md step 2.
+// Host test for log_store_mount.c -- docs/FILESYSTEM.md step 2.
 //
 // log_store_mount.c was "not part of any host test build" before this file
 // (its own header comment on log_store_mount.h says so) because it

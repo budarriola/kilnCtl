@@ -3,7 +3,7 @@
 # check_*.ps1 glob picks up tools/PcTools/scripts/iter_tune_write_surface_check.py
 # without any further wiring (same pattern as check_ct_cal_write_surface.ps1).
 #
-# Enforces docs/ITER_TUNE_REDESIGN_PLAN.md sec 5: iter_tune.c/.h never calls
+# Enforces docs/ITER_TUNE_REDESIGN.md sec 5: iter_tune.c/.h never calls
 # a setter/persistence/hardware API itself, and no production file wires
 # iter_tune_* into the firing pipeline (it is bench-fixture-only, unwired,
 # pending owner sign-off per sec 9.3).

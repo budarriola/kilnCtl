@@ -244,7 +244,7 @@ bool profiles_cfg_fs_resolve_ex(uint8_t id, const profile_t *nvs_profile, bool n
         /* nvs_rev == 0 means this slot was never deleted (a real delete always
          * persists rev >= 1), so the file is live, not stale. */
         if (file_rev > nvs_rev || nvs_rev == 0) {
-            ESP_LOGW(PCFG_FS_TAG,
+            ESP_LOGI(PCFG_FS_TAG,
                      "prof%u file/NVS DIVERGED (file rev %lu valid, NVS unused at rev %lu) -- adopting FILE "
                      "(higher rev, looks like a failed NVS write)",
                      id, (unsigned long)file_rev, (unsigned long)nvs_rev);
@@ -289,9 +289,8 @@ bool profiles_cfg_fs_resolve_ex(uint8_t id, const profile_t *nvs_profile, bool n
         *out_profile = file_profile;
         *out_rev = file_rev;
         *out_used_file = true;
-        /* NVS resync happens on the next explicit save through
-         * profiles_http.c, same convention zones_config_cfg_fs.c documents --
-         * this function only decides and writes the FILE side. */
+        /* This function only decides. The caller (profiles_http.c nvs_load_all_from) retires the
+         * superseded legacy NVS blob after this returns, once per slot; saves are file-only. */
     } else {
         ESP_LOGW(PCFG_FS_TAG,
                  "prof%u file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting NVS (higher-or-equal rev), "

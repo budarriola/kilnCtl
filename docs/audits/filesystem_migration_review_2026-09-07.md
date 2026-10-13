@@ -6,8 +6,8 @@ component pinned), `234ce9f3` (partition table, `cfg` at 0xDB0000),
 `c4b4e65d` (that table actually flashed to the bench board), `d2a1358d`
 (`cfg_fs` foundation), `b79b5ef5` (`/api/cfgfs` + `get_cfgfs_status`),
 `19f74959` (zones config dual-write), plus the prefs-move and profiles-move
-work in the working tree at review time. Plans read: `docs/FILESYSTEM_PLAN.md`,
-`docs/FILESYSTEM_USER_DATA_PLAN.md`.
+work in the working tree at review time. Plans read: `docs/FILESYSTEM.md`,
+`docs/FILESYSTEM_USER_DATA.md`.
 
 Everything below is from the code, not the commit messages. Where a claim in
 a plan or commit message did not survive checking, that is said explicitly.
@@ -130,7 +130,7 @@ read: `nvs_load()` adopts the file, sets `s_zones_cfg_rev` to it, and the
 next `nvs_save()` overwrites the NVS copy, so the lost edit is gone
 permanently.
 
-This is precisely the hazard `FILESYSTEM_USER_DATA_PLAN.md` section 4
+This is precisely the hazard `FILESYSTEM_USER_DATA.md` section 4
 introduced the rev counter to close ("an edit made on *rolled-back*
 firmware writes NVS only; rolling forward again then reads the *file*, which
 is now stale, and silently loses that edit"). The implementation had the

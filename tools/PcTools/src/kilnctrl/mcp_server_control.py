@@ -441,31 +441,91 @@ def control_get_zones(host: Optional[str] = None) -> str:
     )
 
 
+def _close_enough(want: float, got: Optional[float], tol: float) -> bool:
+    return isinstance(got, (int, float)) and abs(float(got) - float(want)) <= max(tol, 1e-4 * abs(want))
+
+
 @_core._tool()
-def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> str:
-    """Set a zone's PID gains."""
+def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float,
+                         confirm: bool = False) -> str:
+    """Set a zone's PID gains (UART CONTROL write; persistent tuned gains).
+
+    Refuses unless ``confirm is True`` exactly, refuses while a profile
+    firing or autotune run is live (or if that cannot be read), and verifies
+    the gains by a GET_ZONES read-back -- FAILED if they do not match."""
+    if confirm is not True:
+        return (f"refused: control_set_zone_pid overwrites zone {zone}'s tuned PID gains "
+                f"(kp={kp}, ki={ki}, kd={kd}); pass confirm=True, exactly, to write.")
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not change zone PID gains mid-run"
     try:
         result = _srv._control.set_zone_pid(zone, kp, ki, kd)
     except ControlQueryError as exc:
         return f"error: {exc}"
-    if result.ok:
-        return f"ok - zone {zone} PID set"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - could not set zone {zone} PID{detail}"
+    if not result.ok:
+        detail = f": {result.reason}" if result.reason else ""
+        return f"refused - could not set zone {zone} PID{detail}"
+    try:
+        _tc, _rc, zones = _srv._control.get_zones()
+    except ControlQueryError as exc:
+        return (f"error: zone {zone} PID write was acknowledged but the read-back failed "
+                f"({exc}) -- state UNKNOWN, re-check before trusting this")
+    got = next((z for z in zones if z.index == zone), None)
+    if got is None:
+        return f"FAILED: zone {zone} missing from the GET_ZONES read-back"
+    bad = [f"{n}: wanted {w}, board reports {g}"
+           for n, w, g in (("kp", kp, got.pid_kp), ("ki", ki, got.pid_ki), ("kd", kd, got.pid_kd))
+           if not _close_enough(w, g, 1e-5)]
+    if bad:
+        return (f"FAILED: zone {zone} PID write was acknowledged but read-back disagrees -- "
+                + "; ".join(bad) + ". Do not trust this as applied.")
+    return f"ok - zone {zone} PID set (read back)"
 
 
 @_core._tool()
-def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float) -> str:
+def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float,
+                           confirm: bool = False, host: Optional[str] = None) -> str:
     """Set a zone's feedforward thermal model (steady-state gain, time
-    constant, dead time), used for model feedforward and autotune seeding."""
+    constant, dead time), used for model feedforward and autotune seeding.
+
+    Refuses unless ``confirm is True`` exactly, refuses while a profile firing
+    or autotune run is live (or if that cannot be read), and verifies the
+    model by an HTTP GET /api/zones read-back (``host`` resolved like
+    control_get_zones) -- FAILED if it does not match or cannot be read."""
+    if confirm is not True:
+        return (f"refused: control_set_zone_model overwrites zone {zone}'s plant model "
+                f"(k_dc={k_dc}, tau_s={tau_s}, dead_time_s={dead_time_s}); pass confirm=True, "
+                f"exactly, to write.")
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not change the zone model mid-run"
     try:
         result = _srv._control.set_zone_model(zone, k_dc, tau_s, dead_time_s)
     except ControlQueryError as exc:
         return f"error: {exc}"
-    if result.ok:
-        return f"ok - zone {zone} model set"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - could not set zone {zone} model{detail}"
+    if not result.ok:
+        detail = f": {result.reason}" if result.reason else ""
+        return f"refused - could not set zone {zone} model{detail}"
+    resolved = _control_resolve_host(host)
+    try:
+        zones_json = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: zone {zone} model write was acknowledged but the read-back failed "
+                f"(host={resolved}): {exc} -- state UNKNOWN, re-check before trusting this")
+    z = _zone_by_index(zones_json.get("zones") or [], zone)
+    if z is None:
+        return f"FAILED: zone {zone} missing from the GET /api/zones read-back (host={resolved})"
+    # model_k_dc prints %.9g (real values 1e-5..1e-2), so an absolute 0.06 would
+    # call a non-landed write verified; tau/dead time print %.1f.
+    bad = [f"{n}: wanted {w}, board reports {z.get(n)!r}"
+           for n, w, tol in (("model_k_dc", k_dc, 1e-9), ("model_tau_s", tau_s, 0.06),
+                             ("model_dead_time_s", dead_time_s, 0.06))
+           if not _close_enough(w, z.get(n), tol)]
+    if bad:
+        return (f"FAILED: zone {zone} model write was acknowledged but read-back disagrees -- "
+                + "; ".join(bad) + f" (host={resolved}). Do not trust this as applied.")
+    return f"ok - zone {zone} model set (read back)"
 
 
 # ---------------------------------------------------------------------------
@@ -629,8 +689,10 @@ def control_set_zone_limits(
     (floor), touching ONLY those two fields over the GET-merge-POST
     /api/zones path (zones_http_client.build_post_body()) -- every other
     field the board reports (PID gains, control_mode, relay_mask, ramp rate,
-    coupling matrix, timing profiles, ...) is echoed back exactly as read,
-    never overwritten. This is the narrow tool the facade was missing: the
+    coupling matrix, timing profiles, ...) is echoed back as GET printed
+    it (the firmware's omit-preserved float fields -- plant model, coupling,
+    easeoff/approach/bands/fuzzy, hystc, coilpower -- are NOT re-posted at
+    all, so they stay bit-exact), never overwritten. This is the narrow tool the facade was missing: the
     only pre-existing zones writer, load_config_preset() (config_presets.py),
     overwrites PID gains and control_mode for every zone along with whatever
     limit a preset also carries.
@@ -742,7 +804,8 @@ def control_set_zone_limits(
         )
 
     try:
-        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [zone_override]}), None)
     except zones_http_client.ZonesHttpError as exc:
         return f"error: could not build POST body from the GET snapshot: {exc}"
 
@@ -759,6 +822,9 @@ def control_set_zone_limits(
                     f"a firing or autotune run started after this tool's own precheck; distinct "
                     f"from the safety-ceiling-raise 409 above and from OTA's 428 interlock "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -852,7 +918,8 @@ def control_set_zone_type(
     over the GET-merge-POST /api/zones path (zones_http_client.
     build_post_body()) -- every other field the board reports (PID gains,
     control_mode, relay_mask, limits, ramp rate, coupling matrix, timing
-    profiles, ...) is echoed back exactly as read, never overwritten. Modeled
+    profiles, ...) is echoed back as GET printed it (omit-preserved float fields
+    are not re-posted, so they stay bit-exact), never overwritten. Modeled
     directly on control_set_zone_limits(); see that tool's docstring for the
     shared GET-merge-POST/collateral-diff discipline.
 
@@ -923,7 +990,8 @@ def control_set_zone_type(
         )
 
     try:
-        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [zone_override]}), None)
     except zones_http_client.ZonesHttpError as exc:
         return f"error: could not build POST body from the GET snapshot: {exc}"
 
@@ -934,6 +1002,9 @@ def control_set_zone_type(
             return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
                     f"a firing or autotune run started after this tool's own precheck "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -964,6 +1035,109 @@ def control_set_zone_type(
 
     return (f"ok - zone {zone}: zone_type={got} ({_ZONE_TYPE_NAMES.get(got, '?')}) "
             f"(confirmed by read-back; host={resolved})\n{_ZONE_TYPE_CONSEQUENCE[zone_type]}")
+
+
+# ---------------------------------------------------------------------------
+# control_set_zone_relay_mask -- narrow writer for one zone's relay_mask only,
+# modeled directly on control_set_zone_type() above (same GET-merge-POST
+# /api/zones path, confirm gate, mode gate, collateral read-back). Built so the
+# aux bench case AX-C03 (a zone relay_mask containing aux relay 4 must be
+# refused 409) can run, and restore the original mask, with no whole-page
+# preset write. The firmware owns the validity rules (unconfigured relay,
+# relay claimed by an enabled aux output, overlap); this tool range-checks the
+# integer only and reports a firmware refusal as "refused by firmware (HTTP n)".
+# ---------------------------------------------------------------------------
+ZONE_RELAY_MASK_MAX = 0xFF  # firmware parses the mask as a u8
+
+
+@_core._tool()
+def control_set_zone_relay_mask(
+    zone: int,
+    relay_mask: int,
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Set ONE zone's relay_mask (bit N-1 = relay N) over GET-merge-POST
+    /api/zones, touching only that field. Same discipline as
+    control_set_zone_type(): refused unless `confirm is True` exactly (dry run
+    otherwise), refused mid-run (precheck plus the system_mode_gate 409), zone
+    must be one GET reports, and a confirmed write FAILS LOUD unless relay_mask
+    reads back exactly as posted with nothing else in /api/zones changed. The
+    firmware's own refusals (e.g. a mask containing a relay an enabled aux
+    output owns) come back as "refused by firmware (HTTP <status>): <detail>".
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import
+
+    if (isinstance(relay_mask, bool) or not isinstance(relay_mask, int)
+            or not 0 <= relay_mask <= ZONE_RELAY_MASK_MAX):
+        return f"refused: relay_mask={relay_mask!r} must be an integer in 0..{ZONE_RELAY_MASK_MAX}"
+
+    resolved = _ota_resolve_host(host)
+
+    running_reason = _profile_or_autotune_running_reason()
+    if running_reason is not None:
+        return f"refused: {running_reason} -- relay_mask is not changed mid-run (host={resolved})"
+
+    try:
+        before = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: GET /api/zones failed (host={resolved}): {exc}"
+
+    zones = before.get("zones") or []
+    valid_indices = sorted(z.get("index") for z in zones if "index" in z)
+    if zone not in valid_indices:
+        return f"refused: zone {zone} is out of range -- board reports zones {valid_indices} (host={resolved})"
+
+    current = _zone_by_index(zones, zone) or {}
+    current_mask = current.get("relay_mask")
+
+    if confirm is not True:
+        return (f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set zone {zone}: "
+                f"relay_mask={relay_mask} (current: relay_mask={current_mask!r}; host={resolved})")
+
+    try:
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [{"index": zone, "relay_mask": relay_mask}]}), None)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: could not build POST body from the GET snapshot: {exc}"
+
+    try:
+        post_result = zones_http_client.post_zones(resolved, body)
+    except zones_http_client.ZonesHttpError as exc:
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run started after this tool's own precheck "
+                    f"(host={resolved})")
+        if exc.status is not None and 400 <= exc.status < 500:
+            return f"refused by firmware (HTTP {exc.status}): {exc.detail or exc} (host={resolved})"
+        return f"error: POST /api/zones failed (host={resolved}): {exc}"
+    if post_result != "ok":
+        return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
+
+    try:
+        after = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: POST /api/zones returned ok, but the confirming re-fetch of GET "
+                f"/api/zones failed (host={resolved}): {exc} -- state UNKNOWN, re-check before "
+                f"trusting this")
+
+    after_zone = _zone_by_index(after.get("zones") or [], zone)
+    if after_zone is None:
+        return f"FAILED: zone {zone} missing from the re-fetched GET /api/zones response (host={resolved})"
+
+    got = after_zone.get("relay_mask")
+    if got != relay_mask:
+        return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
+                f"landed -- relay_mask: wanted {relay_mask}, board now reports {got!r} "
+                f"(host={resolved}). Do not trust this as applied.")
+
+    collateral = _zone_collateral_diff(before, after, zone, {"relay_mask"})
+    if collateral:
+        return (f"FAILED: zone {zone}'s relay_mask landed correctly, but other field(s) changed "
+                f"unexpectedly -- {'; '.join(collateral)} (host={resolved}). This tool must touch "
+                f"only relay_mask; investigate before trusting this board's config.")
+
+    return f"ok - zone {zone}: relay_mask={got} (was {current_mask!r}; confirmed by read-back; host={resolved})"
 
 
 # ---------------------------------------------------------------------------
@@ -1059,11 +1233,15 @@ def control_set_zone_type(
 #: %.2f/%.3f/%.4f print -- z%u_fuzzy_strength, z%u_easeoffmult,
 #: z%u_approachratecap, z%u_errorband, z%u_rateband, z%u_progressband
 #: (zones_http_post_parse.c) -- so they are stripped too and stay bit-exact.
-#: Nothing else is stripped: a required field left out of the body would 400
-#: or zero.
-_ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
-    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
-    r"|approachratecap|errorband|rateband|progressband)$")
+#: 2026-10-09: z%u_hystc and z%u_coilpower use the same branch
+#: (zones_http_post_parse.c, `field_present ? parse : current_z->...`) and
+#: are stripped as well.
+#: 2026-10-11: the eight guard_* thresholds and xzone (the
+#: `zones_http_field_nonblank` branch) are stripped too. The full list lives
+#: in zones_http_client.ZONE_OMIT_PRESERVED_FLOAT_KEYS and is drift-tested
+#: against the firmware source. Required fields are never stripped: one left
+#: out of the body would 400 or zero.
+_ZONE_OMIT_PRESERVED_KEY_RE = zones_http_client.ZONE_OMIT_PRESERVED_KEY_RE  # single source: zones_http_client.py
 
 
 def _strip_omit_preserved_zone_fields(body: str, keep_key: "Optional[str]") -> str:
@@ -1133,7 +1311,7 @@ def control_set_zone_coupling(
         control_set_zone_limits()/control_set_zone_type() respect, since
         POST /api/zones refuses EVERY zone/relay/guard config write while a
         firing or autotune run is active (owner decision Q2, 2026-09-25,
-        SYSTEM_MODE_GATE_PLAN.md).
+        SYSTEM_MODE_GATE.md).
 
     After a confirmed write, re-fetches GET /api/zones and FAILS LOUD unless
     the target cell reads back within 0.0005 (comfortably above GET's own
@@ -1211,6 +1389,9 @@ def control_set_zone_coupling(
             return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
                     f"a firing or autotune run started after this tool's own precheck "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -1394,6 +1575,9 @@ def control_set_relay_type(
             return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
                     f"a firing or autotune run started after this tool's own precheck "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"

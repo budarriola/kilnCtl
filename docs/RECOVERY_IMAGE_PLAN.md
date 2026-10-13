@@ -1,7 +1,7 @@
 # Recovery image rework plan
 
 Status: opened 2026-10-02. Pending work only; delete a wave's section when it lands and
-update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT_PLAN.md`
+update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT.md`
 (why a separate recovery image exists). Code: `firmware/KilnFW_recovery/`, flashed to the
 `recovery` factory partition in `firmware/KilnFW/partitions.csv`.
 
@@ -169,6 +169,10 @@ recovery instead; the bootloader already falls back to factory for an invalid ap
 `check_recovery_upload.ps1` (streaming loop and ESP OTA sink with stubbed `esp_ota_*`/httpd:
 short body, recv timeouts, an `esp_ota_end` failure leaving the boot target alone) and
 `check_recovery_hold.ps1`.
+
+## Expected S6b latch
+
+Any stay in the recovery image leaves the Pico with no safety link, so it latches S6b (link dead) and drops K4. This is expected, not a defect. After exit, confirm the link is up and that the cause was the recovery dwell, then clear it (owner decision 2026-10-02: clear without asking when the cause is the recovery image).
 
 ## Open risks
 

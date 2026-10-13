@@ -88,6 +88,8 @@ def get_kiln_configs_list(host: str, timeout: float = KILN_CONFIGS_QUARANTINE_HT
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise KilnConfigsQuarantineHttpError(f"GET {_LIST_PATH} unreachable: {detail}") from exc
+    except OSError as exc:  # socket.timeout / connection reset mid-read: not a URLError
+        raise KilnConfigsQuarantineHttpError(f"GET {_LIST_PATH} transport failure: {exc}") from exc
     try:
         return json.loads(text)
     except Exception as exc:
@@ -115,6 +117,8 @@ def _post_quarantine_clear_raw(host: str, confirm: bool, timeout: float) -> "tup
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise KilnConfigsQuarantineHttpError(f"POST {_API_PATH} unreachable: {detail}") from exc
+    except OSError as exc:  # socket.timeout / connection reset: status probe is non-mutating
+        raise KilnConfigsQuarantineHttpError(f"POST {_API_PATH} transport failure: {exc}") from exc
 
 
 def get_quarantine_status(host: str, timeout: float = KILN_CONFIGS_QUARANTINE_HTTP_TIMEOUT_S) -> "tuple[bool, str]":
@@ -153,6 +157,10 @@ def post_quarantine_clear(host: str, timeout: float = KILN_CONFIGS_QUARANTINE_HT
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise KilnConfigsQuarantineHttpError(f"POST {_API_PATH} unreachable: {detail}") from exc
+    except OSError as exc:  # timeout/reset AFTER sending confirm=1: the clear may have happened
+        raise KilnConfigsQuarantineHttpError(
+            f"POST {_API_PATH} transport failure: {exc} -- state UNKNOWN: the clear may have been "
+            f"applied; re-probe quarantine status before retrying") from exc
     try:
         return json.loads(text)
     except Exception as exc:

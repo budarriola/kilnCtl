@@ -75,44 +75,7 @@ $capFile = Resolve-DriverFile -DriversDir $driversDir -BaseName "wifi_provision_
 # Same comment-stripping helper as check_bridge_reject_reason.ps1 and
 # check_uart_version_independence.ps1 (duplicated rather than imported -- this
 # project has no shared PowerShell module mechanism).
-function Get-CodeOnlyLines {
-    param([string]$Path)
-    $inBlockComment = $false
-    $lines = Get-Content -Path $Path
-    $result = @()
-    foreach ($line in $lines) {
-        $code = $line
-        if ($inBlockComment) {
-            $endIdx = $code.IndexOf("*/")
-            if ($endIdx -ge 0) {
-                $code = $code.Substring($endIdx + 2)
-                $inBlockComment = $false
-            } else {
-                $result += ""
-                continue
-            }
-        }
-        $lineCommentIdx = $code.IndexOf("//")
-        if ($lineCommentIdx -ge 0) {
-            $code = $code.Substring(0, $lineCommentIdx)
-        }
-        while ($true) {
-            $startIdx = $code.IndexOf("/*")
-            if ($startIdx -lt 0) { break }
-            $endIdx = $code.IndexOf("*/", $startIdx)
-            if ($endIdx -ge 0) {
-                $code = $code.Substring(0, $startIdx) + $code.Substring($endIdx + 2)
-            } else {
-                $code = $code.Substring(0, $startIdx)
-                $inBlockComment = $true
-                break
-            }
-        }
-        $result += $code
-    }
-    return $result
-}
-
+. (Join-Path $PSScriptRoot "lib_code_only_lines.ps1")  # shared string-aware stripper
 $uriPattern = '\.uri\s*=\s*"'
 $sourceFiles = Get-ChildItem -Path $driversDir -Filter "*.c" -File -Recurse
 if ($sourceFiles.Count -lt 5) {

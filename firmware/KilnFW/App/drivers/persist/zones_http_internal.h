@@ -149,7 +149,7 @@ extern zones_state_t s_zones;
 #define NVS_KEY_RELAY_NAMES "relay_names_cfg"
 NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 
-/* docs/FILESYSTEM_USER_DATA_PLAN.md item 3 (relay names), section 5 step 5
+/* docs/FILESYSTEM_USER_DATA.md item 3 (relay names), section 5 step 5
  * close-out: separate tiny NVS key for the dual-write rev counter, same
  * reasoning as NVS_KEY_ZONES_REV in zones_config_store.c -- a rev counter has
  * nothing to do with the operator-entered labels themselves, so it is not a
@@ -227,6 +227,9 @@ extern SafetyLinkClass *s_hw_safety;
 
 esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
+/* zones_config_is_undecided(): declared in zones_config_accessors.h. */
+uint32_t zones_config_rev_for_test(void); /* the in-RAM rev floor the next save stamps from */
+void zones_config_load_fault_reset_for_test(void); /* clears the boot-latched zones_cfg_load_fault_t */
 esp_err_t nvs_save(void);
 
 /* true = the zones blob re-read from the cfg file right now equals the in-RAM config byte for byte. For a
@@ -273,6 +276,12 @@ void migrate_from_default_partition(void);
 
 void relay_names_load(void);
 esp_err_t relay_names_save(void);
+/* relay_names_save() without the save mutex: the caller holds
+ * zones_cfg_save_section_lock() across its RAM edit and this call
+ * (CFG_STORE_SAVE_RACE audit MED-1). */
+esp_err_t relay_names_save_locked(void);
+void zones_cfg_save_section_lock(void);
+void zones_cfg_save_section_unlock(void);
 
 
 /* Zone normals (docs/CONFIG_FILESYSTEM.md item 2) -- shared with the host tests. See
@@ -324,9 +333,9 @@ void zone_normals_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
 void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
                                       bool *diverged);
 
-void zone_ct_map_clear(void);
+bool zone_ct_map_clear(void);
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index);
-void zone_k_ct_clear(void);
+bool zone_k_ct_clear(void);
 bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a);
 
 uint8_t zone_owned_relay_mask(const zones_cfg_t *cfg);
@@ -360,6 +369,8 @@ esp_err_t zones_get_handler(httpd_req_t *req);
  * GET /api/zones ran low on json_cap headroom; also defined in
  * zones_http_get.c, registered from zones_http_start() alongside get_uri. */
 esp_err_t zones_diag_get_handler(httpd_req_t *req);
+/* *err_reason value for a scratch-allocation failure: the caller answers 503, not 400. */
+#define ZONES_HTTP_ERR_OOM "out of memory"
 bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count, uint8_t relay_count,
                                   uint8_t timing_profile_count, const zone_cfg_t *current_z, zone_cfg_t *z,
                                   const char **err_reason);
@@ -400,6 +411,8 @@ typedef struct {
      * zone_sweep_plan_i_normal()'s doc comment for what "already measured"
      * means in each CT topology. */
     volatile uint8_t             i_normal_pushed_mask;
+    /* L2: any ESP-side save of the CT provenance records failed this run. */
+    volatile bool                esp_persist_failed;
     volatile char                i_normal_reason[96];
     /* Owner feature (2026-09-10): "set the nameplate value, find the normal
      * current on first heat, cause a fault if much higher or lower than
@@ -471,7 +484,7 @@ zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_
                                          float k_old, float *out_k);
 const char *zone_kct_derive_str(zone_kct_derive_t r);
 
-/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
+/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION.md)
  * Defined in zones_current_sweep_engine.c. Pure: every input is a plain number
  * the caller gathers, so the whole verdict is host-testable off-target and so
  * the fitted question keeps its single owner (config_store_ct_channel_fitted()

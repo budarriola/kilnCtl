@@ -39,7 +39,7 @@
 #define RCCF_RMDIR(p) rmdir(p)
 #endif
 
-#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA.md
                        * section 5 step 6's cfg-filesystem dual-write bridge for THIS module, see the
                        * new tests appended near the bottom of this file. */
 
@@ -745,7 +745,7 @@ static void test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy(
     g_test_stub_semaphore_take_default = 1; // restore pdTRUE for every test after this one
 }
 
-// --- backup-gate pass (docs/FILESYSTEM_PLAN.md, 2026-09-07):
+// --- backup-gate pass (docs/FILESYSTEM.md, 2026-09-07):
 // relay_cycles_restore_all() -- the counterpart to relay_cycles_reset()
 // above, restoring all RELAY_CYCLES_COUNT counts from a backup archive
 // (full_board_backup.py's /api/status.relay_counts) rather than zeroing one.
@@ -955,7 +955,7 @@ static void test_restore_all_allow_lower_mask_overrides_one_relay_only(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
+// cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 6, "MOVE, but last, after everything else has flown").
 // Uses the real relay_cycles_init()/relay_cycles_flush()/relay_cycles_reset()/
 // relay_cycles_restore_all() public API (never pokes s_rc directly except to
@@ -1033,6 +1033,37 @@ static void test_cfg_fs_partition_absent_fails_loud_and_still_loads_legacy(void)
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "re-init");
     TEST_CHECK(s_rc.counts[0] == 55, "the NVS copy was NOT overwritten by the failed save (no fallback)");
+}
+
+static int s_f5_depth_seen = -1;
+
+static esp_err_t rc_depth_probe_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    if (g_test_stub_lock_depth > s_f5_depth_seen) {
+        s_f5_depth_seen = g_test_stub_lock_depth;
+    }
+    return ESP_OK;
+}
+
+static void test_init_holds_no_lock_across_cfg_write(void)
+{
+    TEST_SECTION("relay_cycles_init -- s_rc.lock is NOT held while the cfg write (flash-worker dispatch) runs "
+                 "(lock-inversion audit F5)");
+    mount_cfg_fresh();
+    s_rc.counts[0] = 10;
+    TEST_CHECK(stage_legacy_nvs_blob(3) == HAL_OK, "stage a legacy NVS blob so init self-heals into the cfg file");
+    memset(&s_rc, 0, sizeof(s_rc));
+    g_test_stub_lock_depth = 0;
+    s_f5_depth_seen = -1;
+    pref_cfg_fs_set_write_fn(rc_depth_probe_write_fn);
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_f5_depth_seen >= 0, "the cfg write ran during init");
+    TEST_CHECK(s_f5_depth_seen == 0, "no stub lock held across the cfg write");
+    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.initialized, "counts published");
 }
 
 static void test_cfg_fs_migrates_nvs_value_to_file_then_prefers_it(void)
@@ -1160,6 +1191,19 @@ static void test_cfg_write_failure_is_loud_and_rev_unadvanced(void)
     TEST_CHECK(relay_cycles_flush() == ESP_OK, "the retry lands");
     read_cycles_file(&raw, &rev, &valid);
     TEST_CHECK(valid && rev == 2 && raw.counts[0] == 2, "file now at rev 2 with the new count");
+
+    /* persfx LOW-1: a failing periodic persist backs off a full interval instead of retrying every tick. */
+    s_rc.counts[0] = 3;
+    s_rc.dirty = true;
+    s_rc.last_persist_us = (int64_t)hal_time_now_us() - (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000 - 1;
+    pref_cfg_fs_set_write_fn(rc_failing_write_fn);
+    relay_cycles_maybe_persist();
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_rc.dirty, "failed periodic persist leaves the counts dirty");
+    relay_cycles_maybe_persist();
+    read_cycles_file(&raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 2 && s_rc.dirty,
+               "the next tick does NOT retry (backoff): file still rev 2, still dirty");
 }
 
 static void test_cfg_fs_reset_all_composes_with_migration_never_loses_counts(void)
@@ -1539,6 +1583,7 @@ void run_test_relay_cycles(void)
     test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes();
     test_cfg_fs_divergence_tie_break_strict_greater_than();
     test_cfg_fs_reset_all_composes_with_migration_never_loses_counts();
+    test_init_holds_no_lock_across_cfg_write();
     test_cfg_fs_negative_no_file_write_means_file_never_catches_up();
     test_get_dualwrite_status_reports_real_divergence();
     test_padding_is_not_data_status_and_init();

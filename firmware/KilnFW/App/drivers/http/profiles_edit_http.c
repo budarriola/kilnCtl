@@ -11,9 +11,6 @@
 #include "MAX31856.h"
 #include "http_form.h"
 #include "live_profile.h" /* live_edit_name_collides() -- profile_post_handler()'s dup-name refusal */
-#include "profile_executor.h" /* profile_executor_get_status() -- Opus review item 2,
-                                 * PROFILE_SLOTS_100.md section 7: refuse to delete
-                                 * the slot the executor is currently running/paused on. */
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
 #include "cfg_fs_refusal_http.h"
@@ -47,6 +44,10 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
     }
     if (name_len <= 0) {
         snprintf(err_msg, err_cap, "name missing");
+        return false;
+    }
+    if (http_form_value_has_ctl(name, name_len)) {
+        snprintf(err_msg, err_cap, "name contains a control character");
         return false;
     }
     strncpy(p->name, name, PROFILE_NAME_MAX_LEN);
@@ -196,7 +197,7 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         seg->dwell_min = (uint32_t)dwell;
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- indexed field
+    /* docs/ON_OFF_ZONE.md plan step 5 API surface -- indexed field
      * family "rule0_zone=3&rule0_segment=2&..." matching how segments are
      * already encoded above. A rule slot is present iff "rule%u_zone" is
      * present; presence stops at the first gap (no sparse holes over the
@@ -271,7 +272,7 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
          * so without this field a rule%u_temp_cmp posted from the editor was
          * silently ignored at run time (temp_source stayed 0 = none, the
          * memset()'d default above). Only 0 (none)/1 (this zone's TC) are
-         * wired by the executor as of ON_OFF_ZONE_PLAN.md plan step 5 --
+         * wired by the executor as of ON_OFF_ZONE.md plan step 5 --
          * 2 (named zone)/3 (executor setpoint) are reserved encoding space,
          * so the client only ever needs to send 0 or 1 today; a value out of
          * 0-3 collapses to 0 here (validate_on_off_rules() re-checks the
@@ -286,6 +287,12 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         len = http_form_find_field(body, key, val, sizeof(val));
         fend = NULL;
         r->temp_threshold_c = len > 0 ? strtof(val, &fend) : 0.0f;
+        if (len > 0 && !isfinite(r->temp_threshold_c)) {
+            snprintf(err_msg, err_cap, "rule %u: temp_c not finite", i);
+            return false;
+        }
+        /* A dormant threshold (no temperature condition) is never stored. */
+        if (r->temp_source == 0 || r->temp_cmp == 0) r->temp_threshold_c = 0.0f;
 
         snprintf(key, sizeof(key), "rule%u_time_start_s", i);
         len = http_form_find_field(body, key, val, sizeof(val));
@@ -322,7 +329,7 @@ static bool append_warning(char *json, size_t cap, size_t *o, bool *first, const
     return true;
 }
 
-/* docs/LIVE_PROFILE_EDIT_PLAN.md section 7/8 -- the single validation body
+/* docs/LIVE_PROFILE_EDIT.md section 7/8 -- the single validation body
  * shared by profile_post_handler() (mode ADVISORY, below), the live-edit
  * accept handler and the executor's pickup re-check (both mode HARD). Reads
  * zone config only; no httpd state, so it host-tests directly. `warnings_json`
@@ -518,12 +525,64 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     body[received] = '\0';
 
     /* id: empty or "-1" creates in the first free slot; a valid existing id
-     * overwrites that slot. Any other value in 0..7 also targets that exact
+     * overwrites that slot. Any other user-slot value (0..99) also targets that exact
      * slot (create-or-overwrite), so a client that already knows its id can
      * address it directly rather than relying on "first free". */
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    long requested_id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
+    long requested_id = -1;
+    /* A built-in id (PROFILE_BUILTIN_ID_BASE + index) is accepted explicitly
+     * and means "new slot / first free" (same as -1): that is the "copy
+     * built-in" feature profiles_page.html relies on (copyBuiltin() and
+     * loadIntoEditor()+Save both post id=<builtin id>). The built-in itself
+     * is never written. Every other out-of-range id is still a 400. */
+    bool id_ok = (id_len <= 0);
+    if (id_len > 0) {
+        long parsed = -1;
+        if (http_form_parse_long(id_val, id_len, -1, 255, &parsed)) {
+            if (parsed <= PROFILES_MAX_COUNT - 1) {
+                requested_id = parsed;
+                id_ok = true;
+            } else if (profiles_builtin_id_valid((uint8_t)parsed)) {
+                requested_id = -1; /* builtin copy -> first free slot */
+                id_ok = true;
+            }
+        }
+    }
+    if (id_len == -2 || !id_ok) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id invalid");
+        return ESP_OK;
+    }
+
+    /* M-2 (WEB_UI_JS_AUDIT): optional stale-editor guard for an overwrite of an existing slot. expected_rev is
+     * the slot_rev GET /api/profile printed when the page loaded it (profiles_http_slot_rev); expected_name is
+     * the slot's name then (identity: a slot deleted and re-created under the same id is refused even if the
+     * counter were to collide, e.g. across a reboot). Absent = old behaviour (benchproto/MCP/import paths). */
+    bool have_expected_rev = false;
+    long expected_rev = 0;
+    bool have_expected_name = false;
+    char expected_name[PROFILE_NAME_MAX_LEN + 1];
+    expected_name[0] = '\0';
+    {
+        char rv[16];
+        int rl = http_form_find_field(body, "expected_rev", rv, sizeof(rv));
+        if (rl != -1) {
+            if (!http_form_parse_long(rv, rl, 0, 2147483647L, &expected_rev)) {
+                free(body);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected_rev invalid");
+                return ESP_OK;
+            }
+            have_expected_rev = true;
+        }
+        int nl = http_form_find_field(body, "expected_name", expected_name, sizeof(expected_name));
+        if (nl == -2) {
+            free(body);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected_name invalid");
+            return ESP_OK;
+        }
+        have_expected_name = (nl != -1);
+    }
 
     /* check_httpd_task_stack_budget.py: profile_t (~428 B) used to be a
      * plain local (`tmp`) here, contributing to this handler's own
@@ -562,7 +621,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ret;
     }
 
-    /* Feasibility + ceiling check, docs/LIVE_PROFILE_EDIT_PLAN.md section 8
+    /* Feasibility + ceiling check, docs/LIVE_PROFILE_EDIT.md section 8
      * item 2 -- profiles_validate_candidate() is the one function the save
      * handler here, the live-edit handler and the executor's pickup check
      * all call. ADVISORY mode reproduces this handler's pre-extraction
@@ -615,10 +674,36 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     uint8_t target_id;
     if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
         target_id = (uint8_t)requested_id;
+        /* M-2: refuse a stale overwrite before anything is written. */
+        if (have_expected_rev || have_expected_name) {
+            bool stale = false;
+            if (!profiles_slot_used(target_id)) {
+                stale = true; /* deleted since the page loaded it */
+            } else if (have_expected_rev && profiles_http_slot_rev(target_id) != (uint32_t)expected_rev) {
+                stale = true;
+            } else if (have_expected_name && strcmp(s_profiles.profiles[target_id].name, expected_name) != 0) {
+                stale = true;
+            }
+            if (stale) {
+                profiles_save_unlock();
+                ESP_LOGW(PROFILES_TAG, "POST /api/profile refused: slot %u changed since the editor loaded it",
+                         (unsigned)target_id);
+                free(warn_json);
+                free(tmp);
+                httpd_resp_set_status(req, "409 Conflict");
+                httpd_resp_set_type(req, "application/json");
+                {
+                    static const char k409[] =
+                        "{\"ok\":false,\"error\":\"profile_changed\",\"reason\":\"this profile was changed or deleted "
+                        "elsewhere since you opened it; reload it and redo your edit\"}";
+                    return httpd_resp_send(req, k409, sizeof(k409) - 1);
+                }
+            }
+        }
     } else {
         int free_slot = -1;
         for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!profiles_slot_used(i)) {
+            if (!profiles_slot_used(i) && !s_profile_rev_unknown[i]) {
                 free_slot = i;
                 break;
             }
@@ -631,6 +716,15 @@ esp_err_t profile_post_handler(httpd_req_t *req)
             return ESP_OK;
         }
         target_id = (uint8_t)free_slot;
+    }
+
+    /* PROFILESFX11 MED-1: an unreadable-rev slot cannot be persisted; refuse BEFORE the RAM copy (mirrors
+     * profiles_http_save_impl), with the same 409 profile text. */
+    if (s_profile_rev_unknown[target_id]) {
+        profiles_save_unlock();
+        free(warn_json);
+        free(tmp);
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
     }
 
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
@@ -682,16 +776,19 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         free(tmp);
         return ret;
     }
+    profiles_slot_gen_begin(target_id);
     s_profiles.profiles[target_id] = *tmp;
     free(tmp);
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot_locked(target_id);
+    profiles_slot_gen_end(target_id);
+    const uint32_t saved_rev = profiles_http_slot_rev(target_id);
     profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
         free(warn_json);
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_state_profiles(req, s_profile_rev_unknown[target_id], err, -1);
     }
 
     /* HEAP (PSRAM), same reasoning as warn_json above -- embeds warn_json's
@@ -708,7 +805,8 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
-    int n = snprintf(json, json_cap, "{\"ok\":true,\"id\":%u,\"warnings\":%s}", target_id, warn_json);
+    int n = snprintf(json, json_cap, "{\"ok\":true,\"id\":%u,\"slot_rev\":%lu,\"warnings\":%s}", target_id,
+                 (unsigned long)saved_rev, warn_json);
     free(warn_json);
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
@@ -740,64 +838,52 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len > 0 && end != id_val && id >= 0 && id <= 255 && profiles_builtin_id_valid((uint8_t)id)) {
+    long id = -1;
+    bool id_ok = id_len > 0 && http_form_parse_long(id_val, id_len, 0, 255, &id);
+    if (id_ok && profiles_builtin_id_valid((uint8_t)id)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "built-in schedules are read-only and cannot be deleted -- "
                             "hide it instead (POST /api/profile/builtin/hide)");
         return ESP_OK;
     }
-    if (id_len <= 0 || end == id_val || id < 0 || id >= PROFILES_MAX_COUNT) {
+    if (!id_ok || id < 0 || id >= PROFILES_MAX_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
-    if (!profiles_slot_used(id)) {
+    /* The whole sequence -- running check, favorite clear, stats prune, erase,
+     * and the delete-in-flight mark that a concurrent profile start checks
+     * under s_exec.lock (HTTP input parsing audit L23) -- lives in
+     * profiles_delete_slot() (profiles_http.c), shared with benchproto's
+     * profiles_http_delete(). No lock is held here across the call; see that
+     * function's comment for the lock order. */
+    switch (profiles_delete_slot((uint8_t)id)) {
+    case PROFILES_DELETE_OK:
+        return httpd_resp_sendstr(req, "ok");
+    case PROFILES_DELETE_NOT_FOUND:
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
-    }
-    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
-     * delete a slot the executor is currently running or has paused. Same
-     * check as profiles_http.c's benchproto profiles_http_delete(). */
-    /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1464-byte
-     * profile_exec_status_t stack local on the httpd task. */
-    uint8_t active_id = 0;
-    if (profile_executor_get_active_id(&active_id) && active_id == id) {
+    case PROFILES_DELETE_RUNNING:
         /* Set explicitly rather than via httpd_resp_send_err(): esp_http_server
          * has no HTTPD_409_CONFLICT enumerator (kiln_cfg_http.c's identical
          * comment/pattern). */
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "profile is currently running -- stop it before deleting");
-    }
-
-    /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
-     * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
-     * where a power cut between the two steps could survive with the slot
-     * erased but its favorite bit still set -- an import that later lands on
-     * this same id inherits that orphaned favorite (profiles_favorites.h's
-     * lifecycle keeps favorites across import, deliberately, unlike delete).
-     * A failed save is logged inside the module and does not fail the
-     * delete. */
-    (void)profiles_favorites_set((uint8_t)id, false);
-    /* Prune firing history before the slot is touched so a failure leaves the
-     * slot in place and the delete retryable (see profiles_http_delete()). */
-    if (firing_stats_erase((uint8_t)id) != ESP_OK) {
+    case PROFILES_DELETE_BUSY:
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "busy: this profile is already being deleted, retry");
+    case PROFILES_DELETE_BUILTIN:
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "built-in schedules are read-only and cannot be deleted");
+        return ESP_OK;
+    case PROFILES_DELETE_PERSIST_FAILED:
+        /* Review web7 LOW-6: the store erase refuses (ESP_ERR_INVALID_STATE) on a slot whose rev floor is unknown
+         * this boot; that is the store_unreadable_at_boot 409, not a flash write failure. Any other failure keeps
+         * the plain 500 (persfx3 MED-2). */
+        return cfg_fs_http_persist_failed_state(req, false, ESP_FAIL, -1);
+    case PROFILES_DELETE_REV_UNKNOWN:
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
+    default:
         return cfg_fs_http_persist_failed(req);
     }
-    profiles_save_lock();
-    esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
-    if (err == ESP_OK) {
-        profiles_slot_clear(id);
-        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    }
-    profiles_save_unlock();
-    if (err != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- slot kept, retry", id,
-                 esp_err_to_name(err));
-        return cfg_fs_http_persist_failed(req);
-    }
-    return httpd_resp_sendstr(req, "ok");
 }
 
 /* ---- Builtin hide / unhide / restore ---------------------------------------
@@ -840,9 +926,9 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len <= 0 || end == id_val || id < 0 || id > 255 || !profiles_builtin_id_valid((uint8_t)id)) {
+    long id = -1;
+    bool id_ok = id_len > 0 && http_form_parse_long(id_val, id_len, 0, 255, &id);
+    if (!id_ok || !profiles_builtin_id_valid((uint8_t)id)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such built-in schedule");
         return ESP_OK;
     }
@@ -856,7 +942,7 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 
     esp_err_t err = profiles_builtin_set_hidden((uint8_t)id, hidden);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_profiles_for(req, "profiles/hidden.json" /* profiles_builtin.c PROFILES_HIDDEN_FILE_PATH */, err);
     }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"id\":%ld,\"hidden\":%s,\"persisted\":%s}",
@@ -877,7 +963,7 @@ esp_err_t builtin_restore_post_handler(httpd_req_t *req)
     }
     esp_err_t err = profiles_builtin_restore_all();
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_profiles_for(req, "profiles/hidden.json" /* profiles_builtin.c PROFILES_HIDDEN_FILE_PATH */, err);
     }
     char json[96];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"persisted\":%s}", err == ESP_OK ? "true" : "false");
@@ -910,9 +996,9 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len <= 0 || end == id_val || id < 0 || id > 255) {
+    long id = -1;
+    bool id_ok = id_len > 0 && http_form_parse_long(id_val, id_len, 0, 255, &id);
+    if (!id_ok) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
@@ -928,11 +1014,19 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
      * uses for "hidden". */
     char fav_val[8];
     int fav_len = http_form_find_field(body, "favorite", fav_val, sizeof(fav_val));
+    if (fav_len == -2 || (fav_len > 0 && !(fav_len == 1 && (fav_val[0] == '0' || fav_val[0] == '1')))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "favorite must be 0 or 1");
+        return ESP_OK;
+    }
+    if (id < PROFILES_MAX_COUNT && !profiles_slot_used((uint8_t)id)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
+        return ESP_OK;
+    }
     bool favorite = (fav_len <= 0) || (fav_val[0] != '0');
 
     esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_favorites(req, PROFILES_FAVORITES_FILE_PATH, err);
     }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%ld,\"favorite\":%s,\"persisted\":%s}", id,

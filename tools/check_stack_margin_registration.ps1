@@ -103,44 +103,7 @@ $mainFiles = @(Get-ChildItem -Path $appDir -Filter "*.c" -File)
 # check_bridge_reject_reason.ps1 / check_uart_version_independence.ps1
 # (duplicated rather than imported -- this project has no shared
 # PowerShell module mechanism).
-function Get-CodeOnlyLines {
-    param([string]$Path)
-    $inBlockComment = $false
-    $lines = Get-Content -Path $Path
-    $result = @()
-    foreach ($line in $lines) {
-        $code = $line
-        if ($inBlockComment) {
-            $endIdx = $code.IndexOf("*/")
-            if ($endIdx -ge 0) {
-                $code = $code.Substring($endIdx + 2)
-                $inBlockComment = $false
-            } else {
-                $result += ""
-                continue
-            }
-        }
-        $lineCommentIdx = $code.IndexOf("//")
-        if ($lineCommentIdx -ge 0) {
-            $code = $code.Substring(0, $lineCommentIdx)
-        }
-        while ($true) {
-            $startIdx = $code.IndexOf("/*")
-            if ($startIdx -lt 0) { break }
-            $endIdx = $code.IndexOf("*/", $startIdx)
-            if ($endIdx -ge 0) {
-                $code = $code.Substring(0, $startIdx) + $code.Substring($endIdx + 2)
-            } else {
-                $code = $code.Substring(0, $startIdx)
-                $inBlockComment = $true
-                break
-            }
-        }
-        $result += $code
-    }
-    return $result
-}
-
+. (Join-Path $PSScriptRoot "lib_code_only_lines.ps1")  # shared string-aware stripper
 # Every task DRAM_PSRAM_STATUS.md / stack_margin.h's own header comment tracks
 # as needing a live stack_margin_register() call site. See this script's
 # top comment for why this is a named list rather than a blind create-vs-
@@ -187,7 +150,7 @@ $requiredNames = @(
     # into and cleared back to NULL from when it self-deletes.
     "zone_sweep",  # liveness: on-demand -- transient task an HTTP handler (zones_http.c's sweep_start_post_handler()) creates per POST /api/zones/sweep/start call
 
-    # docs/PICO_AUTO_UPDATE_PLAN.md G3 -- the one-shot boot-time Pico
+    # docs/PICO_AUTO_UPDATE.md G3 -- the one-shot boot-time Pico
     # auto-update evaluator (App/drivers/net/pico_auto_update_boot.c). It
     # self-deletes once it has a verdict, so it is short-lived rather than a
     # service, but it runs on EVERY boot and does a bounded link wait plus a
@@ -196,6 +159,13 @@ $requiredNames = @(
     # ABSENT would still mean its stack_margin_register() call site never
     # fired at all, which is a fault; DEAD after boot is its normal state.
     "pico_auto_update",  # liveness: boot-once
+
+    # REVIEW_LCD19FX6 LOW-2: main_network_http.c's ota_confirm task (main_ota_rollback_confirm_task) is not
+    # one-shot: it loops for(;;), retrying boot_guard_mark_healthy() every 500 ms until the clear verifies, and
+    # after it runs the stale-stage check (PSA SHA-256 + 1 KB buffer) on a 5120 B stack. It was exempt and
+    # unmeasured. Same shape as pico_auto_update: runs every boot, normally self-deletes (DEAD is its normal state),
+    # so boot-once; ABSENT would mean the registration call site never fired.
+    "ota_confirm",  # liveness: boot-once
 
     # 2026-09-28: wifi_prov_owner (wifi_prov.c's owner_task) was exempted
     # below with a stale reason ("provisioning-only command owner, torn down
@@ -211,7 +181,12 @@ $requiredNames = @(
     # enough on its own to justify raising the task's existing 4096 B stack,
     # but this task's high-water mark had never been measured at all before
     # this fix, on a heap-allocated stack that carries no .dram0.bss cost).
-    "wifi_prov_owner"  # liveness: always
+    "wifi_prov_owner",  # liveness: always
+
+    # 2026-10-09 (WIFI_REVIEW LOW-6): dns_hijack_task was exempted as "self-deletes"; it
+    # loops for the process lifetime (a vTaskDelete only on socket/bind failure) and is
+    # started unconditionally by wifi_prov_start().
+    "dns_hijack"  # liveness: always
 )
 # A stray unary comma / line-ending slip turns an entry into a nested Object[] (DEV_TOOLS_REVIEW_2026-10-09 LOW-1);
 # -contains and task_liveness.py would then silently miss it. Every entry must be a plain string.
@@ -523,18 +498,48 @@ if (Test-Path $hwAbstractionRoot) {
 # task losing its registration" AND "a task nobody ever wired in" cases both
 # covered by one mechanism, keyed on the created task's own name rather than
 # on which file happened to create it.
-$createPattern2 = 'xTaskCreate\w*\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"([^"]+)"'
+# First argument: any text up to the first comma (cast, &fn, (void *)fn ...), reduced to the bare
+# identifier by Get-TaskFnName below (LCD19FX5 LOW-2).
+$createPattern2 = 'xTaskCreate\w*\s*\(\s*([^,"]+?)\s*,\s*"([^"]+)"'
+function Get-TaskFnName([string]$arg) {
+    $a = $arg -replace '\([^()]*\)', '' -replace '[&\s]', ''
+    if ($a -notmatch '^[A-Za-z_]\w*$') { throw "check_stack_margin_registration.ps1: unparseable xTaskCreate first argument '$arg'" }
+    return $a
+}
+# Files that legitimately hold an xTaskCreate*( call whose task name is not a string literal (a wrapper taking the
+# name as a parameter). The count must match exactly; any other file with an unmatched call fails (LCD19FX5 LOW-2).
+# Each allowed site is also pinned by its FIRST argument (REVIEW_LCD19FX6 INFO-2), so swapping the wrapper's own create
+# for a different non-literal create in the same file is caught, not just a count change.
+$nonLiteralCreateAllowed = @{
+    'uart_bridge_ext.c' = @('task_fn')
+    'http_async_job.c'  = @('http_async_job_task')
+    'hal_uart_esp.c'    = @('hal_uart_esp_event_task')
+}
+$nonLiteralFirstArgs = @{}
+$nonLiteralCreates = @{}
 $createdTasks = @()
 foreach ($f in $sourceFiles) {
     $codeLines = Get-CodeOnlyLines -Path $f.FullName
     $joined = [string]::Join("`n", $codeLines)
+    $blankJoined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName -BlankLiterals))
+    $callCount = [regex]::Matches($blankJoined, '\bxTaskCreate\w*\s*\(').Count
+    # Calls whose second argument is not a (blanked) string literal: record their first argument.
+    foreach ($nm in [regex]::Matches($blankJoined, '\bxTaskCreate\w*\s*\(\s*([^,]+?)\s*,\s*([^,\s])')) {
+        if ($nm.Groups[2].Value -ne '"') {
+            if (-not $nonLiteralFirstArgs.ContainsKey($f.Name)) { $nonLiteralFirstArgs[$f.Name] = @() }
+            $nonLiteralFirstArgs[$f.Name] += (Get-TaskFnName $nm.Groups[1].Value)
+        }
+    }
+    $matchCount = 0
     foreach ($m in [regex]::Matches($joined, $createPattern2)) {
+        $matchCount++
         $createdTasks += [PSCustomObject]@{
             FreeRtosName = $m.Groups[2].Value
-            TaskFunction = $m.Groups[1].Value
+            TaskFunction = (Get-TaskFnName $m.Groups[1].Value)
             File         = $f.Name
         }
     }
+    if ($callCount -ne $matchCount) { $nonLiteralCreates[$f.Name] = $callCount - $matchCount }
 }
 
 # Exemptions: tasks legitimately not tracked by stack_margin_register(),
@@ -555,9 +560,7 @@ $exemptCreatedNames = @{
     "wifi_connect_ui"   = "ui_page_network_manage.c connect_worker_task: one-shot connect attempt, self-deletes"
     "wifi_forget_ui"    = "ui_page_network_manage.c forget_worker_task: one-shot forget-network call, self-deletes"
     "wifi_scan_ui"      = "ui_page_network_manage.c scan_worker_task: one-shot Wi-Fi scan, self-deletes"
-    "ota_confirm"       = "main_network_http.c main_ota_rollback_confirm_task: one-shot OTA confirm task (5120 B stack since OT-G06: after the boot_guard clear it runs the stale-stage check, a PSA SHA-256 plus a 1 KB work buffer and update_stage_clear), self-deletes; logs its own stack high-water mark once before deleting"
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
-    "dns_hijack"        = "wifi_prov_link.c dns_hijack_task: provisioning-only captive-portal DNS, self-deletes"
     "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"
@@ -574,14 +577,75 @@ $exemptCreatedNames = @{
     "monitor_task"      = "monitor_task.c monitor_task_entry: long-lived heartbeat task, NOT YET registered for stack-margin reporting -- pre-existing gap, out of scope for docs/audits/2026-09-08-stack-margin-audit.md, flagged for a follow-up pass"
 }
 
+# Every exemption is pinned to the ONE file and task function that may create that name (REVIEW_LCD19FX6 INFO-3), so a
+# second create reusing an exempt name in another file (or with another function) is not silently waved through.
+$exemptCreatePin = @{
+    "wifi_mode_ui"         = "ui_page_network.c|mode_worker_task"
+    "wifi_ap_id_ui"        = "ui_page_network.c|ap_identity_worker_task"
+    "wifi_connect_ui"      = "ui_page_network_manage.c|connect_worker_task"
+    "wifi_forget_ui"       = "ui_page_network_manage.c|forget_worker_task"
+    "wifi_scan_ui"         = "ui_page_network_manage.c|scan_worker_task"
+    "cfg_autofmt"          = "cfg_fs_mount.c|cfg_fs_auto_format_task"
+    "factory_reset_reboot" = "factory_reset.c|reboot_task"
+    "ota_rollback_reboot"  = "ota_http_esp.c|ota_rollback_reboot_task"
+    "ota_pico_rollback"    = "ota_http_pico.c|ota_pico_rollback_task"
+    "recovery_exit_reboot" = "ota_http_recovery.c|ota_recovery_exit_reboot_task"
+    "sw_reset_reboot"      = "sw_reset_http.c|sw_reset_reboot_task"
+    "ota_pico_relay"       = "ota_pico_relay.c|relay_task_fn"
+    "info_boot_push"       = "uart_bridge_info.c|info_boot_push_task"
+    "i2c_owner_task"       = "i2c_owner.c|i2c_owner_task"
+    "spi_owner_task"       = "esp_spi_owner.c|spi_owner_task"
+    "monitor_task"         = "monitor_task.c|monitor_task_entry"
+}
+$pinKeys = (@($exemptCreatePin.Keys) | Sort-Object) -join ','
+$exemptKeys = (@($exemptCreatedNames.Keys) | Sort-Object) -join ','
+if ($pinKeys -ne $exemptKeys) {
+    throw "check_stack_margin_registration.ps1: `$exemptCreatePin and `$exemptCreatedNames must name the same tasks (pin: $pinKeys; exempt: $exemptKeys)"
+}
+$pinSeen = @{}
+
+$nlBad = @()
+foreach ($k in (@($nonLiteralCreates.Keys) + @($nonLiteralCreateAllowed.Keys) | Sort-Object -Unique)) {
+    $have = 0; if ($nonLiteralCreates.ContainsKey($k)) { $have = $nonLiteralCreates[$k] }
+    $want = 0; if ($nonLiteralCreateAllowed.ContainsKey($k)) { $want = @($nonLiteralCreateAllowed[$k]).Count }
+    if ($have -ne $want) { $nlBad += "$k : $have xTaskCreate*( call(s) without a literal task name, allowed $want" }
+    elseif ($want -gt 0) {
+        $haveArgs = (@($nonLiteralFirstArgs[$k]) | Sort-Object) -join ','
+        $wantArgs = (@($nonLiteralCreateAllowed[$k]) | Sort-Object) -join ','
+        if ($haveArgs -ne $wantArgs) { $nlBad += "$k : non-literal xTaskCreate*( first argument(s) '$haveArgs', allowed '$wantArgs'" }
+    }
+}
+if ($nlBad.Count -gt 0) {
+    foreach ($v in $nlBad) { Write-Host "    $v" -ForegroundColor Red }
+    throw "check_stack_margin_registration.ps1: xTaskCreate*( call(s) with no readable literal task name are invisible to the name and size checks. Use a literal name, or (wrapper only) edit `$nonLiteralCreateAllowed with a reason."
+}
 $unrecognized = @()
+$pinBad = @()
 foreach ($t in $createdTasks) {
     $freeRtosName = $t.FreeRtosName
+    if ($exemptCreatePin.ContainsKey($freeRtosName)) {
+        $want = $exemptCreatePin[$freeRtosName]
+        $have = "$($t.File)|$($t.TaskFunction)"
+        if ($have -ne $want) {
+            $pinBad += "$freeRtosName : created at $have, but its exemption is pinned to $want (a second create reusing an exempt name is not covered by it)"
+            continue
+        }
+        if (-not $pinSeen.ContainsKey($freeRtosName)) { $pinSeen[$freeRtosName] = 0 }
+        $pinSeen[$freeRtosName]++
+    }
     if ($registeredSet.Contains($freeRtosName)) { continue }
     if ($exemptCreatedNames.ContainsKey($freeRtosName)) { continue }
     $unrecognized += "$freeRtosName (task function '$($t.TaskFunction)' in $($t.File))"
 }
 
+$pinMissing = @($exemptCreatePin.Keys | Where-Object { -not $pinSeen.ContainsKey($_) } | Sort-Object)
+foreach ($k in $pinMissing) { $pinBad += "$k : no create site at $($exemptCreatePin[$k]) -- stale exemption (delete it) or the task moved" }
+foreach ($k in @($pinSeen.Keys)) { if ($pinSeen[$k] -ne 1) { $pinBad += "$k : $($pinSeen[$k]) create sites at $($exemptCreatePin[$k]), expected exactly 1" } }
+if ($pinBad.Count -gt 0) {
+    Write-Host "STACK MARGIN EXEMPT-CREATE PIN CHECK FAILED:" -ForegroundColor Red
+    foreach ($v in $pinBad) { Write-Host "    $v" -ForegroundColor Red }
+    throw "check_stack_margin_registration.ps1: an `$exemptCreatedNames entry is not pinned to its single create site (file|function) -- see messages above."
+}
 if ($unrecognized.Count -gt 0) {
     Write-Host "STACK MARGIN CREATE-VS-REGISTER CHECK FAILED:" -ForegroundColor Red
     Write-Host "  The following xTaskCreate*() call site(s) create a task that is neither" -ForegroundColor Red
@@ -593,6 +657,166 @@ if ($unrecognized.Count -gt 0) {
 }
 
 Write-Host "Stack margin create-vs-register check passed: $($createdTasks.Count) xTaskCreate*() call site(s) all accounted for (registered or exempted)." -ForegroundColor Green
+
+# --- Create-vs-register stack comparison (REVIEW_DEVBREAK5 LOW-4, REVIEW_DEVBREAKFX6 LOW-1) ---
+#
+# The name check above proves a created task is registered; it never compared the stack SIZE. stack_margin grades
+# free space against the size handed to stack_margin_register(), so a registration that disagrees with the
+# xTaskCreate*() stack (zone_sweep: created 5120, registered 4096) reports a denominator that is wrong by the
+# difference. Each size argument is EVALUATED when it is a decimal/hex literal, a simple literal expression
+# (+ - * / and parentheses, u/l suffixes ignored), or an object-like #define (found in any .c/.h under drivers or
+# main, defined exactly once) that reduces to one. For every name created and registered, every create x register pair
+# whose sizes both evaluate must be equal.
+#
+# SKIPPED names are never silent: every name with no evaluable pair (sizeof, an unresolved or ambiguous macro, a
+# non-constant expression) or with only a create or only a register site under that name is printed with its reason,
+# and the skipped set is a RATCHET: it must equal $stackSkipAllowed exactly. A new skip fails until someone edits
+# that table; an entry that now compares (or vanished) fails too, so the table can only shrink by deleting lines.
+$stackSkipAllowed = @{
+    'cfg_autofmt' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'factory_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'i2c_owner_task' = 'create site only: FreeRTOS name behind i2c_owner_sx1509/i2c_owner_ns2009; the size arrives through the stack_depth parameter, not a literal'
+    'info_boot_push' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'monitor_task' = 'create site only: permanent boot heartbeat task (monitor_task.c), not yet registered for stack-margin reporting (see $exemptCreatedNames)'
+    'ota_pico_relay' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'spi_owner_task' = 'create site only: FreeRTOS name behind the spi_owner registration; the size arrives through the stack_depth parameter, not a literal'
+    'sw_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'wifi_ap_id_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_connect_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_forget_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_mode_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_scan_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'http_async_job' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'httpd_worker' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'i2c_owner_ns2009' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
+    'i2c_owner_sx1509' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
+    'safety_owner_evt' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'safety_proto_rx' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'spi_owner' = 'register site only: created by spi_owner init under the name spi_owner_task with a parameter size (see spi_owner_task)'
+    'uart_owner_evt_task' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'lvgl' = 'create size is sizeof(static stack array)/sizeof(StackType_t): not a literal'
+    'uart_proto_rx' = 'create size is a function parameter (stack_depth) in uart_protocol.c: not a literal'
+}
+# FreeRTOS create name -> stack_margin_register name, for ONE task created and registered under two names (the
+# FreeRTOS name is truncated to configMAX_TASK_NAME_LEN, so the register name is shorter). Pairs are compared as one.
+$stackNameAlias = @{
+    'recovery_exit_reboot' = 'recovery_exit'
+}
+$minStackCompared = 32   # 32 pairs compare today; a blind regex must not hide behind a low floor
+
+$macroValues = @{}
+$macroFiles = @(Get-ChildItem -Path $driversDir -Include "*.c","*.h" -Recurse -File) + $mainFiles
+foreach ($f in $macroFiles) {
+    foreach ($ln in (Get-CodeOnlyLines -Path $f.FullName)) {
+        if ($ln -match '^\s*#\s*define\s+([A-Za-z_]\w*)\s+(\S.*?)\s*$') {
+            $mn = $Matches[1]
+            if (-not $macroValues.ContainsKey($mn)) { $macroValues[$mn] = New-Object System.Collections.Generic.List[string] }
+            $macroValues[$mn].Add($Matches[2].Trim())
+        }
+    }
+}
+
+$script:unresolvedId = $null
+function Resolve-StackExpr([string]$tok, [int]$depth = 0) {
+    $t = $tok.Trim()
+    if ($t -match 'sizeof') { return @{ Ok = $false; Reason = 'sizeof' } }
+    if ($depth -gt 5) { return @{ Ok = $false; Reason = 'macro chain too deep' } }
+    $sub = [regex]::Replace($t, '(?<![0-9A-Za-z_])[A-Za-z_]\w*', {
+        param($m)
+        $id = $m.Value
+        if (-not $macroValues.ContainsKey($id)) { $script:unresolvedId = "macro $id (not found)"; return $id }
+        if ($macroValues[$id].Count -ne 1) { $script:unresolvedId = "macro $id (defined $($macroValues[$id].Count) times)"; return $id }
+        $r = Resolve-StackExpr $macroValues[$id][0] ($depth + 1)
+        if (-not $r.Ok) { $script:unresolvedId = "macro $id -> $($r.Reason)"; return $id }
+        return "($($r.Value))"
+    })
+    if ($script:unresolvedId) { $why = $script:unresolvedId; $script:unresolvedId = $null; return @{ Ok = $false; Reason = $why } }
+    $sub = [regex]::Replace($sub, '(?<=[0-9a-fA-F])[uUlL]+(?![0-9A-Za-z_])', '')
+    if ($sub -notmatch '^[0-9a-fA-FxX+\-*/()\s]+$') { return @{ Ok = $false; Reason = "expression '$t'" } }
+    try { $v = [int64](Invoke-Expression $sub) } catch { return @{ Ok = $false; Reason = "expression '$t'" } }
+    return @{ Ok = $true; Value = $v }
+}
+
+$createStackRe = 'xTaskCreate\w*\s*\(\s*[^,"]+?\s*,\s*"([^"]+)"\s*,\s*([^,;]+?)\s*,'
+$regStackRe = 'stack_margin_register\s*\(\s*"([^"]+)"\s*,[^;]*?,\s*([^,;]+?)\s*\)\s*;'
+$aliasUsed = @{}
+$createdStacks = @{}
+$registeredStacks = @{}
+foreach ($f in $sourceFiles) {
+    $joined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName))
+    foreach ($m in [regex]::Matches($joined, $createStackRe)) {
+        $n = $m.Groups[1].Value
+        if ($stackNameAlias.ContainsKey($n)) { $aliasUsed[$n] = $true; $n = $stackNameAlias[$n] }
+        if (-not $createdStacks.ContainsKey($n)) { $createdStacks[$n] = @() }
+        $createdStacks[$n] += [pscustomobject]@{ Eval = (Resolve-StackExpr $m.Groups[2].Value); Tok = $m.Groups[2].Value.Trim(); File = $f.Name }
+    }
+    foreach ($m in [regex]::Matches($joined, $regStackRe)) {
+        $n = $m.Groups[1].Value
+        if (-not $registeredStacks.ContainsKey($n)) { $registeredStacks[$n] = @() }
+        $registeredStacks[$n] += [pscustomobject]@{ Eval = (Resolve-StackExpr $m.Groups[2].Value); Tok = $m.Groups[2].Value.Trim(); File = $f.Name }
+    }
+}
+$stackMismatch = @()
+$stackCompared = 0
+$skipped = @{}   # name -> reason
+$partial = @()   # unevaluable sites under a name where another pair DID compare
+foreach ($n in (@($createdStacks.Keys) + @($registeredStacks.Keys) | Sort-Object -Unique)) {
+    if (-not $createdStacks.ContainsKey($n)) { $skipped[$n] = 'register site only (no create site with this task name)'; continue }
+    if (-not $registeredStacks.ContainsKey($n)) { $skipped[$n] = 'create site only (registered under another name or not at all)'; continue }
+    $pairs = 0
+    $why = @()
+    foreach ($c in $createdStacks[$n]) {
+        foreach ($r in $registeredStacks[$n]) {
+            if (-not $c.Eval.Ok) { $why += "create '$($c.Tok)' in $($c.File): $($c.Eval.Reason)"; continue }
+            if (-not $r.Eval.Ok) { $why += "register '$($r.Tok)' in $($r.File): $($r.Eval.Reason)"; continue }
+            $stackCompared++; $pairs++
+            if ($c.Eval.Value -ne $r.Eval.Value) {
+                $stackMismatch += "$n : created with $($c.Eval.Value) B ($($c.Tok)) in $($c.File) but stack_margin_register() reports against $($r.Eval.Value) B ($($r.Tok)) in $($r.File)"
+            }
+        }
+    }
+    if ($pairs -eq 0) { $skipped[$n] = (($why | Select-Object -Unique) -join '; ') }
+    elseif ($why.Count -gt 0) { $partial += "$n : $((($why | Select-Object -Unique) -join '; '))" }
+}
+if ($stackMismatch.Count -gt 0) {
+    Write-Host "STACK MARGIN STACK-SIZE CHECK FAILED:" -ForegroundColor Red
+    foreach ($v in $stackMismatch) { Write-Host "    $v" -ForegroundColor Red }
+    throw "A task's xTaskCreate*() stack size and its stack_margin_register() size disagree -- get_stack_margin grades free space against the wrong denominator. Make both the same value."
+}
+if ($partial.Count -gt 0) {
+    Write-Host "STACK MARGIN STACK-SIZE CHECK: unevaluable site(s) beside an evaluated pair:" -ForegroundColor Red
+    foreach ($v in $partial) { Write-Host "    $v" -ForegroundColor Red }
+    throw "A task name has a create or register site whose stack size cannot be evaluated while another pair under the same name compared -- the unevaluated site is unchecked. Make it a literal or a uniquely defined literal #define."
+}
+# An alias entry that matched no create site is stale (the task was renamed): fail instead of silently dead (LCD19FX5 INFO-4); ahead of the pair-count floor so its own message is reachable (LCD19FX6 INFO-3).
+$deadAliases = @($stackNameAlias.Keys | Where-Object { -not $aliasUsed.ContainsKey($_) } | Sort-Object)
+if ($deadAliases.Count -gt 0) {
+    throw "check_stack_margin_registration.ps1: `$stackNameAlias entr(ies) matched no create site (delete or fix): $($deadAliases -join ', ')"
+}
+if ($stackCompared -lt $minStackCompared) {
+    throw "check_stack_margin_registration.ps1: only $stackCompared create/register stack pair(s) compared (ratchet floor $minStackCompared) -- the patterns have probably gone blind."
+}
+Write-Host "Stack margin stack-size check: $stackCompared create/register pair(s) agree; $($skipped.Count) name(s) NOT compared:" -ForegroundColor Green
+foreach ($k in ($skipped.Keys | Sort-Object)) { Write-Host "    skipped $k -- $($skipped[$k])" }
+# Compare the skip REASON CLASS as well as the name (LCD19FX5 INFO-1): a name that stays skipped but for a different
+# reason (e.g. create-only -> unevaluable size) is a change the ratchet must see.
+function Get-SkipClass([string]$r) {
+    if ($r -like 'create site only*') { return 'create-only' }
+    if ($r -like 'register site only*') { return 'register-only' }
+    return 'unevaluable'
+}
+$classChanged = @($skipped.Keys | Where-Object { $stackSkipAllowed.ContainsKey($_) -and (Get-SkipClass $skipped[$_]) -ne (Get-SkipClass $stackSkipAllowed[$_]) } | Sort-Object)
+if ($classChanged.Count -gt 0) {
+    foreach ($k in $classChanged) { Write-Host "    $k : skipped as $(Get-SkipClass $skipped[$k]) now, allowed as $(Get-SkipClass $stackSkipAllowed[$k])" -ForegroundColor Red }
+    throw "The reason class of a stack-size-check skipped name changed -- review it and update `$stackSkipAllowed."
+}
+$newSkips = @($skipped.Keys | Where-Object { -not $stackSkipAllowed.ContainsKey($_) } | Sort-Object)
+$staleSkips = @($stackSkipAllowed.Keys | Where-Object { -not $skipped.ContainsKey($_) } | Sort-Object)
+if ($newSkips.Count -gt 0 -or $staleSkips.Count -gt 0) {
+    if ($newSkips.Count -gt 0) { Write-Host "    NEW skipped name(s) not in `$stackSkipAllowed: $($newSkips -join ', ')" -ForegroundColor Red }
+    if ($staleSkips.Count -gt 0) { Write-Host "    `$stackSkipAllowed entries no longer skipped (delete them): $($staleSkips -join ', ')" -ForegroundColor Red }
+    throw "The set of stack-size-check skipped names changed. Make the size evaluable (a literal or a uniquely defined literal #define), or edit `$stackSkipAllowed in this script with a reason; delete entries that now compare."
+}
 
 # --- Recovery image (firmware/KilnFW_recovery) -----------------------------
 #
@@ -617,15 +841,22 @@ $recFiles = @(Get-ChildItem -Path $recoveryDirResolved -Filter "*.c" -Recurse -F
 if ($recFiles.Count -lt 1) {
     throw "check_stack_margin_registration.ps1: no .c files under $recoveryDirResolved -- has the recovery image moved?"
 }
-$recCreateRe = 'xTaskCreate\w*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*"([^"]+)"'
+$recCreateRe = $createPattern2   # any first argument (cast, &fn): same form as the main section (LCD19FX6 LOW-1)
+# The floor guards the REAL recovery dir only; a caller-supplied -RecoveryDir (tests, fixtures) has none (REVIEW_LCD19FX7 MED-1).
+$minRecCreated = if ($RecoveryDir) { 0 } else { 5 }  # 5 sites today (4 reported + rec_restart exempt); a blind regex must not hide behind a low floor
 $recViolations = @()
 $recCreated = 0
 foreach ($f in $recFiles) {
     $joined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName))
+    $recCalls = [regex]::Matches([string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName -BlankLiterals)), '\bxTaskCreate\w*\s*\(').Count
+    $recMatched = [regex]::Matches($joined, $recCreateRe).Count
+    if ($recCalls -ne $recMatched) {
+        $recViolations += "$($f.Name): $recCalls xTaskCreate*( call(s) but only $recMatched with a readable literal task name -- a create without one is invisible to this check"
+    }
     $hasHwm = $joined -match 'uxTaskGetStackHighWaterMark\s*\('
     foreach ($m in [regex]::Matches($joined, $recCreateRe)) {
         $recCreated++
-        $n = $m.Groups[1].Value
+        $n = $m.Groups[2].Value
         if ($hasHwm -or $recoveryExemptNames.ContainsKey($n)) { continue }
         $recViolations += "$n (in $($f.Name)): xTaskCreate*() with no uxTaskGetStackHighWaterMark() reporting in the same file and no `$recoveryExemptNames entry"
     }
@@ -634,6 +865,9 @@ if ($recViolations.Count -gt 0) {
     Write-Host "RECOVERY STACK-MARGIN CHECK FAILED:" -ForegroundColor Red
     foreach ($v in $recViolations) { Write-Host "    $v" -ForegroundColor Red }
     throw "A recovery-image task is created without any stack high-water-mark reporting. Report uxTaskGetStackHighWaterMark() (see recovery_io.c relay_hold) or add it to `$recoveryExemptNames with a reason."
+}
+if ($recCreated -lt $minRecCreated) {
+    throw "check_stack_margin_registration.ps1: only $recCreated recovery-image xTaskCreate*() site(s) found (floor $minRecCreated) -- the pattern has probably gone blind."
 }
 Write-Host "Recovery stack-margin check passed: $recCreated xTaskCreate*() call site(s) reported or exempted." -ForegroundColor Green
 

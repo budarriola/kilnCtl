@@ -151,6 +151,9 @@ typedef struct {
 #define MAIN_OTA_CONFIRM_POLL_MS   500
 #define MAIN_OTA_CONFIRM_WARN_MS   10000
 
+/* stack_margin_register() target for the ota_confirm task; cleared by the task before it self-deletes. */
+static TaskHandle_t s_ota_confirm_task;
+
 static void main_ota_rollback_confirm_task(void *arg)
 {
     main_ota_confirm_ctx_t ctx = *(main_ota_confirm_ctx_t *)arg;
@@ -210,6 +213,7 @@ static void main_ota_rollback_confirm_task(void *arg)
              * (existing 500 ms cadence) and retrying the clear until it is
              * actually verified, rather than trusting one shot. */
             if (boot_guard_mark_healthy()) {
+                s_ota_confirm_task = NULL;
                 vTaskDelete(NULL);
                 return;
             }
@@ -265,6 +269,7 @@ static void main_ota_rollback_confirm_task(void *arg)
                 (void)update_http_stale_stage_check(rollback_cancel_ok);
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+                s_ota_confirm_task = NULL;
                 vTaskDelete(NULL);
                 return;
             }
@@ -416,7 +421,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     live_profile_start();
     esp_err_t fav_err = profiles_favorites_start();
     if (fav_err != ESP_OK) {
-        ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- no favorites shown this boot",
+        ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- favorites unresolved (the next favorite POST retries the read)",
                  esp_err_to_name(fav_err));
         startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
@@ -426,7 +431,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(profiles_err));
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
-    // docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: must run after profiles_http_start()
+    // docs/LIVE_PROFILE_EDIT.md pass 2: must run after profiles_http_start()
     // just above -- calls the same profiles_http_get()/profiles_http_save()
     // seam.
     esp_err_t profiles_live_err = profiles_live_http_start();
@@ -610,7 +615,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
-    // ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7: persistence + read/restore
+    // ITER_TUNE_REDESIGN.md sec 8 row 7: persistence + read/restore
     // surface for the iter_tune decision core. Same "no ordering
     // dependency" placement as everything else in this block -- iter_tune
     // itself stays unwired from profile_executor.c pending owner sign-off
@@ -623,7 +628,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
-    // FILESYSTEM_PLAN.md "Dual-write window" section: GET /api/dualwrite_window
+    // FILESYSTEM.md "Dual-write window" section: GET /api/dualwrite_window
     // reports progress toward the owner-approved dual-write closure criterion
     // (20 consecutive clean boots + one file-backed firing + one verified
     // restore round trip), and POST .../restore_verified lets PC-side backup
@@ -764,12 +769,17 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
             ota_ctx->web_ok = (ctx->dash_err == ESP_OK);
             ota_ctx->ota_ok = (ota_http_err == ESP_OK);
             if (xTaskCreate(main_ota_rollback_confirm_task, "ota_confirm", 5120, ota_ctx,
-                             tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                             tskIDLE_PRIORITY + 1, &s_ota_confirm_task) != pdPASS) {
+                s_ota_confirm_task = NULL;
                 ESP_LOGE(MAIN_TAG, "Failed to start OTA rollback confirmation task -- this image "
                               "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "
                               "counter will not be cleared this boot either");
                 startup_fault_note(STARTUP_FAULT_OTA_CONFIRM);
                 free(ota_ctx);
+            } else {
+                /* 5120 must match the xTaskCreate stack literal above (check_stack_margin_registration.ps1
+                 * compares them). The task loops until boot_guard's clear verifies, so it needs a measured margin. */
+                stack_margin_register("ota_confirm", &s_ota_confirm_task, 5120);
             }
         } else {
             ESP_LOGE(MAIN_TAG, "OTA rollback confirmation context alloc failed -- this image "

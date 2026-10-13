@@ -165,7 +165,7 @@ typedef struct {
     bool tc_config_reasserted_known;
     bool tc_config_reasserted;
 
-    /* 2026-09-23: docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- the Pico's
+    /* 2026-09-23: docs/PICO_AUTO_UPDATE.md:64's named gap -- the Pico's
      * own view of which bootloader A/B slot it is currently running,
      * surfaced via the same V3 status frame flags2 byte
      * (SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B). Same
@@ -353,7 +353,7 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
     if (s->tc_config_reasserted_known) {
         APPEND(",\"tc_config_reasserted\":%s", s->tc_config_reasserted ? "true" : "false");
     }
-    /* docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- "unknown" until a V3
+    /* docs/PICO_AUTO_UPDATE.md:64's named gap -- "unknown" until a V3
      * peer has confirmed the Pico's own active-slot answer at least once. */
     APPEND(",\"pico_active_slot\":\"%s\"",
            (!s->link_up || !s->pico_active_slot_known) ? "unknown" : (s->pico_active_slot_is_b ? "B" : "A"));
@@ -1203,7 +1203,7 @@ static esp_err_t ct_cal_post_locked(httpd_req_t *req)
 /* POST /api/safety/commissioning/ct_trim                                 */
 /* ---------------------------------------------------------------------- */
 
-/* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision 3: the operator
+/* docs/CT_ATTRIBUTION_VERIFICATION.md, owner decision 3: the operator
  * enters the clamp ratio (A_fs, the handler above) and, separately, the
  * offset/gain trim that corrects what the board actually reads against a
  * reference meter. Body: "ch=<0-2>&trim_offset_a=<v>&trim_gain=<v>".
@@ -1854,7 +1854,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     // row now walks ct_auto_zero_job as an extra_root and grades against a
     // ceiling derived from this real depth, not a borrowed one.
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 8192, ct_auto_zero_job, jc);
+        http_async_job_try_start(req, "http_async_job", 10240, ct_auto_zero_job, jc);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }
@@ -2043,7 +2043,7 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
     // codes are unchanged. No request body to carry through (this route
     // takes no parameters), so ctx is NULL. ---
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 8192, bench_preset_job, NULL);
+        http_async_job_try_start(req, "http_async_job", 10240, bench_preset_job, NULL);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }
@@ -2302,11 +2302,15 @@ static esp_err_t rate_guard_auto_post_locked(httpd_req_t *req)
     bool confirm = false;
     if (req->content_len > 0) {
         char body[32];
-        if (read_body(req, body, sizeof(body))) {
-            char value[4] = {0};
-            confirm = http_form_find_field(body, "confirm", value, sizeof(value)) >= 0 &&
-                      strcmp(value, "1") == 0;
+        if (!read_body(req, body, sizeof(body))) {
+            /* Oversize or unreadable body: never silently treat as confirm=false
+             * (the caller meant something we could not read). */
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large or read failed");
+            return ESP_OK;
         }
+        char value[4] = {0};
+        confirm = http_form_find_field(body, "confirm", value, sizeof(value)) >= 0 &&
+                  strcmp(value, "1") == 0;
     }
 
     float candidate = 0.0f, current = 0.0f;

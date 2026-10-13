@@ -1,4 +1,5 @@
 #include "iter_tune_http.h"
+#include "http_form.h"
 #include "http_auth_http.h" // kiln_http_register()
 
 #include <stdio.h>
@@ -9,7 +10,7 @@
 
 #include "autotune_engine.h" // autotune_engine_reserve_zone_for_external_write()
 #include "cfg_fs_refusal_http.h" // cfg_fs_http_refuse_if_unmounted(), cfg_fs_http_persist_failed()
-#include "firing_shadow.h"   // ITER_TUNE_REDESIGN_PLAN.md step 8 -- read-only status only
+#include "firing_shadow.h"   // ITER_TUNE_REDESIGN.md step 8 -- read-only status only
 #include "iter_tune.h"
 #include "iter_tune_store.h"
 #include "relay_authority.h"        // relay_authority_heat_run_active() -- system_mode_gate snapshot
@@ -32,7 +33,7 @@ static esp_err_t iter_tune_status_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
 
-    // Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): one whole-firing-set
+    // Shadow mode (ITER_TUNE_REDESIGN.md step 8): one whole-firing-set
     // summary, not per-zone data, so it is its own top-level object rather
     // than forced into the per-zone loop below. READ-ONLY -- firing_shadow
     // never writes a gain, this handler never calls anything that would.
@@ -120,7 +121,9 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char val[8];
         if (httpd_query_key_value(query, "zone", val, sizeof(val)) == ESP_OK) {
-            zone = strtol(val, NULL, 10);
+            if (!http_form_parse_long(val, (int)strlen(val), 0, 255, &zone)) {
+                zone = -1;
+            }
         }
     }
     char json[160];
@@ -132,7 +135,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): this is a live PID-gain write into
      * zones_config (zones_config_set_pid() below, this file's "ONLY
      * sanctioned write path" per the header comment above) -- refuse it
@@ -223,6 +226,11 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         // record is left completely untouched (not even the OFF/status
         // fields), so a retried restore still sees the original anchor.
         autotune_engine_release_zone_for_external_write((uint8_t)zone);
+        if (zones_config_is_undecided()) {
+            /* PROFILESFX10 LOW-3: refused because the stored zones config was unreadable at boot. */
+            cfg_fs_http_send_zones_undecided_409(req);
+            return ESP_OK;
+        }
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"zones_config_set_pid refused\"}");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
@@ -254,7 +262,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         // was not written: say so as a failure, never a success with a warning.
         ESP_LOGE(TAG, "restore_commissioned zone=%ld: gains applied but persisting the OFF state failed (%d)", zone,
                  (int)persist_err);
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, ITER_TUNE_CFG_FILE_PATH, persist_err);
     } else {
         n = snprintf(json, sizeof(json), "{\"ok\":true,\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f}",
                      (double)restored.kp, (double)restored.ki, (double)restored.kd);
@@ -266,7 +274,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
 esp_err_t iter_tune_http_start(void)
 {
     iter_tune_store_start();
-    // ITER_TUNE_REDESIGN_PLAN.md step 8: load shadow mode's verdict-summary
+    // ITER_TUNE_REDESIGN.md step 8: load shadow mode's verdict-summary
     // counters once here, at boot, so the status GET handler never has to
     // load them lazily from the httpd task (see firing_shadow_get_status()).
     firing_shadow_store_start();

@@ -34,14 +34,13 @@ the loop to ask permission of.
 
 What this module deliberately does **not** implement, and why:
 
-- **No "refuse while ARMED" gate.** `TODO.md` item 1b's own wording calls
-  for "writes refused unless INIT/GRACE", but SaftyFW currently exposes no
-  way for the PC to query relay_owner's state at all (same honest gap
-  `debug_probe.py`'s module docstring and `write_memory()` already document
-  for raw memory writes) -- there is nothing here to query yet. GPIO6's own
-  hard, unconditional deny is what stands in for that guard rail today: it
-  is stricter than "refused unless ARMED", not a substitute that pretends to
-  be equivalent.
+- **No "refuse while ARMED" gate in this module.** The gate exists one layer
+  up: ``mcp_server_pico_gpio_probe.py``'s ``set_mode``/``write`` tools call
+  ``debug_probe.pico_armed_state()`` (the same fail-closed read
+  ``debug_write_memory(peer="pico")`` uses) and refuse while the Pico is
+  ARMED or when ARMED cannot be read. A caller using this module directly
+  bypasses that gate; GPIO6's hard, unconditional deny here is the only guard
+  rail at this level.
 - **No profile-running check.** The ESP probe's `gpio_probe_run_blocked()`
   has a live `profile_executor` to ask; this module has no such source of
   truth on the Pico side and does not fabricate one.

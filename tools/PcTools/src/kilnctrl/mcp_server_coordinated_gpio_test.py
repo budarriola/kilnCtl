@@ -63,11 +63,18 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
         link_up = None
     try:
         exec_status = _srv._profiles.get_exec_status()
-        running_or_paused = exec_status.state in (1, 2)
+        # Allow-list: only idle/done/faulted are not running; an unknown state counts as running.
+        running_or_paused = exec_status.state_name not in ("idle", "done", "faulted")
         state_name = exec_status.state_name
     except Exception:  # noqa: BLE001
         running_or_paused = None
         state_name = "(unknown)"
+    try:
+        at_state = _srv._autotune.get_status().state_name
+        autotune_active = at_state not in ("idle", "done", "aborted")
+    except Exception:  # noqa: BLE001
+        at_state = "(unknown)"
+        autotune_active = None
     resolved_host = _gpio_test_resolve_host(host)
     try:
         interlock = ota_http.get_interlock(resolved_host)
@@ -86,6 +93,8 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
         ota_interlock_reason=ota_reason,
         link_up=link_up,
         ota_interlock_needs_ack=ota_needs_ack,
+        autotune_active=autotune_active,
+        autotune_state_name=at_state,
     )
 
 
@@ -133,7 +142,7 @@ def coordinated_gpio_test(confirm: bool = False, host: Optional[str] = None) -> 
     resolution as every other HTTP-backed tool here: explicit host wins,
     else the board's current station IP, else the fallback-AP address.
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "REFUSED -- confirm=True was not passed -- refusing to drive any pin.\n"
             "This test halts the Pico and detaches GPIO4/5/10 from both firmwares' "

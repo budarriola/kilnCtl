@@ -7,7 +7,7 @@
 # pointed at the 1,966,080-byte `recovery`/factory slot at 0xA10000 instead
 # of the `app` (ota_0) partition, so flash_firmware() was writing the main
 # application image into the wrong region. The fix (see
-# docs/OTA_SINGLE_SLOT_PLAN.md) replaced the hardcoded constant with
+# docs/OTA_SINGLE_SLOT.md) replaced the hardcoded constant with
 # per-flash resolution: _resolve_app_flash_target() reads
 # <kiln_fw_root>/partitions.csv and returns the entry actually named `app`,
 # by name (not by (type, subtype), which would have matched `recovery` too
@@ -156,7 +156,7 @@ if ($failures.Count -gt 0) {
     foreach ($f in $failures) {
         Write-Host "  - $f" -ForegroundColor Red
     }
-    throw "The flash_firmware() partition-offset guard (docs/OTA_SINGLE_SLOT_PLAN.md) is missing, disconnected, or has drifted -- see tools/check_flash_partition_offset_guard.ps1's header comment."
+    throw "The flash_firmware() partition-offset guard (docs/OTA_SINGLE_SLOT.md) is missing, disconnected, or has drifted -- see tools/check_flash_partition_offset_guard.ps1's header comment."
 }
 
 Write-Host "Flash partition-offset guard check passed: guard defined, wired into flash_firmware() before OpenOCD is touched, override present, single source of truth for the write offset."

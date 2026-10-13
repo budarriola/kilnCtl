@@ -87,6 +87,7 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 // logic anymore.
 // ---------------------------------------------------------------------------
 #include "hal_kv.h"
+#include "fake_sysinfo.h"
 #include "fake_kv.h"
 
 typedef hal_kv_handle_t *nvs_handle_t;
@@ -223,6 +224,7 @@ static nvs_stub_entry_t *nvs_stub_find(const char *partition, const char *ns, co
 // test_wifi_prov.c/test_autotune_engine_prestart.c use for their own splits.
 #include "../drivers/http/profiles_catalog_http.c"
 #include "../drivers/http/profiles_edit_http.c"
+#include "save_section_probe.h"
 
 #undef asm
 
@@ -243,7 +245,7 @@ const uint8_t profiles_page_html_gz_end[1] = { 0 };
 // profiles_http_start()/profiles_list_get_handler() are called), but every
 // symbol profiles_http.c references anywhere in the file must resolve at
 // link time.
-static char s_chunk_capture[16384];
+static char s_chunk_capture[32768];
 static size_t s_chunk_capture_len = 0;
 static bool s_chunk_capture_on = false;
 
@@ -262,11 +264,13 @@ esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type)
 // 2026-09-29: http_auth_http.c now calls wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req))
 // to tag each session touch with whether it arrived over the SoftAP interface.
 int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
+static bool s_floors_unknown_hdr_set;
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
 {
     (void)r;
-    (void)field;
-    (void)value;
+    if (field && value && strcmp(field, "X-Profile-Floors-Unknown") == 0 && strcmp(value, "1") == 0) {
+        s_floors_unknown_hdr_set = true;
+    }
     return ESP_OK;
 }
 void web_set_asset_cache_headers(httpd_req_t *r);
@@ -291,6 +295,12 @@ static bool s_send_capture_on = false;
 // non-chunked path profile_post_handler() actually uses for every response).
 static const char *s_post_body;
 static size_t s_post_body_left;
+// Fuzz hooks: after s_fail_after bytes were served recv returns s_fail_ret (0 EOF, <0 error).
+static size_t s_post_served;
+static size_t s_fail_after = (size_t)-1;
+static int s_fail_ret = 0;
+static int s_fake_hide_calls = 0;
+static int s_fake_restore_calls = 0;
 static char s_resp_capture[2048];
 static size_t s_resp_capture_len;
 static bool s_resp_capture_on;
@@ -330,30 +340,40 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     }
     return ESP_OK;
 }
+static int s_last_err_code;
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r;
-    (void)error;
+    s_last_err_code = (int)error;
     (void)msg;
     return ESP_OK;
 }
+static char s_last_status_str[48];
+static char s_last_sendstr[2048];
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;
-    (void)status;
+    snprintf(s_last_status_str, sizeof(s_last_status_str), "%s", status ? status : "");
     return ESP_OK;
 }
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
     (void)r;
-    (void)s;
+    snprintf(s_last_sendstr, sizeof(s_last_sendstr), "%s", s ? s : "");
     return ESP_OK;
 }
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    if (s_fail_after != (size_t)-1 && s_post_served >= s_fail_after) {
+        return s_fail_ret;
+    }
     if (s_post_body && s_post_body_left > 0) {
         size_t n = buf_len < s_post_body_left ? buf_len : s_post_body_left;
+        if (s_fail_after != (size_t)-1 && s_post_served + n > s_fail_after) {
+            n = s_fail_after - s_post_served;
+        }
+        s_post_served += n;
         memcpy(buf, s_post_body, n);
         s_post_body += n;
         s_post_body_left -= n;
@@ -373,7 +393,7 @@ esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len)
         return ESP_FAIL;
     }
     snprintf(buf, buf_len, "%s", s_stub_query_str);
-    return ESP_OK;
+    return strlen(s_stub_query_str) >= buf_len ? ESP_ERR_HTTPD_RESULT_TRUNC : ESP_OK;
 }
 esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size_t val_size)
 {
@@ -586,15 +606,18 @@ bool profiles_builtin_is_hidden(uint8_t id)
     (void)id;
     return false;
 }
+static esp_err_t s_fake_hidden_err = ESP_OK; /* PROFILESFX10 LOW-2: lets a test refuse the hidden.json writers */
 esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
 {
     (void)id;
     (void)hidden;
-    return ESP_OK;
+    s_fake_hide_calls++;
+    return s_fake_hidden_err;
 }
 esp_err_t profiles_builtin_restore_all(void)
 {
-    return ESP_OK;
+    s_fake_restore_calls++;
+    return s_fake_hidden_err;
 }
 
 // PROFILE_SLOTS_100.md section 7 task 8: fake for the narrow accessor
@@ -635,7 +658,7 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
 // refuse to delete the slot the executor is currently running/paused on.
 // Defaults to IDLE (nothing running); tests that need a "delete refused"
 // case set g_fake_exec_state/g_fake_exec_profile_id first.
-_Static_assert(sizeof(profile_exec_status_t) == 1464, "profile_exec_status_t size: comments across drivers/ cite 1464 B -- update them");
+_Static_assert(sizeof(profile_exec_status_t) == 1512, "profile_exec_status_t size: comments across drivers/ cite 1512 B -- update them");
 static profile_exec_state_t g_fake_exec_state = PROFILE_EXEC_IDLE;
 static uint8_t              g_fake_exec_profile_id = 0xFF;
 void profile_executor_get_status(profile_exec_status_t *out)
@@ -651,8 +674,16 @@ void profile_executor_get_status(profile_exec_status_t *out)
  * state the profile_executor_get_status() fake above uses, so every
  * existing "delete refused because it's the running/paused slot" test
  * keeps exercising the identical scenario through the new call path. */
+static uint8_t s_l23_id;                    /* L23 race test below */
+static int s_l23_runnable_at_exec_check = -1; /* runnable seen by the running check */
+static bool s_l23_probe_exec;
 bool profile_executor_get_active_id(uint8_t *out_id)
 {
+    /* First call only: the delete's running check. Later calls (from the
+     * erase path) must not overwrite what that check saw. */
+    if (s_l23_probe_exec && s_l23_runnable_at_exec_check < 0) {
+        s_l23_runnable_at_exec_check = profiles_http_slot_runnable(s_l23_id) ? 1 : 0;
+    }
     bool active = (g_fake_exec_state == PROFILE_EXEC_RUNNING || g_fake_exec_state == PROFILE_EXEC_PAUSED);
     if (out_id) {
         *out_id = g_fake_exec_profile_id;
@@ -798,7 +829,7 @@ static void assert_profiles_equal(const profile_t *a, const profile_t *b, const 
         snprintf(msg, sizeof(msg), "%s: segment %u dwell_min preserved", ctx, i);
         TEST_CHECK(a->segments[i].dwell_min == b->segments[i].dwell_min, msg);
     }
-    // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- every existing caller of this
+    // docs/ON_OFF_ZONE.md plan step 5 -- every existing caller of this
     // helper now also proves the on/off rule tail round-trips (or, for a
     // profile that never had any, stays at 0 -- this is what makes every
     // v1/v2/v3 migration test in this file double as a "rules-free profile
@@ -830,7 +861,7 @@ static void assert_profiles_equal(const profile_t *a, const profile_t *b, const 
 }
 
 // ---------------------------------------------------------------------------
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 (user-profiles
+// docs/FILESYSTEM_USER_DATA.md section 5 step 4 (user-profiles
 // filesystem move) -- tests for profiles_cfg_fs.c's per-slot read-through/
 // dual-write bridge, added here (rather than a separate TU) because
 // nvs_load_all_from() is `static` -- the exact reason this whole file is its
@@ -1005,6 +1036,87 @@ static void test_pcfg_file_wins_when_it_has_the_higher_rev(void)
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
     TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 still used");
     assert_profiles_equal(&out.profiles[0], &file_side, "FILE content wins (higher rev)");
+}
+
+static void test_pcfg_adopted_file_retires_legacy_nvs_blob(void)
+{
+    TEST_SECTION("profiles cfg_fs -- adopted higher-rev file retires the legacy NVS blob; floor and file intact");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t nvs_side = make_stored_profile();
+    strncpy(nvs_side.name, "NvsSide", PROFILE_NAME_MAX_LEN);
+    profile_t file_side = make_stored_profile();
+    strncpy(file_side.name, "FileSide", PROFILE_NAME_MAX_LEN);
+    stage_legacy_slot(0, &nvs_side, 40);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "file at rev 41");
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "legacy blob present before load");
+
+    for (int boot = 0; boot < 2; boot++) {
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        profiles_state_t out;
+        bool any_found = false;
+        TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+        assert_profiles_equal(&out.profiles[0], &file_side, "file content adopted");
+        TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot still used");
+        TEST_CHECK(!pcfg_nvs_slot_blob_present(0), "legacy NVS blob retired");
+        TEST_CHECK(s_profile_rev[0] == 41, "rev floor is the file rev, unchanged by the erase");
+        TEST_CHECK(!s_profile_rev_unknown[0], "floor known");
+    }
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(back) && back[0] == 40, "persisted prof_rev array untouched");
+    /* Review 12 LOW-5: the persisted used bitmap must have slot 0 cleared (no dangling bit). */
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    profiles_slot_bitmap_t persisted_used;
+    memset(&persisted_used, 0xFF, sizeof(persisted_used));
+    size_t ulen = sizeof(persisted_used);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, &persisted_used, &ulen) == ESP_OK, "persisted used bitmap readable");
+    nvs_close(h);
+    TEST_CHECK(!profiles_slot_bitmap_test(&persisted_used, 0), "retire cleared the persisted used bit for slot 0");
+    profile_t fp;
+    TEST_CHECK(pcfg_file_profile(0, &fp), "file still present");
+}
+
+static void test_pcfg_retire_keeps_blob_when_file_not_adopted(void)
+{
+    TEST_SECTION("profiles cfg_fs -- cfg unmounted or file not adopted keeps the NVS blob");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t nvs_side = make_stored_profile();
+    strncpy(nvs_side.name, "NvsSide", PROFILE_NAME_MAX_LEN);
+    profile_t file_side = make_stored_profile();
+    strncpy(file_side.name, "FileSide", PROFILE_NAME_MAX_LEN);
+    stage_legacy_slot(0, &nvs_side, 40);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "file at rev 41");
+    cfg_fs_deinit();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "cfg unmounted: NVS blob kept");
+
+    pcfg_reset_all();
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    stage_legacy_slot(0, &nvs_side, 41);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "file at EQUAL rev 41");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "equal rev (NVS adopted): NVS blob kept");
+
+    /* Review 12 LOW-5: equal rev AND identical bytes -- the file may be adopted, the blob must still stay. */
+    pcfg_reset_all();
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    stage_legacy_slot(0, &file_side, 41);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "identical file at EQUAL rev 41");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "equal rev, identical bytes: NVS blob kept (strict >)");
 }
 
 static void test_pcfg_unused_slot_keeps_nvs_rev_floor(void)
@@ -1458,6 +1570,58 @@ static void test_pcfg_resolve_scratch_oom_leaves_file_untouched(void)
     TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact after boot load");
 }
 
+static void test_pcfg_boot_profile_scratch_oom_fails_closed(void)
+{
+    TEST_SECTION("boot load: sizeof(profile_t) / 2*sizeof(profile_t) scratch OOM is an error and marks slots unknown (review M2, 794fce57)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t file_p = make_stored_profile();
+    strncpy(file_p.name, "CurrentFile", PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(profiles_cfg_fs_save(2, &file_p, 7) == ESP_OK, "file at rev 7");
+
+    /* nvs_load_all_from: resolve scratch (one profile_t); a rev blob creates the kiln_cfg namespace so the
+     * function does not delegate to the files-only path */
+    uint32_t revs0[PROFILES_MAX_COUNT] = {0};
+    pcfg_set_rev_blob(revs0, sizeof(revs0));
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    persist_scratch_test_fail_size = sizeof(profile_t);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    profiles_state_t st;
+    bool any_found = false;
+    esp_err_t lerr = nvs_load_all_from(PROFILES_NVS_PARTITION, &st, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen == 1, "the sizeof(profile_t) allocation was reached");
+    TEST_CHECK(lerr == ESP_ERR_NO_MEM, "OOM reported as an error, never absent/OK");
+    bool all_unknown = true;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        all_unknown = all_unknown && s_profile_rev_unknown[id];
+    }
+    TEST_CHECK(all_unknown, "every slot marked rev-unknown (resolve-error flags set)");
+    profile_t after;
+    TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact");
+
+    /* nvs_load_files_only: two-profile scratch */
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    persist_scratch_test_fail_size = 2 * sizeof(profile_t);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    memset(&st, 0, sizeof(st));
+    any_found = false;
+    lerr = nvs_load_files_only(PROFILES_NVS_PARTITION, &st, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen == 1, "the 2*sizeof(profile_t) allocation was reached");
+    TEST_CHECK(lerr == ESP_ERR_NO_MEM, "files-only OOM reported as an error");
+    all_unknown = true;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        all_unknown = all_unknown && s_profile_rev_unknown[id];
+    }
+    TEST_CHECK(all_unknown, "every slot marked rev-unknown, none absent");
+    TEST_CHECK(!any_found, "nothing reported found");
+    TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact");
+}
+
 static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
 {
     TEST_SECTION("junk rev repair: scratch allocation failure fails closed (review 5 L4)");
@@ -1478,6 +1642,35 @@ static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
     persist_scratch_test_fail_nth = 0;
     TEST_CHECK(persist_scratch_test_seen == 1, "the repair scratch allocation was reached");
     TEST_CHECK(s_profile_rev_unknown[3], "slot 3 stays rev-unknown (fail closed)");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(junk), "rev blob not rewritten");
+}
+
+static void test_pcfg_junk_rev_repair_refuses_on_external_ram_stack(void)
+{
+    TEST_SECTION("junk rev repair: PSRAM-stack caller is refused, fails closed, prof_rev untouched "
+                 "(HOST_TEST_GAP_AUDIT gap 7, commit 7d155f5a)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(1, &p0, 9) == ESP_OK, "file at rev 9 (slot 1)");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    fake_kv_set_write_safe_here(false);
+    profiles_state_t out;
+    bool any_found = false;
+    (void)nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(s_profile_rev_unknown[3] && s_profile_rev_unknown[1], "slots stay rev-unknown (fail closed)");
+    TEST_CHECK(s_profile_rev[3] == 0, "no floor raise when the repair is refused");
     nvs_handle_t h;
     nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
     uint32_t back[PROFILES_MAX_COUNT];
@@ -1605,6 +1798,53 @@ static void test_save_mutex_serializes_rev_write_bump(void)
     TEST_CHECK(g_test_stub_lock_depth == 0, "mutex released after the saves");
     profiles_cfg_fs_reset_write_fn_for_test();
 }
+/* "Save mutex vs. flash worker" (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
+ * profiles_save_lock() reserves the flash worker BEFORE taking the mutex and
+ * releases it AFTER giving it, and the cfg write / delete happen inside the
+ * reservation. This is the deadlock on main and in v1.0.0-pre.2: an httpd save
+ * holding the mutex waited for the worker while the worker ran a PROFILES
+ * SAVE/DELETE job blocked on the mutex. */
+static unsigned s_ps_writes_outside;
+static esp_err_t ps_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    g_ssp.writes++;
+    if (g_ssp.depth <= 0) {
+        s_ps_writes_outside++;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+static esp_err_t ps_delete_fn(const char *rel_path)
+{
+    g_ssp.writes++;
+    if (g_ssp.depth <= 0) {
+        s_ps_writes_outside++;
+    }
+    return cfg_fs_delete(rel_path);
+}
+static void test_profiles_save_reserves_flash_worker(void)
+{
+    TEST_SECTION("profiles save/delete -- worker reserved before the save mutex, released after; file I/O inside");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[5] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x20);
+    ssp_install();
+    s_ps_writes_outside = 0;
+    profiles_cfg_fs_set_write_fn(ps_write_fn);
+    profiles_cfg_fs_set_delete_fn(ps_delete_fn);
+    TEST_CHECK(nvs_save_slot(5) == ESP_OK, "save slot 5");
+    TEST_CHECK(ssp_shape_ok(1) && s_ps_writes_outside == 0, "save: reservation wraps the mutex and the file write");
+    int enters_after_save = g_ssp.enters;
+    TEST_CHECK(profiles_http_delete(5), "delete slot 5");
+    TEST_CHECK(g_ssp.enters > enters_after_save, "delete opened a section too");
+    TEST_CHECK(ssp_shape_ok(2) && s_ps_writes_outside == 0, "delete: reservation wraps the mutex and the file delete");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "everything released");
+    profiles_cfg_fs_reset_write_fn_for_test();
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    ssp_uninstall();
+}
+
 /* Delete and retarget seams (Opus review of 0880162b): the erase / rewrite must
  * run with the save mutex held. */
 static int s_dl_depth_at_delete;
@@ -1666,6 +1906,483 @@ static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
     nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
     nvs_close(h);
     TEST_CHECK(blen == sizeof(junk), "rev blob not overwritten");
+}
+
+static void test_nvs_erase_slot_repairs_wrong_size_used_bitmap(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2: a wrong-size used-bitmap blob is rebuilt, not a permanent outage");
+    pcfg_reset_all();
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, NVS_KEY_USED, junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete succeeds despite the junk-size bitmap");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == sizeof(profiles_slot_bitmap_t),
+               "the bad blob was overwritten with a 16-byte bitmap");
+    nvs_close(h);
+}
+
+static void test_nvs_erase_slot_keeps_longer_used_bitmap_tail(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2: a longer newer-firmware used bitmap keeps its tail");
+    pcfg_reset_all();
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t longer[24];
+    memset(longer, 0, sizeof(longer));
+    longer[0] = 0x08; /* slot 3 used */
+    for (int i = 16; i < 24; i++) {
+        longer[i] = (uint8_t)(0xA0 + i);
+    }
+    nvs_set_blob(h, NVS_KEY_USED, longer, sizeof(longer));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete succeeds with a longer bitmap");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == sizeof(longer),
+               "rewritten at its full original length");
+    TEST_CHECK(blen == sizeof(longer) && memcmp(back + 16, longer + 16, 8) == 0, "tail preserved verbatim");
+    TEST_CHECK((back[0] & 0x08) == 0, "slot 3's bit cleared in the head");
+    nvs_close(h);
+}
+
+static void test_favorites_wrong_size_blob_is_an_error(void)
+{
+    TEST_SECTION("profiles_favorites_start -- review LOW-3: a wrong-size favorites blob is not 'nothing favorited'");
+    pcfg_reset_all();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start() reports the unusable blob");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)profiles_favorites_start();
+}
+
+static void set_used_blob(const void *b, size_t n)
+{
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_USED, b, n);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void test_used_bitmap_rebuild_keeps_present_slot_bit(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2a test gap: a rebuild keeps the bit of a slot whose key is present");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1); /* legacy profN keys: the rebuild indexes these */
+    stage_legacy_slot(5, &src, 1);
+    {
+        nvs_handle_t kh;
+        nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &kh);
+        char k[8];
+        uint8_t blob[8] = {1};
+        profile_nvs_key(3, k, sizeof(k));
+        nvs_set_blob(kh, k, blob, sizeof(blob));
+        profile_nvs_key(5, k, sizeof(k));
+        nvs_set_blob(kh, k, blob, sizeof(blob));
+        nvs_commit(kh);
+        nvs_close(kh);
+    }
+    s_profiles.profiles[3] = src;
+    s_profiles.profiles[5] = src;
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    set_used_blob(junk, sizeof(junk));
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete slot 3 despite junk bitmap");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == 16, "16-byte bitmap");
+    nvs_close(h);
+    TEST_CHECK((back[0] & 0x20) != 0, "slot 5 (key present) keeps its bit");
+    TEST_CHECK((back[0] & 0x08) == 0, "slot 3 cleared");
+}
+
+static size_t used_blob_len(void);
+
+static void stage_two_slots_with_keys(void)
+{
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    stage_legacy_slot(5, &src, 1);
+    nvs_handle_t kh;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &kh);
+    char k[8];
+    uint8_t blob[8] = {1};
+    profile_nvs_key(3, k, sizeof(k));
+    nvs_set_blob(kh, k, blob, sizeof(blob));
+    profile_nvs_key(5, k, sizeof(k));
+    nvs_set_blob(kh, k, blob, sizeof(blob));
+    nvs_commit(kh);
+    nvs_close(kh);
+    s_profiles.profiles[3] = src;
+    s_profiles.profiles[5] = src;
+}
+
+static void test_used_bitmap_18_byte_junk_converges_to_16(void)
+{
+    TEST_SECTION("nvs_erase_slot -- FIRELOWFX2 LOW-1: an 18-byte junk used blob is rewritten at 16 bytes, not kept at 18");
+    pcfg_reset_all();
+    stage_two_slots_with_keys();
+    uint8_t junk[18] = {0};
+    junk[0] = 0x28;
+    set_used_blob(junk, sizeof(junk));
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete slot 3 despite 18-byte bitmap");
+    TEST_CHECK(used_blob_len() == 16, "bitmap is 16 bytes afterwards (repair converged)");
+}
+
+static void test_used_bitmap_1_byte_blob_is_wrong_size(void)
+{
+    TEST_SECTION("nvs_erase_slot -- FIRELOWFX2 LOW-2: a 1-byte used BLOB is wrong-size and rebuilt, not 'no bitmap'");
+    pcfg_reset_all();
+    stage_two_slots_with_keys();
+    uint8_t one = 0x28;
+    set_used_blob(&one, 1);
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete slot 3 despite 1-byte bitmap blob");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == 16, "16-byte bitmap");
+    nvs_close(h);
+    TEST_CHECK((back[0] & 0x20) != 0, "slot 5 (key present) keeps its bit");
+}
+
+static void test_used_bitmap_boot_load_longer_and_junk_length(void)
+{
+    TEST_SECTION("nvs_load_all_from -- review LOW-2b: a 24-byte used blob loads; an 18-byte one is refused");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(4, &src, 1);
+    uint8_t longer[24] = {0};
+    longer[0] = 0x10;
+    set_used_blob(longer, sizeof(longer));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t e = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(e == ESP_OK && profiles_slot_bitmap_test(&out.used_bitmap, 4), "24-byte bitmap loads at boot, slot 4 used");
+    uint8_t junk20[18] = {0};
+    junk20[0] = 0x10;
+    set_used_blob(junk20, sizeof(junk20));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(&out, 0, sizeof(out));
+    e = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(e != ESP_OK || !profiles_slot_bitmap_test(&out.used_bitmap, 4), "18-byte (non word multiple) bitmap is refused");
+}
+
+static size_t used_blob_len(void)
+{
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t b[64];
+    size_t n = sizeof(b);
+    esp_err_t e = nvs_get_blob(h, NVS_KEY_USED, b, &n);
+    nvs_close(h);
+    return e == ESP_OK ? n : (size_t)-1;
+}
+
+static void test_used_bitmap_genuine_read_error_does_not_rebuild(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2a: a genuine read error on the bitmap is not rebuilt over");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    TEST_CHECK(fake_kv_script_corrupt_key(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_USED), "corrupt used key");
+    s_profiles.profiles[3] = src;
+    TEST_CHECK(nvs_erase_slot(3) != ESP_OK, "erase fails instead of rebuilding from a transient error");
+    TEST_CHECK(used_blob_len() == (size_t)-1, "the unreadable bitmap was not overwritten");
+}
+
+static void test_used_bitmap_rebuild_fails_closed_on_probe_error(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2a: a profN probe error during rebuild saves nothing");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    stage_legacy_slot(5, &src, 1);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    set_used_blob(junk, sizeof(junk));
+    TEST_CHECK(fake_kv_script_corrupt_key(PROFILES_NVS_PARTITION, NVS_NAMESPACE, "prof5"), "corrupt prof5");
+    s_profiles.profiles[3] = src;
+    TEST_CHECK(nvs_erase_slot(3) != ESP_OK, "erase fails closed");
+    TEST_CHECK(used_blob_len() == sizeof(junk), "no bitmap was saved");
+    TEST_CHECK(cfg_fs_condition_is("profiles_used_bitmap"), "LOW-3: the fail-closed condition is listed in GET /api/cfgfs conditions");
+    TEST_CHECK(!cfg_fs_degraded_is("profiles_used_bitmap"), "FX3 LOW-5: it is NOT a degraded (boot-unreadable) store");
+}
+
+static void test_used_bitmap_condition_clears_on_successful_load(void)
+{
+    TEST_SECTION("used bitmap -- INFO-3: the profiles_used_bitmap condition clears on any successful bitmap load");
+    pcfg_reset_all();
+    cfg_fs_condition_set("profiles_used_bitmap", true);
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    s_profiles.profiles[3] = src;
+    (void)nvs_erase_slot(3); /* loads the (valid) bitmap */
+    TEST_CHECK(!cfg_fs_condition_is("profiles_used_bitmap"), "stale condition cleared by a good load");
+    /* The wrong-size rebuild path clears it too. */
+    pcfg_reset_all();
+    cfg_fs_condition_set("profiles_used_bitmap", true);
+    stage_legacy_slot(3, &src, 1);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    set_used_blob(junk, sizeof(junk));
+    s_profiles.profiles[3] = src;
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "erase succeeds after a rebuild");
+    TEST_CHECK(!cfg_fs_condition_is("profiles_used_bitmap"), "stale condition cleared by a successful rebuild");
+}
+
+static void test_favorites_set_refuses_while_user_mask_unresolved(void)
+{
+    TEST_SECTION("profiles_favorites_set -- review LOW-3a: refuses after a failed load with no cfg file");
+    pcfg_reset_all();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start reports the unusable blob");
+    TEST_CHECK(profiles_favorites_set(2, true) != ESP_OK, "set refused while the user mask is unresolved");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)profiles_favorites_start();
+}
+
+static int fuzz_post(esp_err_t (*h)(httpd_req_t *), const char *body, long long clen, size_t fail_after, int fail_ret);
+static void fuzz_small_setup(void);
+
+static void test_favorites_refused_retry_keeps_published_masks(void)
+{
+    TEST_SECTION("profiles_favorites_set -- FIRELOWFX3 LOW-2: a refused retry never zeroes the masks lock-free readers see");
+    fuzz_small_setup();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    {
+        hal_kv_handle_t kh;
+        TEST_CHECK(hal_kv_open(&kh, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "profiles_nvs") == HAL_OK, "open");
+        TEST_CHECK(hal_kv_set_u32(&kh, "prof_favbi", 0x5u) == HAL_OK, "builtin mask has its own readable key");
+        hal_kv_close(&kh);
+    }
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_OK, "slot 2 favorited (cfg file written)");
+    TEST_CHECK(cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH) == ESP_OK, "cfg file removed so only the junk NVS blob remains");
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start reports the unusable user blob");
+    profiles_slot_bitmap_t u;
+    uint32_t b = 0;
+    profiles_favorites_masks(&u, &b);
+    TEST_CHECK(profiles_slot_bitmap_test(&u, 2), "INFO-6: the published USER mask (slot 2) is kept, not zeroed");
+    TEST_CHECK(b == 0x5u, "builtin mask recovered from its own key at boot");
+    /* Retry that fails again: the published builtin mask must not drop to 0 in between or afterwards. */
+    TEST_CHECK(profiles_favorites_set(8, true) != ESP_OK, "retry refused again");
+    profiles_favorites_masks(&u, &b);
+    TEST_CHECK(b == 0x5u, "LOW-2: refused retry leaves the builtin mask published");
+    TEST_CHECK(profiles_slot_bitmap_test(&u, 2), "INFO-6: refused retry leaves the user mask published");
+    /* Even when the builtin key becomes unreadable, the prior published value stays. */
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favbi");
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_set(8, true) != ESP_OK, "retry refused (builtin key gone)");
+    profiles_favorites_masks(&u, &b);
+    TEST_CHECK(b == 0u, "INFO-4: a genuinely absent builtin key reads as 0, not the stale RAM mask");
+    TEST_CHECK(profiles_slot_bitmap_test(&u, 2), "INFO-6: user mask still published");
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_success_load_clears_unresolved_flag(void)
+{
+    TEST_SECTION("profiles_favorites -- INFO-6: a successful load resets the unresolved flag (set() must not reload)");
+    fuzz_small_setup();
+    nvs_handle_t h;
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start fails: unresolved");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    {
+        hal_kv_handle_t kh;
+        TEST_CHECK(hal_kv_open(&kh, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "profiles_nvs") == HAL_OK, "open");
+        TEST_CHECK(hal_kv_set_u32(&kh, "prof_favusr", 0x4u) == HAL_OK, "legacy user mask in NVS");
+        hal_kv_close(&kh);
+    }
+    TEST_CHECK(profiles_favorites_start() == ESP_OK, "start succeeds from the legacy NVS copy");
+    TEST_CHECK(profiles_favorites_is(2), "legacy mask published");
+    /* Make a reload fail again: file gone, NVS user key junk. If the flag were still set, set() would reload and
+     * be refused; with the flag cleared by the successful load it writes straight away. */
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_set(3, true) == ESP_OK, "set does not reload and is not refused");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_unreadable_file_gets_generic_409(void)
+{
+    TEST_SECTION("profile favorite POST -- REVIEW_PROFILESFX2 LOW-1: an unreadable prof_fav.bin gets the reboot/format text, not the key text");
+    fuzz_small_setup();
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_OK, "favorite saved to the cfg file");
+    cfg_fs_test_inject_read_error(PROFILES_FAVORITES_FILE_PATH, ESP_FAIL, 64);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start is unresolved, not 'no favorites saved yet'");
+    TEST_CHECK(pref_cfg_fs_rev_unknown(PROFILES_FAVORITES_FILE_PATH), "file is rev-unknown");
+    TEST_CHECK(cfg_fs_degraded_is(PROFILES_FAVORITES_FILE_PATH), "store is listed as degraded");
+    TEST_CHECK(profiles_favorites_is(2), "the published mask was not zeroed for the unreadable file");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409");
+    TEST_CHECK(strstr(s_last_sendstr, "cfg format") != NULL, "text says a cfg format clears it");
+    TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") != NULL && strstr(s_last_sendstr, "scope=all") != NULL,
+               "PROFILESFX4 LOW-A: names scope=profiles / scope=all, which delete prof_fav.bin");
+    TEST_CHECK(strstr(s_last_sendstr, "scope kiln does not") != NULL, "says scope kiln does not clear it");
+    TEST_CHECK(strstr(s_last_sendstr, "reboot to re-read") != NULL, "REVIEW_PROFILESFX6 MED-1: first remedy is a reboot");
+    TEST_CHECK(strstr(s_last_sendstr, "each time") == NULL && strstr(s_last_sendstr, "retry") == NULL,
+               "does not promise a per-request re-read");
+    TEST_CHECK(strstr(s_last_sendstr, "?force_healthy=1") != NULL, "force_healthy is the query string");
+    TEST_CHECK(strstr(s_last_sendstr, "ERASES ALL cfg-stored settings") != NULL, "cfg format warns it erases everything");
+    TEST_CHECK(strlen(s_last_sendstr) < sizeof(s_last_sendstr) - 1 && strstr(s_last_sendstr, CFG_FS_FAVORITES_FILE_UNREADABLE_REASON "\"}") != NULL,
+               "PROFILESFX8 LOW-2: whole reason captured, not truncated by the stub");
+    TEST_CHECK(strstr(s_last_sendstr, "(then reboot)") != NULL, "PROFILESFX8 LOW-1: cfg format remedy says to reboot afterwards");
+    TEST_CHECK(strstr(s_last_sendstr, "also wipes Wi-Fi and kiln NVS") != NULL, "PROFILESFX8 INFO-5: scope=all wording");
+    TEST_CHECK(strstr(s_last_sendstr, "reason\":\"a stored setting") == NULL, "not the generic scope-kiln text");
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_degraded_clear_for_test();
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static esp_err_t s_fail_after_rename_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)cfg_fs_write_atomic(rel_path, data, len); /* bytes land, then the caller is told it failed */
+    return ESP_FAIL;
+}
+
+static void test_favorites_failed_commit_keeps_dirty_so_reverse_still_writes(void)
+{
+    TEST_SECTION("profile favorites -- REVIEW_PROFILESFX6 LOW-1: a failed commit leaves the file unknown, the reverse change still writes");
+    fuzz_small_setup();
+    pref_cfg_fs_set_write_fn(s_fail_after_rename_fn);
+    TEST_CHECK(profiles_favorites_set(3, true) != ESP_OK, "favorite 3: write lands, commit reports failure");
+    TEST_CHECK(!profiles_favorites_is(3), "RAM not published after the failed commit");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(profiles_favorites_set(3, false) == ESP_OK, "unfavorite 3 reports OK");
+    (void)profiles_favorites_start(); /* simulated reboot */
+    TEST_CHECK(!profiles_favorites_is(3), "after reboot 3 is not a favorite (the reverse change was written)");
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_refused_commit_leaves_ram_unchanged(void)
+{
+    TEST_SECTION("profile favorite POST -- PROFILESFX4 LOW-B: legacy NVS adopted + unreadable file, refused set leaves RAM unchanged");
+    fuzz_small_setup();
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_OK, "favorite 2 saved to the cfg file");
+    /* A valid legacy NVS copy (favorite 2 only) so the unreadable file resolves via NVS adoption. */
+    profiles_slot_bitmap_t u;
+    profiles_slot_bitmap_from_u32(&u, 0);
+    profiles_slot_bitmap_set(&u, 2);
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, "prof_favusr", &u, sizeof(u));
+    nvs_commit(h);
+    nvs_close(h);
+    cfg_fs_test_inject_read_error(PROFILES_FAVORITES_FILE_PATH, ESP_FAIL, 64);
+    (void)profiles_favorites_start();
+    TEST_CHECK(pref_cfg_fs_rev_unknown(PROFILES_FAVORITES_FILE_PATH), "file is rev-unknown");
+    TEST_CHECK(profiles_favorites_is(2), "adopted NVS favorite 2 is shown");
+    TEST_CHECK(!profiles_favorites_is(3), "3 is not a favorite yet");
+    TEST_CHECK(profiles_favorites_set(3, true) == ESP_ERR_INVALID_STATE, "set refused on the unreadable file");
+    TEST_CHECK(!profiles_favorites_is(3), "refused commit did not publish favorite 3");
+    TEST_CHECK(profiles_favorites_is(2), "favorite 2 unchanged");
+    TEST_CHECK(profiles_favorites_set(2, false) == ESP_ERR_INVALID_STATE, "unfavorite refused too");
+    TEST_CHECK(profiles_favorites_is(2), "refused unfavorite left favorite 2 in RAM");
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_degraded_clear_for_test();
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_unresolved_is_degraded_409_and_retry_heals(void)
+{
+    TEST_SECTION("profile favorite POST -- FIRELOWFX2 MED-1: unresolved store is degraded, answers 409, and a retry heals");
+    fuzz_small_setup();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start reports the unusable blob");
+    TEST_CHECK(cfg_fs_degraded_is(PROFILES_FAVORITES_FILE_PATH), "favorites store is listed as degraded");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409, not 500");
+    TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+    TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL, "FX3 LOW-1: the 409 names the one real recovery");
+    TEST_CHECK(strstr(s_last_sendstr, "scope=all") != NULL, "REVIEW_PROFILESFX2 LOW-1: the 409 also names scope=all");
+    TEST_CHECK(strstr(s_last_sendstr, "user profile") != NULL, "FX3 LOW-1: the 409 says it also erases user profiles");
+    TEST_CHECK(strstr(s_last_sendstr, "scope kiln") != NULL && strstr(s_last_sendstr, "cfg format") != NULL,
+               "FX3 LOW-1: the 409 says cfg format / scope kiln do not clear it");
+    TEST_CHECK(strstr(s_last_sendstr, "format_confirm force_healthy") == NULL, "FX3 LOW-1: no longer advises cfg format as the cure");
+    /* The cause clears (transient failure): the next set re-reads and succeeds without a reboot. */
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    s_last_status_str[0] = '\0';
+    (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) != 0 && strncmp(s_last_status_str, "500", 3) != 0, "retry no longer refused");
+    TEST_CHECK(profiles_favorites_is(8), "slot 8 is now a favorite");
+    TEST_CHECK(!cfg_fs_degraded_is(PROFILES_FAVORITES_FILE_PATH), "degraded mark cleared");
+    (void)profiles_favorites_set(8, false);
 }
 
 static void test_nvs_erase_slot_propagates_firing_stats_error(void)
@@ -1850,6 +2567,27 @@ static bool fav_nvs_has_keys(void)
     return any;
 }
 
+static bool s_prf_mark = false;
+static bool prf_hook(void) { return s_prf_mark; }
+static void test_profiles_saves_refuse_under_reset_mark(void)
+{
+    TEST_SECTION("nvs_save_slot and profiles_favorites_set -- refused under the save lock while the reset mark is set");
+    nvs_stub_reset();
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
+    pref_cfg_fs_set_reset_refuse_hook(prf_hook);
+    s_prf_mark = true;
+    TEST_CHECK(nvs_save_slot(3) == ESP_ERR_INVALID_STATE, "nvs_save_slot refuses");
+    s_prf_mark = false;
+    (void)profiles_favorites_set(5, false);
+    s_prf_mark = true;
+    TEST_CHECK(profiles_favorites_set(5, true) == ESP_ERR_INVALID_STATE, "profiles_favorites_set refuses");
+    TEST_CHECK(!profiles_favorites_is(5), "refused favorite leaves RAM untouched");
+    TEST_CHECK(!fav_file_exists(), "no favorites file written");
+    s_prf_mark = false;
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+}
+
 static void test_favorites_cfg_only_storage(void)
 {
     TEST_SECTION("profiles_favorites -- cfg file only; a save never writes the legacy NVS keys");
@@ -1878,7 +2616,10 @@ static void test_favorites_refused_when_unmounted(void)
     esp_err_t e = profiles_favorites_set(2, true);
     TEST_CHECK(e == ESP_ERR_INVALID_STATE, "set returns the unmounted error");
     TEST_CHECK(!fav_nvs_has_keys(), "and nothing was written to NVS as a fallback");
-    TEST_CHECK(profiles_favorites_is(2), "the change still applies live for this boot");
+    TEST_CHECK(!profiles_favorites_is(2), "PROFILESFX4 LOW-B: a refused save is not published to RAM");
+    // A retry still hits the same refusal (RAM and file agree, so it is not a silent ESP_OK no-op either).
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_ERR_INVALID_STATE,
+               "retry after a failed save is not a silent ESP_OK no-op");
     nvs_stub_reset();
     TEST_CHECK(!profiles_favorites_is(2), "and is gone after a restart (never persisted)");
 }
@@ -1939,6 +2680,355 @@ static void test_profiles_http_delete_refuses_running_slot(void)
 }
 
 // ---------------------------------------------------------------------------
+// HTTP input parsing audit L23: delete vs profile start. The delete marks the
+// slot in flight BEFORE its running check (which takes s_exec.lock); the start
+// re-checks profiles_http_slot_runnable() under s_exec.lock before committing
+// RUNNING. These pin the delete side of that protocol (the start side is
+// test_profile_executor_prestart.c's test_run_refuses_slot_being_deleted()).
+static int s_l23_runnable_at_erase = -1; /* runnable seen mid-erase */
+static int s_l23_nested_delete = -1;     /* second delete's result mid-erase */
+
+static esp_err_t l23_delete_fn(const char *rel_path)
+{
+    s_l23_runnable_at_erase = profiles_http_slot_runnable(s_l23_id) ? 1 : 0;
+    s_l23_nested_delete = (int)profiles_delete_slot(s_l23_id);
+    return cfg_fs_delete(rel_path);
+}
+
+// Seqlock generation: a start that captured the slot generation before its copy
+// is refused after ANY RAM assign, including a save whose persist FAILED (RAM
+// changed, published rev unchanged), and while an assign is in flight (odd).
+static uint32_t s_gen_seen_in_write = 0;
+static esp_err_t gen_probe_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    s_gen_seen_in_write = profiles_http_slot_rev(4);
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
+static esp_err_t failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path; (void)data; (void)len;
+    return ESP_FAIL;
+}
+
+/* Models cfg_fs_write_atomic() failing AFTER its rename: the file is in place, the caller sees ESP_FAIL. */
+static esp_err_t write_then_fail_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)cfg_fs_write_atomic(rel_path, data, len);
+    return ESP_FAIL;
+}
+
+static void test_save_ex_rollback_unlinks_written_file(void)
+{
+    TEST_SECTION("misc8 LOW-1: rolled-back fresh slot whose file landed on flash is unlinked");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    profiles_cfg_fs_set_write_fn(write_then_fail_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id < PROFILES_MAX_COUNT, "save reports persisted=false");
+    profile_t loaded;
+    uint32_t rev = 0;
+    bool valid = true;
+    profiles_cfg_fs_load_raw(out_id, &loaded, &rev, &valid);
+    TEST_CHECK(!valid, "rolled-back slot's file is gone (would resurrect at next boot)");
+}
+
+static void test_save_ex_rollback_delete_failure_logs_reappear(void)
+{
+    TEST_SECTION("REVIEW_SUITEFX INFO-2: failed rollback delete is logged as WILL reappear, file stays");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    esp_log_test_capture_reset();
+    profiles_cfg_fs_set_write_fn(write_then_fail_fn);
+    profiles_cfg_fs_set_delete_fn(pcfg_failing_delete_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id < PROFILES_MAX_COUNT, "save still reports persisted=false");
+    TEST_CHECK(!profiles_slot_used(out_id), "RAM slot cleared by the rollback");
+    TEST_CHECK(esp_log_test_capture_contains("WILL reappear"), "log says the stale cfg file WILL reappear");
+    profile_t loaded;
+    uint32_t rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(out_id, &loaded, &rev, &valid);
+    TEST_CHECK(valid, "the undeletable file is still on flash (documented residual)");
+}
+
+static void test_save_expect_rev_under_lock(void)
+{
+    TEST_SECTION("REVIEW_WEBGENFX LOW-B: profiles_http_save_expect_rev compares the slot rev inside the save");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    char err[128] = "";
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, &warn, err, sizeof(err)), "seed slot 4");
+    uint32_t loaded_rev = profiles_http_slot_rev(4);
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, &warn, err, sizeof(err)), "a second save (the 'web save')");
+    TEST_CHECK(profiles_http_slot_rev(4) != loaded_rev, "rev moved");
+    uint32_t before = profiles_http_slot_rev(4);
+    TEST_CHECK(!profiles_http_save_expect_rev(4, &p, loaded_rev, &out_id, &warn, err, sizeof(err)),
+               "stale expected rev is refused");
+    TEST_CHECK(strstr(err, "changed") != NULL, "refusal names the change");
+    TEST_CHECK(strstr(err, "Reopen") != NULL && strstr(err, "Pick the slot again") == NULL,
+               "REVIEW_PROFILESFX LOW-3: refusal says reopen / other slot, not 'pick again' (which is refused every time)");
+    TEST_CHECK(strlen(err) < PROFILES_SAVE_ERR_MSG_LEN,
+               "REVIEW_PROFILESFX3 LOW-1: refusal fits the LCD save dialog's err_msg buffer untruncated");
+    TEST_CHECK(profiles_http_slot_rev(4) == before, "refused save wrote nothing");
+    TEST_CHECK(profiles_http_save_expect_rev(4, &p, before, &out_id, &warn, err, sizeof(err)),
+               "current expected rev saves");
+    TEST_CHECK(profiles_http_slot_rev(4) != before, "accepted save bumped the rev");
+}
+
+/* REVIEW_WEBGENFX H7: the boot seed must be EVEN for every slot (odd = "write in flight"). Script an ODD seed
+ * explicitly rather than lean on the fake RNG's odd fallback. */
+static void test_boot_seed_is_even_parity(void)
+{
+    TEST_SECTION("REVIEW_WEBGENFX H7: profiles_http_start seeds every user slot's rev even");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    const uint32_t seeds[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    fake_sysinfo_script_random_sequence(seeds, 4);
+    (void)profiles_http_start(); /* stub returns INVALID_STATE after the seed and boot load */
+    fake_sysinfo_script_random_sequence(NULL, 0);
+    bool all_even = true;
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+        if ((profiles_http_slot_rev(i) & 1u) != 0u) {
+            all_even = false;
+        }
+    }
+    TEST_CHECK(all_even, "every slot rev is even after boot even when the RNG returns an odd word");
+}
+
+static void rvfx_prepare_free_slot0_with_file(uint32_t file_rev)
+{
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    profile_t old = make_stored_profile();
+    profiles_cfg_fs_save(0, &old, file_rev);
+}
+
+static bool rvfx_slot0_file_valid(void)
+{
+    profile_t loaded;
+    uint32_t rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(0, &loaded, &rev, &valid);
+    return valid;
+}
+
+static void test_rvfx_rollback_keeps_unexamined_file(void)
+{
+    TEST_SECTION("misc8fx MED-1: a refused SAVE_AS (rev floor unknown) must not delete the slot's unexamined file");
+    rvfx_prepare_free_slot0_with_file(1);
+    s_profile_rev_unknown[0] = true;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    bool ok = profiles_http_save_ex(0, &p, &out_id, &warn, &persisted, err, sizeof(err)); /* explicit id: PROFILESFX11 first-free would skip slot 0 */
+    /* PROFILESFX10 MED-1: the refusal now happens before any RAM assignment, so there is nothing to roll back. */
+    TEST_CHECK(!ok && strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "save onto the rev-unknown slot 0 is refused up front");
+    TEST_CHECK(!profiles_slot_used(0), "slot 0 stays unused (no RAM mutation)");
+    TEST_CHECK(rvfx_slot0_file_valid(), "slot 0's unexamined file survived the rollback");
+    s_profile_rev_unknown[0] = false;
+}
+
+static void test_rvfx_rollback_keeps_file_with_other_rev(void)
+{
+    TEST_SECTION("misc8fx LOW-1: a failed write before the rename keeps an existing file (rev differs from the attempt)");
+    rvfx_prepare_free_slot0_with_file(5);
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id == 0, "save refused on slot 0");
+    TEST_CHECK(rvfx_slot0_file_valid(), "pre-existing file (rev 5 != attempted rev 1) survived");
+}
+
+static void test_save_ex_fresh_slot_rolled_back_in_lock(void)
+{
+    TEST_SECTION("fwlow16 LOW-1: failed persist of a fresh slot rolls back inside save_ex; overwrite stays applied");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    uint8_t warn = 0;
+    bool persisted = true;
+    char err[128];
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id < PROFILES_MAX_COUNT, "fresh save reports persisted=false");
+    TEST_CHECK(!profiles_slot_used(out_id), "fresh slot rolled back (no phantom RAM-only profile)");
+    uint8_t id1 = out_id;
+    persisted = false;
+    ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    TEST_CHECK(ok && persisted && out_id == id1, "same-name retry succeeds in the freed slot");
+
+    /* Overwrite of an existing slot keeps the applied-live convention. */
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    persisted = true;
+    ok = profiles_http_save_ex(id1, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && profiles_slot_used(id1), "overwrite stays applied when persist fails");
+}
+
+static void test_profiles_slot_gen_seqlock(void)
+{
+    TEST_SECTION("slot generation: failed save and in-flight assign refuse a captured start");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4");
+    uint32_t cap = profiles_http_slot_rev(4);
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "captured generation runnable");
+
+    /* The generation is odd for the whole RAM-assign + file-write window. */
+    s_gen_seen_in_write = 0;
+    profiles_cfg_fs_set_write_fn(gen_probe_write_fn);
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4 (probe)");
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK((s_gen_seen_in_write & 1u) == 1u, "generation is odd while the assign/persist is in flight");
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "successful save after capture: old copy refused");
+    cap = profiles_http_slot_rev(4);
+
+    /* Failed save (PROFILESFX11 LOW-2): an overwrite whose persist fails still changed RAM, so it must bump the
+     * generation and refuse the old capture. (The rev-unknown refusal mutates nothing; checked just below.) */
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    (void)profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "failed save after capture: old copy refused");
+    cap = profiles_http_slot_rev(4);
+
+    /* PROFILESFX10 MED-1: a save refused for an unreadable store mutates nothing, so the capture stays valid. */
+    s_profile_rev_unknown[4] = true;
+    (void)profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err));
+    s_profile_rev_unknown[4] = false;
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "refused save after capture: RAM untouched, old copy still runnable");
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh capture runnable after refused save");
+
+    /* Assign in flight. */
+    uint32_t cap2 = profiles_http_slot_rev(4);
+    profiles_slot_gen_begin(4);
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap2), "assign in progress: refused");
+    uint32_t odd = profiles_http_slot_rev(4);
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, odd), "capture taken mid-assign (odd): refused");
+    profiles_slot_gen_end(4);
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, odd), "odd capture stays refused after the assign ends");
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap2), "pre-assign capture refused after the assign ends");
+}
+
+static void test_profiles_delete_start_race_l23(void)
+{
+    TEST_SECTION("L23: a start is refused while a delete of the slot is in flight; delete refused while running");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    s_l23_id = 4;
+    s_profiles.profiles[4] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+    TEST_CHECK(nvs_save_slot(4) == ESP_OK, "save slot 4");
+    TEST_CHECK(profiles_http_slot_runnable(4), "an idle used slot is runnable");
+    TEST_CHECK(!profiles_http_slot_runnable(5), "an unused slot is not runnable");
+
+    s_l23_runnable_at_exec_check = -1;
+    s_l23_runnable_at_erase = -1;
+    s_l23_nested_delete = -1;
+    s_l23_probe_exec = true;
+    profiles_cfg_fs_set_delete_fn(l23_delete_fn);
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4");
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    s_l23_probe_exec = false;
+    TEST_CHECK(s_l23_runnable_at_exec_check == 0,
+               "the in-flight mark is set BEFORE the running check (a start in that window is refused)");
+    TEST_CHECK(s_l23_runnable_at_erase == 0, "a start during the erase is refused");
+    TEST_CHECK(s_l23_nested_delete == (int)PROFILES_DELETE_BUSY, "a second delete of the same slot mid-erase is BUSY");
+    TEST_CHECK(!profiles_http_slot_runnable(4), "after the delete the slot is not runnable");
+
+    /* Residual edge: delete + re-save under the same id changes the published rev. */
+    {
+        s_profiles.profiles[4] = make_stored_profile();
+        profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+        TEST_CHECK(nvs_save_slot(4) == ESP_OK, "save slot 4 (rev capture)");
+        uint32_t cap = profiles_http_slot_rev(4);
+        TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "unchanged rev: runnable");
+        TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4 (rev capture)");
+        s_profiles.profiles[4] = make_stored_profile();
+        profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+        TEST_CHECK(nvs_save_slot(4) == ESP_OK, "re-save slot 4 under the same id");
+        TEST_CHECK(profiles_slot_used(4) && profiles_http_slot_runnable(4), "slot used and runnable again");
+        TEST_CHECK(profiles_http_slot_rev(4) != cap, "rev moved on delete + re-save");
+        TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "stale captured rev: refused");
+        TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh rev: runnable");
+    }
+
+    /* Delete refused while running releases the mark: the slot stays runnable. */
+    s_profiles.profiles[4] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+    TEST_CHECK(nvs_save_slot(4) == ESP_OK, "re-save slot 4");
+    g_fake_exec_state = PROFILE_EXEC_RUNNING;
+    g_fake_exec_profile_id = 4;
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_RUNNING, "delete refused while the executor runs slot 4");
+    TEST_CHECK(profiles_slot_used(4) && profiles_http_slot_runnable(4), "refused delete leaves the slot and no mark");
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    /* A failed erase releases the mark too. */
+    /* REVIEW_WEBGENFX LOW-C: a rev-unknown slot is refused BEFORE any side effect (favorite kept). */
+    TEST_CHECK(profiles_favorites_set(4, true) == ESP_OK, "favorite slot 4");
+    s_profile_rev_unknown[4] = true;
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_REV_UNKNOWN, "rev-unknown delete answers REV_UNKNOWN");
+    TEST_CHECK(profiles_favorites_is(4), "refused rev-unknown delete leaves the favorite mark");
+    s_profile_rev_unknown[4] = false;
+    (void)profiles_favorites_set(4, false);
+    TEST_CHECK(profiles_http_slot_runnable(4), "failed delete leaves the slot runnable");
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "retry succeeds");
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_NOT_FOUND, "deleting it again is NOT_FOUND");
+}
+
+// ---------------------------------------------------------------------------
 // Review fold-in (PROFILE_SLOTS_100.md section 7): favorite-clear must
 // run BEFORE slot erase, not after. Runtime behavior is identical either way
 // on the happy path -- the bug this guards against is a power cut landing
@@ -1980,13 +3070,14 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
     TEST_CHECK(http_text != NULL, "could not locate profiles_http.c from the host test's working directory");
     if (http_text) {
         size_t len = 0;
-        const char *body = find_function_body(http_text, "bool profiles_http_delete(uint8_t id)", &len);
-        TEST_CHECK(body != NULL, "could not find profiles_http_delete()'s function body -- update this test "
+        /* Both delete doors share profiles_delete_slot() since the L23 fix. */
+        const char *body = find_function_body(http_text, "profiles_delete_result_t profiles_delete_slot(uint8_t id)", &len);
+        TEST_CHECK(body != NULL, "could not find profiles_delete_slot()'s function body -- update this test "
                                   "if it was renamed/restructured");
         if (body) {
             char *fn = dup_range(body, len);
             if (fn) {
-                assert_favorite_clear_precedes_erase(fn, "profiles_http_delete()");
+                assert_favorite_clear_precedes_erase(fn, "profiles_delete_slot()");
                 free(fn);
             }
         }
@@ -2009,11 +3100,54 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
         if (body) {
             char *fn = dup_range(body, len);
             if (fn) {
-                assert_favorite_clear_precedes_erase(fn, "profile_delete_post_handler()");
+                /* The web door must go through the shared sequence, never a
+                 * private erase that skips the delete-in-flight mark (L23). */
+                TEST_CHECK(strstr(fn, "profiles_delete_slot(") != NULL,
+                           "profile_delete_post_handler() delegates to profiles_delete_slot()");
+                TEST_CHECK(strstr(fn, "nvs_erase_slot") == NULL && strstr(fn, "profiles_slot_clear") == NULL,
+                           "profile_delete_post_handler() has no private erase path");
                 free(fn);
             }
         }
         free(edit_text);
+    }
+
+    {
+        /* Review web7 LOW-4: profiles_http_start() seeds the RAM-only slot generations from the boot RNG. */
+        char *ht = test_read_source_anchored(__FILE__, "../drivers/http/profiles_http.c", HTTP_C_CANDIDATES, 3);
+        TEST_CHECK(ht != NULL, "could not locate profiles_http.c");
+        if (ht) {
+            size_t len = 0;
+            const char *body = find_function_body(ht, "esp_err_t profiles_http_start(void)", &len);
+            char *fn = body ? dup_range(body, len) : NULL;
+            TEST_CHECK(fn != NULL && strstr(fn, "hal_sysinfo_random_u32()") != NULL &&
+                           strstr(fn, "atomic_store(&s_slot_gen[i]") != NULL,
+                       "profiles_http_start() seeds s_slot_gen from hal_sysinfo_random_u32()");
+            free(fn);
+            free(ht);
+        }
+    }
+
+    /* Review web7 LOW-5: the LCD overwrite path captures the slot revision at pick time and refuses on change. */
+    static const char *LCD_C_CANDIDATES[] = {
+        "../drivers/ui/ui_page_profile_builder_review.c",
+        "App/drivers/ui/ui_page_profile_builder_review.c",
+        "firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_review.c",
+    };
+    char *lcd_text = test_read_source_anchored(__FILE__, "../drivers/ui/ui_page_profile_builder_review.c",
+                                                LCD_C_CANDIDATES, 3);
+    TEST_CHECK(lcd_text != NULL, "could not locate ui_page_profile_builder_review.c");
+    if (lcd_text) {
+        TEST_CHECK(strstr(lcd_text, "s_pick_rev = profiles_http_slot_rev(slot)") != NULL,
+                   "LCD slot pick captures the slot revision");
+        TEST_CHECK(strstr(lcd_text, "profiles_http_save_expect_rev(slot, d, s_pick_rev") != NULL,
+                   "LCD save compares the captured revision inside the save (under the save lock)");
+        TEST_CHECK(strstr(lcd_text, "char err_msg[PROFILES_SAVE_ERR_MSG_LEN]") != NULL,
+                   "LCD save dialog sizes err_msg with PROFILES_SAVE_ERR_MSG_LEN (not a small literal)");
+        TEST_CHECK(strstr(lcd_text, "err_msg, sizeof(err_msg))") != NULL, "LCD save passes sizeof(err_msg)");
+        TEST_CHECK(strstr(lcd_text, "ui_page_profile_builder_source_rev()") != NULL,
+                   "LCD overwrite of the edited slot uses the rev captured at edit load");
+        free(lcd_text);
     }
 }
 
@@ -2236,6 +3370,30 @@ static void test_v1_blob_loads_and_preserves_all_fields(void)
               "REGRESSION: slot 0 must still be reported used -- a v1 blob rejected as \"wrong length for "
               "its claimed version\" is exactly the bug that wiped real saved profiles on the bench board");
     assert_profiles_equal(&out.profiles[0], &src, "v1 regression");
+}
+
+// rf4 follow-up: on target a blob read of a legacy u8 `used` key is NOT_FOUND, not INVALID_ARG.
+static void test_legacy_u8_used_key_with_target_not_found(void)
+{
+    TEST_SECTION("used_bitmap_load -- legacy u8 prof_used key whose blob read is NOT_FOUND (target) still loads");
+
+    nvs_stub_reset();
+    profile_t src = make_stored_profile();
+    profile_persisted_v1_t v1;
+    v1.version = 1;
+    v1.profile = to_v2(&src);
+    stage_profile_blob(0, &v1, sizeof(v1));
+    stage_bitmap(0x01);
+    fake_kv_script_blob_get_misses_size1(true);
+
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    fake_kv_script_blob_get_misses_size1(false);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(any_found, "the legacy u8 used key counts as present");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 still used via the get_u8 fallback");
 }
 
 // ---------------------------------------------------------------------------
@@ -2506,7 +3664,39 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
               "all 8 user-slot entries must be present in the listing, none dropped");
 }
 
-// Opus review pass (docs/ON_OFF_ZONE_PLAN.md step 5b) -- profile_detail_
+static void test_profiles_list_floors_unknown_header_covers_free_slots(void)
+{
+    TEST_SECTION("profiles_list_get_handler -- unknown rev floors on a FREE slot raise X-Profile-Floors-Unknown");
+
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    profile_t *p = &s_profiles.profiles[0];
+    memset(p, 0, sizeof(*p));
+    snprintf(p->name, sizeof(p->name), "One");
+    p->zone_mask = 1;
+    p->segment_count = 1;
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 0);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    s_floors_unknown_hdr_set = false;
+    TEST_CHECK(profiles_list_get_handler(&req) == ESP_OK, "list ok");
+    TEST_CHECK(!s_floors_unknown_hdr_set, "known floors: no header");
+
+    s_profile_rev_unknown[0] = true; /* only the USED slot is unknown: the per-entry flag already covers it */
+    s_floors_unknown_hdr_set = false;
+    (void)profiles_list_get_handler(&req);
+    TEST_CHECK(!s_floors_unknown_hdr_set, "a used-only unknown slot does not raise the header");
+
+    s_profile_rev_unknown[3] = true; /* a free slot: nothing listed shows it, so the header must */
+    s_floors_unknown_hdr_set = false;
+    (void)profiles_list_get_handler(&req);
+    TEST_CHECK(s_floors_unknown_hdr_set, "a free rev-unknown slot raises X-Profile-Floors-Unknown");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+// Opus review pass (docs/ON_OFF_ZONE.md step 5b) -- profile_detail_
 // get_handler()'s PROFILE_DETAIL_JSON_CAP budgeted PROFILE_MAX_ON_OFF_RULES
 // at 128 bytes/rule, but a rule object with a real temp_source key measures
 // 182 bytes worst case; combined with 12 worst-case segments and a 512-byte
@@ -2609,6 +3799,41 @@ static void test_profile_detail_json_valid_at_max_capacity(void)
               "not be cut off mid-array/mid-object");
 }
 
+static void test_profiles_list_reports_rev_unknown(void)
+{
+    TEST_SECTION("profiles_list_get_handler -- rev_unknown per slot surfaces the degraded state (stack review S2)");
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    for (int i = 0; i < 2; i++) {
+        profile_t *p = &s_profiles.profiles[i];
+        memset(p, 0, sizeof(*p));
+        strncpy(p->name, i ? "bad" : "good", PROFILE_NAME_MAX_LEN);
+        p->zone_mask = 0x01;
+        p->segment_count = 1;
+        p->segments[0].target_c = 100.0f;
+        p->segments[0].ramp_c_per_hr = 50.0f;
+        p->segments[0].dwell_min = 5;
+        profiles_slot_bitmap_set(&s_profiles.used_bitmap, (uint8_t)i);
+    }
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    s_profile_rev_unknown[1] = true;
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = profiles_list_get_handler(&req);
+    s_chunk_capture_on = false;
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    TEST_CHECK(err == ESP_OK, "handler ok");
+    const char *g = strstr(s_chunk_capture, "\"name\":\"good\"");
+    const char *b = strstr(s_chunk_capture, "\"name\":\"bad\"");
+    TEST_CHECK(g && b, "both entries listed");
+    TEST_CHECK(g && strstr(g, "\"rev_unknown\":false") != NULL && (!b || strstr(g, "\"rev_unknown\":false") < b),
+               "slot 0 rev_unknown:false");
+    TEST_CHECK(b && strstr(b, "\"rev_unknown\":true") != NULL, "slot 1 rev_unknown:true");
+}
+
 static void test_profiles_list_carries_last_run_started_unix_s(void)
 {
     TEST_SECTION("profiles_list_get_handler -- carries last_run_started_unix_s from "
@@ -2690,7 +3915,7 @@ static void test_v2_blob_migrates_distinct_multi_segment_values(void)
 }
 
 // ---------------------------------------------------------------------------
-// Test 4c -- docs/ON_OFF_ZONE_PLAN.md plan step 5, PROFILE_VERSION 3->4: a
+// Test 4c -- docs/ON_OFF_ZONE.md plan step 5, PROFILE_VERSION 3->4: a
 // real v3 blob (current segment shape, crc32 tail, NO on/off rules -- what
 // every board saved between the relay/IO pass and this one) migrates and
 // gets the documented migration default: on_off_rule_count == 0, every rule
@@ -3314,6 +4539,41 @@ static void test_validate_io_segment_zone_ownership(void)
                         "(a gate that refuses everything is not a fix)");
 }
 
+/* REVIEW_PROFILESFX5 INFO-1: the longest io-segment refusals must leave >= 16 bytes of margin in the
+ * LCD save dialog's buffer, so a slightly longer future message is not silently cut short. */
+static void test_validate_io_segment_longest_refusal_margin(void)
+{
+    TEST_SECTION("validate_io_segment -- longest refusals fit PROFILES_SAVE_ERR_MSG_LEN with margin");
+    profile_segment_t seg;
+    char err_msg[PROFILES_SAVE_ERR_MSG_LEN];
+    size_t longest = 0;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    g_zone_relay_mask_zone0 = 0x00;
+    g_stub_aux[3].enabled = true;
+    seg.io_target = 4;
+    TEST_CHECK(!validate_io_segment(&seg, 255, err_msg, sizeof(err_msg)), "aux-bound relay refused");
+    TEST_CHECK(strstr(err_msg, "bound to an aux output") != NULL, "aux refusal text produced");
+    if (strlen(err_msg) > longest) longest = strlen(err_msg);
+    g_stub_aux[3].enabled = false;
+
+    g_zone_relay_mask_zone0 = 0x08;
+    TEST_CHECK(!validate_io_segment(&seg, 255, err_msg, sizeof(err_msg)), "zone-owned relay refused");
+    if (strlen(err_msg) > longest) longest = strlen(err_msg);
+    g_zone_relay_mask_zone0 = 0x00;
+
+    seg.io_target = 255;
+    TEST_CHECK(!validate_io_segment(&seg, 255, err_msg, sizeof(err_msg)), "bad io_target refused");
+    if (strlen(err_msg) > longest) longest = strlen(err_msg);
+
+    TEST_CHECK(longest + 16 <= PROFILES_SAVE_ERR_MSG_LEN,
+               "longest io-segment refusal leaves >= 16 bytes of margin in PROFILES_SAVE_ERR_MSG_LEN");
+}
+
 // ---------------------------------------------------------------------------
 // Test 6 -- validate_io_segment(): the encoding gap between the relay range
 // (1-4) and the IO range (11-17) -- where a ~DRDY or LCD pin would have to
@@ -3710,6 +4970,333 @@ static esp_err_t run_profile_post(const char *body)
     return err;
 }
 
+// ---- Seqlock bracket coverage for the non-save writers (edit, retarget commit,
+// retarget revert, delete). Each probes the slot generation from inside the
+// persist seam: it must be odd while the RAM assign/persist is in flight and
+// even (and advanced) once the writer returns. Removing gen_begin leaves the
+// in-flight value even; removing gen_end leaves it odd afterward.
+static unsigned s_sg_writes;
+static unsigned s_sg_odd_writes;      /* writes that saw slot 4 odd */
+static unsigned s_sg_bad_writes;      /* retarget: writes that did not see exactly one odd of 0..3 */
+static bool s_sg_strict;
+static unsigned sg_odd_count_0_3(void)
+{
+    unsigned n = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+        n += profiles_http_slot_rev(i) & 1u;
+    }
+    return n;
+}
+/* Assign-order probe: at gen_begin the RAM slot must still hold what it held at the previous
+ * gen_end (or the pre-op snapshot); a RAM assign before gen_begin makes it differ. */
+static profile_t s_sg_snap[8];
+static unsigned s_sg_early_assign;
+static unsigned s_sg_begins;
+static void sg_snap_all(void)
+{
+    for (uint8_t i = 0; i < 8; i++) {
+        s_sg_snap[i] = s_profiles.profiles[i];
+    }
+}
+static void sg_gen_hook(uint8_t id, bool is_begin)
+{
+    if (id >= 8) {
+        return;
+    }
+    if (is_begin) {
+        s_sg_begins++;
+        if (memcmp(&s_sg_snap[id], &s_profiles.profiles[id], sizeof(profile_t)) != 0) {
+            s_sg_early_assign++;
+        }
+    } else {
+        s_sg_snap[id] = s_profiles.profiles[id];
+    }
+}
+static esp_err_t sg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    s_sg_writes++;
+    if (profiles_http_slot_rev(4) & 1u) {
+        s_sg_odd_writes++;
+    }
+    if (s_sg_strict && sg_odd_count_0_3() != 1u) {
+        s_sg_bad_writes++;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+static esp_err_t sg_fail2_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    unsigned i = s_sg_writes;
+    esp_err_t r = sg_write_fn(rel_path, data, len);
+    return (i == 1) ? ESP_FAIL : r; /* the 2nd write fails -> commit reverts */
+}
+static esp_err_t sg_delete_fn(const char *rel_path)
+{
+    if (profiles_http_slot_rev(4) & 1u) {
+        s_sg_odd_writes++;
+    }
+    return cfg_fs_delete(rel_path);
+}
+
+static void test_profile_edit_post_slot_gen(void)
+{
+    TEST_SECTION("slot generation: profile_post_handler (edit) brackets its RAM assign + persist");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "seed slot 4");
+    uint32_t before = profiles_http_slot_rev(4);
+    s_sg_writes = s_sg_odd_writes = 0;
+    s_sg_strict = false;
+    profiles_cfg_fs_set_write_fn(sg_write_fn);
+    sg_snap_all();
+    s_sg_early_assign = s_sg_begins = 0;
+    profiles_slot_gen_set_hook_for_test(sg_gen_hook);
+    esp_err_t r = run_profile_post("id=4&name=SgEdit&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    profiles_slot_gen_set_hook_for_test(NULL);
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_sg_begins >= 1 && s_sg_early_assign == 0, "edit: RAM slot unchanged at gen_begin (bracket opens before the assign)");
+    TEST_CHECK(r == ESP_OK && strstr(s_resp_capture, "\"ok\":true") != NULL, "edit POST succeeded");
+    TEST_CHECK(s_sg_writes >= 1 && s_sg_odd_writes >= 1, "generation odd while the edit persists (gen_begin)");
+    TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u && profiles_http_slot_rev(4) != before,
+               "generation even and advanced after the edit (gen_end)");
+}
+
+static void test_profile_post_expected_rev(void)
+{
+    TEST_SECTION("POST /api/profile -- expected_rev/expected_name: stale or reused slot -> 409 and nothing "
+                 "written; matching -> saves and returns the new slot_rev (WEB_UI_JS_AUDIT M-2)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "seed slot 4");
+    uint32_t rev0 = profiles_http_slot_rev(4);
+    char body[400];
+    const char *tail = "&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+
+    /* an edit by someone else moves the rev */
+    run_profile_post("id=4&name=Other&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(profiles_http_slot_rev(4) != rev0, "setup: the other writer moved the rev");
+    uint32_t rev1 = profiles_http_slot_rev(4);
+
+    snprintf(body, sizeof(body), "id=4&name=Mine&expected_rev=%lu%s", (unsigned long)rev0, tail);
+    esp_err_t r = run_profile_post(body);
+    TEST_CHECK(r == ESP_OK && strstr(s_resp_capture, "profile_changed") != NULL, "stale expected_rev refused with profile_changed");
+    TEST_CHECK(strcmp(s_profiles.profiles[4].name, "Other") == 0, "stale save wrote nothing");
+    TEST_CHECK(profiles_http_slot_rev(4) == rev1, "stale save did not move the rev");
+
+    snprintf(body, sizeof(body), "id=4&name=Mine&expected_rev=%lu&expected_name=WrongName%s", (unsigned long)rev1, tail);
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "profile_changed") != NULL, "matching rev but different identity (name) refused");
+    TEST_CHECK(strcmp(s_profiles.profiles[4].name, "Other") == 0, "identity mismatch wrote nothing");
+
+    snprintf(body, sizeof(body), "id=4&name=Mine&expected_rev=%lu&expected_name=Other%s", (unsigned long)rev1, tail);
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL && strstr(s_resp_capture, "\"slot_rev\":") != NULL,
+               "matching token saves and reports slot_rev");
+    TEST_CHECK(strcmp(s_profiles.profiles[4].name, "Mine") == 0, "matching save wrote the slot");
+
+    /* deleted slot: an expected_* overwrite must not resurrect it */
+    TEST_CHECK(profiles_http_delete(4), "delete slot 4");
+    snprintf(body, sizeof(body), "id=4&name=Ghost&expected_rev=%lu%s", (unsigned long)profiles_http_slot_rev(4), tail);
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "profile_changed") != NULL, "overwrite of a deleted slot with a token refused");
+    TEST_CHECK(!profiles_slot_used(4), "deleted slot not resurrected");
+
+    /* no token: old behaviour */
+    run_profile_post("id=4&name=Legacy&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL, "no token keeps the old create-or-overwrite behaviour");
+}
+
+static void test_retarget_slot_gen(void)
+{
+    TEST_SECTION("slot generation: retarget commit and revert bracket each slot's assign + persist");
+    for (int pass = 0; pass < 2; pass++) {
+        rt_seed();
+        uint32_t before[4];
+        for (uint8_t i = 0; i < 4; i++) {
+            before[i] = profiles_http_slot_rev(i);
+        }
+        profiles_retarget_counts_t c;
+        char err[160] = "";
+        s_sg_writes = s_sg_odd_writes = s_sg_bad_writes = 0;
+        s_sg_strict = true;
+        /* pass 0: clean commit. pass 1: 2nd write fails, so the revert writes too. */
+        profiles_cfg_fs_set_write_fn(pass == 0 ? sg_write_fn : sg_fail2_write_fn);
+        sg_snap_all();
+        s_sg_early_assign = s_sg_begins = 0;
+        profiles_slot_gen_set_hook_for_test(sg_gen_hook);
+        bool ok = profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err));
+        profiles_slot_gen_set_hook_for_test(NULL);
+        profiles_cfg_fs_reset_write_fn_for_test();
+        TEST_CHECK(s_sg_begins >= 1 && s_sg_early_assign == 0, "retarget: RAM slot unchanged at every gen_begin (bracket opens before the assign)");
+        s_sg_strict = false;
+        TEST_CHECK(ok == (pass == 0), pass == 0 ? "commit succeeds" : "injected failure fails the commit");
+        TEST_CHECK(s_sg_writes >= (pass == 0 ? 2u : 3u), pass == 0 ? "commit wrote slots" : "revert wrote after the failure");
+        TEST_CHECK(s_sg_bad_writes == 0, pass == 0 ? "every commit write saw exactly one slot in flight (gen_begin/gen_end)"
+                                                   : "every commit and revert write saw exactly one slot in flight (gen_begin/gen_end)");
+        TEST_CHECK(sg_odd_count_0_3() == 0, "all slot generations even afterward");
+        bool advanced = false;
+        for (uint8_t i = 0; i < 4; i++) {
+            advanced = advanced || profiles_http_slot_rev(i) != before[i];
+        }
+        TEST_CHECK(advanced, "generations advanced");
+    }
+}
+
+static void test_delete_slot_gen(void)
+{
+    TEST_SECTION("slot generation: profiles_delete_slot brackets its erase + RAM clear");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "seed slot 4");
+    uint32_t before = profiles_http_slot_rev(4);
+    s_sg_odd_writes = 0;
+    profiles_cfg_fs_set_delete_fn(sg_delete_fn);
+    sg_snap_all();
+    s_sg_early_assign = s_sg_begins = 0;
+    profiles_slot_gen_set_hook_for_test(sg_gen_hook);
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4");
+    profiles_slot_gen_set_hook_for_test(NULL);
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    TEST_CHECK(s_sg_begins >= 1 && s_sg_early_assign == 0, "delete: RAM slot unchanged at gen_begin");
+    TEST_CHECK(s_sg_odd_writes >= 1, "generation odd while the erase runs (gen_begin)");
+    TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u && profiles_http_slot_rev(4) != before,
+               "generation even and advanced after the delete (gen_end)");
+}
+
+// Strict input audit (2026-10-09): a non-numeric / trailing-garbage / overlong id must
+// be a 400, never slot 0 (overwrite) or "create new".
+static void test_profile_post_handler_rejects_malformed_id(void)
+{
+    TEST_SECTION("profile_post_handler() -- id=abc / id=1abc / overlong id / id=%00 are refused with 400");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    const char *rest = "&name=StrictId&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    const char *ids[] = { "id=abc", "id=1abc", "id=123456789", "id=-2", "id=100", "id=127", "id=129", "id=1%002" };
+    for (size_t k = 0; k < sizeof(ids) / sizeof(ids[0]); k++) {
+        char body[256];
+        snprintf(body, sizeof(body), "%s%s", ids[k], rest);
+        s_last_err_code = 0;
+        TEST_CHECK(run_profile_post(body) == ESP_OK, "handler replies itself");
+        TEST_CHECK(s_last_err_code == 400, "malformed id answers 400");
+        TEST_CHECK(!profiles_slot_used(0) && !profiles_slot_used(1), "nothing was written to any slot");
+    }
+}
+
+// Built-in copy: id=<builtin id> saves into the first free slot (same as -1)
+// and never touches the built-in; non-builtin ids above the slot range stay 400.
+static void test_profile_post_builtin_id_copies_to_first_free(void)
+{
+    TEST_SECTION("profile_post_handler() -- id=128 (builtin) saves into first free slot, builtin untouched");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    g_fake_builtin_on = true;
+    char body[256];
+    snprintf(body, sizeof(body),
+             "id=%d&name=BuiltinCopy&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5",
+             (int)PROFILE_BUILTIN_ID_BASE);
+    s_last_err_code = 0;
+    TEST_CHECK(run_profile_post(body) == ESP_OK, "handler replies itself");
+    TEST_CHECK(s_last_err_code != 400, "builtin id is not a 400");
+    TEST_CHECK(profiles_slot_used(0), "copy landed in the first free slot");
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL, "reply is ok:true");
+    TEST_CHECK(strstr(s_resp_capture, "\"id\":0,") != NULL, "reply id is the new user slot (0), not the builtin id");
+    TEST_CHECK(strcmp(s_profiles.profiles[0].name, "BuiltinCopy") == 0, "slot 0 holds the posted contents");
+    TEST_CHECK(!profiles_slot_used(1), "exactly one slot was created");
+    TEST_CHECK(g_builtin_profile_count == 0, "builtin catalogue unchanged");
+    g_fake_builtin_on = false;
+}
+
+static void test_profile_name_nul_refused(void)
+{
+    TEST_SECTION("profile_post_handler() -- name=%00 is refused, not stored as an empty name");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    char body[256];
+    build_minimal_post_body(body, sizeof(body), "a%00b");
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":false") != NULL, "NUL in name answered ok:false");
+    TEST_CHECK(!profiles_slot_used(0), "nothing stored");
+}
+
+static void test_profile_rule_temp_nan_refused_even_with_cmp_none(void)
+{
+    TEST_SECTION("profile_post_handler() -- rule0_temp_c=nan refused even when temp_cmp is NONE");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    char body[320];
+    snprintf(body, sizeof(body),
+             "id=-1&name=NanRule&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5"
+             "&rule_count=1&rule0_zone=0&rule0_seg=0&rule0_temp_cmp=0&rule0_temp_c=nan");
+    run_profile_post(body);
+    TEST_CHECK(!profiles_slot_used(0), "a NaN rule threshold is never persisted");
+}
+
+static void test_profile_favorite_empty_slot_refused(void)
+{
+    TEST_SECTION("profile_favorite_post_handler() -- an empty slot or a bad favorite value is refused");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    const char *b1 = "id=3&favorite=1";
+    req.content_len = (long long)strlen(b1);
+    s_post_body = b1;
+    s_post_body_left = strlen(b1);
+    s_last_err_code = 0;
+    (void)profile_favorite_post_handler(&req);
+    TEST_CHECK(s_last_err_code == 404, "favoriting an empty slot answers 404");
+    TEST_CHECK(!profiles_favorites_is(3), "empty slot not marked favorite");
+    const char *b2 = "id=abc";
+    req.content_len = (long long)strlen(b2);
+    s_post_body = b2;
+    s_post_body_left = strlen(b2);
+    s_last_err_code = 0;
+    (void)profile_favorite_post_handler(&req);
+    TEST_CHECK(s_last_err_code == 400, "id=abc answers 400");
+    s_post_body = NULL;
+    s_post_body_left = 0;
+}
+
+static void test_profile_detail_long_query(void)
+{
+    TEST_SECTION("profile_detail_get_handler()/builtin_list -- a cache-buster query no longer becomes 'id missing'; "
+                 "a truncated query is refused 400");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 0);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_stub_query_str = "id=0&_=1728480000000000000000000000000000000";
+    s_last_err_code = 0;
+    (void)profile_detail_get_handler(&req);
+    TEST_CHECK(s_last_err_code != 400, "a 46-char query still resolves the id");
+    s_stub_query_str = "id=0&_=1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    s_last_err_code = 0;
+    (void)profile_detail_get_handler(&req);
+    TEST_CHECK(s_last_err_code == 400, "an over-long query is refused 400");
+    s_last_err_code = 0;
+    (void)builtin_list_get_handler(&req);
+    TEST_CHECK(s_last_err_code == 400, "builtin_list: truncated query refused 400");
+    s_stub_query_str = "id=1abc";
+    s_last_err_code = 0;
+    (void)profile_detail_get_handler(&req);
+    TEST_CHECK(s_last_err_code == 404, "id=1abc is not slot 1");
+    s_stub_query_str = NULL;
+}
+
 static void test_profile_post_handler_collision_response_is_well_formed_json(void)
 {
     TEST_SECTION("profile_post_handler() -- a plain (no-quote) dup-name collision response is well-formed "
@@ -3772,17 +5359,21 @@ static void test_profile_post_handler_collision_response_escapes_newline_in_name
                  "when the colliding name contains a raw newline AND a '\"' (Opus review finding 3)");
     memset(&s_profiles, 0, sizeof(s_profiles));
 
-    char body1[256];
-    build_minimal_post_body(body1, sizeof(body1), "A%0A%22B");
-    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save (name containing newline+'\"') must succeed");
+    /* F5 (WEB_UI_XSS_AUDIT_2026-10-09): such a name can no longer be CREATED over HTTP --
+     * the parse layer refuses a control byte with 400. The escaper itself is
+     * covered for control bytes by test_dashboard_json.c / test_http_auth_enforce.c. */
+    char body0[256];
+    build_minimal_post_body(body0, sizeof(body0), "A%0A%22B");
+    s_resp_capture[0] = '\0';
+    (void)run_profile_post(body0);
+    TEST_CHECK(strstr(s_resp_capture, "control character") != NULL,
+              "a new profile whose name carries a newline is refused as a control character");
 
-    char body2[256];
-    build_minimal_post_body(body2, sizeof(body2), "A%0A%22B");
-    TEST_CHECK(run_profile_post(body2) == ESP_OK, "handler must still return ESP_OK on a refusal");
-    TEST_CHECK(json_is_well_formed(s_resp_capture),
-              "a collision response embedding a name with a raw newline must still be well-formed JSON");
-    TEST_CHECK(strstr(s_resp_capture, "\\u000a") != NULL,
-              "the newline must be escaped as \\u00XX, not left as a raw control byte");
+    char body1[256];
+    build_minimal_post_body(body1, sizeof(body1), "Aplain");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save must succeed");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "handler must still return ESP_OK on a refusal");
+    TEST_CHECK(json_is_well_formed(s_resp_capture), "collision response is well-formed JSON");
 }
 
 // ---------------------------------------------------------------------------
@@ -3950,7 +5541,7 @@ static void test_profiles_list_marks_exceeds_ceiling(void)
               "the over-ceiling profile must be marked exceeds_ceiling:true in the list");
 }
 
-// ---- profiles_validate_candidate() -- docs/LIVE_PROFILE_EDIT_PLAN.md section 7/8 -------
+// ---- profiles_validate_candidate() -- docs/LIVE_PROFILE_EDIT.md section 7/8 -------
 // The one function the save handler, the live-edit handler and the executor's pickup
 // check all share. These tests exercise it directly (no httpd_req_t needed -- it reads
 // only zone config), proving HARD refuses what ADVISORY only warns about, and that the
@@ -4444,9 +6035,441 @@ static void test_builtin_json_emits_seg_kind_and_resolved_zone_mask(void)
     g_stub_thermo_count = 8;
 }
 
+static void test_profiles_refused_until_boot_load_done(void)
+{
+    TEST_SECTION("profile starts refused until the boot load finished (review LOW-1)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4");
+    profiles_http_test_set_loaded(false);
+    TEST_CHECK(!profiles_http_slot_runnable(4), "user slot not runnable before load finished");
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "rev check refuses before load finished");
+    /* review 14 LOW-5: every writer is refused for the whole pre-load window, not only while s_boot_loading */
+    {
+        uint32_t rev_pre = profiles_http_slot_rev(4);
+        TEST_CHECK(!profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)) && strncmp(err, "busy:", 5) == 0,
+                   "save refused busy before the boot load finished");
+        TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_BUSY, "delete refused busy before the boot load finished");
+        profiles_retarget_counts_t rc;
+        TEST_CHECK(!profiles_retarget_zone_to_aux_commit(0, 1, true, &rc, err, sizeof(err)) &&
+                       strncmp(err, "busy:", 5) == 0,
+                   "retarget commit refused busy before the boot load finished");
+        TEST_CHECK(!profiles_retarget_zone_to_aux_resume(0, 1, true, &rc, err, sizeof(err)),
+                   "retarget resume refused before the boot load finished");
+        TEST_CHECK(!profiles_retarget_zone_to_aux_revert(0, 1), "retarget revert refused before the boot load finished");
+        TEST_CHECK(profiles_http_slot_rev(4) == rev_pre && profiles_slot_used(4), "refused writers left slot 4 untouched");
+    }
+    profiles_http_test_set_loaded(true);
+    TEST_CHECK(profiles_http_slot_runnable(4), "runnable once loaded");
+    /* profiles_http_start() runs the load and publishes the flag (the stub then returns INVALID_STATE). */
+    profiles_http_test_set_loaded(false);
+    (void)profiles_http_start();
+    TEST_CHECK(profiles_http_slot_runnable(4), "profiles_http_start publishes loaded after the boot load");
+    TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u, "boot load bracket leaves the generation even");
+    /* review LOW-9: a save while the boot load runs is refused busy (409), nothing written */
+    profiles_http_test_set_boot_loading(true);
+    uint32_t rev_before = profiles_http_slot_rev(4);
+    TEST_CHECK(!profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)) && strncmp(err, "busy:", 5) == 0,
+               "save refused busy during boot load");
+    TEST_CHECK(profiles_http_slot_rev(4) == rev_before, "refused save did not touch the slot");
+    profiles_http_test_set_boot_loading(false);
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save works again after boot load");
+}
+
+// HTTP fuzz campaign part 2: hostile POST /api/profile bodies and a body shorter than Content-Length.
+static void test_fuzz_profile_post_hostile(void)
+{
+    TEST_SECTION("profile_post_handler() fuzz -- hostile bodies store nothing; short body is a 400");
+    const char *seg = "&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    static const char *const heads[] = {
+        "id=-1", "id=-1&name=",
+        "id=-1&name=ThisNameIsFarTooLongForAProfileSlotxxxxxxxxxxxxxxxxxxxx",
+        "id=-1&name=A&zone_mask=0", "id=-1&name=A&zone_mask=-1", "id=-1&name=A&zone_mask=99999999999",
+        "id=-1&name=A&zone_mask=1&seg_count=0", "id=-1&name=A&zone_mask=1&seg_count=-1",
+        "id=-1&name=A&zone_mask=1&seg_count=99999",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=nan&seg0_ramp=50&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=1e999&seg0_ramp=50&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=inf&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=-1",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=99999999999",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=99999&seg0_ramp=50&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=-500&seg0_ramp=50&seg0_dwell=5",
+    };
+    for (size_t k = 0; k < sizeof(heads) / sizeof(heads[0]); k++) {
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        pcfg_reset_all();
+        char body[512];
+        /* bodies that already carry segment fields get no extra suffix */
+        snprintf(body, sizeof(body), "%s%s", heads[k], strstr(heads[k], "seg0_") ? "" : seg);
+        run_profile_post(body);
+        char msg[200];
+        snprintf(msg, sizeof(msg), "hostile profile body #%zu stores nothing (%s)", k, heads[k]);
+        TEST_CHECK(!profiles_slot_used(0), msg);
+    }
+    /* seg_count bigger than the fields supplied */
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    run_profile_post("id=-1&name=A&zone_mask=1&seg_count=3&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(!profiles_slot_used(0), "seg_count=3 with only seg0 present stores nothing");
+
+    /* Content-Length longer than the body actually received: recv returns 0 early */
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    const char *good = "id=-1&name=Short&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(good) + 40;
+    s_post_body = good;
+    s_post_body_left = strlen(good);
+    s_last_err_code = 0;
+    (void)profile_post_handler(&req);
+    s_post_body = NULL;
+    s_post_body_left = 0;
+    TEST_CHECK(s_last_err_code == 400, "body shorter than Content-Length answers 400");
+    TEST_CHECK(!profiles_slot_used(0), "short body stores nothing");
+
+    /* Content-Length 0 and a negative one */
+    for (int i = 0; i < 2; i++) {
+        memset(&req, 0, sizeof(req));
+        req.content_len = i ? -5 : 0;
+        s_last_err_code = 0;
+        (void)profile_post_handler(&req);
+        TEST_CHECK(s_last_err_code == 400 && !profiles_slot_used(0), "empty/negative Content-Length is a 400, nothing stored");
+    }
+    /* oversized Content-Length never allocates/reads */
+    memset(&req, 0, sizeof(req));
+    req.content_len = 100 * 1024 * 1024;
+    s_last_err_code = 0;
+    (void)profile_post_handler(&req);
+    TEST_CHECK(s_last_err_code == 400 || s_last_err_code == 413, "100 MB Content-Length refused up front");
+}
+
+// HTTP body fuzz part 3: delete / builtin hide / builtin restore / favorite.
+// A refused request must erase, hide, unhide or favorite nothing.
+static int fuzz_post(esp_err_t (*h)(httpd_req_t *), const char *body, long long clen, size_t fail_after, int fail_ret)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = clen;
+    s_post_body = body;
+    s_post_body_left = strlen(body);
+    s_post_served = 0;
+    s_fail_after = fail_after;
+    s_fail_ret = fail_ret;
+    s_last_err_code = 0;
+    (void)h(&req);
+    s_post_body = NULL;
+    s_post_body_left = 0;
+    s_fail_after = (size_t)-1;
+    s_fail_ret = 0;
+    return s_last_err_code;
+}
+
+static void fuzz_small_setup(void)
+{
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[8] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x100);
+    (void)nvs_save_slot(8);
+    (void)profiles_favorites_set(8, false);
+    g_fake_builtin_on = true;
+    s_fake_hide_calls = 0;
+    s_fake_restore_calls = 0;
+}
+
+static void test_delete_rev_unknown_is_409(void)
+{
+    TEST_SECTION("profile delete on a rev-unknown slot answers 409 store_unreadable_at_boot, not 500 (review web7 LOW-6)");
+    fuzz_small_setup();
+    s_profile_rev_unknown[8] = true;
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(profile_delete_post_handler, "id=8", 4, (size_t)-1, 0);
+    TEST_CHECK(profiles_slot_used(8), "refused delete keeps the slot");
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409");
+    TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+    TEST_CHECK(strstr(s_last_sendstr, "format_confirm?force_healthy=1, then reboot") != NULL, "PROFILESFX8 LOW-3: generic text uses the query spelling and says reboot");
+    TEST_CHECK(strstr(s_last_sendstr, "ERASES ALL cfg-stored settings") != NULL, "PROFILESFX8 LOW-3: generic text warns the format erases");
+    TEST_CHECK(strstr(s_last_sendstr, "format_confirm force_healthy") == NULL, "PROFILESFX8 LOW-3: no space spelling");
+    TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL, "PROFILESFX9 MED-1: names scope=profiles");
+    TEST_CHECK(strstr(s_last_sendstr, "does not clear it\"}") != NULL, "PROFILESFX9 MED-1: profile body not truncated, says scope kiln does not clear it");
+    TEST_CHECK(strstr(s_last_sendstr, "or a factory reset (scope kiln)") == NULL, "PROFILESFX9 MED-1: never offers scope kiln as the cure");
+    /* PROFILESFX9 LOW-1: the generic (non-profile) text keeps scope kiln as its own remedy, as a separate clause. */
+    {
+        httpd_req_t greq;
+        memset(&greq, 0, sizeof(greq));
+        s_last_sendstr[0] = '\0';
+        (void)cfg_fs_http_persist_failed_state(&greq, true, ESP_ERR_INVALID_STATE, -1);
+        TEST_CHECK(strstr(s_last_sendstr, "and preferences; alternatively use a factory reset (scope kiln)\"}") != NULL,
+                   "PROFILESFX9 LOW-1: generic text separates the factory reset from the format's erase list");
+        TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") == NULL, "generic text does not name the profile scope");
+    }
+    s_profile_rev_unknown[8] = false;
+}
+
+/* PROFILESFX10 LOW-2: the save, hide and restore routes each answer the PROFILE 409 text, not the generic one. */
+static void check_profile_409(const char *what)
+{
+    char m[160];
+    snprintf(m, sizeof(m), "%s: status is 409", what);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, m);
+    snprintf(m, sizeof(m), "%s: body names store_unreadable_at_boot", what);
+    TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, m);
+    snprintf(m, sizeof(m), "%s: profile text (scope=profiles, scope kiln does not clear it)", what);
+    TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL &&
+                   strstr(s_last_sendstr, "does not clear it\"}") != NULL, m);
+}
+
+static void test_profile_routes_use_profile_409_text(void)
+{
+    TEST_SECTION("PROFILESFX10 LOW-2: save / hide / restore on an unreadable store answer the profile 409");
+    fuzz_small_setup();
+    s_profile_rev_unknown[8] = true;
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    const char *sb = "id=8&name=SgRevUnk&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    (void)fuzz_post(profile_post_handler, sb, (long long)strlen(sb), (size_t)-1, 0);
+    check_profile_409("save");
+    s_profile_rev_unknown[8] = false;
+
+    cfg_fs_degraded_set("profiles/hidden.json", true);
+    s_fake_hidden_err = ESP_ERR_INVALID_STATE;
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(builtin_hide_post_handler, "id=128", 6, (size_t)-1, 0);
+    check_profile_409("hide");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(builtin_restore_post_handler, "", 0, (size_t)-1, 0);
+    check_profile_409("restore");
+    s_fake_hidden_err = ESP_OK;
+    cfg_fs_degraded_clear_for_test();
+}
+
+/* PROFILESFX10 MED-1: the shared save path refuses a rev-unknown slot and mutates no RAM, for every caller. */
+static void test_save_refuses_rev_unknown_slot_without_mutating_ram(void)
+{
+    TEST_SECTION("PROFILESFX10 MED-1: profiles_http_save / _expect_rev / _ex on a rev-unknown slot fail and leave RAM untouched");
+    fuzz_small_setup();
+    s_profile_rev_unknown[8] = true;
+    profile_t before = s_profiles.profiles[8];
+    profile_t cand = make_stored_profile();
+    strncpy(cand.name, "Changed", sizeof(cand.name) - 1);
+    uint8_t out_id = 0xEE;
+    char err[PROFILES_SAVE_ERR_MSG_LEN] = {0};
+    TEST_CHECK(profiles_slot_used(8), "precondition: slot 8 used");
+    /* UART bridge / backup import / import route entry point */
+    TEST_CHECK(!profiles_http_save(8, &cand, &out_id, NULL, err, sizeof(err)), "save into a rev-unknown slot fails");
+    TEST_CHECK(strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "err_msg is the store-unreadable constant");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged");
+    TEST_CHECK(profiles_slot_used(8), "used bit unchanged");
+    /* LCD builder entry point */
+    err[0] = '\0';
+    TEST_CHECK(!profiles_http_save_expect_rev(8, &cand, profiles_http_slot_rev(8), &out_id, NULL, err, sizeof(err)),
+               "expect_rev save into a rev-unknown slot fails");
+    TEST_CHECK(strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "expect_rev err_msg is the constant");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged (expect_rev)");
+    /* live-edit style (out_persisted) */
+    bool persisted = true;
+    err[0] = '\0';
+    TEST_CHECK(!profiles_http_save_ex(8, &cand, &out_id, NULL, &persisted, err, sizeof(err)), "save_ex fails too");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged (save_ex)");
+    s_profile_rev_unknown[8] = false;
+    /* a healthy slot still saves */
+    err[0] = '\0';
+    TEST_CHECK(profiles_http_save(8, &cand, &out_id, NULL, err, sizeof(err)), "a healthy slot still saves");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+/* PROFILESFX11 MED-1 + INFO: POST /api/profile on a rev-unknown slot refuses before the RAM copy; first-free skips
+ * rev-unknown slots, so a new-slot POST neither lands on one nor leaves a phantom. */
+static void test_post_handler_rev_unknown_refuses_before_ram_copy(void)
+{
+    TEST_SECTION("PROFILESFX11 MED-1: POST to a rev-unknown slot leaves RAM, used bit and generation untouched");
+    fuzz_small_setup();
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    s_profile_rev_unknown[8] = true;
+    profile_t before = s_profiles.profiles[8];
+    uint32_t cap = profiles_http_slot_rev(8);
+    TEST_CHECK(profiles_slot_used(8), "precondition: slot 8 used");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    const char *sb = "id=8&name=SgRevUnk2&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    (void)fuzz_post(profile_post_handler, sb, (long long)strlen(sb), (size_t)-1, 0);
+    check_profile_409("post rev-unknown");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged");
+    TEST_CHECK(profiles_slot_used(8), "used bit unchanged");
+    TEST_CHECK(profiles_http_slot_rev(8) == cap, "generation untouched");
+    TEST_CHECK(profiles_http_slot_runnable_rev(8, cap), "earlier capture still runnable");
+
+    /* New-slot POST: make the first free slot rev-unknown; nothing may land on it. */
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    int ff = -1;
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+        if (!profiles_slot_used(i)) { ff = i; break; }
+    }
+    TEST_CHECK(ff >= 0, "precondition: a free slot exists");
+    if (ff >= 0) {
+        s_profile_rev_unknown[ff] = true;
+        const char *nb = "name=NewSkip&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+        (void)fuzz_post(profile_post_handler, nb, (long long)strlen(nb), (size_t)-1, 0);
+        TEST_CHECK(!profiles_slot_used((uint8_t)ff), "new profile never lands on the rev-unknown free slot");
+        {
+            int landed = -1;
+            for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+                if (profiles_slot_used(i) && strcmp(s_profiles.profiles[i].name, "NewSkip") == 0) { landed = i; break; }
+            }
+            TEST_CHECK(landed >= 0 && landed != ff, "new-slot POST succeeded in the next truly free slot");
+        }
+        TEST_CHECK(s_profiles.profiles[ff].name[0] == '\0', "no phantom content in the rev-unknown slot");
+        profile_t cand = make_stored_profile();
+        strncpy(cand.name, "NewSkip2", sizeof(cand.name) - 1);
+        uint8_t out_id = 0xEE;
+        char err[PROFILES_SAVE_ERR_MSG_LEN] = {0};
+        TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &cand, &out_id, NULL, err, sizeof(err)),
+                   "save with no id succeeds despite an unreadable free slot");
+        TEST_CHECK(out_id != (uint8_t)ff && out_id < PROFILES_MAX_COUNT, "allocated the next truly free slot");
+        TEST_CHECK(!profiles_slot_used((uint8_t)ff), "the rev-unknown slot stays unused");
+    }
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+static void test_fuzz_small_body_handlers(void)
+{
+    TEST_SECTION("delete/hide/restore/favorite fuzz -- hostile bodies change nothing");
+    const char *dgood = "id=8";
+    size_t dl = strlen(dgood);
+    int st;
+    long long lens[] = { 0, -1, 65, 100000000LL, 0x7fffffffffffffffLL, 0 /* body length + 30, set below */ };
+    size_t nlens = sizeof(lens) / sizeof(lens[0]);
+
+    // delete: recv failure at every offset, Content-Length extremes, bad ids.
+    for (size_t at = 0; at < dl; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_small_setup();
+            st = fuzz_post(profile_delete_post_handler, dgood, (long long)dl, at, ret);
+            TEST_CHECK(st == 400 && profiles_slot_used(8), "delete: recv failure mid-body erases nothing");
+        }
+    }
+    lens[5] = (long long)dl + 30;
+    for (size_t i = 0; i < nlens; i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_delete_post_handler, dgood, lens[i], (size_t)-1, 0);
+        TEST_CHECK(st == 400 && profiles_slot_used(8), "delete: bad Content-Length erases nothing");
+    }
+    const char *dbad[] = { "id=", "id=+8", "id=8x", "id=-8", "id=%00", "id=8%00", "id=9999999999999", "id=256",
+                           "id=8%", "id=%zz", "xid=8", "id[]=8", "ID=8", "id=1.5", "id=0x8", "id= 8", "id=8 ",
+                           "id=%ff",
+                           "id=8&pad=pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp" /* valid id, body over the 64-byte cap */ };
+    for (size_t i = 0; i < sizeof(dbad) / sizeof(dbad[0]); i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_delete_post_handler, dbad[i], (long long)strlen(dbad[i]), (size_t)-1, 0);
+        char msg[120];
+        snprintf(msg, sizeof(msg), "delete: refused, slot 8 intact: %s", dbad[i]);
+        TEST_CHECK(st >= 400 && profiles_slot_used(8), msg);
+    }
+    fuzz_small_setup();
+    st = fuzz_post(profile_delete_post_handler, dgood, (long long)dl, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && !profiles_slot_used(8), "delete: control, clean body erases the slot");
+
+    // favorite
+    const char *fgood = "id=8&favorite=1";
+    size_t fl = strlen(fgood);
+    for (size_t at = 0; at < fl; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_small_setup();
+            st = fuzz_post(profile_favorite_post_handler, fgood, (long long)fl, at, ret);
+            TEST_CHECK(st == 400 && !profiles_favorites_is(8), "favorite: recv failure mid-body marks nothing");
+        }
+    }
+    lens[5] = (long long)fl + 30;
+    for (size_t i = 0; i < nlens; i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_favorite_post_handler, fgood, lens[i], (size_t)-1, 0);
+        TEST_CHECK(st == 400 && !profiles_favorites_is(8), "favorite: bad Content-Length marks nothing");
+    }
+    const char *fbad[] = { "id=8&favorite=2", "id=8&favorite=10", "id=8&favorite=%31%31", "id=8&favorite=1x",
+                           "id=8&favorite=+1", "id=8&favorite=%00", "id=8&favorite=-1", "id=%00", "id=8x&favorite=1",
+                           "id=", "favorite=1", "id=300&favorite=1", "id=8&favorite=0000000000" };
+    for (size_t i = 0; i < sizeof(fbad) / sizeof(fbad[0]); i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_favorite_post_handler, fbad[i], (long long)strlen(fbad[i]), (size_t)-1, 0);
+        char msg[120];
+        snprintf(msg, sizeof(msg), "favorite: refused, nothing marked: %s", fbad[i]);
+        TEST_CHECK(st >= 400 && !profiles_favorites_is(8), msg);
+    }
+    fuzz_small_setup();
+    st = fuzz_post(profile_favorite_post_handler, fgood, (long long)fl, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && profiles_favorites_is(8), "favorite: control, clean body marks the slot");
+
+    // builtin hide (fake builtin id is PROFILE_BUILTIN_ID_BASE)
+    char hgood[48];
+    snprintf(hgood, sizeof(hgood), "id=%d&hidden=1", (int)PROFILE_BUILTIN_ID_BASE);
+    size_t hl = strlen(hgood);
+    for (size_t at = 0; at < hl; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_small_setup();
+            st = fuzz_post(builtin_hide_post_handler, hgood, (long long)hl, at, ret);
+            TEST_CHECK(st == 400 && s_fake_hide_calls == 0, "hide: recv failure mid-body hides nothing");
+        }
+    }
+    lens[5] = (long long)hl + 30;
+    for (size_t i = 0; i < nlens; i++) {
+        fuzz_small_setup();
+        st = fuzz_post(builtin_hide_post_handler, hgood, lens[i], (size_t)-1, 0);
+        TEST_CHECK(st >= 400 && s_fake_hide_calls == 0, "hide: bad Content-Length hides nothing");
+    }
+    const char *hbad[] = { "id=", "id=-1", "id=+1", "id=%00", "xid=1", "hidden=1", "id=1000", "id=%zz", "id=8" };
+    for (size_t i = 0; i < sizeof(hbad) / sizeof(hbad[0]); i++) {
+        fuzz_small_setup();
+        st = fuzz_post(builtin_hide_post_handler, hbad[i], (long long)strlen(hbad[i]), (size_t)-1, 0);
+        char msg[120];
+        snprintf(msg, sizeof(msg), "hide: refused, nothing hidden: %s", hbad[i]);
+        TEST_CHECK(st >= 400 && s_fake_hide_calls == 0, msg);
+    }
+    fuzz_small_setup();
+    st = fuzz_post(builtin_hide_post_handler, hgood, (long long)hl, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && s_fake_hide_calls == 1, "hide: control, clean body hides once");
+
+    // builtin restore: a bad body must not restore.
+    for (size_t i = 0; i < nlens; i++) {
+        if (lens[i] <= 0) {
+            continue; /* empty body is the legitimate form */
+        }
+        fuzz_small_setup();
+        st = fuzz_post(builtin_restore_post_handler, "x=1", lens[i], (size_t)-1, 0);
+        if (lens[i] == 3) {
+            continue;
+        }
+        TEST_CHECK(st == 400 && s_fake_restore_calls == 0, "restore: bad Content-Length restores nothing");
+    }
+    for (int ret = -1; ret <= 0; ret++) {
+        fuzz_small_setup();
+        st = fuzz_post(builtin_restore_post_handler, "abc", 3, 1, ret);
+        TEST_CHECK(st == 400 && s_fake_restore_calls == 0, "restore: recv failure restores nothing");
+    }
+    fuzz_small_setup();
+    st = fuzz_post(builtin_restore_post_handler, "", 0, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && s_fake_restore_calls == 1, "restore: control, empty body restores");
+    g_fake_builtin_on = false;
+}
+
 void run_test_profiles_http(void)
 {
+    test_fuzz_profile_post_hostile();
+    profiles_http_test_set_loaded(true); /* tests below exercise runnable checks without a boot sequence */
+    test_legacy_u8_used_key_with_target_not_found();
     test_v1_blob_loads_and_preserves_all_fields();
+    test_profiles_refused_until_boot_load_done();
+    profiles_http_test_set_loaded(true);
     test_version_zero_rejected();
     test_length_mismatch_rejected();
     test_bad_crc_rejected();
@@ -4458,12 +6481,15 @@ void run_test_profiles_http(void)
     test_newer_version_refused_not_wiped();
     test_one_bad_slot_does_not_affect_others();
     test_profiles_list_json_valid_with_escape_heavy_names();
+    test_profiles_list_floors_unknown_header_covers_free_slots();
     test_profile_detail_json_valid_at_max_capacity();
     test_profiles_list_carries_last_run_started_unix_s();
+    test_profiles_list_reports_rev_unknown();
     test_validate_io_segment_zone_ownership();
     test_validate_on_off_rules_aux_targets();
     test_aux_rule_survives_real_save_and_load();
     test_validate_io_segment_refuses_aux_bound_relay();
+    test_validate_io_segment_longest_refusal_margin();
     test_validate_io_segment_drdy_lcd_gap_refused();
     test_profiles_http_save_accepts_cone10_profile_on_80c_zone();
     test_profiles_http_save_accepts_in_range_profile();
@@ -4475,6 +6501,17 @@ void run_test_profiles_http(void)
     test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name();
     test_profiles_http_save_allows_builtin_name();
     test_profiles_http_save_allows_editing_existing_slot_named_like_builtin();
+    test_profile_post_handler_rejects_malformed_id();
+    test_profile_post_builtin_id_copies_to_first_free();
+    test_profile_name_nul_refused();
+    test_profile_rule_temp_nan_refused_even_with_cmp_none();
+    test_profile_favorite_empty_slot_refused();
+    test_fuzz_small_body_handlers();
+    test_delete_rev_unknown_is_409();
+    test_profile_routes_use_profile_409_text();
+    test_save_refuses_rev_unknown_slot_without_mutating_ram();
+    test_post_handler_rev_unknown_refuses_before_ram_copy();
+    test_profile_detail_long_query();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();
     test_profile_post_handler_collision_response_escapes_newline_in_name();
@@ -4509,10 +6546,25 @@ void run_test_profiles_http(void)
     test_favorites_refused_when_unmounted();
     test_favorites_legacy_nvs_migrates();
     test_profiles_http_delete_refuses_running_slot();
+    test_profiles_delete_start_race_l23();
+    test_profiles_slot_gen_seqlock();
+    test_save_ex_rollback_unlinks_written_file();
+    test_save_ex_rollback_delete_failure_logs_reappear();
+    test_save_expect_rev_under_lock();
+    test_boot_seed_is_even_parity();
+    test_rvfx_rollback_keeps_unexamined_file();
+    test_rvfx_rollback_keeps_file_with_other_rev();
+    test_save_ex_fresh_slot_rolled_back_in_lock();
+    test_profile_edit_post_slot_gen();
+    test_profile_post_expected_rev();
+    test_retarget_slot_gen();
+    test_delete_slot_gen();
     test_delete_clears_favorite_before_erase_wiring();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();
+    test_pcfg_adopted_file_retires_legacy_nvs_blob();
+    test_pcfg_retire_keeps_blob_when_file_not_adopted();
     test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file();
     test_pcfg_unused_slot_keeps_nvs_rev_floor();
     test_pcfg_boot_load_failure_still_resolves_files();
@@ -4525,9 +6577,13 @@ void run_test_profiles_http(void)
     test_pcfg_longer_rev_array_is_known_tail_ignored();
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
+    test_pcfg_boot_profile_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
+    test_pcfg_junk_rev_repair_refuses_on_external_ram_stack();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();
     test_save_mutex_serializes_rev_write_bump();
+    test_profiles_saves_refuse_under_reset_mark();
+    test_profiles_save_reserves_flash_worker();
     test_delete_paths_hold_save_lock_at_erase_seam();
     test_pcfg_junk_repair_load_error_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
@@ -4537,6 +6593,23 @@ void run_test_profiles_http(void)
     test_pcfg_unknown_floors_flag_file_backed_slots_too();
     test_pcfg_corrupt_nvs_blob_keeps_live_file();
     test_nvs_erase_slot_refuses_when_rev_array_unreadable();
+    test_nvs_erase_slot_repairs_wrong_size_used_bitmap();
+    test_nvs_erase_slot_keeps_longer_used_bitmap_tail();
+    test_favorites_wrong_size_blob_is_an_error();
+    test_used_bitmap_rebuild_keeps_present_slot_bit();
+    test_used_bitmap_boot_load_longer_and_junk_length();
+    test_used_bitmap_genuine_read_error_does_not_rebuild();
+    test_used_bitmap_rebuild_fails_closed_on_probe_error();
+    test_favorites_set_refuses_while_user_mask_unresolved();
+    test_used_bitmap_18_byte_junk_converges_to_16();
+    test_used_bitmap_1_byte_blob_is_wrong_size();
+    test_favorites_refused_retry_keeps_published_masks();
+    test_favorites_refused_commit_leaves_ram_unchanged();
+    test_favorites_failed_commit_keeps_dirty_so_reverse_still_writes();
+    test_favorites_unresolved_is_degraded_409_and_retry_heals();
+    test_favorites_success_load_clears_unresolved_flag();
+    test_favorites_unreadable_file_gets_generic_409();
+    test_used_bitmap_condition_clears_on_successful_load();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();

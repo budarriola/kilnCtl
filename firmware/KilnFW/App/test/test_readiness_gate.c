@@ -87,11 +87,11 @@ static void set_fully_ready(void)
     /* 2026-09-14: the ceiling-match item, promoted into this gate the same
      * way estop_verified was. Not diverged -- the two sides agree. */
     s_fake_facts.ceiling_diverged = false;
-    /* docs/PICO_AUTO_UPDATE_PLAN.md's new item: not blocked, i.e. the
+    /* docs/PICO_AUTO_UPDATE.md's new item: not blocked, i.e. the
      * Pico's firmware version matches (or the boot-time glue has not
      * flagged an unrecoverable mismatch). */
     s_fake_facts.pico_update_blocked = false;
-    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md's new item. PASS is the only
+    /* docs/CT_ATTRIBUTION_VERIFICATION.md's new item. PASS is the only
      * fact that reads READY_OK; on the actual bench fixture the reachable
      * value is INCONCLUSIVE, which deliberately does NOT block a start --
      * test_ct_attribution_non_fail_verdicts_do_not_block() below is the half
@@ -198,7 +198,7 @@ static void test_ceiling_divergence_alone_refuses(void)
 
 static void test_pico_update_blocked_alone_refuses(void)
 {
-    /* docs/PICO_AUTO_UPDATE_PLAN.md owner decision, verbatim: "on an
+    /* docs/PICO_AUTO_UPDATE.md owner decision, verbatim: "on an
      * unrecoverable version mismatch the ESP refuses to fire until
      * matched" -- an actual block, not a warning surface. This gate's item
      * is the enforcement half of that; pico_auto_update_state_is_blocking()
@@ -213,7 +213,7 @@ static void test_pico_update_blocked_alone_refuses(void)
 
 static void test_ct_attribution_fail_alone_refuses(void)
 {
-    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision: "a FAIL
+    /* docs/CT_ATTRIBUTION_VERIFICATION.md, owner decision: "a FAIL
      * blocks both the step and firing". A FAIL means a current clamp is not
      * on the conductor the configuration names, so the over-current guard is
      * aimed at the wrong zone -- it reads as armed and healthy while
@@ -493,7 +493,7 @@ static void test_messages_are_json_safe(void)
         case READINESS_GATE_BLOCK_CT_LEAK_ALARM: s_fake_facts.ct_leak_alarm_active = true; break;
         default: s_fake_facts.estop_verified = false; break;
         }
-        char msg[192];
+        char msg[READINESS_GATE_MSG_CAP];
         memset(msg, 0, sizeof(msg));
         readiness_gate_block_t which = readiness_gate_evaluate(&s_fake_facts, msg, sizeof(msg));
         TEST_CHECK(which == all[i], "precondition: the intended item is the one that blocked");
@@ -502,6 +502,8 @@ static void test_messages_are_json_safe(void)
         /* 191 chars + NUL is the most dashboard_exec_http.c's recovery_err[192]
          * can carry; a message longer than that would be silently truncated
          * mid-sentence in the operator's refusal. */
+        TEST_CHECK(strlen(msg) < sizeof(msg) - 1,
+                   "the message is not truncated by READINESS_GATE_MSG_CAP, the buffer the autotune start paths use");
         TEST_CHECK(strlen(msg) < 191, "the message fits the HTTP handler's 192-byte refusal buffer");
         TEST_CHECK(readiness_gate_item_key(which) != NULL, "the blocking item maps to an /api/readiness key");
     }
@@ -509,8 +511,45 @@ static void test_messages_are_json_safe(void)
                "READINESS_GATE_OK maps to no item key -- nothing blocked, nothing to point at");
 }
 
+/* fwbatch13 LOW-2: every profile-start caller sizes its refusal buffer from READINESS_GATE_MSG_CAP. */
+static void test_start_callers_size_buffers_from_cap(void)
+{
+    TEST_SECTION("profile-start callers size err_msg from READINESS_GATE_MSG_CAP");
+    static const struct { const char *rel; const char *needle; } files[] = {
+        { "../drivers/bridge/uart_bridge_ext_control.c", "static char err_msg[READINESS_GATE_MSG_CAP];\n                err_msg[0] = '\\0';\n                bool ok = profile_executor_run" },
+        { "../drivers/http/dashboard_exec_http.c", "static char err_msg[READINESS_GATE_MSG_CAP];\n    err_msg[0] = '\\0';" },
+        { "../drivers/ui/ui_page_home_actions.c", "char err_msg[READINESS_GATE_MSG_CAP]" },
+        { "../drivers/ui/ui_page_profile_detail.c", "char err_msg[READINESS_GATE_MSG_CAP]" },
+    };
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s", __FILE__);
+        char *slash = strrchr(path, '/');
+        char *bslash = strrchr(path, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        TEST_CHECK(slash != NULL, "cannot derive the test directory from __FILE__");
+        if (!slash) return;
+        snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "%s", files[i].rel);
+        FILE *f = fopen(path, "rb");
+        TEST_CHECK(f != NULL, "caller source readable");
+        if (!f) return;
+        static char src[600000];
+        size_t n = fread(src, 1, sizeof(src) - 1, f);
+        fclose(f);
+        src[n] = 0;
+        /* normalise CRLF so the multi-line needle matches */
+        size_t w = 0;
+        for (size_t r = 0; r < n; r++) if (src[r] != '\r') src[w++] = src[r];
+        src[w] = 0;
+        char msg[200];
+        snprintf(msg, sizeof(msg), "%s sizes its readiness refusal buffer from READINESS_GATE_MSG_CAP", files[i].rel);
+        TEST_CHECK(strstr(src, files[i].needle) != NULL, msg);
+    }
+}
+
 int main(void)
 {
+    test_start_callers_size_buffers_from_cap();
     test_fully_ready_board_is_allowed();
     test_recovery_mode_alone_refuses();
     test_safety_trip_alone_refuses();

@@ -3,7 +3,11 @@
 firmware/KilnFW/App/drivers/update/update_http.c, client in
 update_http_client.py).
 
-Read-only:   update_status, update_check, update_fetch_status, update_get_settings
+Read-only:   update_status, update_fetch_status, update_get_settings (GET only)
+Job-starting: update_check -- NOT read-only: it POSTs /api/update/check, which
+             starts a TLS job on the board (heap, network, a board-side job slot;
+             nothing is stored and it needs no confirm). Use update_fetch_status
+             for a pure GET of the last job.
 Mutating:    update_stage_upload, update_stage_clear, update_stage_release,
              update_fetch_cancel, update_set_settings   (confirm is True exactly)
 
@@ -76,8 +80,8 @@ def update_status(host: Optional[str] = None) -> str:
     pre-WP2 partition table has no stage and answers 404 (reported as an
     error). The board refuses an image whose project name is not
     KilnCtrl (wrong_project); sha256 catches corruption.
-    Nothing here installs anything; the apply step (recovery image, WP5) has
-    no tool yet."""
+    Nothing here installs anything; the apply step runs in the recovery
+    image: recovery_enter(), then recovery_apply_staged()."""
     resolved = _resolve_host(host)
     try:
         st = uhc.get_stage_status(resolved)
@@ -307,10 +311,17 @@ def _refusal_text(exc: uhc.UpdateHttpError) -> str:
     return f"HTTP {exc.status} {name or exc.detail or exc}"
 
 
+_MAX_WAIT_S = 200.0
+
+
 def _wait_job(host: str, wait_s: float) -> "tuple[Optional[dict], Optional[str]]":
     """Poll GET /api/update/fetch until the job is no longer busy or wait_s runs out.
     Returns (status, None) or (last status or None, error text)."""
-    deadline = time.monotonic() + max(0.0, wait_s)
+    # The client aborts a call after 300 s of silence; leave room for the
+    # prechecks and read-back around the poll. A job still busy at the clamp
+    # is reported UNKNOWN by the caller, never ok.
+    wait_s = min(max(0.0, float(wait_s)), _MAX_WAIT_S)
+    deadline = time.monotonic() + wait_s
     last: Optional[dict] = None
     while True:
         try:
@@ -320,13 +331,15 @@ def _wait_job(host: str, wait_s: float) -> "tuple[Optional[dict], Optional[str]]
         if not last.get("busy"):
             return last, None
         if time.monotonic() >= deadline:
-            return last, "still running when the wait ended"
+            return last, f"still running after {wait_s:g}s (wait_s is clamped to {_MAX_WAIT_S:g}s)"
         time.sleep(_POLL_S)
 
 
 @_core._tool()
 def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerelease: bool = False) -> str:
-    """Ask the board to check GitHub for the newest release of the configured
+    """NOT read-only: starts a board job (POST /api/update/check, no confirm gate;
+    stores nothing, stage untouched). For a pure GET of the last job use
+    update_fetch_status. Ask the board to check GitHub for the newest release of the configured
     repository (POST /api/update/check then GET /api/update/fetch, ROUTE_TIER_ADMIN)
     and report the version, the policy verdict (upgrade / up to date / downgrade /
     needs force / refused) and the release sha256. The board does the TLS work
@@ -358,7 +371,7 @@ def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerele
 @_core._tool()
 def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, force: bool = False,
                          allow_downgrade: bool = False, confirm_downgrade: str = "",
-                         wait_s: float = 300.0, host: Optional[str] = None,
+                         wait_s: float = 200.0, host: Optional[str] = None,
                          ack_no_safety: bool = False) -> str:
     """Download the newest GitHub release of the configured repository into the
     `stage` partition (POST /api/update/download, ROUTE_TIER_ADMIN). The board
@@ -369,7 +382,7 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
     Without ``confirm=True`` (exactly) this is a DRY RUN: it reads the fetch and
     stage status and the repo, shows the query it would send, and sends nothing.
     With confirm: refuses while any job or stage operation is in flight, then
-    starts the download and polls up to ``wait_s``. The board decides policy
+    starts the download and polls up to ``wait_s`` (clamped to 200 s so the call stays under the MCP client's 300 s abort; the UNKNOWN text names the clamped value). The board decides policy
     (a downgrade needs ``allow_downgrade=True`` AND ``confirm_downgrade`` equal
     to the release tag; the same version needs ``force``; a pre-release needs
     ``allow_prerelease``, which also makes the board pick from the releases list

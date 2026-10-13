@@ -338,8 +338,8 @@ class EndToEndRealBodyTest(_Base):
         posted = dict(urllib.parse.parse_qsl(post_mock.call_args[0][1]))
         self.assertEqual(posted["z2_coupling_c0"], repr(8.08))
         stripped = {k for k in echo if mc._ZONE_OMIT_PRESERVED_KEY_RE.match(k)}
-        # 3 cells + k/tau/deadtime/diag + six omit-preserved tuning floats, per zone
-        self.assertEqual(len(stripped), 3 * (3 + 4 + 6))
+        # 3 cells + k/tau/deadtime/diag + six tuning floats + nine guard floats (BENCHFX2 LOW-1), per zone
+        self.assertEqual(len(stripped), 3 * (3 + 4 + 6 + 9))
         self.assertEqual(set(posted) - set(echo), set())
         self.assertEqual(set(echo) - set(posted), stripped - {"z2_coupling_c0"})
         for k, v in posted.items():

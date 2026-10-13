@@ -600,9 +600,37 @@ void run_test_thermal_guard(void)
         /* dt_s=10, so trip_tick*10s must land at the configured 60s window
          * (tick index 5, i.e. elapsed 60s), not at 300s (tick index 29). */
         char detail[160];
-        snprintf(detail, sizeof(detail), "trip landed at tick %d (%.0fs) -- expected ~60s, not 300s", trip_tick,
-                 (trip_tick + 1) * 10.0);
-        TEST_CHECK(trip_tick >= 0 && trip_tick <= 6, detail);
+        snprintf(detail, sizeof(detail), "trip landed at tick %d (%.0fs) -- expected the 120s no-model floor, not 300s",
+                 trip_tick, (trip_tick + 1) * 10.0);
+        /* Firing review 2026-10-09 item 6: with no plant model a wrong_dir_window_s shorter than
+         * CLIMB_WINDOW_FLOOR_MIN_S (120 s) is floored to it on guard 1's climbing branch. */
+        TEST_CHECK(trip_tick >= 11 && trip_tick <= 13, detail);
+    }
+
+    /* Item 6 / review F3: distinct values tell WHICH window guard 1's climbing branch used. */
+    {
+        const float wd[2] = {60.0f, 300.0f};
+        const float pw[2] = {300.0f, 60.0f};
+        const int lo[2] = {28, 4};
+        const int hi[2] = {32, 7};
+        for (int c = 0; c < 2; c++) {
+            thermal_guard_state_t s;
+            thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 10.0f,
+                                        .wrong_dir_window_s = wd[c], .progress_window_s = pw[c]};
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.setpoint_c = 500.0f;
+            in.measurement_c = 20.0f;
+            in.commanded_duty = 1.0f;
+            int trip_tick = -1;
+            for (int i = 0; i < 60; i++) {
+                if (thermal_guard_tick(&s, &cfg, &in)) { trip_tick = i; break; }
+            }
+            char msg[160];
+            snprintf(msg, sizeof(msg), "wrong_dir=%.0f progress=%.0f: explicit progress_window_s wins on the climbing "
+                     "branch (tripped at tick %d, expected %d..%d)", wd[c], pw[c], trip_tick, lo[c], hi[c]);
+            TEST_CHECK(trip_tick >= lo[c] && trip_tick <= hi[c], msg);
+        }
     }
 
     /* Same scenario, but with wrong_dir_window_s left at 0 ("not configured")
@@ -680,7 +708,7 @@ void run_test_thermal_guard(void)
     {
         thermal_guard_state_t s;
         thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
-                                    .wrong_dir_window_s = 30.0f, .progress_duty_min = 0.1f};
+                                    .progress_window_s = 30.0f, .progress_duty_min = 0.1f};
         thermal_guard_reset(&s);
         thermal_guard_input_t in = base_input();
         in.commanded_duty = 0.2f;
@@ -696,7 +724,7 @@ void run_test_thermal_guard(void)
     {
         thermal_guard_state_t s;
         thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
-                                    .wrong_dir_window_s = 30.0f, .progress_duty_min = 0.0f};
+                                    .progress_window_s = 30.0f, .progress_duty_min = 0.0f};
         thermal_guard_reset(&s);
         thermal_guard_input_t in = base_input();
         in.commanded_duty = 0.2f;
@@ -1037,7 +1065,7 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped, "progress_band_c=10 puts an 8 C error inside the band, so no rise is demanded");
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1: guard 1's key finding. Duty commanded
+    /* docs/ON_OFF_ZONE.md sec 1: guard 1's key finding. Duty commanded
      * at 1.0 for 10x the progress window while the reading stays perfectly
      * FLAT is exactly a healthy vent's signature -- and today's guard 1
      * (in.on_off_zone left false, the pre-this-pass behaviour) trips it as

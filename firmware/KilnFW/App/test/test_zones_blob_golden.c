@@ -309,6 +309,7 @@ static void test_zones_blob_golden_matches_firmware_layout(void)
     TEST_SECTION("zones_cfg_t golden for config_convert.py -- real nvs_save() bytes, every field distinct");
 
     cfg_fs_deinit();
+    zones_config_load_fault_reset_for_test(); /* clears the cannot-decide save gate an earlier test in this exe may leave */
     zones_config_cfg_fs_reset_write_fn_for_test();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);

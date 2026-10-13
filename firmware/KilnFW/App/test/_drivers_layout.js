@@ -102,4 +102,18 @@ function listDriverFiles(driversDir, filterFn) {
     .map((p) => ({ name: path.basename(p), fullPath: p }));
 }
 
-module.exports = { resolveDriversDir, resolveDriverFile, listDriverFiles, walkFiles };
+/* Return the single-line page function whose definition starts at column 0 with `prefix`
+ * (e.g. 'function kgR6('). Throws naming the helper if it is missing, moved/indented, or no
+ * longer a complete one-line function (unbalanced braces). Shared by the zones-page tests. */
+function pickLine(lines, prefix) {
+  const l = lines.map((x) => x.replace(/\r$/, '')).find((x) => x.indexOf(prefix) === 0);
+  if (!l) throw new Error('helper not found at column 0: ' + prefix);
+  const open = (l.match(/\{/g) || []).length;
+  const close = (l.match(/\}/g) || []).length;
+  if (open === 0 || open !== close) {
+    throw new Error(prefix + ' is no longer a one-line function; extend the extraction');
+  }
+  return l;
+}
+
+module.exports = { resolveDriversDir, resolveDriverFile, listDriverFiles, walkFiles, pickLine };

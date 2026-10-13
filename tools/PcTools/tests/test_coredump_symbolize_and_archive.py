@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """New behavioural tests for coredump_fetch.py, added 2026-09-16
-(RELEASE_HARDENING_PLAN.md blocker 1 item 1). Appended to
+(RELEASE_HARDENING.md blocker 1 item 1). Appended to
 test_coredump_fetch.py.
 
 These specifically target three defects found while symbolizing the real

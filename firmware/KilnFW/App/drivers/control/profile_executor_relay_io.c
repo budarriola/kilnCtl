@@ -26,10 +26,78 @@
 #include "sim_backend.h"
 #include "zones_config_accessors.h"
 
+/* Relay bits switched by the ACTIVE relay-type IO segments of this run.
+ * io_seg_start() claims such a relay as RELAY_OWNER_PROFILE and writes it once;
+ * it is in no zone mask and not in aux_claim_mask, so every "relays this run owns"
+ * set (the running pending-OFF retry, apply_relay()'s F4 fallback) must add it.
+ * Must be called with s_exec.lock held. */
+uint8_t exec_io_segment_relay_mask(void)
+{
+    uint8_t m = 0;
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        const io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (r->active && r->is_relay && r->target >= PROFILE_IO_TARGET_RELAY_BASE &&
+            r->target < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT) {
+            m |= (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        }
+    }
+    return m;
+}
+
 void apply_relay(uint8_t zi, bool want_on)
 {
     uint8_t mask = 0;
-    if (!zones_config_get_relay_mask(zi, &mask) || mask == 0) {
+    bool mask_ok = zones_config_get_relay_mask(zi, &mask);
+    if (!mask_ok) {
+        /* Firing review item 4: an unreadable mask must still drive OFF --
+         * fall back to every mask this run has claimed, and keep retrying. */
+        s_exec.zones[zi].relay_commanded_on = false;
+        /* Review F4: drive OFF only the claimed relays that could be THIS zone's:
+         * drop other zones' readable masks and every aux relay this run still
+         * drives, so a fault here does not chatter relays that should be ON. */
+        uint8_t fb = s_exec.claimed_relay_mask;
+        for (uint8_t oz = 0; oz < MAX31856_CHANNEL_COUNT; oz++) {
+            uint8_t om = 0;
+            if (oz != zi && zones_config_get_relay_mask(oz, &om)) {
+                fb &= (uint8_t)~om;
+            }
+        }
+        fb &= (uint8_t)~s_exec.aux_claim_mask;
+        fb &= (uint8_t)~exec_io_segment_relay_mask();
+        for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
+            if (s_exec.aux[ai].commanded_on || s_exec.aux[ai].actuated_on) {
+                fb &= (uint8_t)~(1u << ai);
+            }
+        }
+        static bool s_fb_logged;
+        if (!s_fb_logged) {
+            ESP_LOGE(PE_TAG, "zone %u relay mask unreadable -- fallback OFF mask 0x%02X (claimed 0x%02X)",
+                     (unsigned)zi, (unsigned)fb, (unsigned)s_exec.claimed_relay_mask);
+            s_fb_logged = true;
+        }
+        if (fb == 0) {
+            /* Nothing this run claimed can be attributed to this zone, so there is
+             * nothing to write and nothing to mark pending: refuse (relay stays
+             * uncommanded). Logged above; heat is never turned ON on this path. */
+            return;
+        }
+        if (s_exec.io) {
+            esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(fb, 0);
+            if (off_err == ESP_OK) {
+                relay_off_tracker_note_write(fb, 0);
+            } else {
+                /* Fail-safe: nothing is assumed open. The mask stays pending
+                 * and zone_off_pending_retry() re-drives OFF every tick. */
+                if ((s_exec.zone_off_pending_mask & fb) != fb) {
+                    ESP_LOGE(PE_TAG, "fallback relay OFF write (mask 0x%02X) failed: %s -- retrying every tick",
+                             (unsigned)fb, esp_err_to_name(off_err));
+                }
+                s_exec.zone_off_pending_mask |= fb;
+            }
+        }
+        return;
+    }
+    if (mask == 0) {
         s_exec.zones[zi].relay_commanded_on = false;
         return;
     }
@@ -64,6 +132,7 @@ void apply_relay(uint8_t zi, bool want_on)
      * genuinely blocked zone now reads heat_blocked=true on EVERY tick,
      * want_on or not, so profile_executor_guard_commanded_duty() sees a
      * true contiguous zero again. */
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E: before the gate decision */
     uint32_t sources = 0;
     bool blocked = relay_authority_zone_blocked(s_exec.safety, zi, &sources);
     bool edge = (blocked != s_exec.zones[zi].heat_blocked) ||
@@ -97,13 +166,17 @@ void apply_relay(uint8_t zi, bool want_on)
          * applied this run's own gate; kiln_io_owner just serializes the
          * actual write against uart_bridge.c/dashboard_set_relay() (2026-08-19,
          * TODO.md 10.14 Phase 1). */
-        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(mask, want_on ? mask : 0, off_epoch_since);
         if (err != ESP_OK) {
             ESP_LOGW(PE_TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
                           "state for zone %u is unknown",
                      esp_err_to_name(err), zi);
         } else {
             relay_off_tracker_note_write(mask, want_on ? mask : 0);
+            s_exec.zone_off_pending_mask &= (uint8_t)~mask;
+        }
+        if (err != ESP_OK && !want_on) {
+            s_exec.zone_off_pending_mask |= mask;
         }
     }
     /* No-op unless CONFIG_KILNCTL_SIM_PLANT. Fed the POST-gate decision, not
@@ -456,16 +529,135 @@ void force_zone_relay_off(uint8_t zi)
     s_exec.zones[zi].duty = 0.0f;
 }
 
+/* Retry zone relay OFF writes that failed. Safe in every state: only writes
+ * OFF, only to bits recorded as failed. Must be called with s_exec.lock held. */
+void zone_off_pending_retry(void)
+{
+    uint8_t mask = s_exec.zone_off_pending_mask;
+    if (mask == 0 || !s_exec.io) {
+        return;
+    }
+    if (s_exec.state != PROFILE_EXEC_PAUSED) {
+        /* Review F4: once the run has ended another owner (manual, autotune, rule)
+         * may hold a relay; never write to it, just forget the bit. */
+        for (uint8_t b = 0; b < 8; b++) {
+            if (!(mask & (1u << b))) continue;
+            relay_owner_t o = relay_authority_get_owner((uint8_t)(b + 1u));
+            if (o != RELAY_OWNER_NONE && o != RELAY_OWNER_PROFILE) {
+                mask &= (uint8_t)~(1u << b);
+                s_exec.zone_off_pending_mask &= (uint8_t)~(1u << b);
+            }
+        }
+        if (mask == 0) {
+            return;
+        }
+    }
+    esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+    if (off_err == ESP_OK) {
+        relay_off_tracker_note_write(mask, 0);
+        s_exec.zone_off_pending_mask = 0;
+    } else {
+        /* Fail-safe: the bits stay pending (mask NOT cleared) so the next
+         * tick retries; never assume the contacts opened. */
+        ESP_LOGE(PE_TAG, "pending relay OFF retry (mask 0x%02X) failed: %s -- will retry",
+                 (unsigned)mask, esp_err_to_name(off_err));
+    }
+}
+
+/* Review-2 MEDIUM-1: pending OFF bits for relays the RUNNING run does not own must
+ * still be retried while the run is in progress (zone_off_pending_retry() only runs
+ * outside RUNNING). Bounded cadence (1 s); never writes to a relay owned by an
+ * active zone, an active autotune zone or a live aux claim. Must be called with
+ * s_exec.lock held. */
+#define ZONE_OFF_PENDING_RUNNING_RETRY_MS 1000u
+void zone_off_pending_retry_running(TickType_t now)
+{
+    uint8_t mask = s_exec.zone_off_pending_mask;
+    if (mask == 0 || !s_exec.io) {
+        return;
+    }
+    if (s_exec.zone_off_pending_retry_seen &&
+        (uint32_t)(now - s_exec.zone_off_pending_retry_tick) < pdMS_TO_TICKS(ZONE_OFF_PENDING_RUNNING_RETRY_MS)) {
+        return;
+    }
+    s_exec.zone_off_pending_retry_seen = true;
+    s_exec.zone_off_pending_retry_tick = now;
+
+    uint8_t owned = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!s_exec.zones[zi].active && !autotune_engine_is_active_on_zone(zi)) {
+            continue;
+        }
+        uint8_t zm = 0;
+        if (!zones_config_get_relay_mask(zi, &zm)) {
+            return; /* cannot attribute ownership: write nothing this cycle */
+        }
+        owned |= zm;
+    }
+    owned |= s_exec.aux_claim_mask;
+    owned |= exec_io_segment_relay_mask();
+    mask &= (uint8_t)~owned;
+    for (uint8_t b = 0; b < 8; b++) {
+        if (!(mask & (1u << b))) continue;
+        relay_owner_t o = relay_authority_get_owner((uint8_t)(b + 1u));
+        if (o != RELAY_OWNER_NONE && o != RELAY_OWNER_PROFILE) {
+            mask &= (uint8_t)~(1u << b);
+            s_exec.zone_off_pending_mask &= (uint8_t)~(1u << b);
+        }
+    }
+    if (mask == 0) {
+        return;
+    }
+    esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+    if (off_err == ESP_OK) {
+        relay_off_tracker_note_write(mask, 0);
+        s_exec.zone_off_pending_mask &= (uint8_t)~mask;
+    } else {
+        ESP_LOGE(PE_TAG, "pending relay OFF retry during run (mask 0x%02X) failed: %s -- will retry",
+                 (unsigned)mask, esp_err_to_name(off_err));
+    }
+}
+
 /* Must be called with s_exec.lock held. */
 void force_all_relays_off(void)
 {
     if (s_exec.state == PROFILE_EXEC_IDLE) {
         return; /* nothing loaded -- nothing to turn off */
     }
+    bool terminal = (s_exec.state == PROFILE_EXEC_DONE || s_exec.state == PROFILE_EXEC_FAULTED);
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if (s_exec.zones[zi].active) {
-            force_zone_relay_off(zi);
+        if (!s_exec.zones[zi].active) {
+            continue;
         }
+        uint8_t zmask = 0;
+        if (terminal && s_exec.io && zones_config_get_relay_mask(zi, &zmask)) {
+            /* Firing-path audit MED-3 (the F4 filter of zone_off_pending_retry()): once the
+             * run has ended and released its claim, a relay held by another owner (autotune,
+             * manual, rule) is not ours to write OFF every tick. */
+            uint8_t m = zmask;
+            for (uint8_t b = 0; b < 8; b++) {
+                if (!(zmask & (1u << b))) continue;
+                relay_owner_t o = relay_authority_get_owner((uint8_t)(b + 1u));
+                if (o != RELAY_OWNER_NONE && o != RELAY_OWNER_PROFILE) {
+                    m &= (uint8_t)~(1u << b);
+                }
+            }
+            if (m != zmask) {
+                heater_output_force_off(&s_exec.zones[zi].heater_state);
+                s_exec.zones[zi].relay_commanded_on = false;
+                s_exec.zones[zi].duty = 0.0f;
+                if (m != 0) {
+                    esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(m, 0);
+                    if (off_err == ESP_OK) {
+                        relay_off_tracker_note_write(m, 0);
+                    } else {
+                        s_exec.zone_off_pending_mask |= m;
+                    }
+                }
+                continue;
+            }
+        }
+        force_zone_relay_off(zi);
     }
 }
 
@@ -480,6 +672,69 @@ void force_all_relays_off(void)
  * Must be called with s_exec.lock held. */
 bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 {
+    return aux_apply_relay_pico(aux_idx, want_on, false);
+}
+
+/* F5HOLDERFX2 LOW-3: as aux_apply_relay(), refusing an ON while the tick's Pico report says TRIPPED. */
+/* SAFETYFX7 LOW-1: a DIAG that is stale (or was not received since the Pico's last reboot) cannot show a trip
+ * that happened after it, so it must not PERMIT a new switch-ON. Used by the ON gates ONLY: never by an OFF,
+ * fault, drop or abort path (a DIAG gap must not drop an output that is already on or abort a run). No
+ * safety link bound (host/sim) means nothing to gate on. An unreadable status counts as not fresh. */
+/* SAFETYFX8 I-2: the stale-DIAG warnings log once per stale episode; a fresh read (or no link) re-arms them. */
+static uint8_t s_stale_logged_aux_mask;
+static uint16_t s_stale_logged_seg_mask; /* SAFETYFX10 I-3: one bit per segment (PROFILE_MAX_SEGMENTS <= 16) */
+
+/* SAFETYFX10 I-3: true exactly once per stale episode per aux / per segment (the caller logs on true). */
+static bool stale_log_once_aux(uint8_t mask)
+{
+    if (s_stale_logged_aux_mask & mask) {
+        return false;
+    }
+    s_stale_logged_aux_mask |= mask;
+    return true;
+}
+
+static bool stale_log_once_seg(uint8_t idx)
+{
+    uint16_t bit = (uint16_t)(1u << idx);
+    if (s_stale_logged_seg_mask & bit) {
+        return false;
+    }
+    s_stale_logged_seg_mask |= bit;
+    return true;
+}
+
+/* SAFETYFX10 I-3: a new run starts with every stale-DIAG warning re-armed. */
+void profile_executor_stale_log_reset(void)
+{
+    s_stale_logged_aux_mask = 0;
+    s_stale_logged_seg_mask = 0;
+}
+
+static bool pico_diag_stale_for_on(void)
+{
+    /* SAFETYFX8 I-1: NULL means "no link bound" -- host/sim, or on a target the safety link failed to start
+     * (main_control_bringup.c). The latter is safe ONLY because every ON path calls relay_authority_on_blocked(NULL),
+     * which blocks every ON, BEFORE this check: do not move this check ahead of that one. */
+    if (!s_exec.safety) {
+        s_stale_logged_aux_mask = 0;
+        s_stale_logged_seg_mask = 0;
+        return false;
+    }
+    safety_link_status_t st;
+    if (safety_link_get_status(s_exec.safety, &st) != ESP_OK) {
+        return true;
+    }
+    bool stale = !relay_authority_pico_diag_fresh(&st);
+    if (!stale) {
+        s_stale_logged_aux_mask = 0;
+        s_stale_logged_seg_mask = 0;
+    }
+    return stale;
+}
+
+bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped)
+{
     if (aux_idx >= AUX_OUTPUTS_COUNT) {
         return false;
     }
@@ -488,16 +743,24 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
      * reasoning as apply_relay(): a failed OFF write must stay nameable. */
     s_exec.claimed_relay_mask |= mask;
 
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E */
     uint32_t sources = 0;
-    if (want_on && relay_authority_on_blocked(s_exec.safety, &sources)) {
+    if (want_on && (pico_tripped || relay_authority_on_blocked(s_exec.safety, &sources))) {
         ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X", (unsigned)aux_idx + 1u,
                  (unsigned)sources);
+        want_on = false;
+    }
+    /* SAFETYFX7 LOW-1: a stale DIAG refuses a NEW ON only; an aux already on is held (no drop on a DIAG gap). */
+    if (want_on && !s_exec.aux[aux_idx].commanded_on && pico_diag_stale_for_on()) {
+        if (stale_log_once_aux(mask)) {
+            ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT PICO DIAG IS STALE -- not switched on", (unsigned)aux_idx + 1u);
+        }
         want_on = false;
     }
     static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
     bool write_ok = true; /* no io bound (host/sim) counts as ok: nothing can fail */
     if (s_exec.io) {
-        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(mask, want_on ? mask : 0, off_epoch_since);
         if (err != ESP_OK) {
             write_ok = false;
             if (!(s_write_fail_logged_mask & mask)) {
@@ -585,7 +848,7 @@ void force_aux_relays_off(void)
 
 /* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2. Called every executor
  * tick while NOT RUNNING, with s_exec.lock held. When a safety fault is
- * asserted (relay_authority_on_blocked(), or a fresh Pico TRIPPED report passed
+ * asserted (relay_authority_on_blocked(), or a cached Pico TRIPPED report (any age) passed
  * in as pico_tripped), every aux output that is on is driven OFF:
  *  - PAUSED (F1): a pause otherwise holds the last commanded aux state; that
  *    hold only lasts while nothing is faulted. Goes through aux_apply_relay()
@@ -788,12 +1051,20 @@ on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const 
  * reach it, which is what makes a pause hold the last aux state. */
 void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap)
 {
+    profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, cap, false);
+}
+
+/* F5HOLDERFX2 LOW-3: pico_tripped (the tick's cached Pico TRIPPED report, any age) is treated like an authority block
+ * for every ON; OFF is never gated. */
+void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap,
+                                    bool pico_tripped)
+{
     if (s_exec.aux_claim_mask == 0) {
         return;
     }
     uint8_t enabled_now = aux_outputs_cfg_enabled_mask();
     uint32_t sources = 0;
-    bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources);
+    bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources) || pico_tripped;
 
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         uint8_t bit = (uint8_t)(1u << i);
@@ -804,7 +1075,11 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             /* Disabled (or conflicted) after the run started: stop driving
              * it, and open it once if we had it closed. */
             if (s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) {
-                aux_apply_relay(i, false);
+                if (!aux_apply_relay(i, false)) {
+                    /* Firing-path audit LOW-2: keep the commanded/actuated state so the
+                     * next tick retries the OFF instead of forgetting a closed relay. */
+                    continue;
+                }
             }
             profile_executor_aux_reset_runtime(i);
             continue;
@@ -816,7 +1091,12 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             ax.tc_zone = AUX_TC_ZONE_NONE;
         }
         bool bypass_hold = false;
-        on_off_trigger_input_t oin = profile_executor_aux_on_off_input(i, &ax, cfg_ok, authority_blocked,
+        /* SAFETYFX8 LOW-2: a stale DIAG will refuse this aux's NEW ON inside aux_apply_relay_pico(); feed it into the
+         * trigger as a block now so actuated_on/held_s/min_on follow the real (OFF) state and rule_reason says why.
+         * An aux already on is never blocked by staleness (held). */
+        bool stale_hold = !s_exec.aux[i].commanded_on && pico_diag_stale_for_on();
+        bool blocked_i = authority_blocked || stale_hold;
+        on_off_trigger_input_t oin = profile_executor_aux_on_off_input(i, &ax, cfg_ok, blocked_i,
                                                                        stretched_this_tick, dt_s, &bypass_hold);
         bool failsafe = oin.failsafe_override;
         on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(
@@ -833,7 +1113,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
          * the cap, then (aux only) an unevaluable input, then no rule. */
         if (r.actuated_on) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
-        } else if (authority_blocked) {
+        } else if (blocked_i) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
         } else if (r.cap_denied) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
@@ -844,7 +1124,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
         } else {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
         }
-        aux_apply_relay(i, r.actuated_on);
+        aux_apply_relay_pico(i, r.actuated_on, pico_tripped);
         if (s_exec.aux[i].commanded_on && dt_s > 0.0f) s_exec.aux[i].on_time_s += dt_s;
     }
 }
@@ -939,6 +1219,17 @@ bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
     return false;
 }
 
+/* F5HOLDERFX MED-1: drop the pending gated-ON request of every other active segment on `target`. */
+static void io_segs_clear_wants_on_others(uint8_t except_idx, uint8_t target)
+{
+    for (uint8_t j = 0; j < PROFILE_MAX_SEGMENTS; j++) {
+        io_seg_runtime_t *o = &s_exec.io_segs[j];
+        if (j != except_idx && o->active && o->is_relay && o->target == target) {
+            o->wants_on = false;
+        }
+    }
+}
+
 /* Applies segment `idx`'s command once and starts tracking it. Called the
  * first tick segment_index reaches a RELAY_IO segment (see the
  * segment-stepping block) -- never re-applied on later ticks while the same
@@ -947,14 +1238,39 @@ bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
  * ownership claim below exists to prevent for the blocking/relay case. */
 void io_seg_start(uint8_t idx, const profile_segment_t *seg)
 {
+    io_seg_start_pico(idx, seg, false);
+}
+
+/* F5HOLDERFX2 LOW-3: as io_seg_start(), refusing an ON while the tick's fresh Pico report says TRIPPED. */
+void io_seg_start_pico(uint8_t idx, const profile_segment_t *seg, bool pico_tripped)
+{
+    io_seg_start_since_pico(idx, seg, kiln_io_relay_off_epoch(), pico_tripped); /* LOW-E: before the start decision */
+}
+
+/* As io_seg_start(), with the all-off epoch sampled by the caller before its own gate decision. */
+void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since)
+{
+    /* Warm-replay start (profile_executor_run.c) has no tick Pico report; it is gated by
+     * relay_authority_start_blocked() just before, which (F5HOLDERFX3 LOW-1) refuses a fresh Pico TRIPPED. */
+    io_seg_start_since_pico(idx, seg, off_epoch_since, false);
+}
+
+void io_seg_start_since_pico(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since, bool pico_tripped)
+{
     io_seg_runtime_t *r = &s_exec.io_segs[idx];
     memset(r, 0, sizeof(*r));
     r->active = true;
     r->is_relay = (seg->io_target >= PROFILE_IO_TARGET_RELAY_BASE) &&
                   (seg->io_target < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
+    if (r->is_relay) {
+        /* F5HOLDERFX MED-1: newest request wins -- an earlier still-active segment on this relay must
+         * not retry its gate-dropped ON over this segment's command (non-blocking segments, warm replay). */
+        io_segs_clear_wants_on_others(idx, seg->io_target);
+    }
     r->target = seg->io_target;
     r->blocking = seg->io_blocking != 0;
     r->state_on = seg->io_state != 0;
+    r->wants_on = r->state_on;
     r->leave_on_at_end = seg->io_leave_on_at_end != 0;
     r->remaining_s = (float)(seg->dwell_min * 60u);
 
@@ -965,11 +1281,36 @@ void io_seg_start(uint8_t idx, const profile_segment_t *seg)
          * below can always account for it even if the write itself fails. */
         s_exec.claimed_relay_mask |= bit;
         relay_authority_claim_mask(bit, RELAY_OWNER_PROFILE);
+        /* Review EXECTEST INFO-1: a relay_authority source (safety link down, PC link, APP latch...)
+         * can rise mid-run WITHOUT faulting the executor (the watchdog aborts only after sustained
+         * silence), and this write is AUTHORIZED (ungated by the owner). Gate the ON here the way
+         * apply_relay()/aux_apply_relay() do: drive OFF instead, and say so. Retried each tick by
+         * io_segs_retry_on() through the same gate (plus a fresh Pico TRIPPED refusal), never ungated. */
+        bool drive_on = r->state_on;
+        uint32_t blocked_sources = 0;
+        if (drive_on && (pico_tripped || relay_authority_on_blocked(s_exec.safety, &blocked_sources))) {
+            ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X -- commanded OFF",
+                     idx + 1, r->target, (unsigned)blocked_sources);
+            drive_on = false;
+            r->state_on = false; /* F5HOLDER LOW-4: physical truth; wants_on keeps the request for the gated retry */
+        } else if (drive_on && pico_diag_stale_for_on()) {
+            /* SAFETYFX7 LOW-1: stale DIAG refuses the ON; wants_on keeps it for the retry once DIAG is fresh. */
+            if (stale_log_once_seg(idx)) {
+                ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT PICO DIAG IS STALE -- commanded OFF",
+                         idx + 1, r->target);
+            }
+            drive_on = false;
+            r->state_on = false;
+        }
         if (s_exec.io) {
-            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, r->state_on ? bit : 0);
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(bit, drive_on ? bit : 0, off_epoch_since);
             if (err != ESP_OK) {
                 ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
                          idx + 1, r->target, esp_err_to_name(err));
+            } else {
+                /* Review LOW-1: a successful write supersedes an earlier failed OFF recorded by io_seg_finish();
+                 * left set, zone_off_pending_retry() would later turn a leave_on_at_end relay OFF. */
+                s_exec.zone_off_pending_mask &= (uint8_t)~bit;
             }
         }
     } else if (s_exec.io) {
@@ -979,9 +1320,9 @@ void io_seg_start(uint8_t idx, const profile_segment_t *seg)
                      idx + 1, r->target - PROFILE_IO_TARGET_IO_BASE + 1u, esp_err_to_name(err));
         }
     }
-    ESP_LOGI(PE_TAG, "relay/IO segment %u: %s %u %s (%s, %lus hold)", idx + 1,
+    ESP_LOGI(PE_TAG, "relay/IO segment %u: %s %u %s%s (%s, %lus hold)", idx + 1,
              r->is_relay ? "relay" : "IO_", r->is_relay ? r->target : (uint8_t)(r->target - PROFILE_IO_TARGET_IO_BASE + 1u),
-             r->state_on ? "ON" : "OFF", r->blocking ? "blocking" : "non-blocking",
+             r->state_on ? "ON" : "OFF", (r->wants_on && !r->state_on) ? " (ON dropped by gate, will retry)" : "", r->blocking ? "blocking" : "non-blocking",
              (unsigned long)seg->dwell_min * 60u);
 }
 
@@ -1014,12 +1355,20 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
 
     if (r->is_relay) {
         uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        if (leave_on) {
+            /* Review LOW-1: the owner's explicit leave-ON wins over any stale pending OFF. */
+            s_exec.zone_off_pending_mask &= (uint8_t)~bit;
+        }
         if (!leave_on && s_exec.io) {
             esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
             if (err != ESP_OK) {
                 ESP_LOGE(PE_TAG, "relay/IO segment %u: force-off of relay %u failed: %s -- sweep_unowned_relays() "
                               "will keep retrying",
                          idx + 1, r->target, esp_err_to_name(err));
+                /* Firing-path audit MED-1: record the failed OFF so zone_off_pending_retry()
+                 * (every non-RUNNING tick) and zone_off_pending_retry_running() keep
+                 * retrying it after the claim below is dropped. */
+                s_exec.zone_off_pending_mask |= bit;
             }
         }
         /* Either way this run is done naming this bit: on the off path
@@ -1032,6 +1381,8 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
          * if no profile had ever touched it. */
         s_exec.claimed_relay_mask &= (uint8_t)~bit;
         relay_authority_release_mask(bit);
+        /* F5HOLDERFX MED-1: this bit was just released/forced OFF; no other segment may retry it ON unowned. */
+        io_segs_clear_wants_on_others(idx, r->target);
     } else if (!leave_on && s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_io(r->target - PROFILE_IO_TARGET_IO_BASE + 1u, false);
         if (err != ESP_OK) {
@@ -1078,6 +1429,34 @@ void io_segs_tick(float dt_s)
         r->remaining_s -= dt_s;
         if (r->remaining_s <= 0.0f) {
             io_seg_finish(i, false);
+        }
+    }
+}
+
+/* F5HOLDER LOW-4 / F5HOLDERFX2 LOW-1: retry gate-dropped relay ONs. Called once per RUNNING tick as the LAST
+ * relay-writing step of the RUNNING body (after segment stepping, zone loop, thermal guards, aux tick and the
+ * mode-state check), so a guard trip that tick never leaves an ON write after it. Refuses
+ * while the authority gate is blocked OR a cached Pico TRIPPED report (any age) is pending (fail-safe). s_exec.lock held. */
+void io_segs_retry_on(bool pico_tripped)
+{
+    if (!s_exec.io || pico_tripped) {
+        return;
+    }
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (!(r->active && r->is_relay && r->wants_on && !r->state_on)) {
+            continue;
+        }
+        const uint32_t off_epoch_since = kiln_io_relay_off_epoch();
+        uint32_t blocked_sources = 0;
+        if (relay_authority_on_blocked(s_exec.safety, &blocked_sources) || pico_diag_stale_for_on()) {
+            continue;
+        }
+        uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        if (kiln_io_owner_command_set_relay_mask_authorized_since(bit, bit, off_epoch_since) == ESP_OK) {
+            r->state_on = true;
+            s_exec.zone_off_pending_mask &= (uint8_t)~bit;
+            ESP_LOGI(PE_TAG, "relay/IO segment %u: relay %u ON applied after the authority block cleared", i + 1, r->target);
         }
     }
 }
@@ -1236,7 +1615,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         return true;
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1's "Executor watchdog inputs" row:
+    /* docs/ON_OFF_ZONE.md sec 1's "Executor watchdog inputs" row:
      * PROFILE_EXEC_FAULTED fires when every active HEATER zone is faulted,
      * regardless of on/off zone state -- an on/off zone (a vent, a fan) is
      * not a heat source, so a run whose only unfaulted zone is one of these
@@ -1298,12 +1677,19 @@ void guard9_assert_stale_tick_fault(void)
 /* Must be called with s_exec.lock held. */
 void clear_this_runs_faults(void)
 {
-    if (s_exec.global_fault_source != 0 && s_exec.safety) {
-        esp_err_t err = safety_link_set_fault_source(s_exec.safety, s_exec.global_fault_source, false);
+    /* K7 review F5: APP is shared. A live relay-unknown hold or a foreign (boot safe-state) holder
+     * keeps the link bit; only this run's own claim on it is forgotten (global_fault_source below). */
+    uint32_t release_mask = s_exec.global_fault_source;
+    if (pe_app_owner_relay_unknown() || pe_app_owner_foreign || pe_app_guard9_pending()) {
+        release_mask &= ~(uint32_t)SAFETY_FAULT_SRC_APP;
+    }
+    if (release_mask != 0 && s_exec.safety) {
+        esp_err_t err = safety_link_set_fault_source(s_exec.safety, release_mask, false);
         if (err != ESP_OK) {
-            ESP_LOGE(PE_TAG, "clearing fault source 0x%02X failed: %s", (unsigned)s_exec.global_fault_source,
+            ESP_LOGE(PE_TAG, "clearing fault source 0x%02X failed: %s", (unsigned)release_mask,
                      esp_err_to_name(err));
         }
+        if ((release_mask & SAFETY_FAULT_SRC_APP) != 0u) pe_app_release_recheck(s_exec.safety); /* F5HOLDER LOW-2 */
     }
     s_exec.global_fault_source = 0;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -1340,6 +1726,9 @@ void force_relay_mask_off(uint8_t zi, uint8_t mask)
             ESP_LOGE(PE_TAG, "zone %u: dropping superseded relay mask 0x%02X failed: %s -- "
                           "those contacts may still be closed and nothing owns them now",
                      zi, mask, esp_err_to_name(err));
+            /* Firing-path audit LOW-4: the sweep only runs while RUNNING; the pending
+             * mask is retried in every state. */
+            s_exec.zone_off_pending_mask |= mask;
         }
     }
     sim_backend_note_zone_relay(zi, false);

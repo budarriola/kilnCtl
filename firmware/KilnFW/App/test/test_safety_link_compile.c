@@ -62,6 +62,7 @@
 
 #include "test_common.h"
 #include "fake_gpio.h" /* fault-hold tests read the physical fault pin level */
+#include "fake_sysinfo.h" /* scripted hal_sysinfo_random_u32() for the test-trip request_id seed */
 #include "fake_time.h" /* hal_time.h's host fake -- safety_link_inbox.c's safety_exchange() now
                         * calls hal_time_now_us() for link_reply_us (HW_ABSTRACTION.md "Still
                         * open") -- see fake_time.c already linked into this executable's build
@@ -410,6 +411,8 @@ static uart_proto_message_t s_stub_broadcast_leading_msg;
 static unsigned s_stub_broadcast_count = 0;
 static uint8_t s_stub_broadcast_cmd[STUB_BROADCAST_LOG_MAX];
 static uint8_t s_stub_broadcast_last_payload[64];
+static bool s_stub_patch_request_id;
+static uint8_t s_stub_request_id_delta;
 static size_t s_stub_broadcast_last_len = 0;
 esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device_t dst_device,
                                         uint8_t dst_task, uint8_t src_task,
@@ -436,6 +439,10 @@ esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device
       s_fake_inbox_auto_push_armed = true;
   }
   if (s_stub_broadcast_reply_push) {
+      if (s_stub_patch_request_id && length == KILNLINK_TEST_TRIP_LEN) {
+          /* TEST_TRIP_RESULT reply: byte1 = the request_id just sent (+ delta). */
+          s_stub_broadcast_reply_msg.payload[1] = (uint8_t)(payload[2] + s_stub_request_id_delta);
+      }
       fake_time_advance_us(s_stub_broadcast_advance_us);
       fake_inbox_push(&s_stub_broadcast_reply_msg);
   }
@@ -544,7 +551,7 @@ static void set_status_frame(uint8_t *p, uint8_t flags, float tc_c, float cj_c,
 // zeroed (harmless -- safety_apply_diag() doesn't gate on them).
 static void set_diag_frame(uint8_t *p, uint8_t trip_reason, uint8_t state)
 {
-    memset(p, 0, SAFETY_LINK_DIAG_FRAME_LEN);
+    memset(p, 0, SAFETY_LINK_DIAG_FRAME_LEN_V2);
     p[0] = SAFETY_CMD_DIAG;
     p[1] = trip_reason;
     p[24] = state;
@@ -568,6 +575,7 @@ static void test_apply_status_accepts_v1_and_v2_lengths(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
     msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
@@ -635,6 +643,7 @@ static void test_apply_power_accepts_v1_and_v2_lengths_and_gates_counts_on_flag(
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (55-byte) frame from a legacy Pico: no bytes 55..60 exist at all.
     // power_calibrated bit set, COUNTS_VALID bit clear (a real legacy peer
@@ -693,6 +702,7 @@ static void test_apply_status_v3_borrowed(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (23 bytes): no byte 24/25 at all -- must read as borrowed_known ==
     // false, the "not yet known" state, never a confident "not borrowed".
@@ -749,6 +759,7 @@ static void test_apply_status_v3_tc_config_reasserted(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (23 bytes): no byte 24/25 at all -- must read as
     // tc_config_reasserted_known == false, never a confident "not
@@ -810,7 +821,7 @@ static void test_apply_status_v3_tc_config_reasserted(void)
 static void test_apply_status_v3_active_slot(void)
 {
     TEST_SECTION("safety_apply_status -- V3 (26B) ACTIVE_SLOT_KNOWN/ACTIVE_SLOT_B flags2 bits 3/4 "
-                 "(2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64): absent-byte contract reads as "
+                 "(2026-09-23, docs/PICO_AUTO_UPDATE.md:64): absent-byte contract reads as "
                  "UNKNOWN, present byte decodes A/B correctly and is independent of bits 0/1/2, and "
                  "a V3->V1 regression clears the stale known-flag");
 
@@ -827,6 +838,7 @@ static void test_apply_status_v3_active_slot(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (23 bytes): no byte 24/25 at all -- must read as
     // pico_active_slot_known == false, never a confident slot A.
@@ -933,6 +945,7 @@ static void test_apply_status_temp_valid_flag_is_sole_authority(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
 
     // Flag SET: a live-looking reading passes through untouched.
@@ -960,6 +973,7 @@ static void test_apply_status_ignores_peer_link_up_and_fault_bits(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
 
     // A peer that (incorrectly) sets both LINK_UP and FAULT alongside a
@@ -1041,6 +1055,7 @@ static void test_fw_version_known_and_dirty_roundtrips(void)
     link.initialized = true; // safety_link_get_peer_build_status() refuses ESP_ERR_INVALID_STATE otherwise
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     const uint8_t commit_in[8] = "abcd123"; // 7 chars + NUL, but only commit_len (7) is meaningful
     const uint8_t datetime_in[5] = "12:00";
@@ -1090,6 +1105,7 @@ static void test_k4_edge_counting_off_on_on_off_counts_two(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     send_status_with_relay_bit(&link, &msg, false); // off
     TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0, "off -> off (relative to the unknown start) is not an edge");
@@ -1115,6 +1131,7 @@ static void test_k4_edge_counting_first_frame_counts_zero(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // First observation reads K4 ON. If the tracked "previous" state
     // defaulted to false/off instead of genuinely unknown, this would be
@@ -1124,6 +1141,25 @@ static void test_k4_edge_counting_first_frame_counts_zero(void)
                "first-ever frame resyncs silently, counting zero edges even though K4 reads ON");
     TEST_CHECK(link.safety_relay_state_known == true, "state is now known, for the NEXT frame to compare against");
     TEST_CHECK(link.safety_relay_state == true, "and it correctly remembers ON");
+}
+
+static void test_pico_boot_id_change_logs_once(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- a boot_id change logs old and new boot_id exactly once");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/7, 0, 0);
+    safety_apply_fw_version(&link, &fw_msg);
+    esp_log_test_capture_reset();
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/9, 0, 0);
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(esp_log_test_capture_contains("boot_id 7 -> 9"), "reboot logs old and new boot_id");
+    TEST_CHECK(g_esp_log_capture_count == 1, "exactly one log line for the change");
+    esp_log_test_capture_reset();
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(g_esp_log_capture_count == 0, "repeat of the same boot_id logs nothing");
 }
 
 static void test_k4_edge_counting_boot_id_change_counts_zero(void)
@@ -1138,6 +1174,7 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // Establish a known state: K4 OFF.
     send_status_with_relay_bit(&link, &msg, false);
@@ -1147,6 +1184,7 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
     // The Pico reboots -- a FW_VERSION frame with a NEW boot_id arrives.
     uart_proto_message_t fw_msg;
     memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
                                           /*config_version=*/0, /*config_crc=*/0);
     safety_apply_fw_version(&link, &fw_msg);
@@ -1181,6 +1219,157 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
                "immediately-prior remembered state (on)");
 }
 
+// kilnlink audit 2026-10-09 M1: the 8-bit boot_id repeats 1 boot in 256, so
+// a Pico reboot must ALSO be caught by its DIAG uptime_ms stepping backwards.
+static void apply_diag_uptime_rx(SafetyLinkClass *link, uint32_t uptime_ms, uint32_t rx_ms)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    msg.rx_ms = rx_ms; /* REBOOTFX3 LOW-2: receive-time stamp, independent of the (fake) drain tick */
+    set_diag_frame(msg.payload, 0u, 0u);
+    safety_put_u32_le(&msg.payload[6], uptime_ms);
+    msg.length = SAFETY_LINK_DIAG_FRAME_LEN;
+    TEST_CHECK(safety_apply_diag(link, &msg) == true, "DIAG frame applied");
+}
+
+static void apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms)
+{
+    apply_diag_uptime_rx(link, uptime_ms, (uint32_t)s_fake_tick_count);
+}
+
+// REBOOTFX3 LOW-2 / INFO-1: elapsed comes from the UART receive stamp, not the drain tick.
+static void test_pico_uptime_uses_receive_time_not_drain_time(void)
+{
+    TEST_SECTION("safety_apply_diag -- baseline DIAG drained late but received on time is not a reboot "
+                 "across the Pico's 2^32 wrap (REBOOTFX3 INFO-1)");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TickType_t saved_tick = s_fake_tick_count;
+
+    // Baseline: Pico uptime 1 s before its wrap, received at t=1000 but drained 2.5 s late (t=3500).
+    s_fake_tick_count = 3500u;
+    apply_diag_uptime_rx(&link, UINT32_MAX - 999u, 1000u);
+    // Current DIAG: 5 s after the baseline reception, Pico on schedule (wrapped to 4000), drained at t=6000.
+    s_fake_tick_count = 6000u;
+    apply_diag_uptime_rx(&link, 4000u, 6000u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u,
+               "late-drained baseline, on-time receive: Pico wrap is not a reboot");
+
+    // A real reboot is still caught by receive-time elapsed.
+    s_fake_tick_count = 7000u;
+    apply_diag_uptime_rx(&link, 100u, 7000u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "real reboot still counted with receive stamps");
+    s_fake_tick_count = saved_tick;
+}
+
+static void test_pico_reboot_detected_by_uptime_regression(void)
+{
+    TEST_SECTION("safety_apply_diag -- a DIAG uptime_ms regression is a Pico reboot even when "
+                 "the 8-bit boot_id repeats (kilnlink audit 2026-10-09 M1)");
+
+    TEST_CHECK(safety_pico_uptime_behind_expected(600000u, 0u, 1500u), "backwards step regresses");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 5000u), "equal (duplicate frame) does not");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 6000u), "forward step does not");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 4000u), "small step back inside the 2 s tolerance does not");
+    TEST_CHECK(safety_pico_uptime_behind_expected(5000u, 1000u, 2999u), "step back past the tolerance is a reboot");
+    // REBOOTFX2 LOW-3: a drain delay / frozen DIAG has a large now_ms (above elapsed + tol): not a reboot.
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 1000u, 600000u - 3500u),
+               "LOW-3: frozen uptime far above the elapsed time is not a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 0u, 590000u),
+               "LOW-3: late-drained DIAG (uptime well above elapsed) is not a reboot");
+    // LOW-1: a long outage on a Pico that kept running is on schedule; a repeat-id reboot whose new uptime
+    // already passed the OLD baseline is still behind the EXPECTED uptime.
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 300000u, 900100u), "kept running over a long outage: not a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(20000u, 300000u, 100000u),
+               "LOW-1: new uptime (100 s) passed the old baseline (20 s) but is behind baseline+elapsed (320 s)");
+    // LOW-2: the 49.7-day wrap, with the outage straddling it by more than the old 120 s band.
+    TEST_CHECK(!safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 300000u - 1u),
+               "LOW-2: outage spanning the wrap (-600 s .. +300 s) is not a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 1500u),
+               "a reboot across the wrap is still caught");
+    // OLDPOOLA LOW/MED-2: 31-day baseline (> 2^31 ms) then reboot to a small uptime is still caught.
+    TEST_CHECK(safety_pico_uptime_behind_expected(0xA0000000u, 100000u, 500u),
+               "LOW/MED-2: reboot from a 31-day baseline is caught");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(0xA0000000u, 100000u, 0xA0000000u + 100000u + 50u),
+               "LOW/MED-2: on-schedule 31-day baseline is not a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(1000u, 0u, 500u),
+               "small step back inside tolerance on a young Pico is not a reboot");
+    // REBOOTFX3 INFO-2: continuity-window boundaries (kills back<tol, dropped 200 ppm term, fwd<tol).
+    TEST_CHECK(!safety_pico_uptime_behind_expected(2000u, 0u, 0u), "INFO-2: back == tol is not a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(0u, 1000000u, 1000000u - 2100u),
+               "INFO-2: tol includes the 200 ppm term (2200 at 1000 s)");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(UINT32_MAX - 999u, 1000u, 2000u),
+               "INFO-2: fwd == tol across the wrap is not a reboot");
+    // INFO-4: bound boundary (tol = 2000 at elapsed 1000).
+    TEST_CHECK(safety_pico_uptime_behind_expected(600000u, 1000u, 1000u + 2000u),
+               "INFO-4: now == elapsed + tol is a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 1000u, 1000u + 2000u + 1u),
+               "INFO-4: now == elapsed + tol + 1 is not a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(1000u, 0x90000000u, 1000u + 0x90000000u),
+               "elapsed >= 2^31 ms: modular difference meaningless, in doubt count a reboot");
+
+    s_stub_relay_cycles_safety_edge_calls = 0;
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    link.reannounce_pending = false;
+    // These 30-byte DIAGs would otherwise owe the bounded DIAG-driven re-announce; isolate the uptime path.
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+
+    apply_diag_uptime(&link, 600000u);
+    apply_diag_uptime(&link, 601000u);
+    link.cached.trip_event_ever_received = true;
+    link.cached.trip_last_seq = 3u;
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    send_status_with_relay_bit(&link, &msg, true);
+    TEST_CHECK(link.safety_relay_state_known == true, "setup: relay baseline known");
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u, "rising uptime is not a reboot");
+    TEST_CHECK(link.reannounce_pending == false, "rising uptime owes no re-announce");
+
+    // The Pico reboots and draws the SAME boot_id 42: FW_VERSION alone sees no change.
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(link.cached.trip_last_seq == 3u, "same boot_id: FW_VERSION path alone resets nothing");
+    apply_diag_uptime(&link, 1500u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "uptime regression counted as a reboot");
+    TEST_CHECK(link.cached.trip_last_seq == 0u && link.cached.trip_event_ever_received == false,
+               "trip_seq dedup forgotten (the new boot restarts trip_seq at 0)");
+    TEST_CHECK(link.safety_relay_state_known == false, "relay-edge baseline forgotten");
+    TEST_CHECK(link.reannounce_pending == true, "ANNOUNCE_VERSION re-burst owed to the new boot");
+
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    apply_diag_uptime(&link, 2500u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u && link.reannounce_pending == false,
+               "the new boot's rising uptime is not a second reboot");
+
+    // The FW_VERSION of the rebooted boot (same id 42) arrived: the uptime-noted flag is consumed.
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    // A boot_id change clears the baseline, so the first DIAG of that boot never
+    // double-counts against the previous boot's uptime.
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/43,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(link.pico_uptime_baseline_known == false, "boot_id change clears the uptime baseline");
+    apply_diag_uptime(&link, 900u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "first DIAG after a boot_id change seeds, not counts");
+}
+
 static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown(void)
 {
     TEST_SECTION("safety_apply_fw_version -- a frame from a peer built BEFORE the "
@@ -1196,6 +1385,7 @@ static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unkno
     link.initialized = true;
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // A pre-min_compatible ANNOUNCE/FW_VERSION frame carried only cmd(1) +
     // protocol(2) = 3 bytes total -- one short of the 5 needed to reach
@@ -1223,6 +1413,7 @@ static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unkno
     link2.initialized = true;
     uart_proto_message_t msg2;
     memset(&msg2, 0, sizeof(msg2));
+    msg2.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg2.payload[0] = 0x0B;
     msg2.payload[1] = 5; msg2.payload[2] = 0; // protocol_version = 5
     msg2.payload[3] = 3; msg2.payload[4] = 0; // min_compatible = 3
@@ -1248,6 +1439,7 @@ static void test_fw_version_max_length_commit_and_datetime_no_truncation(void)
     link.initialized = true; // safety_link_get_peer_build_status() refuses ESP_ERR_INVALID_STATE otherwise
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // Deliberately no zero byte anywhere in either buffer -- a reader that
     // treated this as a C string would run off the end looking for a NUL
@@ -1286,6 +1478,7 @@ static void test_fw_version_oversized_commit_len_is_capped(void)
     link.initialized = true; // safety_link_get_peer_build_status() refuses ESP_ERR_INVALID_STATE otherwise
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     uint8_t commit_in[100];
     for (int i = 0; i < 100; i++) commit_in[i] = (uint8_t)('X');
@@ -1436,6 +1629,7 @@ static void test_rollback_result_late_frame_is_stashed_not_dropped(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_rollback_result_frame(msg.payload, /*accepted=*/0,
                                              KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID);
 
@@ -1483,6 +1677,7 @@ static void test_rollback_result_frame_is_not_stashed_when_someone_is_waiting(vo
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_rollback_result_frame(msg.payload, /*accepted=*/0, KILNLINK_ROLLBACK_RESULT_REASON_ARMED);
 
     fake_inbox_reset();
@@ -1535,6 +1730,7 @@ static void test_param_frame_5_byte_found_zero_is_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_param_frame(msg.payload, /*param_id=*/0x0505, /*found=*/0,
                                    /*type=*/KILNLINK_PARAM_TYPE_U8, NULL, 0);
     TEST_CHECK(msg.length == KILNLINK_PARAM_HDR_LEN, "a found=0 reply is exactly the header, 5 bytes");
@@ -1569,6 +1765,7 @@ static void test_param_frame_9_byte_found_one_f32_is_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_param_frame(msg.payload, /*param_id=*/0x0102, /*found=*/1,
                                    /*type=*/KILNLINK_PARAM_TYPE_F32, value, sizeof(value));
     TEST_CHECK(msg.length == KILNLINK_PARAM_MAX_LEN, "a found=1/F32 reply is the widest shape, 9 bytes");
@@ -1600,6 +1797,7 @@ static void test_param_frame_4_byte_too_short_is_not_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = KILNLINK_PARAM_HDR_LEN - 1;
     msg.payload[0] = KILNLINK_PARAM_CMD;
 
@@ -1620,6 +1818,7 @@ static void test_param_frame_10_byte_too_long_is_not_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = KILNLINK_PARAM_MAX_LEN + 1;
     msg.payload[0] = KILNLINK_PARAM_CMD;
 
@@ -1897,6 +2096,25 @@ static void test_stale_reset_clears_flags_once_link_is_observed_down(void)
                                          "'known' flag is -- nothing reads it while known is false");
 }
 
+static void test_stale_reset_slow_poll_one_missed_reply_keeps_boot_id(void)
+{
+    TEST_SECTION("safety_reset_stale_peer_info_if_link_down -- review LOW-5: with a 1000 ms poll period one "
+                 "missed reply (age ~1600 ms, inside the 3*P up window) must NOT clear pico_boot_id_known");
+    SafetyLinkClass link = make_link();
+    link.ever_received = true;
+    link.poll_period_ms = 1000u;
+    link.cached_tick = (uint32_t)(0u - 1600u / portTICK_PERIOD_MS); // stub clock is 0: elapsed ~1600 ms
+    link.peer_version_known = true;
+    link.pico_boot_id_known = true;
+    link.peer_build_known = true;
+    TEST_CHECK(safety_age_ms_locked(&link) > 1500u && safety_age_ms_locked(&link) < 1700u, "setup: age ~1600 ms");
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_boot_id_known == true, "slow poll, link up: boot id kept");
+    link.poll_period_ms = 500u;
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_boot_id_known == false, "500 ms poll, same age: link down, cleared");
+}
+
 static void test_stale_reset_never_received_is_also_down(void)
 {
     TEST_SECTION("safety_reset_stale_peer_info_if_link_down -- a link that has NEVER received "
@@ -1928,6 +2146,35 @@ static void test_stale_reset_never_received_is_also_down(void)
 // clearable but actually get re-populated with the NEW peer's identity,
 // which is what lets a subsequent rollback attempt compare against the
 // right baseline instead of a connection that already ended.
+static void test_link_blip_same_boot_id_is_not_a_reboot(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- firing audit MED-4: a link blip (known flag cleared) followed by "
+                 "the SAME boot_id is not a Pico reboot; a changed boot_id is");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    uint8_t commit[3] = {1, 2, 3};
+    uint8_t datetime[2] = {4, 5};
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    msg.length = set_fw_version_frame(msg.payload, false, commit, 3, datetime, 2, 42, 1, 0);
+    safety_apply_fw_version(&link, &msg);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+
+    link.ever_received = true;
+    link.cached_tick = 1; /* wraps to "down" */
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_boot_id_known == false, "setup: blip cleared the known flag");
+    link.cached_tick = 0;
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0,
+               "MUST GO RED if a same-boot_id relink after a blip bumps pico_reboot_seq");
+
+    memset(&msg, 0, sizeof(msg));
+    msg.length = set_fw_version_frame(msg.payload, false, commit, 3, datetime, 2, 43, 1, 0);
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq != seq0, "a changed boot_id is still a reboot");
+}
+
 static void test_stale_reset_then_reapply_recovers_after_reconnect(void)
 {
     TEST_SECTION("safety_reset_stale_peer_info_if_link_down + safety_apply_fw_version -- a lost "
@@ -1955,6 +2202,7 @@ static void test_stale_reset_then_reapply_recovers_after_reconnect(void)
     // applied through the real decode path.
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     uint8_t commit[3] = {1, 2, 3};
     uint8_t datetime[2] = {4, 5};
     msg.length = set_fw_version_frame(msg.payload, /*dirty=*/false, commit, 3, datetime, 2,
@@ -2047,6 +2295,8 @@ static const struct kilnlink_compat_frame s_compat_frames[] = {
      "12->13: new Pico -> ESP frame, SAFETY_CMD_STACK_MARGIN (0x2C), reply to "
      "SAFETY_CMD_GET_STACK_MARGIN (0x2B) -- KILNLINK_MIN_COMPATIBLE NOT raised "
      "alongside this bump, a pre-13 Pico simply never sends 0x2C"},
+    {"TEST_TRIP_RESULT (0x2F)", KILNLINK_TEST_TRIP_RESULT_CMD, 18,
+     "17->18: new Pico -> ESP frame, reply to TEST_TRIP (0x2E); KILNLINK_MIN_COMPATIBLE NOT raised"},
 };
 #define COMPAT_FRAME_COUNT (sizeof(s_compat_frames) / sizeof(s_compat_frames[0]))
 
@@ -2062,6 +2312,7 @@ static bool compat_frame_has_dispatch_case(uint8_t cmd)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.payload[0] = cmd;
     msg.length = 1; // enough to enter the switch; decode success is not what this proves
 
@@ -2777,6 +3028,7 @@ static SafetyLinkClass boot_clear_test_setup(void)
 
     uart_proto_message_t status;
     memset(&status, 0, sizeof(status));
+    status.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
     status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
     TEST_CHECK(safety_apply_status(&link, &status) == true, "status frame primes cached_tick");
@@ -2795,17 +3047,701 @@ static unsigned drive_one_diag_and_service(SafetyLinkClass *link, uint8_t trip_r
 {
     uart_proto_message_t status;
     memset(&status, 0, sizeof(status));
+    status.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
     status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
     safety_apply_status(link, &status);
 
     uart_proto_message_t diag;
     memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(diag.payload, trip_reason, SAFETY_LINK_DIAG_STATE_TRIPPED);
     diag.length = SAFETY_LINK_DIAG_FRAME_LEN;
     TEST_CHECK(safety_apply_diag(link, &diag) == true, "DIAG frame decodes");
     safety_link_service_boot_clear_if_pending(link);
     return s_stub_broadcast_count;
+}
+
+// kilnlink audit 2026-10-09 M4: the 31-byte DIAG carries trip_seq and the
+// ESP echoes it in a 4-byte CLEAR_TRIP; a 30-byte DIAG yields the legacy
+// 3-byte clear; any other length is rejected.
+static void m4_apply_diag(SafetyLinkClass *link, size_t len, uint8_t trip_seq, bool expect_ok)
+{
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    set_diag_frame(diag.payload, SAFETY_LINK_TRIP_REASON_MAIN_FAULT, SAFETY_LINK_DIAG_STATE_TRIPPED);
+    diag.payload[4] = (uint8_t)(1u << (SAFETY_LINK_TRIP_REASON_MAIN_FAULT - 1u)); /* trip_mask LE */
+    diag.payload[5] = 0u;
+    diag.payload[30] = trip_seq;
+    /* A real Pico's uptime advances with wall time; the expected-uptime test compares against the ESP clock. */
+    safety_put_u32_le(&diag.payload[6], 100000u + (uint32_t)s_fake_tick_count);
+    diag.length = (uint16_t)len;
+    TEST_CHECK(safety_apply_diag(link, &diag) == expect_ok,
+               expect_ok ? "M4: DIAG frame of this length decodes"
+                         : "M4: DIAG frame of this length is rejected");
+}
+
+static void test_m4_clear_trip_echoes_diag_trip_seq(void)
+{
+    TEST_SECTION("M4 -- safety_apply_diag accepts 30/31-byte DIAG; send_clear_trip echoes "
+                 "trip_seq (4 bytes) only after a 31-byte DIAG");
+
+    SafetyLinkClass link = boot_clear_test_setup();
+    const uint16_t s6a_mask = (uint16_t)(1u << (SAFETY_LINK_TRIP_REASON_MAIN_FAULT - 1u));
+
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 0x2Bu, true);
+    TEST_CHECK(link.cached.diag_trip_seq_known == true, "31-byte DIAG marks trip_seq known");
+    TEST_CHECK(link.cached.diag_trip_seq == 0x2Bu, "31-byte DIAG caches byte30");
+
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "bound clear sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u, "exactly one frame sent");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2,
+               "after a 31-byte DIAG the clear is the 4-byte bound form");
+    TEST_CHECK(s_stub_broadcast_last_payload[0] == KILNLINK_CLEAR_TRIP_CMD, "cmd byte");
+    TEST_CHECK((uint16_t)(s_stub_broadcast_last_payload[1] |
+                          ((uint16_t)s_stub_broadcast_last_payload[2] << 8)) == s6a_mask,
+               "mask bytes carry the S6a mask");
+    TEST_CHECK(s_stub_broadcast_last_payload[3] == 0x2Bu, "byte3 echoes the DIAG trip_seq");
+
+    // A later 30-byte DIAG (e.g. the Pico rebooted to an older image) must
+    // forget the seq: the next clear is the legacy unbound 3-byte frame.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0x77u, true);
+    TEST_CHECK(link.cached.diag_trip_seq_known == false, "30-byte DIAG forgets trip_seq");
+    base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "legacy clear sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u, "exactly one frame sent");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN,
+               "after a 30-byte DIAG the clear is the 3-byte legacy form");
+
+    // Neither 29 nor 33 bytes is a DIAG; the cache keeps the last good one.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V3 + 1u, 0x11u, false);
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN - 1u, 0x11u, false);
+    TEST_CHECK(link.cached.diag_trip_seq_known == false,
+               "rejected DIAG frames do not touch the cached trip_seq");
+}
+
+// kilnlink review LOW-1/2/4 (2026-10-09 v17 review).
+static void low_fw_version(SafetyLinkClass *link, uint8_t boot_id, uint16_t proto)
+{
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, boot_id,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(link, &fw_msg);
+    link->peer_version_known = true;
+    link->peer_protocol_version = proto;
+}
+
+// REBOOTFX4 LOW-1: an inbox stall must not make one reboot count twice.
+static void test_stalled_inbox_fw_version_does_not_double_count_reboot(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- DIAG rx 20000 + FW_VERSION rx 20100 drained together at 23500 "
+                 "is ONE reboot (REBOOTFX4 LOW-1)");
+    SafetyLinkClass link = make_link();
+    TickType_t saved_tick = s_fake_tick_count;
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    s_fake_tick_count = 10000u;
+    apply_diag_uptime_rx(&link, 600000u, 10000u);
+    apply_diag_uptime_rx(&link, 601000u, 11000u);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    s_fake_tick_count = 23500u; /* both frames drained after a 3.5 s inbox stall */
+    apply_diag_uptime_rx(&link, 1500u, 20000u);
+    uart_proto_message_t fw;
+    memset(&fw, 0, sizeof(fw));
+    fw.rx_ms = 20100u;
+    fw.length = set_fw_version_frame(fw.payload, false, NULL, 0, NULL, 0, /*boot_id=*/43, 0, 0);
+    safety_apply_fw_version(&link, &fw);
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 1u, "FW_VERSION must not double count a stalled-inbox reboot");
+    s_fake_tick_count = saved_tick;
+}
+
+// REBOOTFX4 LOW-2: a DIAG that sat in the inbox reads stale to the freshness gates.
+static void test_diag_frame_age_uses_receive_time(void)
+{
+    TEST_SECTION("safety_link_get_status -- DIAG received 5000 ms before drain fails the 4500 ms freshness gate "
+                 "(REBOOTFX4 LOW-2)");
+    SafetyLinkClass link = make_link();
+    TickType_t saved_tick = s_fake_tick_count;
+    link.initialized = true;
+    s_fake_tick_count = 6000u;
+    apply_diag_uptime_rx(&link, 1000u, 1000u);
+    TEST_CHECK(link.diag_tick == 1000u, "diag_tick is the receive stamp, not the drain time");
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "status read");
+    TEST_CHECK(st.diag_frame_age_ms == 5000u, "age counts from receive");
+    TEST_CHECK(st.diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS, "stalled-inbox DIAG is stale to the freshness gate");
+    // Tick wrap: stamp near 2^32, now just past it.
+    s_fake_tick_count = 100u;
+    apply_diag_uptime_rx(&link, 1000u, UINT32_MAX - 99u);
+    s_fake_tick_count = 300u;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms == 400u, "age is wrap-safe");
+    s_fake_tick_count = saved_tick;
+}
+
+// REBOOTFX4 INFO-1: pin the ms units of rx_ms at the uptime consumer (a /1000 slip must go red).
+static void test_rx_ms_units_pinned_at_uptime_consumer(void)
+{
+    TEST_SECTION("safety_apply_diag -- a Pico that rebooted during a 600 s receive gap is counted (ms units, "
+                 "REBOOTFX4 INFO-1)");
+    SafetyLinkClass link = make_link();
+    TickType_t saved_tick = s_fake_tick_count;
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    apply_diag_uptime_rx(&link, 5000u, 1000u);
+    apply_diag_uptime_rx(&link, 5700u, 601000u); /* on-schedule would be ~605000; 5700 is a fresh boot */
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "reboot across a 600 s gap counted");
+    s_fake_tick_count = saved_tick;
+}
+
+static void test_low1_pico_reboot_forgets_cached_diag_trip_seq(void)
+{
+    TEST_SECTION("LOW-1 -- a Pico reboot forgets the cached DIAG trip_seq, so a stale bound "
+                 "clear cannot match the new boot's seq-1 trip");
+    SafetyLinkClass link = boot_clear_test_setup();
+    low_fw_version(&link, 42u, 17u);
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(link.cached.diag_trip_seq_known && link.cached.diag_trip_seq == 1u, "setup: seq 1 cached");
+    low_fw_version(&link, 43u, 17u); // boot_id change = Pico reboot
+    TEST_CHECK(link.cached.diag_trip_seq_known == false, "reboot clears diag_trip_seq_known");
+    TEST_CHECK(link.cached.diag_trip_seq == 0u, "reboot clears the cached seq");
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear still sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN,
+               "the clear is the unbound form, never the stale seq-1 bound form");
+}
+
+// TEST_TRIP WP3 (docs/TEST_TRIP_PLAN.md sec 2.2): 32-byte DIAG, V3 CLEAR_TRIP, TEST_TRIP.
+static void v3_apply_diag(SafetyLinkClass *link, uint8_t state, uint8_t trip_seq, uint8_t boot_id)
+{
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    set_diag_frame(diag.payload, state == SAFETY_LINK_DIAG_STATE_TRIPPED ? 4u : 0u, state);
+    diag.payload[4] = state == SAFETY_LINK_DIAG_STATE_TRIPPED ? 0x08u : 0u;
+    diag.payload[30] = trip_seq;
+    diag.payload[31] = boot_id;
+    diag.length = SAFETY_LINK_DIAG_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_diag(link, &diag) == true, "32-byte DIAG decodes");
+}
+
+static void test_v3_diag_caches_boot_id_and_clear_is_bound(void)
+{
+    TEST_SECTION("protocol 18 -- 32-byte DIAG caches pico_boot_id; CLEAR_TRIP is the 5-byte "
+                 "bound form only then; 30/31-byte DIAG forgets it; Pico reboot forgets it");
+    SafetyLinkClass link = boot_clear_test_setup();
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 0x2Bu, 0x5Au);
+    TEST_CHECK(link.cached.diag_boot_id_known && link.cached.diag_boot_id == 0x5Au, "boot id cached");
+    TEST_CHECK(link.cached.diag_trip_seq_known && link.cached.diag_trip_seq == 0x2Bu, "trip_seq cached");
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V3,
+               "clear is the 5-byte V3 form");
+    TEST_CHECK(s_stub_broadcast_last_payload[3] == 0x2Bu && s_stub_broadcast_last_payload[4] == 0x5Au,
+               "V3 clear carries trip_seq then pico_boot_id");
+
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 0x2Bu, true);
+    TEST_CHECK(link.cached.diag_boot_id_known == false, "31-byte DIAG forgets the boot id");
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear sends");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2, "31-byte DIAG gives the 4-byte clear");
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0x2Bu, true);
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear sends");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN, "30-byte DIAG gives the 3-byte clear");
+
+    low_fw_version(&link, 42u, 18u);
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 1u, 0x5Au);
+    low_fw_version(&link, 43u, 18u); // boot_id change = Pico reboot
+    TEST_CHECK(link.cached.diag_boot_id_known == false && link.cached.diag_boot_id == 0u,
+               "Pico reboot clears the cached boot id");
+}
+
+static void v3_apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t boot_id)
+{
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    set_diag_frame(diag.payload, 0u, 0u);
+    safety_put_u32_le(&diag.payload[6], uptime_ms);
+    diag.payload[31] = boot_id;
+    diag.length = SAFETY_LINK_DIAG_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_diag(link, &diag) == true, "32-byte DIAG applied");
+}
+
+static void test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag(void)
+{
+    TEST_SECTION("WP3 review LOW-1 -- a Pico reboot counted by a 30-byte DIAG's uptime regression is "
+                 "not counted again by the first 32-byte DIAG's changed boot id; the cached id follows");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX; // isolate from the bounded re-announce
+    apply_diag_uptime(&link, 600000u);
+    apply_diag_uptime(&link, 601000u);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    apply_diag_uptime(&link, 1500u); // new boot: uptime regressed, 30-byte DIAG (peer version still unknown)
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u && link.cached.pico_reboot_seq == seq0 + 1u,
+               "30-byte DIAG counts the reboot once, by uptime");
+    TEST_CHECK(link.pico_boot_id == 42u, "30-byte DIAG leaves the cached boot id on the OLD value");
+    v3_apply_diag_uptime(&link, 2500u, 43u); // first 32-byte DIAG of the same boot: new boot id
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 1u, "32-byte DIAG does NOT count the same reboot again");
+    TEST_CHECK(link.pico_boot_id == 43u && link.cached.diag_boot_id_known && link.cached.diag_boot_id == 43u,
+               "the new boot id is adopted (cached ids consistent)");
+    // A genuine later reboot (outside the 3 s note window) with another id still counts once.
+    s_fake_tick_count += 10000u;
+    v3_apply_diag_uptime(&link, 12500u, 44u);
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 2u, "a later boot id change is still a reboot");
+    s_fake_tick_count = 0;
+}
+
+static void test_tripfx3_lowa_second_quick_reboot_within_note_window_counted(void)
+{
+    TEST_SECTION("TRIPFX3 LOW-A -- a V3 boot-id adoption consumes the uptime note, so a second quick reboot "
+                 "inside the 3 s note window (seen only by a new boot id) is counted");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    apply_diag_uptime(&link, 600000u);
+    apply_diag_uptime(&link, 601000u);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    apply_diag_uptime(&link, 1500u);              /* boot A: counted by uptime, note set */
+    v3_apply_diag_uptime(&link, 1600u, 43u);      /* boot A's first V3 DIAG adopts id 43 */
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 1u && !link.reboot_noted_by_uptime,
+               "boot A counted once and the note is consumed by the id adoption");
+    s_fake_tick_count += 2000u;
+    v3_apply_diag_uptime(&link, 1800u, 44u);      /* boot B: young, inside tolerance, new id */
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 2u, "boot B (new id 44) is counted");
+    TEST_CHECK(link.diag_tick == 2000u, "LOW-B: the DIAG apply stamps diag_tick (age of the DIAG itself, not cached_tick)");
+    s_fake_tick_count = 0;
+}
+
+static void test_tripfx4_low2_diag_age_through_get_status_and_reboot_clear(void)
+{
+    TEST_SECTION("TRIPFX4 LOW-2 -- safety_link_get_status() reports diag_frame_age_ms as ms since the DIAG "
+                 "(1 tick = 1 ms, not /100, not 0), 0 before any DIAG, and a Pico reboot clears diag_since_reboot");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    link.initialized = true; // safety_link_get_status() refuses ESP_ERR_INVALID_STATE otherwise
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status before any DIAG");
+    TEST_CHECK(!st.diag_ever_received && st.diag_frame_age_ms == 0u, "no DIAG yet -> age 0");
+    s_fake_tick_count = 5000u;
+    v3_apply_diag_uptime(&link, 600000u, 42u);
+    v3_apply_diag_uptime(&link, 601000u, 42u);
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status right after DIAG");
+    TEST_CHECK(st.diag_ever_received && st.diag_since_reboot, "DIAG latched, since_reboot true");
+    TEST_CHECK(st.diag_frame_age_ms == 0u, "age 0 on the tick the DIAG arrived");
+    s_fake_tick_count += 3700u;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status 3700 ticks later");
+    TEST_CHECK(st.diag_frame_age_ms == 3700u, "age is exactly the elapsed ticks (3700 ms), not scaled, not 0");
+    s_fake_tick_count += 1000u;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status 4700 ticks later");
+    TEST_CHECK(st.diag_frame_age_ms == 4700u, "age keeps growing past SAFETY_LINK_DIAG_FRESH_MS");
+    /* Pico reboot (new boot id): since_reboot must read false until the next DIAG. */
+    v3_apply_diag_uptime(&link, 1500u, 43u);
+    TEST_CHECK(link.cached.pico_reboot_seq > 0u, "setup: reboot counted");
+    safety_link_status_t st2;
+    memset(&st2, 0, sizeof(st2));
+    /* The reboot DIAG itself re-latches since_reboot; check the note directly on a reboot with no DIAG after. */
+    safety_note_pico_reboot_locked(&link);
+    TEST_CHECK(safety_link_get_status(&link, &st2) == ESP_OK, "get_status after reboot note");
+    TEST_CHECK(!st2.diag_since_reboot, "Pico reboot clears diag_since_reboot until the next DIAG");
+    s_fake_tick_count = 0;
+}
+
+static void test_wp3_info5_test_trip_result_counted_in_stats(void)
+{
+    TEST_SECTION("WP3 review INFO-5 -- the stats switch counts TEST_TRIP_RESULT (0x2F) and records its length");
+    SafetyLinkClass link = boot_clear_test_setup();
+    uint32_t before = link.stats.cmd_test_trip_result_count;
+    safety_count_cmd_byte(&link, KILNLINK_TEST_TRIP_RESULT_CMD, KILNLINK_TEST_TRIP_RESULT_LEN);
+    TEST_CHECK(link.stats.cmd_test_trip_result_count == before + 1u, "0x2F counted");
+    TEST_CHECK(link.stats.last_test_trip_result_len == KILNLINK_TEST_TRIP_RESULT_LEN, "0x2F length recorded");
+}
+
+static void tt_set_reply(uint8_t outcome, uint8_t trip_seq)
+{
+    memset(&s_stub_broadcast_reply_msg, 0, sizeof(s_stub_broadcast_reply_msg));
+    s_stub_broadcast_reply_msg.payload[0] = KILNLINK_TEST_TRIP_RESULT_CMD;
+    s_stub_broadcast_reply_msg.payload[2] = outcome;
+    s_stub_broadcast_reply_msg.payload[3] = trip_seq;
+    s_stub_broadcast_reply_msg.length = KILNLINK_TEST_TRIP_RESULT_LEN;
+    s_stub_broadcast_reply_push = true;
+    s_stub_broadcast_advance_us = 500;
+    s_stub_patch_request_id = true;
+    s_stub_request_id_delta = 0u;
+}
+
+static void test_send_test_trip(void)
+{
+    TEST_SECTION("safety_link_send_test_trip -- local refusals send nothing; happy path maps "
+                 "outcome+trip_seq; request_id mismatch and silence are timeouts");
+    safety_link_test_trip_outcome_t oc;
+    uint8_t seq;
+    SafetyLinkClass link = boot_clear_test_setup();
+    fake_inbox_reset();
+    fake_time_reset_all();
+
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_INVALID_STATE &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_STALE, "no DIAG -> LOCAL_STALE");
+    TEST_CHECK(s_stub_broadcast_count == base, "stale sends nothing");
+
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_NOT_SUPPORTED &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD, "no boot id -> LOCAL_PEER_TOO_OLD");
+    TEST_CHECK(s_stub_broadcast_count == base, "too-old sends nothing");
+
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 1u, 0x5Au);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_INVALID_STATE &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED, "tripped -> LOCAL_ALREADY_TRIPPED");
+    TEST_CHECK(s_stub_broadcast_count == base, "tripped sends nothing");
+
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_ARMED, 1u, 0x5Au);
+    tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 9u);
+    {
+        /* saftyfx3 LOW-3: first request id is seeded from the RNG (not 1 after a reboot). */
+        static const uint32_t seed[1] = { 0x40u };
+        fake_sysinfo_script_random_sequence(seed, 1u);
+    }
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_OK, "accepted call returns ESP_OK");
+    TEST_CHECK(s_stub_broadcast_last_payload[2] == 0x41u,
+               "first request_id is the RNG seed + 1, not a counter restarting at 1");
+    TEST_CHECK(oc == SAFETY_LINK_TEST_TRIP_ACCEPTED && seq == 9u, "outcome ACCEPTED, trip_seq 9");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_TEST_TRIP_LEN &&
+                   s_stub_broadcast_last_payload[0] == KILNLINK_TEST_TRIP_CMD &&
+                   s_stub_broadcast_last_payload[1] == 0x5Au &&
+                   s_stub_broadcast_last_payload[3] == KILNLINK_TEST_TRIP_MAGIC,
+               "request names the cached boot id and carries the magic");
+
+    tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT, 0u);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_OK &&
+                   oc == SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT, "rate-limit outcome passed through");
+    TEST_CHECK(s_stub_broadcast_last_payload[2] == 0x42u,
+               "second request_id is 0x42: the seed is consumed once per boot, not re-rolled per call");
+
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_fake_inbox_advance_time_on_empty = true;
+    tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 9u);
+    s_stub_request_id_delta = 1u;
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_TIMEOUT &&
+                   oc == SAFETY_LINK_TEST_TRIP_NO_REPLY, "request_id mismatch -> timeout, not ACCEPTED");
+
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_stub_patch_request_id = false;
+    s_stub_broadcast_reply_push = false;
+    s_fake_inbox_advance_time_on_empty = true;
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_TIMEOUT, "no reply -> timeout");
+    fake_inbox_reset();
+}
+
+static void test_diag_reannounce_is_bounded(void)
+{
+    TEST_SECTION("residual -- 30-byte DIAGs from a >= 17 Pico owe at most MAX re-announces, GAP apart");
+    SafetyLinkClass link = boot_clear_test_setup();
+    s_boot_clean = false; // isolate from the boot-clear branch's own (separate) re-announce request
+    low_fw_version(&link, 42u, 17u);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = 0u;
+
+    unsigned owed = 0;
+    for (unsigned i = 0; i < 6u; i++) {
+        s_fake_tick_count = 1000u + i * 2100u; // each DIAG a full gap after the last
+        m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+        if (link.reannounce_pending) {
+            owed++;
+            link.reannounce_pending = false; // safety_poll_task consumed it
+        }
+    }
+    TEST_CHECK(owed == SAFETY_DIAG_REANNOUNCE_MAX, "burst: re-announce owed exactly MAX times at the fast gap");
+
+    // SAFTY-LOW-2: after the burst the re-announce continues, slowly and boundedly, while the Pico
+    // still sends 30-byte DIAGs (one lost ANNOUNCE must not last until the next reboot).
+    uint32_t slow_base = link.diag_reannounce_last_ms;
+    if (slow_base < (uint32_t)s_fake_tick_count) {
+        slow_base = (uint32_t)s_fake_tick_count; // the ESP clock never runs backwards (uptime baseline)
+    }
+    owed = 0;
+    for (unsigned i = 1; i <= 40u; i++) {
+        s_fake_tick_count = slow_base + i * 2100u; // 84 s of 30-byte DIAGs
+        m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+        if (link.reannounce_pending) {
+            owed++;
+            link.reannounce_pending = false;
+        }
+    }
+    TEST_CHECK(owed >= 6u && owed <= 8u, "after the burst, a slow re-announce (about one per 10 s) continues");
+    // A 31-byte DIAG ends it.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    s_fake_tick_count += 20000u;
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(!link.reannounce_pending, "binding learned: slow re-announce stops");
+    low_fw_version(&link, 42u, 17u);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = 0u;
+
+    // Rate limit: a fresh budget, DIAGs 100 ms apart owe only the first.
+    low_fw_version(&link, 43u, 17u); // Pico boot_id change resets the budget
+    link.reannounce_pending = false;
+    TEST_CHECK(link.diag_reannounce_count == 0u, "Pico boot_id change resets the counter");
+    owed = 0;
+    for (unsigned i = 0; i < 10u; i++) {
+        s_fake_tick_count = 100000u + i * 100u;
+        m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+        if (link.reannounce_pending) {
+            owed++;
+            link.reannounce_pending = false;
+        }
+    }
+    TEST_CHECK(owed == 1u, "DIAGs inside the gap owe a single re-announce");
+
+    // A 31-byte DIAG proves the Pico learned our version: budget returns, nothing owed.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(link.diag_reannounce_count == 0u && !link.reannounce_pending,
+               "31-byte DIAG resets the budget and owes nothing");
+
+    // A pre-17 Pico never sends byte 30: nothing owed.
+    low_fw_version(&link, 44u, 16u);
+    link.reannounce_pending = false;
+    s_fake_tick_count = 900000u;
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+    TEST_CHECK(!link.reannounce_pending, "protocol 16 peer: no re-announce");
+
+    // Link-down reset.
+    link.diag_reannounce_count = 2u;
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.diag_reannounce_count == 0u,
+               "link-down clears the counter");
+    s_fake_tick_count = 0;
+}
+
+static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
+{
+    TEST_SECTION("LOW-2 -- boot clear on a >= 17 peer does not spend an attempt on a 30-byte DIAG");
+    SafetyLinkClass link = boot_clear_test_setup();
+    low_fw_version(&link, 42u, 17u);
+    link.reannounce_pending = false; // low_fw_version's boot_id change sets it; isolate the gate's own request
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base,
+               "30-byte DIAG from a v17 peer: no clear sent");
+    TEST_CHECK(s_boot_clear_attempts == 0, "no attempt consumed");
+    TEST_CHECK(link.reannounce_pending == true,
+               "blocked gate re-announces so the Pico learns our version and sends the 31-byte DIAG");
+    link.reannounce_pending = false;
+    // Review LOW-1: inside the boot-clear window the re-announce is bounded too. With the budget spent,
+    // a blocked-gate 30-byte DIAG owes nothing (the old unbounded branch would set it every DIAG).
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base,
+               "spent budget: still no clear sent");
+    TEST_CHECK(link.reannounce_pending == false, "spent budget: boot-clear window owes no unbounded re-announce");
+    TEST_CHECK(link.diag_reannounce_count > SAFETY_DIAG_REANNOUNCE_MAX, "exhaustion saturates (logged once)");
+    link.diag_reannounce_count = 0u;
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 5u, true);
+    safety_link_service_boot_clear_if_pending(&link);
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2,
+               "31-byte DIAG: bound clear sent");
+    TEST_CHECK(s_boot_clear_attempts == 1, "exactly one attempt consumed");
+
+    // A peer older than 17 never sends byte 30: the unbound clear still goes.
+    SafetyLinkClass old = boot_clear_test_setup();
+    low_fw_version(&old, 42u, 16u);
+    base = s_stub_broadcast_count;
+    TEST_CHECK(drive_one_diag_and_service(&old, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 1u,
+               "peer < 17: 30-byte DIAG still gets the legacy clear");
+}
+
+static void diag_with_reason(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t reason)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    set_diag_frame(msg.payload, 0u, 0u);
+    safety_put_u32_le(&msg.payload[6], uptime_ms);
+    msg.payload[10] = reason;
+    msg.length = SAFETY_LINK_DIAG_FRAME_LEN;
+    TEST_CHECK(safety_apply_diag(link, &msg) == true, "DIAG frame applied");
+}
+
+static void fw_version_with_boot_id(SafetyLinkClass *link, uint8_t boot_id)
+{
+    uart_proto_message_t fw;
+    memset(&fw, 0, sizeof(fw));
+    fw.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    fw.length = set_fw_version_frame(fw.payload, false, NULL, 0, NULL, 0, boot_id, 0, 0);
+    safety_apply_fw_version(link, &fw);
+}
+
+static void apply_diag_v3(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t boot_id)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
+    set_diag_frame(msg.payload, 0u, 0u);
+    safety_put_u32_le(&msg.payload[6], uptime_ms);
+    msg.payload[31] = boot_id;
+    msg.length = SAFETY_LINK_DIAG_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_diag(link, &msg) == true, "V3 DIAG applied");
+}
+
+static void test_reboot_counted_once_per_diag_all_signals(void)
+{
+    TEST_SECTION("rebootfx2 review items 1+2 -- at most ONE reboot count per DIAG across uptime regression "
+                 "and DIAG boot_id change; the cached id follows every V3 DIAG");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    fw_version_with_boot_id(&link, 42u);
+    apply_diag_v3(&link, 600000u, 42u);
+    uint32_t s0 = link.cached.pico_reboot_seq;
+    /* both signals fire on the same DIAG: uptime regressed AND boot id changed */
+    apply_diag_v3(&link, 1500u, 77u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "MUST GO RED if uptime+boot_id count twice");
+    TEST_CHECK(link.pico_boot_id == 77u, "cached boot id follows the DIAG");
+    fw_version_with_boot_id(&link, 77u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "FW_VERSION with the already-cached id does not recount");
+
+    /* boot_id change alone (uptime did not regress) counts once, and the DIAG cache is rebuilt after */
+    apply_diag_v3(&link, 3500u, 77u);
+    apply_diag_v3(&link, 5500u, 78u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 2u, "boot_id change alone counts once");
+    TEST_CHECK(link.cached.diag_boot_id_known && link.cached.diag_boot_id == 78u, "diag cache re-established");
+    fw_version_with_boot_id(&link, 78u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 2u, "following FW_VERSION: no second count");
+
+    /* time bound: a stale uptime note does not suppress a later, independent boot_id change */
+    SafetyLinkClass t = make_link();
+    fw_version_with_boot_id(&t, 42u);
+    apply_diag_uptime(&t, 600000u);
+    apply_diag_uptime(&t, 1500u); /* counted by uptime, flag set */
+    uint32_t t0 = t.cached.pico_reboot_seq;
+    s_fake_tick_count = 60000u; /* well past SAFETY_REBOOT_NOTE_WINDOW_MS */
+    fw_version_with_boot_id(&t, 43u);
+    TEST_CHECK(t.cached.pico_reboot_seq == t0 + 1u, "MUST GO RED if a stale flag still suppresses the count");
+    s_fake_tick_count = 0;
+}
+
+static void test_reboot_counted_once_diag_before_fw_version(void)
+{
+    TEST_SECTION("firing audit 2 MED-1 (P1) -- a reboot across a link-down whose FW_VERSION burst was "
+                 "lost: the new boot's DIAG lands first, the FW_VERSION second; ONE reboot, ONE seq bump");
+    SafetyLinkClass link = make_link();
+    link.ever_received = true;
+    link.cached_tick = 0;
+    fw_version_with_boot_id(&link, 42u);
+    apply_diag_uptime(&link, 600000u);
+    uint32_t s0 = link.cached.pico_reboot_seq;
+    link.cached_tick = 1; /* link down */
+    safety_reset_stale_peer_info_if_link_down(&link);
+    apply_diag_uptime(&link, 1500u); /* new boot, DIAG first */
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u && link.reboot_noted_by_uptime, "DIAG path counted the reboot");
+    fw_version_with_boot_id(&link, 43u); /* its FW_VERSION, new boot_id */
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "MUST GO RED if the FW_VERSION counts the same reboot again");
+    TEST_CHECK(link.cached.diag_since_reboot == true, "new boot's DIAG stays valid (not re-marked old-boot)");
+    TEST_CHECK(link.pico_uptime_baseline_known == true, "baseline kept");
+    TEST_CHECK(link.pico_boot_id == 43u && !link.reboot_noted_by_uptime, "new id recorded, flag consumed");
+    apply_diag_uptime(&link, 3500u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "no further count");
+    // A later, genuine boot_id change (flag clear) counts normally.
+    fw_version_with_boot_id(&link, 44u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 2u, "an independent boot_id change still counts");
+
+    // Normal order (FW_VERSION first, then DIAG) counts once too.
+    SafetyLinkClass n = make_link();
+    fw_version_with_boot_id(&n, 42u);
+    apply_diag_uptime(&n, 600000u);
+    uint32_t n0 = n.cached.pico_reboot_seq;
+    fw_version_with_boot_id(&n, 43u);
+    apply_diag_uptime(&n, 900u);
+    TEST_CHECK(n.cached.pico_reboot_seq == n0 + 1u, "FW_VERSION-first order counts the reboot once");
+
+    // The flag does not survive a link-down: in doubt, count.
+    SafetyLinkClass d = make_link();
+    d.ever_received = true;
+    d.cached_tick = 0;
+    fw_version_with_boot_id(&d, 42u);
+    apply_diag_uptime(&d, 600000u);
+    apply_diag_uptime(&d, 1500u);
+    TEST_CHECK(d.reboot_noted_by_uptime, "setup: flag set");
+    d.cached_tick = 1;
+    safety_reset_stale_peer_info_if_link_down(&d);
+    TEST_CHECK(!d.reboot_noted_by_uptime, "link-down clears the flag");
+}
+
+static void test_long_outage_repeat_boot_id_reboot_detected(void)
+{
+    TEST_SECTION("firing audit 2 LOW-1/LOW-2 -- DIAG uptime is compared with baseline + ESP elapsed time");
+    TickType_t saved = s_fake_tick_count;
+    // Kept running over a 300 s outage: no reboot.
+    SafetyLinkClass a = make_link();
+    s_fake_tick_count = 1000;
+    apply_diag_uptime(&a, 20000u);
+    s_fake_tick_count = 301000;
+    apply_diag_uptime(&a, 320000u);
+    TEST_CHECK(a.pico_reboot_by_uptime_count == 0u, "kept running across a long outage is not a reboot");
+    // Rebooted during the outage, new uptime already past the old baseline.
+    SafetyLinkClass b = make_link();
+    s_fake_tick_count = 1000;
+    apply_diag_uptime(&b, 20000u);
+    s_fake_tick_count = 301000;
+    apply_diag_uptime(&b, 100000u);
+    TEST_CHECK(b.pico_reboot_by_uptime_count == 1u, "MUST GO RED if uptime >= old baseline hides the reboot (LOW-1)");
+    // Outage spanning the 32-bit wrap by more than the old 120 s band.
+    SafetyLinkClass w = make_link();
+    s_fake_tick_count = 1000;
+    apply_diag_uptime(&w, UINT32_MAX - 600000u);
+    s_fake_tick_count = 901000;
+    apply_diag_uptime(&w, 300000u - 1u);
+    TEST_CHECK(w.pico_reboot_by_uptime_count == 0u, "wrap-spanning outage is not a reboot (LOW-2)");
+    s_fake_tick_count = saved;
+}
+
+static void test_low4_link_down_invalidates_uptime_baseline(void)
+{
+    TEST_SECTION("firing audit 2 MED-1 -- link-down KEEPS the DIAG uptime baseline; a same-boot_id "
+                 "reboot across the outage is detected, a plain blip/long outage is not");
+    /* genuine blip / long outage, same id, uptime advanced: not a reboot */
+    SafetyLinkClass link = make_link();
+    link.ever_received = true;
+    link.cached_tick = 0;
+    apply_diag_uptime(&link, 600000u);
+    link.cached_tick = 1; /* link down */
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_uptime_baseline_known == true, "MUST GO RED if link-down clears the baseline");
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    apply_diag_uptime(&link, 900000u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u && link.cached.pico_reboot_seq == seq0,
+               "uptime advanced across the outage is not a reboot");
+    /* wrap across the outage is still not a reboot */
+    SafetyLinkClass w = make_link();
+    w.ever_received = true;
+    w.cached_tick = 0;
+    apply_diag_uptime(&w, UINT32_MAX - 1000u);
+    w.cached_tick = 1;
+    safety_reset_stale_peer_info_if_link_down(&w);
+    apply_diag_uptime(&w, 500u);
+    TEST_CHECK(w.pico_reboot_by_uptime_count == 0u, "32-bit wrap across an outage is not a reboot");
+    /* same-id reboot across link-down, benign (reason 1) and fatal (reason 2) causes */
+    for (uint8_t reason = 1u; reason <= 2u; reason++) {
+        SafetyLinkClass r = make_link();
+        r.ever_received = true;
+        r.cached_tick = 0;
+        apply_diag_uptime(&r, 600000u);
+        uint32_t s0 = r.cached.pico_reboot_seq;
+        r.cached_tick = 1;
+        safety_reset_stale_peer_info_if_link_down(&r);
+        diag_with_reason(&r, 1500u, reason);
+        TEST_CHECK(r.pico_reboot_by_uptime_count == 1u && r.cached.pico_reboot_seq == s0 + 1u,
+                   "same-id reboot after link-down detected on the first DIAG");
+        TEST_CHECK(r.cached.diag_boot_reason == reason, "boot cause of the new boot is cached for classification");
+    }
 }
 
 static void test_boot_clear_refused_then_retried_succeeds(void)
@@ -2842,6 +3778,7 @@ static void test_boot_clear_refused_then_retried_succeeds(void)
     s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
     uart_proto_message_t cleared;
     memset(&cleared, 0, sizeof(cleared));
+    cleared.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(cleared.payload, 0, SAFETY_LINK_DIAG_STATE_ARMED);
     cleared.length = SAFETY_LINK_DIAG_FRAME_LEN;
     TEST_CHECK(safety_apply_diag(&link, &cleared) == true, "cleared DIAG frame decodes");
@@ -2949,11 +3886,120 @@ static void test_fault_edge_uninitialized_link_refuses(void)
     TEST_CHECK(snap.count == 0, "out is zeroed even on refusal -- never left holding poison/garbage");
 }
 
+#include "test_safety_link_payload_golden.h"
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
+// SAFETYFX10 MED-1 / I-2: TRIP_EVENT-vs-DIAG order is arrival order (a bool), never an age comparison.
+static void apply_trip_event_seq(SafetyLinkClass *link, uint8_t seq)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.length = SAFETY_LINK_TRIP_EVENT_FRAME_LEN;
+    msg.payload[0] = SAFETY_CMD_TRIP_EVENT;
+    msg.payload[1] = seq;
+    msg.payload[2] = 1u;
+    msg.rx_ms = (uint32_t)s_fake_tick_count;
+    TEST_CHECK(safety_apply_trip_event(link, &msg) == true, "TRIP_EVENT frame applied");
+}
+
+static void test_safetyfx10_trip_event_after_diag_is_arrival_order(void)
+{
+    TEST_SECTION("SAFETYFX10 MED-1 -- trip_event_after_diag records arrival order: set by TRIP_EVENT, cleared by DIAG "
+                 "and by a Pico reboot; immune to the 2^32 ms age aliasing");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TEST_CHECK(!link.cached.trip_event_after_diag, "fresh link: flag clear");
+    apply_diag_uptime(&link, 600000u);
+    apply_trip_event_seq(&link, 1u);
+    TEST_CHECK(link.cached.trip_event_after_diag, "TRIP_EVENT after a DIAG sets the flag");
+    apply_trip_event_seq(&link, 1u); /* resend copy of the same burst */
+    TEST_CHECK(link.cached.trip_event_after_diag, "a resend copy keeps the flag set");
+    apply_diag_uptime(&link, 601000u);
+    TEST_CHECK(!link.cached.trip_event_after_diag, "a DIAG after the event clears the flag");
+
+    // I-2: same tick, both orders. Equal ages must not decide anything.
+    apply_trip_event_seq(&link, 2u);
+    apply_diag_uptime(&link, 602000u);
+    TEST_CHECK(!link.cached.trip_event_after_diag, "same tick, event then DIAG: DIAG supersedes");
+    apply_diag_uptime(&link, 603000u);
+    apply_trip_event_seq(&link, 3u);
+    TEST_CHECK(link.cached.trip_event_after_diag, "same tick, DIAG then event: event stands");
+
+    // Pico reboot clears it together with trip_event_ever_received.
+    safety_note_pico_reboot_locked(&link);
+    TEST_CHECK(!link.cached.trip_event_after_diag && !link.cached.trip_event_ever_received,
+               "Pico reboot clears the flag with trip_event_ever_received");
+
+    // MED-1: event then DIAG at tick 0, then the ms counter aliases 2^32 later (modelled as tick 5): both ages read
+    // 5 although the DIAG came after the event. The flag is what decides, and it is clear.
+    s_fake_tick_count = 0;
+    SafetyLinkClass l2 = make_link();
+    l2.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    l2.initialized = true;
+    apply_trip_event_seq(&l2, 1u);
+    apply_diag_uptime(&l2, 600000u);
+    s_fake_tick_count = 5;
+    safety_link_status_t st;
+    TEST_CHECK(safety_link_get_status(&l2, &st) == ESP_OK, "status read");
+    TEST_CHECK(st.trip_event_age_ms == 5u && st.diag_frame_age_ms == 5u, "ages alias to equal values");
+    TEST_CHECK(!st.trip_event_after_diag, "aliased equal ages: flag still says the DIAG came later");
+    s_fake_tick_count = 0;
+}
+
+// REBOOTFX5 LOW-1: with a 10 ms tick the host can finally tell ticks from ms. Built as its own executable
+// (-DportTICK_PERIOD_MS=10u -DKILN_TICK10_ONLY), see build_host_tests.ps1.
+static void test_diag_frame_age_tick_period_10(void)
+{
+    TEST_SECTION("safety_link_get_status diag_frame_age_ms -- 10 ms tick period (REBOOTFX5 LOW-1)");
+    TEST_CHECK(portTICK_PERIOD_MS == 10u, "this executable is built with a 10 ms tick period");
+    TEST_CHECK(uart_proto_rx_stamp_ms(300u) == 3000u, "rx stamp helper multiplies by the tick period");
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    TickType_t saved_tick = s_fake_tick_count;
+    s_fake_tick_count = 500u; /* 5000 ms */
+    apply_diag_uptime_rx(&link, 1000u, uart_proto_rx_stamp_ms(300u)); /* received at 3000 ms */
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "status read");
+    TEST_CHECK(st.diag_ever_received, "DIAG seen");
+    TEST_CHECK(st.diag_frame_age_ms == 2000u, "DIAG age is 2000 ms (200 ticks x 10 ms)");
+    s_fake_tick_count = saved_tick;
+}
+
+// REBOOTFX7 LOW-1: link up, no DIAG for 2^32 ms: the raw ms difference wraps back to a small value and must not
+// read fresh. Modelled with period 1: read stale at 6000, then the clock wraps to 1000 (2^32 + 1000 ms).
+static void test_diag_age_does_not_alias_fresh_after_2p32_ms(void)
+{
+    TEST_SECTION("diag_frame_age_ms saturates stale across the 2^32 ms alias (REBOOTFX7 LOW-1)");
+    TickType_t saved_tick = s_fake_tick_count;
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    apply_diag_uptime_rx(&link, 1000u, 0u);
+    safety_link_status_t st;
+    s_fake_tick_count = 1000;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms == 1000u, "fresh at 1000 ms");
+    s_fake_tick_count = 6000;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS,
+               "stale at 6000 ms");
+    s_fake_tick_count = 1000; /* clock advanced by 2^32 ms: wraps to the same value as the fresh read */
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "status read after wrap");
+    TEST_CHECK(st.diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS, "wrapped age still reads stale");
+    apply_diag_uptime_rx(&link, 2000u, 1000u);
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms == 0u,
+               "a new DIAG clears the latch and reads fresh");
+    s_fake_tick_count = saved_tick;
+}
+
 int main(void)
 {
+#ifdef KILN_TICK10_ONLY
+    test_diag_frame_age_tick_period_10();
+    return g_test_failures > 0 ? 1 : 0;
+#endif
     TEST_SECTION("safety_link.c host build -- safety_apply_status() / safety_link_versions_compatible()");
 
     test_apply_status_accepts_v1_and_v2_lengths();
@@ -2966,7 +4012,15 @@ int main(void)
     test_apply_status_ignores_peer_link_up_and_fault_bits();
     test_k4_edge_counting_off_on_on_off_counts_two();
     test_k4_edge_counting_first_frame_counts_zero();
+    test_pico_boot_id_change_logs_once();
     test_k4_edge_counting_boot_id_change_counts_zero();
+    test_pico_reboot_detected_by_uptime_regression();
+    test_pico_uptime_uses_receive_time_not_drain_time();
+    test_safetyfx10_trip_event_after_diag_is_arrival_order();
+    test_stalled_inbox_fw_version_does_not_double_count_reboot();
+    test_diag_frame_age_uses_receive_time();
+    test_diag_age_does_not_alias_fresh_after_2p32_ms();
+    test_rx_ms_units_pinned_at_uptime_consumer();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();
     test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();
@@ -2987,8 +4041,10 @@ int main(void)
     test_get_stack_margin_survives_a_leading_unrelated_frame();
     test_stale_reset_leaves_flags_alone_while_link_is_up();
     test_stale_reset_clears_flags_once_link_is_observed_down();
+    test_stale_reset_slow_poll_one_missed_reply_keeps_boot_id();
     test_stale_reset_never_received_is_also_down();
     test_stale_reset_then_reapply_recovers_after_reconnect();
+    test_link_blip_same_boot_id_is_not_a_reboot();
     test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();
     test_frames_gated_above_a_version_are_not_expected_from_that_peer();
     test_update_in_progress_does_not_relax_link_loss_block();
@@ -3009,10 +4065,25 @@ int main(void)
     test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order();
     test_fault_edge_uninitialized_link_refuses();
 
+    test_m4_clear_trip_echoes_diag_trip_seq();
     test_boot_clear_refused_then_retried_succeeds();
     test_boot_clear_stops_after_own_fault_source_rises();
+    test_low1_pico_reboot_forgets_cached_diag_trip_seq();
+    test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer();
+    test_diag_reannounce_is_bounded();
+    test_v3_diag_caches_boot_id_and_clear_is_bound();
+    test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag();
+    test_tripfx3_lowa_second_quick_reboot_within_note_window_counted();
+    test_tripfx4_low2_diag_age_through_get_status_and_reboot_clear();
+    test_wp3_info5_test_trip_result_counted_in_stats();
+    test_send_test_trip();
+    test_low4_link_down_invalidates_uptime_baseline();
+    test_reboot_counted_once_diag_before_fw_version();
+    test_reboot_counted_once_per_diag_all_signals();
+    test_long_outage_repeat_boot_id_reboot_detected();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();
+    run_golden_payload_tests();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

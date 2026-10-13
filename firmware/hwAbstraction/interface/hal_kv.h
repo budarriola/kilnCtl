@@ -130,6 +130,12 @@ hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
 hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out);
 hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value);
 
+/* Type-agnostic existence probe (nvs_find_key on target). HAL_OK = a key of ANY
+ * type exists; HAL_NOT_FOUND = none. Use this, never a typed getter, to ask
+ * "is there data here": on real NVS a typed getter on a key of another type
+ * returns NOT_FOUND, not a type error. */
+hal_status_t hal_kv_key_exists(hal_kv_handle_t *h, const char *key);
+
 /* crash_report.c and profiles_http.c's scoped-key erase. */
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key);
 
@@ -169,6 +175,14 @@ hal_status_t hal_kv_stats(const char *partition, hal_kv_stats_t *out);
  * contract above -- this function reports the contract, it does not
  * enforce it. */
 bool hal_kv_write_safe_here(void);
+
+/* Mutation fence (factory-reset writer fence, 2026-10-09 rstfence LOW-6). The device installs ONE predicate
+ * (main.c); every mutating call on a READ_WRITE handle -- hal_kv_set_*, hal_kv_erase_key, hal_kv_commit --
+ * asks it with the handle's partition name (NULL for the default partition) and, when it answers true,
+ * returns HAL_NOT_READY without touching storage. hal_kv_erase_partition()/_init_partition() are partition
+ * level operations and are not fenced (they are the reset job's own tools). No hook = nothing refused. */
+typedef bool (*hal_kv_write_refuse_fn_t)(const char *partition);
+void hal_kv_set_write_refuse_hook(hal_kv_write_refuse_fn_t fn);
 
 #ifdef __cplusplus
 }

@@ -2,7 +2,7 @@
 // "kiln config" slots' existing whole-store NVS blob (kiln_cfg_store.c's
 // nvs_load_store()/nvs_save_store(), NVS_KEY_STORE="kilncfgs") and the `cfg`
 // LittleFS partition (cfg_fs.h/cfg_fs_mount.h), per
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5's "kiln config slots" item
+// docs/FILESYSTEM_USER_DATA.md section 5's "kiln config slots" item
 // (backup audit 031ededb: user-created data with an existing restore path).
 //
 // SCOPE: this file only decides WHICH bytes win (file vs NVS) and drives the

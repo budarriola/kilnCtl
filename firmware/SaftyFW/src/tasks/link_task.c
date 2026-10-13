@@ -57,6 +57,7 @@
 #include "task.h"
 
 #include "pico/time.h"
+#include "pico/rand.h" // get_rand_32() -- boot_id, see link_task_start() (kilnlink audit M1)
 
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -78,6 +79,7 @@
 #include "safety_core.h"
 #include "link_task_announce_eval.h" // pure ANNOUNCE_VERSION -> degraded verdict, see link_task_handle_announce_version()
 #include "link_task_commit_reject.h" // pure write-decision -> wire-reason mapping, see link_task_handle_commit_config()
+#include "link_staging.h" // SET_PARAM staging as an edit list, see link_task_handle_set_param()/_commit_config()
 #include "link_task_tc_type_gate.h"
 #include "snapshots.h"
 #include "thermo_task.h"
@@ -121,6 +123,8 @@
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_reboot.h" // SAFETY_CMD_REBOOT, see link_task_handle_reboot()
+#include "kilnlink/kilnlink_test_trip.h"        // TEST_TRIP (0x2E), link_task_handle_test_trip()
+#include "kilnlink/kilnlink_test_trip_result.h" // TEST_TRIP_RESULT (0x2F)
 #include "kilnlink/kilnlink_reboot_result.h" // SAFETY_CMD_REBOOT_RESULT, see link_task_handle_reboot()
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
 #include "kilnlink/kilnlink_rollback_result.h" // SAFETY_CMD_ROLLBACK_RESULT, see link_task_send_rollback_result()
@@ -166,7 +170,8 @@
 // for the incident history. configTOTAL_HEAP_SIZE (FreeRTOSConfig.h) raised
 // in the same commit to keep non-stack heap headroom sane after this and
 // update_task's stacks both grew.
-#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 10)
+// 2026-10-10 TEST_TRIP WP2: measured 5152 B needs >= 10304 B; bumped *10 -> *11.
+#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 11)
 // Bounded wait, not a blocking read: this task also owns the 500 ms TX
 // cadence and must check in with watchdog_task, so it polls uart_owner's RX
 // ring on a short period rather than blocking on a queue receive.
@@ -206,6 +211,7 @@
 // for exactly the frame that has no deadline riding on it, without making
 // the diagnostics stale on any timescale a human bench-watching them would
 // notice.
+/* Mirrored by KilnFW's SAFETY_LINK_DIAG_FRESH_MS (safety_link.h) = 2 x this + 500; change both together. */
 #define LINK_DIAG_TX_PERIOD_MS     2000
 // Frame E (SAFETY_CMD_POWER) cadence: "No guard reads any of this. It exists
 // to be displayed" (kilnlink_power.h) -- same reasoning as Frame B above, a
@@ -246,6 +252,9 @@
 // could plausibly drift.
 #define LINK_DEVICE_ESP     0u // UART_PROTO_DEVICE_ESP
 #define LINK_DEVICE_SAFETY  2u // UART_PROTO_DEVICE_SAFETY
+_Static_assert(LINK_DEVICE_ESP == LINK_FRAME_DEVICE_ESP, "link_frame.h liveness check mirrors LINK_DEVICE_ESP");
+_Static_assert(LINK_DEVICE_SAFETY == LINK_FRAME_DEVICE_SAFETY,
+               "link_frame.h liveness check mirrors LINK_DEVICE_SAFETY");
 #define LINK_TASK_ID_SAFETY 7u // UART_TASK_ID_SAFETY
 // LOG relay (LINK_PROTOCOL.md section 6, "Frame F"): the Pico's log_task
 // addresses ordinary BROADCAST frames to this task id, same as KilnFW's own
@@ -287,10 +296,37 @@ static volatile bool s_degraded_no_context = false;
 // state as a peer that predates ANNOUNCE_VERSION entirely, see
 // link_frame_pack_status()'s own doc comment (link_frame.h) for why "unknown"
 // and "known old" must behave identically here.
-static volatile uint16_t s_peer_protocol_version = 0;
+// .version is the cached protocol version; .boot_id/.known the ESP boot_id it was
+// announced under (kilnlink_announce_t.boot_id). Updated only through the pure
+// link_peer_announce_*() helpers in link_staging.c (host-tested).
+static link_peer_announce_t s_peer_announce = {false, 0u, 0u};
 
 static uint16_t s_msg_index = 0;
 static uint8_t s_boot_id = 0;
+
+// F6 (TEST_TRIP plan section 6): when the peer's protocol version was last
+// KNOWN (non-zero), in ms of the tick clock. Refreshed every link_task loop
+// iteration while s_peer_announce.version != 0, so "how long has it been
+// unknown" is now - this, whichever site forgot the version. Initialised at
+// boot (link_task_start) so the 30 s fallback is measured from boot.
+static uint32_t s_last_peer_known_ms = 0;
+
+// TEST_TRIP state (docs/TEST_TRIP_PLAN.md section 4): acceptance/rate-limit
+// memory, plus the reply burst. The reply is non-blocking: an ACCEPTED reply
+// waits (bounded) for safety_core to latch so it can carry the real trip_seq.
+#define LINK_TEST_TRIP_REPLY_COPIES      3u
+#define LINK_TEST_TRIP_REPLY_PERIOD_MS   40u
+#define LINK_TEST_TRIP_SEQ_WAIT_MS       300u
+static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u, 0u, 0u};
+static bool s_tt_waiting_seq = false;      // ACCEPTED, waiting for the latch to show a new trip_seq
+static uint8_t s_tt_seq_base = 0;
+static uint32_t s_tt_wait_deadline_ms = 0;
+static uint8_t s_tt_wait_request_id = 0;   // saftyfx2 INFO-3: id of the request waiting for its seq, never shared with an armed refusal
+static uint8_t s_tt_reply_request_id = 0;
+static uint8_t s_tt_reply_outcome = 0;
+static uint8_t s_tt_reply_trip_seq = 0;
+static uint8_t s_tt_reply_pending = 0;     // copies still to send
+static uint32_t s_tt_reply_last_ms = 0;
 
 static uint8_t s_rx_assembly[LINK_RX_ASSEMBLY_MAX];
 static size_t s_rx_assembly_len = 0;
@@ -476,25 +512,33 @@ static uint64_t s_wall_clock_epoch_ms = 0;
 
 // Commissioning staging (docs/COMMISSIONING.md section 2: "Staged in RAM,
 // then committed as one record"). Single-writer, same reasoning as every
-// other plain static above: only SET_PARAM/COMMIT_CONFIG's handlers below
-// ever touch this, both on link_task's own thread. Lazily seeded from
-// config_store_get_full_record() (the currently COMMITTED record) the first
-// time either handler runs, so a board that has never had a single
-// SET_PARAM this boot starts staging from what is actually enforced, not
-// from a blank record that would silently discard every field a PRIOR boot
-// already committed. After a successful COMMIT_CONFIG, this becomes the new
-// baseline for whatever SET_PARAM comes next -- exactly "staged, then
-// committed as one record, then staged again from there."
-static config_store_record_t s_staged_config;
-static bool s_staged_config_init = false;
+// other plain static above: only link_task's own thread touches it.
+//
+// KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 M2: this used to be a whole staged
+// RECORD seeded once from the committed record. SET_CONFIG and SET_CT_CAL
+// write flash directly and never refreshed it, so the next COMMIT_CONFIG /
+// APPLY_CONFIG_VOLATILE wrote the stale copy back and silently reverted
+// them (tc_type included). It is now a list of the edits SET_PARAM actually
+// staged (link_staging.h); the record a COMMIT writes is built at commit time
+// from the CURRENTLY ENFORCED record plus those edits, so a field nobody
+// staged always carries the committed value. A successful direct write also
+// drops any earlier staged edit of a field it changed, so the later write
+// wins. Discarded on an ESP boot_id change (audit M3, see
+// link_task_handle_push_context()).
+static link_staging_t s_staging;
+// Scratch record SET_PARAM validates an edit against; static rather than on
+// link_task's stack (config_store_record_t is several hundred bytes).
+static config_store_record_t s_staging_scratch;
 
-static void link_task_ensure_staged_config(void)
+// Builds the COMMIT_CONFIG / APPLY_CONFIG_VOLATILE candidate: the record
+// currently enforced (config_store_get_full_record(): flash, or a prior
+// volatile install) with every staged edit applied on top. Returns false if
+// an edit no longer applies -- impossible for an edit link_staging_stage()
+// accepted, so a caller treats it as "write nothing".
+static bool link_task_build_staged_candidate(config_store_record_t *out)
 {
-    if (s_staged_config_init) {
-        return;
-    }
-    config_store_get_full_record(&s_staged_config);
-    s_staged_config_init = true;
+    config_store_get_full_record(out);
+    return link_staging_apply(&s_staging, out);
 }
 
 // --- TX ----------------------------------------------------------------
@@ -870,25 +914,25 @@ static void link_task_send_status(void)
     // link_frame_pack_status()'s own doc comment (link_frame.h) for the full
     // skew-safety argument. Only ever true once this boot has positively
     // received an ANNOUNCE_VERSION naming a peer protocol_version >=
-    // LINK_FRAME_STATUS_V2_MIN_PROTOCOL; s_peer_protocol_version's own
+    // LINK_FRAME_STATUS_V2_MIN_PROTOCOL; s_peer_announce.version's own
     // "0 == unknown" default makes "never announced" and "announced, but
     // old" collapse to the same safe (false) outcome here without a separate
     // check.
-    bool peer_supports_status_v2 = link_frame_status_v2_supported(s_peer_protocol_version);
+    bool peer_supports_status_v2 = link_frame_status_v2_supported(s_peer_announce.version);
     uint8_t tx_dropped_sat = link_frame_saturate_tx_dropped(uart_owner_get_tx_dropped());
     // Same gate, one protocol version higher -- see link_frame_status_v3_
     // supported()'s own doc comment (link_frame.h) for why this must never
     // be true unless peer_supports_status_v2 is also true (numerically
     // guaranteed by LINK_FRAME_STATUS_V3_MIN_PROTOCOL > _V2_MIN_PROTOCOL, but
     // link_frame_pack_status() itself does not trust that ordering blindly).
-    bool peer_supports_status_v3 = link_frame_status_v3_supported(s_peer_protocol_version);
+    bool peer_supports_status_v3 = link_frame_status_v3_supported(s_peer_announce.version);
     // LINK_FLAG2_TC_CONFIG_REASSERTED (2026-09-23) -- sticky for the rest of
     // this boot once thermo_task.c has ever re-asserted the MAX31856's
     // config against a live-readback mismatch. See link_frame.h's own
     // comment on the macro for why this is a nonzero-count test, not a
     // one-shot pulse.
     bool tc_config_reasserted = thermo_task_live_config_mismatch_count() != 0u;
-    // LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B (docs/PICO_AUTO_UPDATE_PLAN.md:64) --
+    // LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B (docs/PICO_AUTO_UPDATE.md:64) --
     // update_task_get_active_slot() (update_task.c) is the authoritative
     // "which bootloader slot is this boot actually running" answer, cached
     // once at that task's own startup from a real flash metadata read; see
@@ -945,7 +989,7 @@ static void link_task_send_fw_version(void)
     // generated strings themselves rather than a guessed constant.
     //
     // COMMIT/DIRTY COME FROM THE EMBEDDED IMAGE-IDENTITY RECORD, NOT FROM THE
-    // GENERATED MACROS DIRECTLY (docs/PICO_AUTO_UPDATE_PLAN.md G2). The ESP
+    // GENERATED MACROS DIRECTLY (docs/PICO_AUTO_UPDATE.md G2). The ESP
     // answers "is this Pico out of date?" by comparing what THIS frame
     // reports against the identity it scans out of the image it is about to
     // push at us. Those two have to be the same bytes or the comparison means
@@ -1018,6 +1062,15 @@ static uint8_t link_task_context_age_100ms(void)
 
 static void link_task_send_diag(void)
 {
+    // kilnlink audit 2026-10-09 M4: read the trip occurrence BEFORE the trip
+    // state below. Both reads are lock-free; if a trip latches between them
+    // this frame pairs the newer state with the older seq, and a clear the
+    // ESP binds to it is refused as stale at dequeue (fail safe). Reading in
+    // the other order could pair an older state with a newer seq and bind a
+    // clear to an occurrence the ESP never saw.
+    uint8_t diag_trip_seq = 0;
+    (void)safety_core_get_trip_event(&diag_trip_seq, NULL, NULL, NULL, NULL);
+
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     bool warn_active = false;
     uint8_t diag_state = 0;
@@ -1168,8 +1221,18 @@ static void link_task_send_diag(void)
         .state = diag_state,
         .flags = diag_flags,
         .log_frames_dropped = log_task_get_dropped(),
+        // kilnlink audit 2026-10-09 M4: the 31-byte form, only to a peer
+        // that announced it understands it (link_frame_trip_seq_supported());
+        // before ANNOUNCE and for a protocol 16 peer the frame stays 30 bytes.
+        .has_trip_seq = link_frame_trip_seq_supported(s_peer_announce.version),
+        .trip_seq = diag_trip_seq,
+        // TEST_TRIP plan section 6 (F6): the 32-byte form carrying the Pico
+        // boot_id, only to a peer that announced >= 18 (link_frame_boot_id_
+        // supported()). Implies has_trip_seq (the gate is monotonic).
+        .has_boot_id = link_frame_boot_id_supported(s_peer_announce.version),
+        .pico_boot_id = s_boot_id,
     };
-    uint8_t payload[KILNLINK_DIAG_LEN];
+    uint8_t payload[KILNLINK_DIAG_LEN_V3];
     kilnlink_diag_status_t status;
     size_t len = kilnlink_diag_encode(&dg, payload, sizeof(payload), &status);
     // 2026-08-23 call-path diagnostic, checkpoint 2 -- recorded regardless of
@@ -1177,7 +1240,7 @@ static void link_task_send_diag(void)
     s_diag_encode_len = (uint32_t)len;
     s_diag_encode_status = (uint8_t)status;
     if (len == 0) {
-        return; // can't happen for a fixed sizeof(payload) == KILNLINK_DIAG_LEN buffer
+        return; // can't happen: sizeof(payload) == KILNLINK_DIAG_LEN_V3, the largest form
     }
 
     link_task_send_broadcast(payload, (uint8_t)len);
@@ -1334,11 +1397,47 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
     // sooner, never later. Wiring boot_id_changed to force a reset here
     // would LOOSEN every one of those guards by giving a fast-rebooting ESP
     // a free correlation-window reset on demand -- exactly the wrong
-    // direction for a safety guard. So `boot_id_changed` stays computed and
-    // discarded on purpose; this comment is the record that the omission was
+    // direction for a safety guard. So `boot_id_changed` never reaches the
+    // guard accumulators; this comment is the record that the omission was
     // considered, not overlooked.
-    bool boot_id_changed = s_context_boot_id_known && snap.boot_id != s_last_context_boot_id;
-    (void)boot_id_changed; // suppress unused-variable-as-error; see comment above
+    //
+    // The ONE thing a new ESP session does reset is the SET_PARAM staging
+    // area (KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 M3). Staging is not a guard
+    // accumulator: it is a set of uncommitted edits the previous ESP boot
+    // made, and carrying them into the next boot's COMMIT_CONFIG would commit
+    // values the operator never confirmed. Discarding them can only make a
+    // later COMMIT write the committed record instead, so the "safe
+    // direction" argument above does not apply to it. A context gap of at
+    // least LINK_TASK_CONTEXT_MAX_AGE_MS also counts as a new session, which
+    // covers an ESP reboot that drew the same 8-bit boot_id and a link loss.
+    // KilnFW's zones_current_sweep_task.c repairs its own mid-sweep leftovers
+    // inside one session; this covers the cross-boot case it cannot.
+    bool context_gap =
+        s_context_boot_id_known &&
+        (xTaskGetTickCount() - s_last_context_rx_tick) >= pdMS_TO_TICKS(LINK_TASK_CONTEXT_MAX_AGE_MS);
+    uint16_t staged_before = (uint16_t)link_staging_count(&s_staging);
+    // A boot_id change also forgets the peer protocol version (see
+    // link_staging_apply_context_session()): a rolled-back ESP that lost its
+    // announce burst must not be sent the previous boot's frame formats.
+    bool new_esp_session =
+        link_staging_apply_context_session(&s_staging, &s_peer_announce, s_context_boot_id_known,
+                                           s_last_context_boot_id, snap.boot_id, context_gap);
+    // F2 (safety link review 2026-10-09): the K4 grant belongs to the ESP session that requested it.
+    // A new session that does not claim heat ownership must not inherit it; drop it (de-energise only,
+    // never a trip -- the new session's own REQUEST_ENABLE, or the ESP's K4 reconcile, re-asks).
+    if (link_staging_session_drops_heat_grant(new_esp_session,
+                                              (snap.flags & CONTEXT_FLAG_HEAT_OWNER_ACTIVE) != 0u)) {
+        (void)safety_core_request_enable(false);
+        log_task_log(LOG_LEVEL_INFO, "push_context", "new ESP session without heat owner: grant dropped");
+    }
+    if (new_esp_session) {
+        if (staged_before > 0u) {
+            char discard_msg[64];
+            snprintf(discard_msg, sizeof(discard_msg),
+                     "new ESP session: discarded %u staged edit(s)", (unsigned)staged_before);
+            log_task_log(LOG_LEVEL_WARN, "push_context", discard_msg);
+        }
+    }
     s_last_context_boot_id = snap.boot_id;
     s_context_boot_id_known = true;
 
@@ -1402,13 +1501,17 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     // is deliberately a narrower, additive-feature-specific question than
     // "are we fully compatible" (see link_frame_pack_status()'s doc comment,
     // link_frame.h).
-    s_peer_protocol_version = eval.peer_protocol_version;
+    link_peer_announce_record(&s_peer_announce, msg.boot_id, eval.peer_protocol_version);
 
     // LINK_PROTOCOL.md section 4, "What each side does about a mismatch":
     // the Pico enters DEGRADED_NO_CONTEXT and does NOT latch a trip. This is
     // the ONLY effect a version mismatch has from in here -- no relay/trip
     // call, by design (and this file could not make one anyway, see the
     // header comment).
+    // LOW-1: s_degraded_no_context is deliberately NOT reset when the context
+    // session function forgets the version on a boot_id change. Degraded only
+    // blocks things, so keeping the previous verdict is the conservative
+    // direction; the next ANNOUNCE rewrites it together with the version.
     s_degraded_no_context = eval.degraded_no_context;
 }
 
@@ -1508,6 +1611,121 @@ static void link_task_handle_request_enable(const kilnlink_frame_t *frame)
 // above) and LINK_PROTOCOL.md does not ask CLEAR_TRIP to reply; the ESP
 // observes the outcome via the tripped bit in the next Frame A/B it
 // receives.
+static uint32_t link_task_now_ms(void)
+{
+    return (uint32_t)xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+// ms the peer's protocol version has been unknown (0 while known).
+static uint32_t link_task_peer_unknown_ms(void)
+{
+    if (s_peer_announce.version != 0u) {
+        return 0u;
+    }
+    return link_task_now_ms() - s_last_peer_known_ms;
+}
+
+static void link_task_arm_test_trip_reply(uint8_t request_id, uint8_t outcome, uint8_t trip_seq)
+{
+    s_tt_reply_request_id = request_id;
+    s_tt_reply_outcome = outcome;
+    s_tt_reply_trip_seq = trip_seq;
+    s_tt_reply_pending = (uint8_t)LINK_TEST_TRIP_REPLY_COPIES;
+    s_tt_reply_last_ms = link_task_now_ms() - LINK_TEST_TRIP_REPLY_PERIOD_MS; // first copy at once
+}
+
+// TEST_TRIP (0x2E), docs/TEST_TRIP_PLAN.md section 4. Decode, run the pure
+// acceptance decision, and on ACCEPTED hand the request to safety_core, which
+// latches SAFETY_TRIP_TEST through the real guard path. Every outcome is
+// answered with a TEST_TRIP_RESULT burst (non-blocking, see
+// link_task_poll_test_trip_reply()). This path can only cause a trip.
+static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
+{
+    kilnlink_test_trip_t msg;
+    if (kilnlink_test_trip_decode(frame->payload, frame->length, &msg) != KILNLINK_TEST_TRIP_OK) {
+        return; // malformed: untrusted wire input, discarded like every other decode failure
+    }
+    safety_trip_t trip_reason = SAFETY_TRIP_NONE;
+    safety_core_get_diag_status(&trip_reason, NULL, NULL, NULL);
+    const link_test_trip_state_t tt_state_before = s_test_trip_state;
+    uint8_t outcome = link_frame_decide_test_trip(
+        &s_test_trip_state, link_task_now_ms(), msg.magic, msg.request_id, msg.pico_boot_id, s_boot_id,
+        s_peer_announce.version, update_task_transfer_active(), trip_reason != SAFETY_TRIP_NONE);
+    if (outcome == KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE) {
+        // Same request re-sent: answer the SAME way again -- ACCEPTED with the seq recorded
+        // when the original was answered (REVIEW_TRIPWP2 LOW-2: never the current trip_seq,
+        // which may belong to a later, real trip). While the original is still waiting for
+        // its seq, its own reply covers it.
+        link_test_trip_reply_t dup;
+        if (link_frame_test_trip_reply_on_duplicate(&s_test_trip_state, s_tt_waiting_seq, msg.request_id, &dup)) {
+            link_task_arm_test_trip_reply(dup.request_id, dup.outcome, dup.trip_seq);
+        }
+        return;
+    }
+    if (outcome == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED) {
+        uint8_t base = 0;
+        (void)safety_core_get_trip_event(&base, NULL, NULL, NULL, NULL);
+        if (!safety_core_request_test_trip()) {
+            // Queue missing or a request already pending: nothing was latched. Do not charge
+            // the dedup / rate state for a request that never happened (REVIEW_TRIPWP2 LOW-3),
+            // and do not claim ALREADY_TRIPPED: a request is already pending, i.e. rate-limited.
+            s_test_trip_state = tt_state_before;
+            outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT;
+            log_task_log(LOG_LEVEL_WARN, "test_trip", "refused, safety_core request queue busy");
+            link_task_arm_test_trip_reply(msg.request_id, outcome, 0u);
+            return;
+        }
+        log_task_log(LOG_LEVEL_WARN, "test_trip", "ACCEPTED, test trip requested");
+        s_tt_waiting_seq = true;
+        s_tt_seq_base = base;
+        s_tt_wait_request_id = msg.request_id;
+        s_tt_wait_deadline_ms = link_task_now_ms() + LINK_TEST_TRIP_SEQ_WAIT_MS;
+        return;
+    }
+    log_task_log(LOG_LEVEL_INFO, "test_trip", "refused");
+    link_task_arm_test_trip_reply(msg.request_id, outcome, 0u);
+}
+
+// Once per link_task loop: finish an ACCEPTED reply (needs the latched
+// trip_seq, else 0 after the bounded wait) and send queued reply copies.
+static void link_task_poll_test_trip_reply(void)
+{
+    uint32_t now_ms = link_task_now_ms();
+    if (s_tt_waiting_seq) {
+        uint8_t seq = 0;
+        safety_trip_t reason = SAFETY_TRIP_NONE;
+        bool have = safety_core_get_trip_event(&seq, &reason, NULL, NULL, NULL);
+        if (have && seq != s_tt_seq_base) {
+            s_tt_waiting_seq = false;
+            // REVIEW_TRIPWP2 LOW-1: only a TEST latch is "your test trip"; a real guard that
+            // won the race is reported as already tripped (with its seq), never as ACCEPTED.
+            link_test_trip_reply_t rep;
+            (void)link_frame_test_trip_reply_on_latch(&s_test_trip_state, s_tt_wait_request_id,
+                                                      reason == SAFETY_TRIP_TEST, seq, &rep);
+            link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq);
+        } else if ((int32_t)(now_ms - s_tt_wait_deadline_ms) >= 0) {
+            s_tt_waiting_seq = false;
+            link_test_trip_reply_t rep;
+            (void)link_frame_test_trip_reply_on_timeout(&s_test_trip_state, s_tt_wait_request_id, &rep);
+            link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq);
+        }
+    }
+    if (s_tt_reply_pending > 0u && (now_ms - s_tt_reply_last_ms) >= LINK_TEST_TRIP_REPLY_PERIOD_MS) {
+        kilnlink_test_trip_result_t r = {
+            .request_id = s_tt_reply_request_id,
+            .outcome = s_tt_reply_outcome,
+            .trip_seq = s_tt_reply_trip_seq,
+        };
+        uint8_t payload[KILNLINK_TEST_TRIP_RESULT_LEN];
+        size_t len = kilnlink_test_trip_result_encode(&r, payload, sizeof(payload), NULL);
+        if (len != 0u) {
+            (void)link_task_send_broadcast(payload, (uint8_t)len);
+        }
+        s_tt_reply_pending--;
+        s_tt_reply_last_ms = now_ms;
+    }
+}
+
 static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 {
     kilnlink_clear_trip_t msg;
@@ -1527,7 +1745,9 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     // link_frame_decide_clear_trip() (src/tasks/link_frame.c) is the pure,
     // host-tested extraction of the two refusal checks documented above --
     // this function only acts on its verdict now.
-    link_clear_trip_decision_t decision = link_frame_decide_clear_trip(trip_reason, msg.trip_mask);
+    link_clear_trip_decision_t decision = link_frame_decide_clear_trip_v3(
+        trip_reason, msg.trip_mask, msg.has_trip_seq, msg.has_boot_id, msg.pico_boot_id,
+        s_boot_id, s_peer_announce.version, link_task_peer_unknown_ms());
 
     // A switch with no default, deliberately. This was an if-chain that tested
     // the two refusal values it knew about and let everything else fall
@@ -1559,15 +1779,39 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
                      "REFUSED: trip ineffective (S9) -- contactor may be welded, "
                      "remove power at the breaker; not clearable from here");
         return;
+    case LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED:
+        // kilnlink audit 2026-10-09 M4: this peer announced protocol >= 17
+        // and is sent trip_seq in DIAG, so an unbound clear from it is a
+        // stale or duplicated frame -- never let it clear whatever trip is
+        // latched now.
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, unbound clear from protocol>=17 peer");
+        return;
+    case LINK_CLEAR_TRIP_REFUSE_PEER_UNKNOWN:
+        // F6: peer version unknown (no ANNOUNCE yet). A legacy clear cannot be
+        // bound to this Pico boot; refused until ANNOUNCE or the grace elapses.
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, peer version unknown (no ANNOUNCE yet)");
+        return;
+    case LINK_CLEAR_TRIP_REFUSE_BOOT_ID_REQUIRED:
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, protocol>=18 peer sent a clear without boot_id");
+        return;
+    case LINK_CLEAR_TRIP_REFUSE_BOOT_ID:
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, boot_id is not this boot's");
+        return;
     case LINK_CLEAR_TRIP_ACCEPT:
         break;
     }
 
-    bool queued = safety_core_request_clear_trip();
+    bool queued = safety_core_request_clear_trip(msg.has_trip_seq, msg.trip_seq);
     char msg_buf[64];
-    snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu",
-             queued ? "queued" : "dropped, safety_core queue full",
-             (unsigned long)s_clear_trip_rx_count);
+    if (msg.has_trip_seq) {
+        snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu seq=%u",
+                 queued ? "queued" : "dropped, safety_core queue full",
+                 (unsigned long)s_clear_trip_rx_count, (unsigned)msg.trip_seq);
+    } else {
+        snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu unbound",
+                 queued ? "queued" : "dropped, safety_core queue full",
+                 (unsigned long)s_clear_trip_rx_count);
+    }
     log_task_log(queued ? LOG_LEVEL_INFO : LOG_LEVEL_WARN, "clear_trip", msg_buf);
 }
 
@@ -1733,6 +1977,16 @@ static bool link_task_heat_is_safe_for_tc_type_change(void)
                                           CONTEXT_FLAG_HEAT_OWNER_ACTIVE);
 }
 
+// Heat-possible predicate for config_store_write_volatile() (MED-1): the
+// exact complement of the tc_type gate, so both gates share one definition of
+// "idle and de-energized" and cannot drift. True on any doubt (K4 energized,
+// recent enable request, stale/absent context, any ESP heat flag, relay
+// on-time or current seen).
+static bool link_task_heat_possible_probe(void)
+{
+    return !link_task_heat_is_safe_for_tc_type_change();
+}
+
 // 2026-09-15 Opus re-review N2: called every poll from link_task_fn()'s main
 // loop. While s_tc_type_reapply_pending is set, the persisted flash record
 // and the physically configured MAX31856 may be diverged -- keep retrying
@@ -1854,6 +2108,10 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
         config_store_write_ex(&rec, link_task_heat_is_safe_for_tc_type_change(), &reason, NULL);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_config", "accepted");
+        // Audit M2: this write wins over any earlier staged edit of a field
+        // it changed, and always over a staged tc_type edit (0x0105).
+        (void)link_staging_drop_superseded(&s_staging, &committed, &rec);
+        (void)link_staging_drop_id(&s_staging, 0x0105u);
         // Take effect immediately, not after a reboot -- thermo_task.c's own
         // comment on thermo_task_request_tc_type_reapply() explains the
         // fail-safe path this rides: max31856_configure() clears
@@ -1942,6 +2200,19 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
         return;
     }
 
+    // kilnlink audit 2026-10-09 L2: the same per-channel sanity bounds
+    // config_params_set()/config_params_validate_ex() apply to the
+    // SET_PARAM/COMMIT_CONFIG path (config_params.h,
+    // CONFIG_PARAMS_CT_CAL_GAIN_MAX). config_store_write() itself does not
+    // range-check, so without this a calibrated gain of 0 or less would make
+    // the channel read 0 A and blind S14.
+    const char *cal_rule = NULL;
+    if (!config_params_ct_cal_entry_ok(msg.calibrated != 0u, msg.gain, msg.offset, NULL, NULL,
+                                       &cal_rule)) {
+        log_task_log(LOG_LEVEL_WARN, "set_ct_cal", cal_rule ? cal_rule : "refused, value out of range");
+        return;
+    }
+
     // Read-modify-write against the committed record via config_store_
     // get_full_record(), not the piecemeal getters + config_store_default()
     // this used to build on -- see link_frame_apply_set_ct_cal()'s own
@@ -1960,6 +2231,13 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
     bool written = config_store_write(&rec, &reason);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_ct_cal", "accepted");
+        // Audit M2: this write wins over any earlier staged edit of a field
+        // it changed, and always over this channel's staged gain/offset/
+        // calibrated edits (0x0310+ch, 0x0313+ch, 0x0316+ch).
+        (void)link_staging_drop_superseded(&s_staging, &committed, &rec);
+        (void)link_staging_drop_id(&s_staging, (uint16_t)(0x0310u + msg.channel));
+        (void)link_staging_drop_id(&s_staging, (uint16_t)(0x0313u + msg.channel));
+        (void)link_staging_drop_id(&s_staging, (uint16_t)(0x0316u + msg.channel));
         // Take effect immediately, not after a reboot -- current_task.c's
         // own comment on current_task_reload_ct_cal() explains why a live
         // commissioning session needs this. tc_type now gets the same
@@ -2145,13 +2423,13 @@ static void link_task_handle_rollback(const kilnlink_frame_t *frame)
 // acceptance -- update_task_request_rollback() does not return in that
 // case; see kilnlink_rollback_result.h's own "ASYMMETRIC BY DESIGN"
 // comment). Gated by link_frame_rollback_result_supported() on this boot's
-// cached s_peer_protocol_version, the EXACT same skew-safety discipline
+// cached s_peer_announce.version, the EXACT same skew-safety discipline
 // link_task_send_status() already applies to its own V2 (24-byte) frame --
 // an ESP that has not positively announced protocol_version >= 9 never
 // receives a frame its dispatch switch has no case for.
 static void link_task_send_rollback_result(uint8_t reason_code)
 {
-    if (!link_frame_rollback_result_supported(s_peer_protocol_version)) {
+    if (!link_frame_rollback_result_supported(s_peer_announce.version)) {
         // Peer never announced (0, the safe default) or announced an old
         // version -- stay silent, same as this frame not existing at all
         // for that peer. The refusal is still fully recorded in THIS boot's
@@ -2463,13 +2741,13 @@ static void link_task_handle_inject_tc(const kilnlink_frame_t *frame)
 }
 
 // SAFETY_CMD_SET_PARAM (0x1C), docs/COMMISSIONING.md section 2 -- stages one
-// (param_id, value) pair into the in-RAM record, per config_params.c's id
-// table. Nothing here reaches flash: config_params_set() only mutates
-// s_staged_config, and config_store_write() is called ONLY from
-// COMMIT_CONFIG's handler below, after that whole staged record passes
-// cross-field validation. An unknown id or a type that does not match the
-// field's own wire type is refused individually (config_params_set()
-// returns false, s_staged_config left untouched) -- COMMISSIONING.md section
+// (param_id, value) edit, per config_params.c's id table. Nothing here
+// reaches flash: the edit is validated with config_params_set() against a
+// scratch copy of the committed record and recorded in s_staging, and
+// config_store_write() is called ONLY from COMMIT_CONFIG's handler below,
+// after the whole candidate record passes cross-field validation. An unknown
+// id or a type that does not match the field's own wire type is refused
+// individually (nothing staged) -- COMMISSIONING.md section
 // 2: "unknown ids are refused individually... rather than the whole
 // transfer failing," and the same treatment extends to a wrong type tag for
 // a real id, which is exactly as untrustworthy.
@@ -2483,9 +2761,8 @@ static void link_task_handle_set_param(const kilnlink_frame_t *frame)
         return;
     }
 
-    link_task_ensure_staged_config();
-
-    if (!config_params_set(&s_staged_config, msg.param_id, msg.type, msg.value)) {
+    config_store_get_full_record(&s_staging_scratch);
+    if (!link_staging_stage(&s_staging, &msg, &s_staging_scratch)) {
         log_task_log(LOG_LEVEL_WARN, "set_param", "refused, unknown param_id or type mismatch");
         return;
     }
@@ -2512,9 +2789,10 @@ static void link_task_handle_set_param(const kilnlink_frame_t *frame)
 // The ARMED refusal is NOT checked here -- it lives inside
 // config_store_write() itself (config_store_decide_write(), config_store.h's
 // own header comment), so a future second call site into config_store_write()
-// cannot forget it. On refusal (ARMED, or a flash failure), s_staged_config
-// is left completely UNCHANGED, so a retry (or another SET_PARAM first)
-// starts from exactly what was staged, never from a half-written record.
+// cannot forget it. On refusal (ARMED, or a flash failure), the staged edits
+// in s_staging are left completely UNCHANGED, so a retry (or another
+// SET_PARAM first) starts from exactly what was staged, never from a
+// half-written record.
 // SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20), docs/COMMISSIONING.md sec 2/3.1
 // -- ROADMAP.md "no wire codec carries a per-field COMMIT_CONFIG rejection
 // reason back to the ESP" loose end. Sent ONLY from link_task_handle_
@@ -2551,38 +2829,45 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     }
     (void)msg; // no fields
 
-    link_task_ensure_staged_config();
+    // Audit M2: the candidate is the currently enforced record plus the
+    // staged edits, built now -- never a record seeded before a later
+    // SET_CONFIG/SET_CT_CAL direct write, which used to revert that write.
+    config_store_record_t to_write;
+    if (!link_task_build_staged_candidate(&to_write)) {
+        log_task_log(LOG_LEVEL_ERROR, "commit_config", "refused, a staged edit no longer applies");
+        link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN);
+        return;
+    }
 
     const char *field = NULL;
     const char *rule = NULL;
     config_params_reject_reason_t validate_reason = CONFIG_PARAMS_REJECT_NONE;
-    if (!config_params_validate_ex(&s_staged_config, &field, &rule, &validate_reason)) {
+    if (!config_params_validate_ex(&to_write, &field, &rule, &validate_reason)) {
         log_task_log(LOG_LEVEL_WARN, "commit_config", rule ? rule : "refused, validation failed");
         // COMMISSIONING.md sec 3.1's "names the offending field and the rule
         // it broke" -- validate_reason maps directly onto the wire enum
         // (both are "range" vs "contradiction", nothing else can come out
         // of config_params_validate_ex() here); CONFIG_PARAMS_REJECT_NONE
         // (the NULL-rec case, which link_task.c never actually triggers,
-        // since s_staged_config is always a real object) falls through to
+        // since to_write is always a real object) falls through to
         // UNKNOWN rather than silently mislabelling as RANGE.
         kilnlink_commit_config_reject_reason_t wire_reason =
             (validate_reason == CONFIG_PARAMS_REJECT_CONTRADICTION) ? KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION
             : (validate_reason == CONFIG_PARAMS_REJECT_RANGE)       ? KILNLINK_COMMIT_CONFIG_REJECT_RANGE
                                                                      : KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
         link_task_send_commit_config_rejected(config_params_id_for_field_name(field), wire_reason);
-        return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
+        return; // writes NOTHING -- the staged edits are kept for a retry
     }
 
     // Captured BEFORE this commit's staged changes are finalized/written --
     // config_params_finalize_i_normal_a_invalidation() below needs the
     // effective CT channel map as it stood BEFORE this commit, to detect a
-    // topology/channel remap that must invalidate i_normal_a[]. s_staged_
-    // config already carries this commit's own SET_PARAM changes, so it
-    // cannot serve as "before"; the last record actually committed can.
+    // topology/channel remap that must invalidate i_normal_a[]. to_write
+    // already carries this commit's own SET_PARAM changes, so it cannot
+    // serve as "before"; the last record actually committed can.
     config_store_record_t before_commit;
     config_store_get_full_record(&before_commit);
 
-    config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
     config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK.md step 2
     // Must run AFTER finalize_zone_ct_channel() (so to_write's group bit is
@@ -2603,13 +2888,13 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     bool written = config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_change(), &reason,
                                           &decision);
     if (written) {
-        s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
+        link_staging_reset(&s_staging); // committed; the next SET_PARAM starts from this record
         log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
         // Take effect immediately, not after a reboot -- same reasoning as
         // link_task_handle_set_ct_cal()'s own call to current_task_reload_
         // ct_cal() just above. COMMIT_CONFIG is the only wire path that can
         // change i_present_a/zero_counts/k_ct_v_per_a/gain/mains_voltage_v
-        // (SET_PARAM stages them into s_staged_config; this is where they
+        // (SET_PARAM stages them into s_staging; this is where they
         // actually land in config_store), so this is the one call site that
         // needs current_task_reload_cal() -- current_task_fn()'s own boot
         // sequence is the only other caller.
@@ -2684,16 +2969,19 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 // reason this sibling command exists instead of a flag that would have to
 // thread an ARMED-bypass through config_store_write() itself.
 //
-// CORRECTION (2026-09-14 review, Finding A): this comment used to say "there
-// is no ARMED refusal branch here at all" -- that was true of the flash-
-// stall gate, but config_store_write_volatile() now DOES refuse a narrow
-// class of installs while ARMED (raising/clearing abs_max_temp_c or
-// max_rate_c_per_min, or any tc_type change -- see that function's own doc
-// comment in config_store.h). This handler now has to check its return
-// value for exactly that reason, reported on the existing SAFETY_CMD_
-// COMMIT_CONFIG_REJECTED frame with KILNLINK_COMMIT_CONFIG_REJECT_ARMED --
-// no new wire value, no protocol bump: that reason already existed for
-// COMMIT_CONFIG and was simply unreachable via this path until now.
+// CORRECTION (2026-09-14 review, Finding A; widened 2026-10-09, guard-fixes
+// review HIGH-1/MED-1): config_store_write_volatile() DOES refuse installs,
+// but only while heat is POSSIBLE (this file's link_task_heat_is_safe_for_
+// tc_type_change() says no: relay energized, a heat request or profile
+// running, stale context, or current flowing), NOT merely while ARMED --
+// ARMED is the normal idle state from 60 s after boot, and an idle, de-
+// energized board accepts any validated install. While heat is possible the
+// install is refused if ANY trip-relevant field differs from the running
+// record, other than a few provable tightenings and an explicit allowlist of
+// non-safety fields (see config_store_volatile_would_loosen_safety() in
+// config_store.c). This handler checks the return value for that reason,
+// reported on the existing SAFETY_CMD_COMMIT_CONFIG_REJECTED frame with
+// KILNLINK_COMMIT_CONFIG_REJECT_ARMED -- no new wire value, no protocol bump.
 static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame)
 {
     kilnlink_apply_config_volatile_t msg;
@@ -2706,19 +2994,25 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     }
     (void)msg; // no fields
 
-    link_task_ensure_staged_config();
+    // Audit M2: same candidate construction as link_task_handle_commit_config().
+    config_store_record_t to_write;
+    if (!link_task_build_staged_candidate(&to_write)) {
+        log_task_log(LOG_LEVEL_ERROR, "apply_config_volatile", "refused, a staged edit no longer applies");
+        link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN);
+        return;
+    }
 
     const char *field = NULL;
     const char *rule = NULL;
     config_params_reject_reason_t validate_reason = CONFIG_PARAMS_REJECT_NONE;
-    if (!config_params_validate_ex(&s_staged_config, &field, &rule, &validate_reason)) {
+    if (!config_params_validate_ex(&to_write, &field, &rule, &validate_reason)) {
         log_task_log(LOG_LEVEL_WARN, "apply_config_volatile", rule ? rule : "refused, validation failed");
         kilnlink_commit_config_reject_reason_t wire_reason =
             (validate_reason == CONFIG_PARAMS_REJECT_CONTRADICTION) ? KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION
             : (validate_reason == CONFIG_PARAMS_REJECT_RANGE)       ? KILNLINK_COMMIT_CONFIG_REJECT_RANGE
                                                                      : KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
         link_task_send_commit_config_rejected(config_params_id_for_field_name(field), wire_reason);
-        return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
+        return; // writes NOTHING -- the staged edits are kept for a retry
     }
 
     // See link_task_handle_commit_config()'s matching comment: this is the
@@ -2729,7 +3023,6 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     config_store_record_t before_commit;
     config_store_get_full_record(&before_commit);
 
-    config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
     config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK.md step 2
     // Same ordering requirement as link_task_handle_commit_config(): after
@@ -2741,20 +3034,21 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     config_params_finalize_i_present_a(&to_write);
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
-    // config_store_write_volatile() can still fail for exactly one reason
-    // now (Finding A's ARMED-loosening carve-out): it cannot fail flash I/O
-    // (never touches flash), so any refusal here is that carve-out, never a
-    // storage failure -- report it the same way COMMIT_CONFIG's ARMED
-    // refusal is reported.
+    // config_store_write_volatile() can fail for exactly one reason: the
+    // heat-possible gate (it never touches flash, so it cannot fail flash
+    // I/O). Any refusal here is that gate, never a storage failure -- report
+    // it the same way COMMIT_CONFIG's ARMED refusal is reported.
     uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
     const char *reason = NULL;
     if (!config_store_write_volatile(&to_write, &reason)) {
         log_task_log(LOG_LEVEL_WARN, "apply_config_volatile",
-                     reason ? reason : "refused: would loosen a safety threshold while ARMED");
+                     reason ? reason : "refused: heat is possible and this install changes a trip-relevant field");
         link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_ARMED);
-        return; // writes NOTHING -- s_staged_config is untouched
+        return; // writes NOTHING -- the staged edits are kept for a retry
     }
-    s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
+    // Installed; the cached record now carries these values, and the next
+    // candidate is built from it.
+    link_staging_reset(&s_staging);
     log_task_log(LOG_LEVEL_INFO, "apply_config_volatile", "accepted (volatile, no flash write)");
     // Same "take effect immediately" reasoning as link_task_handle_commit_
     // config()'s own call: CT cal / i_present_a etc. must be live the moment
@@ -2960,9 +3254,15 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     }
 
     // S6b's link_up (snapshots.h's link_task_link_up() doc comment): a
-    // frame that decodes cleanly proves the ESP is alive and transmitting,
-    // regardless of whether this build goes on to act on it -- recorded
-    // before the BROADCAST-only filter just below on purpose.
+    // frame that decodes cleanly AND is addressed from the ESP to this Pico
+    // proves the ESP is alive and transmitting, regardless of whether this
+    // build goes on to act on it -- recorded before the BROADCAST-only filter
+    // just below on purpose. The direction check (kilnlink audit 2026-10-09
+    // L1, link_frame_counts_for_liveness()) keeps a TX-RX loopback of this
+    // Pico's own telemetry from masking S6b.
+    if (!link_frame_counts_for_liveness(frame.src_device, frame.dst_device)) {
+        return; // not from the ESP (e.g. our own frame echoed back) -- never acted on either
+    }
     s_last_valid_frame_tick = xTaskGetTickCount();
     s_valid_frame_seen = true;
 
@@ -2992,6 +3292,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_CLEAR_TRIP_CMD:
         link_task_handle_clear_trip(&frame);
+        break;
+    case LINK_FRAME_TEST_TRIP_CMD:
+        link_task_handle_test_trip(&frame);
         break;
     case LINK_FRAME_SET_CONFIG_CMD:
         link_task_handle_set_config(&frame);
@@ -3262,7 +3565,11 @@ static void link_task_fn(void *arg)
             link_task_send_power();
             last_power_tx = now;
         }
+        if (s_peer_announce.version != 0u) {
+            s_last_peer_known_ms = link_task_now_ms(); // F6: see s_last_peer_known_ms
+        }
         link_task_poll_trip_event(now);
+        link_task_poll_test_trip_reply();
         link_task_retry_pending_tc_type_reapply();
         link_task_config_check_poll(now);
 
@@ -3281,17 +3588,29 @@ static void link_task_fn(void *arg)
 
 bool link_task_start(void)
 {
-    // Pseudo-random, latched once at boot. Nothing else in this build sources
-    // an identity value (boot_reason.h only tracks trip-reason survival
-    // across a watchdog reset, not a boot counter/id) -- time_us_64() has
-    // been running since well before this call, so its low bits are a cheap,
-    // adequate source of "looks different each boot." This is diagnostic
-    // identity only (so the ESP can tell "the Pico just restarted" apart
-    // from "same Pico, still running"), not a security or safety value, so
-    // true entropy is not required.
-    s_boot_id = (uint8_t)(time_us_64() ^ (time_us_64() >> 8));
+    // Latched once at boot. This IS load-bearing (kilnlink audit 2026-10-09
+    // M1): a boot_id change is how the ESP learns the Pico rebooted, and it
+    // then resets its trip_seq dedup, its relay-edge baseline and re-sends
+    // ANNOUNCE_VERSION (safety_apply_fw_version(), KilnFW
+    // safety_link_frames.c) -- the "reset one side of a pair" class. It used
+    // to be a time_us_64() sample taken at a near-fixed point of a
+    // deterministic boot, so consecutive boots could easily draw the same
+    // value. get_rand_32() (pico_rand) mixes the ROSC random bit, the
+    // board's unique id and time, so the 8 bits are close to uniform. An
+    // 8-bit id can still collide (1 in 256), so the ESP does not rely on it
+    // alone: it also treats a backwards step in this Pico's DIAG uptime_ms
+    // as a reboot (safety_pico_uptime_behind_expected(), KilnFW). Not a security
+    // value -- kilnlink has no authentication either way.
+    {
+        uint32_t r = get_rand_32();
+        s_boot_id = (uint8_t)(r ^ (r >> 8) ^ (r >> 16) ^ (r >> 24));
+    }
     s_degraded_no_context = false;
-    s_peer_protocol_version = 0; // unknown until this boot's own ANNOUNCE_VERSION arrives
+    link_peer_announce_clear(&s_peer_announce); // version 0 = unknown until this boot's own ANNOUNCE_VERSION arrives
+    s_last_peer_known_ms = link_task_now_ms(); // F6: the 30 s unknown-peer grace runs from boot
+    s_test_trip_state = (link_test_trip_state_t){false, 0u, 0u, 0u, 0u};
+    s_tt_waiting_seq = false;
+    s_tt_reply_pending = 0u;
     s_msg_index = 0;
     s_rx_assembly_len = 0;
     s_rx_collecting = false;
@@ -3322,7 +3641,14 @@ bool link_task_start(void)
     s_wall_clock_have = false;
     s_wall_clock_epoch_ms = 0;
 
-    s_staged_config_init = false;
+    link_staging_reset(&s_staging);
+
+    // 2026-10-09 guard-fixes review MED-1: APPLY_CONFIG_VOLATILE's
+    // trip-relevant-change refusal applies while heat is POSSIBLE, not merely
+    // while relay_owner is ARMED (ARMED is the normal idle state). Same
+    // fail-closed signal the tc_type reapply gate uses. Registered before the
+    // task exists, so no volatile install can run without it.
+    config_store_set_heat_possible_probe(link_task_heat_possible_probe);
 
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.

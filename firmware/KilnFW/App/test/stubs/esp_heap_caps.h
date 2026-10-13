@@ -37,6 +37,13 @@
 // free(json) are symmetric, same as on target.
 static bool s_stub_heap_caps_malloc_fail = false;
 
+/* Fail only allocations that request MALLOC_CAP_SPIRAM (internal RAM keeps working). */
+static bool s_stub_heap_caps_malloc_fail_spiram = false;
+static inline void heap_caps_malloc_test_set_fail_spiram(bool fail)
+{
+    s_stub_heap_caps_malloc_fail_spiram = fail;
+}
+
 static inline void heap_caps_malloc_test_set_fail(bool fail)
 {
     s_stub_heap_caps_malloc_fail = fail;
@@ -66,8 +73,7 @@ static inline unsigned heap_caps_malloc_test_count(void)
 
 static inline void *heap_caps_malloc(size_t size, uint32_t caps)
 {
-    (void)caps;
-    if (s_stub_heap_caps_malloc_fail) {
+    if (s_stub_heap_caps_malloc_fail || (s_stub_heap_caps_malloc_fail_spiram && (caps & MALLOC_CAP_SPIRAM))) {
         return NULL;
     }
     if (size >= s_stub_heap_caps_malloc_count_min_bytes) {
@@ -76,7 +82,7 @@ static inline void *heap_caps_malloc(size_t size, uint32_t caps)
     return malloc(size);
 }
 
-// profiles_live_http.c (docs/LIVE_PROFILE_EDIT_PLAN.md pass 2) pairs its
+// profiles_live_http.c (docs/LIVE_PROFILE_EDIT.md pass 2) pairs its
 // heap_caps_malloc() calls with the real heap_caps_free(), not a bare
 // free() -- both real ESP-IDF free() and heap_caps_malloc()'s host stub
 // above ultimately go through the same malloc()/free() pool on the host, so

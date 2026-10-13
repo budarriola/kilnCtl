@@ -22,8 +22,8 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (231 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-10-07: `latency_soak`/`latency_soak_start` (read-only; GET-only per-surface HTTP latency soak with p50/p95/max, errors and clustered-stall ticks, for the never-reproduced 2026-08 multi-surface stall; `latency_soak_start` is the background twin polled via `bench_test_job_status`; `mcp_server_latency_soak.py`, `latency_soak.py`, `latency_soak_stats.py`) took the count from 229 to 231; `profile_save_bench_aux_rule` (confirm-gated, read-back-verified; saves the one `BENCH_AUX_RULE` bench profile carrying an aux on/off rule so spare-relay bench steps 3/4/6/7 can run, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a, `mcp_server_aux.py`) took the count from 228 to 229; `control_convert_onoff_zone_to_aux` (confirm-gated, one-way; a single `POST /api/zones` with only `move_zone_to_aux=Z&confirm=1`, which the firmware does all-or-nothing: frees the ON_OFF zone, enables the aux binding and rewrites every stored profile rule for the zone to aux target 8+(relay-1), rolling back on any failure; the tool prechecks, then verifies zone, aux entry and every profile by read-back; `docs/SPARE_RELAY_ONOFF_PLAN.md` section 10, `mcp_server_aux.py`) took the count from 227 to 228; `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated; `update_stage_release` claims success only when the stage read-back is verified, source github, and its sha256 equals the release's; GitHub release check/stage, fetch-job status/cancel and repo setting over WP8's `/api/update/check|download|fetch|fetch/cancel` and WP9's `/api/update/settings`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP10, `mcp_server_update.py`) took the count from 221 to 227; `control_set_relay_type(relay, device_type, confirm=False)` (confirm-gated, refuses mid-run, read-back verified; a narrow writer for one relay's device type, POST key `relay<N>_type` with N 1-based, enum 0 unset/1 damper/2 outlet/3 valve/4 fan/5 light/6 other, `docs/ZONE_GRAPHIC_PLAN.md` M17; `control_get_zones` now also prints `relay_types`) took the count from 220 to 221; `control_get_aux_outputs` (read-only), `control_set_aux_output` and `control_set_aux_manual` (confirm-gated, refuse mid-run, read-back verified; spare-relay aux outputs, `docs/SPARE_RELAY_ONOFF_PLAN.md` WP-7, `mcp_server_aux.py`) took the count from 217 to 220; `bench_test_start`/`ota_matrix_start` (background twins of `bench_test_run`/`ota_matrix_run`: return a job id at once; the job calls the real tool function with confirm/allow_heat/ota_allow_heat/... passed through unchanged, so the board lock, run-level preflight and every gate still apply; `ota_matrix_start` answers a dry run or an unconfirmed call synchronously and starts no job) and `bench_test_job_status` (RUNNING with a runner.log tail, then OK/INCOMPLETE/FAILED plus the report; `wait_s` clamped to 120 s; same `mcpkit/build_jobs.py` registry as `build_job_status`, because the client aborts a call after 300 s of silence while the run keeps going) took the count from 214 to 217; `debug_reset` and `update_stage_upload` also changed text only, no count change (the reset result now has a `reset markers:` line stating whether `KCTL_RESET_ISSUED`/`KCTL_STATE` were seen and `still_halted`, so the dark-board path is distinguishable from the healthy one; a 400 `bad_version` upload refusal now explains the embedded image version is not semver and says to retry with an explicit `version="x.y.z"`, never inventing one); `recovery_apply_status` (read-only) and `recovery_apply_staged` (confirm-gated, polls to done/failed; recovery image only, wraps WP5's `POST /api/recovery/apply_staged`/`GET /api/recovery/apply_status`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md`) took the count from 212 to 214; `update_status` (read-only), `update_stage_upload` and `update_stage_clear` (confirm-gated, verify by read-back; the application's `stage` partition, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP6; no apply tool yet) took the count from 209 to 212; `build_kilnfw_start`/`build_job_status` took the count from 207 to 209; `recovery_enter` (confirm-gated `POST /api/ota/esp/recovery_boot`, the deliberate way from the application into the recovery image; see docs/MCP_SERVERS.md) took the count from 206 to 207; the three further `recovery_*` tools (`recovery_pico_abort`, `recovery_sw_reset`, `recovery_push_esp_image`, all confirm-gated, recovery image only; since 2026-10-02 the recovery image is unauthenticated -- no password, no key, no HMAC; its SoftAP shows a random per-boot passphrase on the LCD, see docs/MCP_SERVERS.md) took the count from 203 to 206; earlier the five `recovery_*` tools (`recovery_status` read-only; `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`, `recovery_pico_upload` confirm-gated; recovery image only, unauthenticated since 2026-10-02 (any joiner automation reads the LCD passphrase from `KILNCTL_RECOVERY_AP_PASSPHRASE`, no PcTools tool joins the AP), see docs/MCP_SERVERS.md) took the count from 198 to 203; `flash_recovery` (JTAG write of the `recovery` partition only; see docs/MCP_SERVERS.md) took the count from 197 to 198; on 2026-10-01 the two `network_get_ip_config`/`network_set_ip_config` tools added that day took the count from 195 to 197, after 2026-09-29, when the AP-password HMAC
+the rest behind a search facade (233 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-10-11: `safety_test_trip(confirm=False)` (confirm-gated; `POST /api/safety/test_trip`, ADMIN tier, makes the Pico latch reason 4 / mask 0x0008, `docs/TEST_TRIP_PLAN.md`, `mcp_server_safety.py`) took the count from 232 to 233; `control_set_zone_relay_mask(zone, relay_mask, confirm=False)` (confirm-gated, refuses mid-run, read-back verified with a collateral diff; GET-merge-POST narrow writer for one zone's `relay_mask`, modeled on `control_set_zone_type`; a firmware 4xx comes back as `refused by firmware (HTTP n)`; lets bench case AX-C03 run and restore the mask, `mcp_server_control.py`) took the count from 231 to 232; `latency_soak`/`latency_soak_start` (read-only; GET-only per-surface HTTP latency soak with p50/p95/max, errors and clustered-stall ticks, for the never-reproduced 2026-08 multi-surface stall; `latency_soak_start` is the background twin polled via `bench_test_job_status`; `mcp_server_latency_soak.py`, `latency_soak.py`, `latency_soak_stats.py`) took the count from 229 to 231; `profile_save_bench_aux_rule` (confirm-gated, read-back-verified; saves the one `BENCH_AUX_RULE` bench profile carrying an aux on/off rule so spare-relay bench steps 3/4/6/7 can run, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a, `mcp_server_aux.py`) took the count from 228 to 229; `control_convert_onoff_zone_to_aux` (confirm-gated, one-way; a single `POST /api/zones` with only `move_zone_to_aux=Z&confirm=1`, which the firmware does all-or-nothing: frees the ON_OFF zone, enables the aux binding and rewrites every stored profile rule for the zone to aux target 8+(relay-1), rolling back on any failure; the tool prechecks, then verifies zone, aux entry and every profile by read-back; `docs/SPARE_RELAY_ONOFF_PLAN.md` section 10, `mcp_server_aux.py`) took the count from 227 to 228; `update_fetch_status`/`update_get_settings` (read-only), `update_check` (starts a board-side GitHub check job via POST /api/update/check; not read-only, no confirm gate) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated; `update_stage_release` claims success only when the stage read-back is verified, source github, and its sha256 equals the release's; GitHub release check/stage, fetch-job status/cancel and repo setting over WP8's `/api/update/check|download|fetch|fetch/cancel` and WP9's `/api/update/settings`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP10, `mcp_server_update.py`) took the count from 221 to 227; `control_set_relay_type(relay, device_type, confirm=False)` (confirm-gated, refuses mid-run, read-back verified; a narrow writer for one relay's device type, POST key `relay<N>_type` with N 1-based, enum 0 unset/1 damper/2 outlet/3 valve/4 fan/5 light/6 other, `docs/ZONE_GRAPHIC_PLAN.md` M17; `control_get_zones` now also prints `relay_types`) took the count from 220 to 221; `control_get_aux_outputs` (read-only), `control_set_aux_output` and `control_set_aux_manual` (confirm-gated, refuse mid-run, read-back verified; spare-relay aux outputs, `docs/SPARE_RELAY_ONOFF_PLAN.md` WP-7, `mcp_server_aux.py`) took the count from 217 to 220; `bench_test_start`/`ota_matrix_start` (background twins of `bench_test_run`/`ota_matrix_run`: return a job id at once; the job calls the real tool function with confirm/allow_heat/ota_allow_heat/... passed through unchanged, so the board lock, run-level preflight and every gate still apply; `ota_matrix_start` answers a dry run or an unconfirmed call synchronously and starts no job) and `bench_test_job_status` (RUNNING with a runner.log tail, then OK/INCOMPLETE/FAILED plus the report; `wait_s` clamped to 120 s; same `mcpkit/build_jobs.py` registry as `build_job_status`, because the client aborts a call after 300 s of silence while the run keeps going) took the count from 214 to 217; `debug_reset` and `update_stage_upload` also changed text only, no count change (the reset result now has a `reset markers:` line stating whether `KCTL_RESET_ISSUED`/`KCTL_STATE` were seen and `still_halted`, so the dark-board path is distinguishable from the healthy one; a 400 `bad_version` upload refusal now explains the embedded image version is not semver and says to retry with an explicit `version="x.y.z"`, never inventing one); `recovery_apply_status` (read-only) and `recovery_apply_staged` (confirm-gated, polls to done/failed; recovery image only, wraps WP5's `POST /api/recovery/apply_staged`/`GET /api/recovery/apply_status`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md`) took the count from 212 to 214; `update_status` (read-only), `update_stage_upload` and `update_stage_clear` (confirm-gated, verify by read-back; the application's `stage` partition, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP6; no apply tool yet) took the count from 209 to 212; `build_kilnfw_start`/`build_job_status` took the count from 207 to 209; `recovery_enter` (confirm-gated `POST /api/ota/esp/recovery_boot`, the deliberate way from the application into the recovery image; see docs/MCP_SERVERS.md) took the count from 206 to 207; the three further `recovery_*` tools (`recovery_pico_abort`, `recovery_sw_reset`, `recovery_push_esp_image`, all confirm-gated, recovery image only; since 2026-10-02 the recovery image is unauthenticated -- no password, no key, no HMAC; its SoftAP shows a random per-boot passphrase on the LCD, see docs/MCP_SERVERS.md) took the count from 203 to 206; earlier the five `recovery_*` tools (`recovery_status` read-only; `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`, `recovery_pico_upload` confirm-gated; recovery image only, unauthenticated since 2026-10-02 (any joiner automation reads the LCD passphrase from `KILNCTL_RECOVERY_AP_PASSPHRASE`, no PcTools tool joins the AP), see docs/MCP_SERVERS.md) took the count from 198 to 203; `flash_recovery` (JTAG write of the `recovery` partition only; see docs/MCP_SERVERS.md) took the count from 197 to 198; on 2026-10-01 the two `network_get_ip_config`/`network_set_ip_config` tools added that day took the count from 195 to 197, after 2026-09-29, when the AP-password HMAC
 retirement (below) deleted the `ota_get_challenge` tool along with
 `GET /api/ota/challenge` itself, dropping the count from 196 to 195. The one
 added before that removal was `control_set_zone_coupling`, 2026-09-28 -- a narrow writer for ONE coupling-matrix cell,
@@ -35,7 +35,8 @@ refused. Built to restore the bench coupling cells the backup-import bug
 fixed in `fee835fa`/`b4bad2c7` zeroed, without `load_config_preset()`'s
 whole-page write. GET-merge-POST like `control_set_zone_type`, except that it
 strips the fields `zones_http_post_parse.c` omit-preserves (every other
-coupling cell, the `k`/`tau`/`deadtime` plant model, `coupling_diag_k_dc`)
+coupling cell, the `k`/`tau`/`deadtime` plant model, `coupling_diag_k_dc`,
+and `hystc`/`coilpower`)
 so the firmware keeps them bit-exact instead of taking GET's rounded print;
 required fields such as PID gains are re-posted from GET's lossless `%.9g` print (tau/deadtime print at `%.1f` but are omit-preserved). Refuses unless `confirm is True`,
 refuses mid-run (precheck plus the `system_mode_gate` 409), and fails loud
@@ -224,7 +225,7 @@ one before it was the profile_live_* quartet, 2026-09-20 -- `profile_live_get`/
 `profile_live_fork`/`profile_live_edit`/`profile_live_decide`,
 MCP tools wrapping the five-route live profile edit HTTP surface
 (`firmware/KilnFW/App/drivers/http/profiles_live_http.c`,
-`docs/LIVE_PROFILE_EDIT_PLAN.md` section 10): fork the running profile into a
+`docs/LIVE_PROFILE_EDIT.md` section 10): fork the running profile into a
 working copy, read its status/content, edit it (400 on a bound violation, 409
 on a window violation), and decide its fate (discard/save_as/overwrite, the
 last refused 403 on a builtin origin). All four go through
@@ -244,7 +245,7 @@ read-back after the POST still shows the record unacknowledged. The one
 before it was `convert_config`, same day -- the MCP surface for
 `tools/PcTools/src/kilnctrl/config_convert.py`, the PC-side best-effort
 config-version converter (file-only, never writes to a board; see
-`docs/CONFIG_MIGRATION_CHAIN_PLAN.md`). The one before that was
+`docs/CONFIG_MIGRATION_CHAIN.md`). The one before that was
 `safety_set_log_level`, same day -- an HTTP client for POST
 /api/safety/log_level, which had no caller anywhere. The one before that was
 `saleae_decode_kilnlink`, same day --
@@ -288,7 +289,9 @@ the toolchain invocations do not have to be rediscovered. Flashing is
 instead — `debug_program(peer="esp")` now **refuses immediately**, before touching
 OpenOCD at all, because that generic single-ELF path reliably fails flash-bank
 detection/verify on this board (confirmed repeatedly); `flash_firmware()` is the
-sanctioned working path, still OpenOCD, never esptool.
+sanctioned working path, still OpenOCD, never esptool. It now requires
+`confirm=True` (exactly), refuses on a recovery-image or unreadable board state
+(`allow_unreadable_board_state=True` overrides only the unreadable case).
 
 `flash_firmware()` accepts an optional `kiln_fw_root` override (absolute path
 to a `firmware/KilnFW`-shaped directory whose `build/` already holds the
@@ -300,7 +303,7 @@ main tree, and `flash_provenance.json` records which path was used.
 
 `flash_firmware()` (2026-09-17 fix) resolves its write target dynamically
 from `<kiln_fw_root>/partitions.csv` — the partition named `app` (the ota_0
-slot introduced by the single-slot OTA redesign, `docs/OTA_SINGLE_SLOT_PLAN.md`)
+slot introduced by the single-slot OTA redesign, `docs/OTA_SINGLE_SLOT.md`)
 — rather than a hardcoded offset. That hardcoded offset used to point at the
 old table's `factory` partition; after the table redesign it silently
 pointed into the new, much smaller `recovery` partition instead and
@@ -312,7 +315,7 @@ pre-flight size check now also refuses, naming both byte counts, if
 `flash_firmware()` now also hard-requires and flashes `bootloader.bin` and
 `partition-table.bin` alongside `KilnCtrl.bin` (2026-09-23), resolving the
 partition-table write offset from `CONFIG_PARTITION_TABLE_OFFSET` in
-`<kiln_fw_root>/sdkconfig` rather than a hardcoded 0x8000 (`fixture_flash()`
+`<kiln_fw_root>/sdkconfig` rather than a hardcoded 0x8000 (the `fixture_flash()` Python helper, not an MCP tool,
 uses the same resolver). Full detail: `docs/MCP_SERVERS.md`'s flash section.
 
 **That gap is now reachable from ordinary firmware (2026-10-02):** the boot_guard
@@ -355,7 +358,10 @@ Full procedure and rationale: `docs/MCP_SERVERS.md`'s flash section,
 `firmware/SaftyFW/docs/ARCHITECTURE.md`'s "Correction, 2026-08-27 audit"
 section.
 
-`ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
+`ota_rollback_esp()` itself has a hazard, 2026-09-04 (historical: on the current
+single-slot design rollback is unavailable and the update path is stage +
+`recovery_enter` + `recovery_apply_staged`; this applies to any older dual-slot
+image): rolling back past a
 `zones_cfg` schema bump (e.g. v22, `ZONES_CFG_VERSION` in
 `firmware/KilnFW/App/drivers/persist/zones_config_json.h`) makes the older firmware
 refuse the newer-than-it-knows blob and run that boot on **firmware-default
@@ -372,9 +378,10 @@ unconditional, so the rollback hazard above is unchanged. The `cfg`
 partition itself is unformatted on the bench board and not yet mounted at
 boot, so this is inert today. **Superseded 2026-09-21:** the bench board
 (`8ab3b81a`) now has `cfg` mounted and populated with 7 files, confirmed
-via `GET /api/cfgfs` on hardware; NVS is still authoritative. Full detail, including a real unfixed
-atomicity defect in the RP2040's own config store found by the same
-review: `docs/CONFIG_FILESYSTEM.md`.
+via `GET /api/cfgfs` on hardware; NVS is still authoritative. Full detail: `docs/CONFIG_FILESYSTEM.md`.
+The RP2040 config store atomicity defects that review found are fixed:
+A/B sectors `24090c9a`, torn-slot reuse plus read-back verify (D2)
+`98d237b0`.
 
 `flash_firmware()` now checks this **automatically** after every flash (the
 `verify` parameter, default `True`): it polls the board's own HTTP API for the
@@ -729,7 +736,7 @@ byte always recompiles. Detail: "Heavy builds" in `docs/agent_rules/COMMON.md`.
 (**2026-09-20 history:** the KilnFW application build briefly gained a
 build-order dependency here, once it started `EMBED_FILES`ing both SaftyFW
 slot images so the ESP can auto-update the Pico at boot
-(`docs/PICO_AUTO_UPDATE_PLAN.md`) — `check_00_kilnfw_target_build.ps1`
+(`docs/PICO_AUTO_UPDATE.md`) — `check_00_kilnfw_target_build.ps1`
 originally read those slot bins out of the shared, non-isolated
 `firmware/SaftyFW/build/` directory, so phase 1 was briefly split into a
 serialized 1a (`check_00_saftyfw_target_build.ps1` alone) / 1b (the two
@@ -950,9 +957,9 @@ a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
 **The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
-(as of 2026-10-09) reports 175 `httpd_uri_t` routes
+(as of 2026-10-09) reports 176 `httpd_uri_t` routes
 registered under `firmware/KilnFW/App/drivers/*.c` against
-`wifi_provision_http.c`'s `config.max_uri_handlers = 184` — 9 spare slots (it
+`wifi_provision_http.c`'s `config.max_uri_handlers = 184` — 8 spare slots (it
 also now requires `http_auth_http.c`'s `KILN_HTTP_MAX_ROUTES` >= both).
 The next route added
 anywhere under `drivers/` will need that cap bumped in the same change, or

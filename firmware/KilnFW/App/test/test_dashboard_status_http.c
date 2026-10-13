@@ -126,6 +126,9 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
 }
 bool watchdog_cfg_panic_disabled(void) { return false; }
 bool boot_guard_is_recovery_mode(void) { return false; }
+// relay_authority.h -- the factory reset in flight mark /api/status reports (HTTP audit L37 follow-up).
+static bool s_fake_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void) { return s_fake_reset_in_flight; }
 const char *unit_pref_suffix(unit_pref_t pref) { (void)pref; return "C"; }
 size_t safety_cfg_store_param_count(void) { return 0; }
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
@@ -299,6 +302,84 @@ static void reset_fake_status_with_known_build_identity(void)
     s_fake_status.fw_version_known = true;
     strncpy(s_fake_status.fw_version, "1.2.3", sizeof(s_fake_status.fw_version) - 1);
     strncpy(s_fake_status.fw_build, "Sep 17 2026 00:00:00", sizeof(s_fake_status.fw_build) - 1);
+}
+
+static void test_status_trip_is_test_only_for_reason_4(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- TEST_TRIP_PLAN 5.5: trip_is_test is true only for reason 4");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    /* WP3 review LOW-3: trip_is_test follows the LIVE DIAG (TRIPPED + reason 4 + fresh), not the
+     * TRIP_EVENT cache (trip_reason), so it clears with the trip. */
+    s_fake_status.diag_ever_received = true;
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    s_fake_status.diag_trip_reason = 4u;
+    s_fake_status.diag_age_ms = 100u;
+    s_fake_status.diag_frame_age_ms = 100u;
+    s_fake_status.diag_since_reboot = true;
+    /* TRIPFX4 LOW-1: a current TEST TRIP_EVENT bound to the DIAG by trip_seq. */
+    s_fake_status.trip_event_ever_received = true;
+    s_fake_status.trip_reason = 4u;
+    s_fake_status.diag_trip_seq_known = true;
+    s_fake_status.diag_trip_seq = 7u;
+    s_fake_status.trip_last_seq = 7u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 4)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "live DIAG TRIPPED reason 4 -> true");
+    s_fake_status.diag_trip_reason = 2u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 2)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "live reason 2 -> false");
+    s_fake_status.diag_trip_reason = 4u;
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (cleared)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "not tripped (DIAG ARMED, stale TEST cache) -> false");
+    /* TRIPFX4 LOW-1: TEST cleared, then a real trip (new seq, reason 2) before the next DIAG: the cached DIAG
+     * still says TRIPPED reason 4 but the TRIP_EVENT disagrees -> false. */
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    s_fake_status.trip_reason = 2u;
+    s_fake_status.trip_last_seq = 8u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (real trip after TEST)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "real trip after cleared TEST, DIAG not yet refreshed -> false");
+    /* same seq bump but the new trip is ALSO reason 4: seq mismatch alone must drop the flag. */
+    s_fake_status.trip_reason = 4u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (seq mismatch)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "trip_seq mismatch -> false");
+    s_fake_status.trip_last_seq = 7u;
+    s_fake_status.diag_trip_seq_known = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (seq unknown)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG trip_seq unknown -> false");
+    s_fake_status.diag_trip_seq_known = true;
+    s_fake_status.trip_event_ever_received = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (no TRIP_EVENT)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "no TRIP_EVENT -> false (fail safe)");
+    s_fake_status.trip_event_ever_received = true;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (restored)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "all conditions hold again -> true");
+    s_fake_status.diag_frame_age_ms = 60000u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (stale)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "stale DIAG -> false");
+    /* TRIPFX3 LOW-B/M3: the bound is the DIAG's own age, pinned at SAFETY_LINK_DIAG_FRESH_MS; a fresh
+     * STATUS frame (diag_age_ms) must not keep an old DIAG alive. */
+    s_fake_status.diag_age_ms = 100u;
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS - 1u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge-1)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "DIAG age bound-1 -> true");
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL,
+               "DIAG age == bound -> true (inclusive, matches relay_authority_pico_diag_fresh)");
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge+1)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG age bound+1 -> false");
+    /* LOW-C: a DIAG from the previous Pico boot never reads as a test trip. */
+    s_fake_status.diag_frame_age_ms = 100u;
+    s_fake_status.diag_since_reboot = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (old boot)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "old-boot DIAG -> false");
 }
 
 static void test_status_emits_aux_block(void)
@@ -622,11 +703,62 @@ static void test_status_cfg_fs_format_pending_field(void)
               "auth on, ADMIN session -- flag and reason both present");
 }
 
+// HTTP audit L37 follow-up (LOW-1): factory_reset_in_flight follows relay_authority's reset mark.
+static void test_status_factory_reset_in_flight_field(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- factory_reset_in_flight follows the reset mark");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    httpd_req_t req;
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_reset_in_flight = false;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (no reset)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"factory_reset_in_flight\":false") != NULL,
+              "no reset in flight -- factory_reset_in_flight:false");
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_reset_in_flight = true;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reset in flight)");
+    s_fake_reset_in_flight = false;
+    TEST_CHECK(strstr(s_last_resp_body, "\"factory_reset_in_flight\":true") != NULL,
+              "reset in flight -- factory_reset_in_flight:true");
+}
+
+// MED-2: the longest swap boot-fault kind name must reach /api/status whole.
+static void test_status_swap_boot_fault_kind_not_truncated(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- swap boot fault kind carried in full");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    httpd_req_t req;
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_status.kiln_cfg_swap_boot_fault = true;
+    strncpy(s_fake_status.kiln_cfg_swap_boot_fault_kind, "rollback_active_id_unsaved",
+            sizeof(s_fake_status.kiln_cfg_swap_boot_fault_kind) - 1);
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"kiln_cfg_swap_boot_fault_kind\":\"rollback_active_id_unsaved\"") != NULL,
+              "full kind string in /api/status JSON");
+}
+
 static void run_test_dashboard_status_http(void)
 {
+    test_status_swap_boot_fault_kind_not_truncated();
+    test_status_factory_reset_in_flight_field();
     test_status_cfg_fs_format_pending_field();
     test_status_touch_cal_supported_reports_each_state();
     test_status_web_auth_off_shows_build_identity();
+    test_status_trip_is_test_only_for_reason_4();
     test_status_emits_aux_block();
     test_status_unauthenticated_redacts_build_identity();
     test_status_user_session_redacts_build_identity();

@@ -309,7 +309,7 @@ float sim_kiln_reading_c(const sim_kiln_state_t *state, const sim_kiln_cfg_t *cf
 float sim_kiln_element_c(const sim_kiln_state_t *state, int zone);
 
 /* ------------------------------------------------------------------------
- * G1 (ITER_TUNE_REDESIGN_PLAN.md sec 6.1/6.2) -- build a sim_plant_cfg_t from
+ * G1 (ITER_TUNE_REDESIGN.md sec 6.1/6.2) -- build a sim_plant_cfg_t from
  * the board's REAL measured FOPDT parameters (zone_cfg_t::model_k_dc/
  * model_tau_s/model_dead_time_s -- the same fields zone_model_at()'s
  * passthrough seam reads, zones_config_accessors.c/.h) instead of hand-set

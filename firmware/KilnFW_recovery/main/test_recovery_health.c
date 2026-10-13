@@ -86,7 +86,7 @@ static char *slurp(const char *path)
         buf[got] = 0;
         size_t w = 0; // drop CR so CRLF checkouts scan like LF ones
         for (size_t r = 0; r < got; r++) {
-            if (buf[r] != '') {
+            if (buf[r] != '\r') {
                 buf[w++] = buf[r];
             }
         }

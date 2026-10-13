@@ -57,6 +57,15 @@ static void test_clear_trip_is_admin(void) {
                "a violation of section 9's guarantee.");
 }
 
+static void test_test_trip_is_admin(void) {
+    TEST_SECTION("route_tier_table.h -- POST /api/safety/test_trip is ADMIN (TEST_TRIP_PLAN owner decision)");
+
+    route_tier_t tier;
+    TEST_CHECK(http_auth_lookup_tier("/api/safety/test_trip", HTTP_POST, &tier) && tier == ROUTE_TIER_ADMIN,
+               "POST /api/safety/test_trip is ROUTE_TIER_ADMIN -- it latches a real safety trip, so it is "
+               "never USER or open");
+}
+
 // OWNER DECISION 2026-09-28: drives http_auth_check() with the REAL
 // looked-up tier for the stop route and asserts the ROUTE_TIER_USER
 // behavior -- DENY_NO_SESSION with no session (including a locked-out
@@ -190,6 +199,7 @@ static void test_danger_stop_is_admin_and_requires_session(void) {
 void run_test_web_auth_safety_interaction(void) {
     test_stop_route_tier_is_user();
     test_clear_trip_is_admin();
+    test_test_trip_is_admin();
     test_stop_route_requires_session_when_auth_on();
     test_stop_route_session_rule_holds_during_bootstrap_needed();
     test_sweep_abort_is_admin_and_requires_session();

@@ -1,0 +1,200 @@
+// Host tests for drivers/common/http_form.h's strict parse helpers (e7c98209). These are the
+// shared mechanism behind the strict checks in dashboard_exec_http (start id), diagnostics_http
+// (danger relay/on, danger_enable on), dashboard_autotune_http (zone/step_duty/...), iter_tune_http
+// (?zone=), settings_http (display_power brightness/timeout) and security_http (set_policy
+// web_enabled/lcd_enabled + parse_int_field). Those handlers have no handler-level host harness
+// (iter_tune_http does, see test_iter_tune_http.c), so the contract each relies on is pinned here,
+// calling find_field + the parse helper exactly as the handlers do.
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "test_common.h"
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
+#include "../drivers/common/http_form.h"
+
+static bool handler_long(const char *body, const char *key, long lo, long hi, long *out)
+{
+    char val[8];
+    int n = http_form_find_field(body, key, val, sizeof(val));
+    return n > 0 && http_form_parse_long(val, n, lo, hi, out);
+}
+
+static bool handler_bool(const char *body, const char *key)
+{
+    char val[4];
+    int n = http_form_find_field(body, key, val, sizeof(val));
+    return http_form_is_bool01(val, n);
+}
+
+static bool handler_float(const char *body, const char *key, float *out)
+{
+    char val[16];
+    int n = http_form_find_field(body, key, val, sizeof(val));
+    return n > 0 && http_form_parse_float(val, n, out);
+}
+
+static void test_long(void)
+{
+    TEST_SECTION("http_form_parse_long -- id/zone/relay style fields");
+    long v = -99;
+    TEST_CHECK(handler_long("id=7", "id", 0, 255, &v) && v == 7, "valid id accepted");
+    TEST_CHECK(handler_long("id=0", "id", 0, 255, &v) && v == 0, "lower bound accepted");
+    TEST_CHECK(handler_long("id=255", "id", 0, 255, &v) && v == 255, "upper bound accepted");
+    TEST_CHECK(!handler_long("id=abc", "id", 0, 255, &v), "abc refused");
+    TEST_CHECK(!handler_long("id=1abc", "id", 0, 255, &v), "trailing garbage 1abc refused");
+    TEST_CHECK(!handler_long("id=%201", "id", 0, 255, &v), "leading space refused");
+    TEST_CHECK(!handler_long("id=256", "id", 0, 255, &v), "above range refused");
+    TEST_CHECK(!handler_long("id=-1", "id", 0, 255, &v), "below range refused");
+    TEST_CHECK(!handler_long("id=", "id", 0, 255, &v), "empty refused");
+    TEST_CHECK(!handler_long("id=99999999999", "id", 0, 255, &v), "too long for the buffer refused");
+    TEST_CHECK(!handler_long("id=9999999", "id", 0, 255, &v), "fits buffer but out of range refused");
+    TEST_CHECK(!http_form_parse_long("99999999999999999999", 20, 0, 0x7fffffffL, &v), "strtol overflow (ERANGE) refused");
+    TEST_CHECK(!handler_long("id=1%002", "id", 0, 255, &v), "%00 refused");
+    TEST_CHECK(!handler_long("other=1", "id", 0, 255, &v), "missing key refused");
+    TEST_CHECK(!handler_long("relay=0", "relay", 1, 8, &v), "relay below 1 refused");
+    TEST_CHECK(handler_long("relay=8", "relay", 1, 8, &v) && v == 8, "relay in range accepted");
+    TEST_CHECK(!http_form_parse_long("12", 3, 0, 255, &v), "len/strlen mismatch refused");
+}
+
+static void test_bool(void)
+{
+    TEST_SECTION("http_form_is_bool01 -- exactly 0 or 1");
+    TEST_CHECK(handler_bool("on=0", "on"), "0 accepted");
+    TEST_CHECK(handler_bool("on=1", "on"), "1 accepted");
+    TEST_CHECK(!handler_bool("on=2", "on"), "2 refused");
+    TEST_CHECK(!handler_bool("on=01", "on"), "01 refused");
+    TEST_CHECK(!handler_bool("on=true", "on"), "true refused");
+    TEST_CHECK(!handler_bool("on=1x", "on"), "1x refused");
+    TEST_CHECK(!handler_bool("on=", "on"), "empty refused");
+    TEST_CHECK(!handler_bool("x=1", "on"), "missing refused");
+    TEST_CHECK(!handler_bool("on=%00", "on"), "%00 refused");
+    TEST_CHECK(!handler_bool("on=12345", "on"), "over-long refused");
+}
+
+static void test_float(void)
+{
+    TEST_SECTION("http_form_parse_float -- step_duty/setpoint style fields");
+    float f = 0.0f;
+    TEST_CHECK(handler_float("d=0.5", "d", &f) && fabsf(f - 0.5f) < 1e-6f, "valid float accepted");
+    TEST_CHECK(handler_float("d=-3", "d", &f) && f == -3.0f, "negative accepted");
+    TEST_CHECK(!handler_float("d=abc", "d", &f), "abc refused");
+    TEST_CHECK(!handler_float("d=0.5x", "d", &f), "trailing garbage refused");
+    TEST_CHECK(!handler_float("d=", "d", &f), "empty refused");
+    TEST_CHECK(!handler_float("d=nan", "d", &f), "nan refused");
+    TEST_CHECK(!handler_float("d=inf", "d", &f), "inf refused");
+    TEST_CHECK(!handler_float("d=1e999", "d", &f), "overflow refused");
+    TEST_CHECK(!handler_float("d=0.%005", "d", &f), "%00 refused");
+    TEST_CHECK(!handler_float("d=0x1p3", "d", &f), "hex float refused (F2)");
+    TEST_CHECK(!handler_float("d=%201", "d", &f), "leading space refused");
+    TEST_CHECK(!handler_float("d=%200.5", "d", &f), "leading space refused");
+}
+
+static void test_decode(void)
+{
+    TEST_SECTION("http_form_url_decode / find_field -- %00 and overlong");
+    char out[8];
+    TEST_CHECK(http_form_find_field("a=b%00c", "a", out, sizeof(out)) == -2, "%00 makes find_field return -2");
+    TEST_CHECK(http_form_find_field("a=%00", "a", out, sizeof(out)) == -2, "bare %00 refused");
+    TEST_CHECK(http_form_find_field("a=ok", "a", out, sizeof(out)) == 2 && strcmp(out, "ok") == 0, "plain value decodes");
+    TEST_CHECK(http_form_find_field("a=%41", "a", out, sizeof(out)) == 1 && out[0] == 'A', "%41 decodes to A");
+    TEST_CHECK(http_form_find_field("a=12345678", "a", out, sizeof(out)) == -2, "too long returns -2");
+    TEST_CHECK(http_form_find_field("a=", "a", out, sizeof(out)) == -1 || http_form_find_field("a=", "a", out, sizeof(out)) == 0,
+               "empty value is reported as absent or zero-length, never a positive length");
+    TEST_CHECK(http_form_find_field("b=1", "a", out, sizeof(out)) == -1, "absent returns -1");
+    {
+        char sentinel[2] = { 0x55, 0x55 };
+        TEST_CHECK(http_form_url_decode("", 0, sentinel, 0) == -1 && sentinel[0] == 0x55, "cap 0 decode writes nothing (F1)");
+    }
+
+    /* A -2 must leave out as the empty string, never an unterminated or truncated
+     * prefix: callers that test != -1 then strtol()/strcmp() the buffer (zones
+     * POST max_simultaneous_relays/continue_on_zone_trip) would otherwise read
+     * stack bytes past the written prefix, or take "1%00" as "1". */
+    memset(out, '7', sizeof(out));
+    TEST_CHECK(http_form_find_field("a=00000000", "a", out, sizeof(out)) == -2 && out[0] == '\0',
+               "over-long value leaves out empty, not an unterminated \"0000000\" prefix");
+    memset(out, '7', sizeof(out));
+    TEST_CHECK(http_form_find_field("a=1%00", "a", out, sizeof(out)) == -2 && out[0] == '\0',
+               "%00 leaves out empty, so \"1%00\" can never read back as \"1\"");
+    char tiny[1] = { '7' };
+    TEST_CHECK(http_form_find_field("a=x", "a", tiny, sizeof(tiny)) == -2 && tiny[0] == '\0',
+               "out_cap 1: over-long still terminates out[0]");
+}
+
+/* HTTP parser fuzz campaign 2026-10-09: adversarial inputs the handlers rely on helpers to refuse. */
+static void test_fuzz_inputs(void)
+{
+    TEST_SECTION("http_form fuzz -- empty body, duplicates, bad escapes, key-prefix, numeric edge cases");
+    char out[16];
+    long l = -7;
+    float f = 1.5f;
+
+    TEST_CHECK(http_form_find_field("", "a", out, sizeof(out)) == -1, "empty body: absent");
+    TEST_CHECK(http_form_find_field("&&&", "a", out, sizeof(out)) == -1, "only separators: absent");
+    TEST_CHECK(http_form_find_field("a", "a", out, sizeof(out)) == -1, "key without '=' is absent");
+    TEST_CHECK(http_form_find_field("ab=1", "a", out, sizeof(out)) == -1, "longer key sharing a prefix is not a match");
+    TEST_CHECK(http_form_find_field("a=1&ab=2", "ab", out, sizeof(out)) == 1 && out[0] == '2', "second field found");
+    TEST_CHECK(http_form_find_field("xa=1", "a", out, sizeof(out)) == -1, "key suffix is not a match");
+    TEST_CHECK(http_form_find_field("a=1&a=2", "a", out, sizeof(out)) == 1 && out[0] == '1', "duplicate key: first wins");
+    TEST_CHECK(http_form_find_field("a=%00&a=1", "a", out, sizeof(out)) == -2, "first duplicate with %00 refuses (no fallthrough)");
+    TEST_CHECK(http_form_find_field("a=1=2", "a", out, sizeof(out)) == 3 && strcmp(out, "1=2") == 0, "extra '=' stays in value");
+
+    /* HTTP fuzz F8f: an invalid percent escape is refused (-2, out left empty), never kept literally. */
+    TEST_CHECK(http_form_find_field("a=%", "a", out, sizeof(out)) == -2 && out[0] == '\0', "lone % refused");
+    TEST_CHECK(http_form_find_field("a=%4", "a", out, sizeof(out)) == -2, "truncated escape refused");
+    TEST_CHECK(http_form_find_field("a=%zz", "a", out, sizeof(out)) == -2, "non-hex escape refused");
+    TEST_CHECK(http_form_find_field("a=%4g", "a", out, sizeof(out)) == -2, "half-hex escape refused");
+    TEST_CHECK(http_form_find_field("a=ok%", "a", out, sizeof(out)) == -2, "trailing % after valid text refused");
+    TEST_CHECK(http_form_find_field("a=%25", "a", out, sizeof(out)) == 1 && out[0] == '%', "%25 decodes to %");
+    TEST_CHECK(http_form_find_field("a=%2500", "a", out, sizeof(out)) == 3 && strcmp(out, "%00") == 0, "%2500 is a literal '%00' string, not a NUL");
+    TEST_CHECK(http_form_find_field("a=%00%00", "a", out, sizeof(out)) == -2, "repeated %00 refused");
+
+    TEST_CHECK(http_form_find_field("a=1234567", "a", out, 8) == 7, "exactly cap-1 fits");
+    TEST_CHECK(http_form_find_field("a=12345678", "a", out, 8) == -2, "cap chars refused");
+    TEST_CHECK(http_form_find_field("a=%31%32%33%34%35%36%37%38", "a", out, 8) == -2, "escapes expanding past cap refused");
+    TEST_CHECK(http_form_find_field("a=++++++++", "a", out, 8) == -2, "plus signs past cap refused");
+    TEST_CHECK(http_form_find_field("a=+", "a", out, 8) == 1 && out[0] == ' ', "plus decodes to space");
+
+    TEST_CHECK(!http_form_parse_long("-", 1, -10, 10, &l), "lone minus refused");
+    TEST_CHECK(!http_form_parse_long("+", 1, -10, 10, &l), "lone plus refused");
+    TEST_CHECK(!http_form_parse_long("0x10", 4, 0, 100, &l), "hex refused");
+    TEST_CHECK(!http_form_parse_long("1e2", 3, 0, 1000, &l), "exponent refused for integer");
+    TEST_CHECK(!http_form_parse_long("1.0", 3, 0, 10, &l), "decimal refused for integer");
+    TEST_CHECK(!http_form_parse_long("5 ", 2, 0, 10, &l), "trailing space refused");
+    TEST_CHECK(!http_form_parse_long("-9223372036854775808", 20, -100, 100, &l), "LONG_MIN out of range refused");
+    TEST_CHECK(!http_form_parse_long("2147483648", 10, 0, 2147483647L, &l), "just above int32 refused");
+    TEST_CHECK(!http_form_parse_long(NULL, 1, 0, 10, &l), "NULL refused");
+    TEST_CHECK(!http_form_parse_long("", 0, 0, 10, &l), "empty refused");
+    TEST_CHECK(l == -7, "refusals never write *out");
+    TEST_CHECK(!http_form_parse_float("-nan", 4, &f), "-nan refused");
+    TEST_CHECK(!http_form_parse_float("-inf", 4, &f), "-inf refused");
+    TEST_CHECK(!http_form_parse_float("infinity", 8, &f), "infinity refused");
+    TEST_CHECK(!http_form_parse_float("NaN(1)", 6, &f), "nan payload refused");
+    TEST_CHECK(!http_form_parse_float("1e39", 4, &f), "float overflow refused");
+    TEST_CHECK(!http_form_parse_float("-1e39", 5, &f), "negative float overflow refused");
+    TEST_CHECK(!http_form_parse_float("1,5", 3, &f), "comma decimal refused");
+    TEST_CHECK(!http_form_parse_float("--1", 3, &f), "double minus refused");
+    TEST_CHECK(!http_form_parse_float(".", 1, &f), "lone dot refused");
+    TEST_CHECK(!http_form_parse_float("1.5 ", 4, &f), "trailing space refused");
+    TEST_CHECK(f == 1.5f, "refusals never write *out (float)");
+    TEST_CHECK(!http_form_value_has_ctl("abc", 3), "plain text has no ctl");
+    TEST_CHECK(http_form_value_has_ctl("a\tb", 3), "tab is a control byte");
+    TEST_CHECK(http_form_value_has_ctl("a\x7f", 2), "DEL is a control byte");
+}
+
+int main(void)
+{
+    test_long();
+    test_bool();
+    test_float();
+    test_decode();
+    test_fuzz_inputs();
+    printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
+    return g_test_failures > 0 ? 1 : 0;
+}

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "recovery_wifi_policy.h"
+#include "recovery_http_policy.h"
 
 static int g_pass, g_fail;
 
@@ -45,6 +46,14 @@ static char *slurp(const char *path)
     if (buf) {
         size_t got = fread(buf, 1, (size_t)n, f);
         buf[got] = 0;
+        // CRLF checkouts: the scans below use LF needles.
+        size_t w = 0;
+        for (size_t r = 0; r < got; r++) {
+            if (buf[r] != '\r') {
+                buf[w++] = buf[r];
+            }
+        }
+        buf[w] = 0;
     }
     fclose(f);
     return buf;
@@ -133,14 +142,157 @@ static void test_wifi_source_order(const char *path)
     free(src);
 }
 
+// Body of the function whose definition starts with `sig`, up to the next
+// line-start "}" (all handlers here are top-level, closing brace at column 0).
+static char *fn_body(const char *src, const char *sig)
+{
+    const char *a = strstr(src, sig);
+    if (!a) {
+        return NULL;
+    }
+    const char *e = strstr(a, "\n}");
+    if (!e) {
+        return NULL;
+    }
+    size_t n = (size_t)(e - a);
+    char *b = (char *)malloc(n + 1);
+    memcpy(b, a, n);
+    b[n] = 0;
+    return b;
+}
+
+static void test_http(const char *path)
+{
+    CHECK(rhp_wifi_reset_ok(0, 0, 0), "wifi reset ok when everything succeeded");
+    CHECK(!rhp_wifi_reset_ok(1, 0, 0), "wifi reset not ok on key erase failure");
+    CHECK(!rhp_wifi_reset_ok(0, -1, 0), "wifi reset not ok on commit failure");
+    CHECK(!rhp_wifi_reset_ok(0, 0, 0x105), "wifi reset not ok when legacy erase failed");
+
+    char *src = slurp(path);
+    CHECK(src != NULL, "recovery_http.c readable");
+    if (!src) {
+        return;
+    }
+    strip_comments(src);
+    // R2-L1: exit and boot_guard_reset treat a failed kiln_nvs as not applicable,
+    // and a failed clear refuses (500) -- the result must gate a 500 reply, not
+    // just be called.
+    const char *sigs[] = {"esp_err_t recovery_exit_post(", "esp_err_t boot_guard_reset_post("};
+    for (int i = 0; i < 2; i++) {
+        char *b = fn_body(src, sigs[i]);
+        CHECK(b != NULL, "boot_guard route handler found");
+        if (b) {
+            const char *gate = strstr(b, "if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {");
+            CHECK(gate != NULL, "route gates on the clear result (if (!boot_guard_clear_or_na(...)))");
+            if (gate) {
+                const char *st = strstr(gate, "500 Internal Server Error");
+                const char *close = strstr(gate, "\n    }");
+                CHECK(st != NULL && close != NULL && st < close, "a failed clear answers 500 inside the gate branch");
+                const char *ok = i == 0 ? strstr(b, "ok, rebooting into the application; %s\", bg_msg)")
+                                        : strstr(b, "return httpd_resp_sendstr(req, bg_msg);");
+                CHECK(ok != NULL && close != NULL && ok > close,
+                      "success reply follows the gate and carries the clear message");
+            }
+            CHECK(strstr(b, " clear_boot_guard(") == NULL && strstr(b, "!clear_boot_guard(") == NULL,
+                  "route does not call plain clear_boot_guard()");
+            free(b);
+        }
+    }
+    // R2-I1: ota_esp_post clears (gated) BEFORE the upload overwrites `app`.
+    char *o = fn_body(src, "esp_err_t ota_esp_post(");
+    CHECK(o != NULL, "ota_esp_post found");
+    if (o) {
+        const char *g = strstr(o, "if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {");
+        const char *u = strstr(o, "recovery_upload_stream(");
+        CHECK(g != NULL && u != NULL && g < u, "ota_esp_post clears boot_guard (gated) before recovery_upload_stream()");
+        if (g && u) {
+            const char *st = strstr(g, "500 Internal Server Error");
+            CHECK(st != NULL && st < u, "ota_esp_post refuses 500 on a failed clear before the upload");
+        }
+        free(o);
+    }
+    // boot_guard_clear_or_na: only the kiln_nvs failure bit makes "not applicable"
+    // true; everything else must actually clear.
+    char *na = fn_body(src, "static bool boot_guard_clear_or_na(char *msg, size_t cap)\n{");
+    CHECK(na != NULL, "boot_guard_clear_or_na definition found");
+    if (na) {
+        CHECK(strstr(na, "if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {") != NULL,
+              "not-applicable is gated on RECOVERY_NVS_FAIL_KILN");
+        CHECK(strstr(na, "RECOVERY_NVS_FAIL_DEFAULT") == NULL && strstr(na, "RECOVERY_NVS_FAIL_WIFI") == NULL,
+              "not-applicable is not gated on another partition's bit");
+        const char *r1 = strstr(na, "return true;");
+        const char *r2 = strstr(na, "return clear_boot_guard(msg, cap);");
+        CHECK(r1 != NULL && r2 != NULL && r1 < r2 && strstr(r1 + 1, "return true;") == NULL,
+              "exactly one 'return true' (the not-applicable branch), then the real clear is returned");
+        free(na);
+    }
+    // R2-L2: the Wi-Fi reset also erases the legacy default-partition copy and
+    // reports success only through rhp_wifi_reset_ok(), using the real result.
+    char *w = fn_body(src, "esp_err_t wifi_reset_post(");
+    CHECK(w != NULL, "wifi_reset_post found");
+    if (w) {
+        const char *call = strstr(w, "int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);");
+        CHECK(call != NULL, "wifi reset stores the legacy erase result in legacy_rc");
+        CHECK(call != NULL && strstr(call + 8, "legacy_rc =") == NULL && strstr(w, "legacy_rc =") == call + 4,
+              "legacy_rc is assigned exactly once, from the erase");
+        const char *gate = strstr(w, "if (!rhp_wifi_reset_ok(erase_failed, (int)err, legacy_rc) && erase_failed == 0 && err == ESP_OK) {");
+        CHECK(gate != NULL && call != NULL && call < gate, "failure branch is taken on !rhp_wifi_reset_ok(..., legacy_rc), after the erase");
+        if (gate) {
+            const char *st = strstr(gate, "500 Internal Server Error");
+            const char *ok = strstr(w, "ok, Wi-Fi settings cleared, restarting\"");
+            CHECK(st != NULL && ok != NULL && st < ok, "legacy erase failure answers 500 before the success reply");
+        }
+        CHECK(strstr(w, "legacy copy not checked") != NULL && strstr(w, "httpd_resp_sendstr(req, legacy_skipped") != NULL,
+              "reply says when the legacy erase was skipped");
+        // N2 (REVIEW_RECOVERY_FIX3): pin the exact selection, whitespace squeezed, so a
+        // ternary forced false (or reordered) is caught, not just the note's text.
+        const char *rep = strstr(w, "httpd_resp_sendstr(req, legacy_skipped");
+        char sq[512];
+        size_t sn = 0;
+        for (const char *c = rep; rep && *c && *c != ';' && sn + 1 < sizeof(sq); c++) {
+            if (*c != ' ' && *c != '\n' && *c != '\t') {
+                sq[sn++] = *c;
+            }
+        }
+        sq[sn] = 0;
+        CHECK(rep != NULL &&
+                  strcmp(sq, "httpd_resp_sendstr(req,legacy_skipped?\"ok,Wi-Fisettingscleared,restarting"
+                             "(legacycopynotchecked:defaultNVSunavailable)\":\"ok,Wi-Fisettingscleared,restarting\")") == 0,
+              "reply picks the skip note exactly when legacy_skipped is set, else the plain ok");
+        free(w);
+    }
+    char *l = fn_body(src, "static int erase_legacy_default_wifi(");
+    CHECK(l != NULL, "legacy erase found");
+    if (l) {
+        const char *rw = strstr(l, "nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &h)");
+        const char *er = strstr(l, "err = nvs_erase_all(h);");
+        const char *cm = strstr(l, "err = nvs_commit(h);");
+        const char *cl = strstr(l, "nvs_close(h);\n    return (int)err;");
+        CHECK(rw && er && cm && rw < er && er < cm, "legacy erase: open read-write, erase_all, then commit");
+        CHECK(er != NULL && cm != NULL && strstr(er, "if (err == ESP_OK) {") != NULL &&
+                  strstr(er, "if (err == ESP_OK) {") < cm,
+              "legacy erase: commit only when erase_all succeeded");
+        CHECK(cl != NULL && cm != NULL && cm < cl, "legacy erase returns the erase/commit result");
+        // N2: the skip path must report itself: *skipped = true inside the
+        // RECOVERY_NVS_FAIL_DEFAULT branch, before that branch's return 0.
+        const char *gt = strstr(l, "RECOVERY_NVS_FAIL_DEFAULT");
+        const char *sk = gt ? strstr(gt, "*skipped = true;") : NULL;
+        const char *r0 = gt ? strstr(gt, "return 0;") : NULL;
+        CHECK(sk != NULL && r0 != NULL && sk < r0, "legacy erase skip path sets *skipped before returning 0");
+        free(l);
+    }
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     test_policy();
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <recovery_wifi.c>\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s <recovery_wifi.c> <recovery_http.c>\n", argv[0]);
         return 2;
     }
     test_wifi_source_order(argv[1]);
+    test_http(argv[2]);
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

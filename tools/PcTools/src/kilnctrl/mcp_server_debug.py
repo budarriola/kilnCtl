@@ -5,6 +5,7 @@ logic changes. See mcp_server.py's module docstring for the overall map.
 """
 from __future__ import annotations
 
+import re
 import asyncio
 import dataclasses
 import functools
@@ -226,7 +227,8 @@ def _archive_flashed_safty_elf(elf_path: str, explicit_elf_path: Optional[str] =
 
 
 @_core._tool()
-def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False) -> str:
+def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False,
+                  allow_running: bool = False) -> str:
     """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
     Writes flash on a live board -- refused unless `confirm=True` is passed
     explicitly (tools/PcTools/TODO.md's "flash writes require an explicit
@@ -252,15 +254,27 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     uncommitted changes, against those changed files' mtimes -- see
     stale_check.py. Pass allow_stale=True to flash anyway. Only checked when
     using the peer's default ELF and default build-info location; an explicit
-    elf_path bypasses the check (nothing to compare it against)."""
+    elf_path bypasses the check (nothing to compare it against).
+
+    Reprogramming the Pico resets it, so it is REFUSED while the ESP reports a
+    running/paused profile or autotune. If the ESP state cannot be read
+    (recovery image, bricked, link down) it proceeds with a loud WARNING in
+    the result. allow_running=True (exactly True) overrides a confirmed run."""
     if peer == debug_probe.PEER_ESP:
         return (
             "error: debug_program(peer=\"esp\") is refused -- use flash_firmware(); "
             "debug_program esp path fails flash-bank detection on this board -- see CLAUDE.md"
         )
 
-    if not confirm:
+    if confirm is not True:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
+
+    esp_warnings: list = []
+    if allow_running is not True:
+        refusal = _esp_profile_running_refusal("reprogram the Pico under", unreadable_warnings=esp_warnings)
+        if refusal is not None:
+            return refusal
+    warn_prefix = "".join(w + chr(10) for w in esp_warnings)
 
     stale_prefix = ""
     if peer == debug_probe.PEER_PICO and elf_path is None:
@@ -292,8 +306,8 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
             )
             resolved_elf = elf_path or debug_probe._safty_fw_elf()
             note += _archive_flashed_safty_elf(resolved_elf, explicit_elf_path=elf_path)
-        return stale_prefix + f"programmed {peer} OK, reset and running" + note
-    return _openocd_error_message(f"program failed for {peer}", output)
+        return warn_prefix + stale_prefix + f"programmed {peer} OK, reset and running" + note
+    return warn_prefix + _openocd_error_message(f"program failed for {peer}", output)
 
 
 def _reset_marker_line(post_state: "Optional[dict]") -> str:
@@ -317,6 +331,50 @@ def _reset_marker_line(post_state: "Optional[dict]") -> str:
     return f"reset markers: KCTL_RESET_ISSUED seen={issued}; {state_check}; {halted_txt}"
 
 
+def _esp_profile_running_refusal(action: str, unreadable_warnings: "Optional[list]" = None) -> "Optional[str]":
+    """Refusal text if the ESP reports a running/paused profile or a live
+    autotune run, OR if that state cannot be read (fail closed: an
+    unreadable executor is not evidence of idle). allow_running=True
+    (exactly True) overrides, at the callers.
+
+    If `unreadable_warnings` is a list, an UNREADABLE state (recovery image,
+    bricked, link down) is not a refusal: a WARNING line is appended to the
+    list and the check continues; only a CONFIRMED running profile/autotune
+    refuses (owner decision 2026-10-10, review B1; debug_program pico)."""
+    override = "Stop the run first, or pass allow_running=True (exactly True) to override."
+    try:
+        status = _srv._profiles.get_exec_status(timeout=2.0)
+    except Exception as exc:  # noqa: BLE001
+        status = None
+        err = str(exc)
+    else:
+        err = "no answer"
+    if status is None and unreadable_warnings is not None:
+        unreadable_warnings.append(
+            f"WARNING: the ESP profile executor state could not be read ({err}) -- "
+            "ESP is in recovery, bricked or the link is down; a firing was NOT ruled out.")
+        return None
+    if status is None:
+        return (f"error: refusing to {action} ESP -- profile executor state could not be read "
+                f"({err}), so a firing cannot be ruled out. {override}")
+    if status.state not in (0, 3, 4):
+        return (
+            f"error: refusing to {action} ESP while a profile is {status.state_name} (running/paused/unknown) -- "
+            "this would freeze or interrupt relay control mid-firing. " + override
+        )
+    try:
+        at = _srv._autotune.get_status()
+    except Exception as exc:  # noqa: BLE001
+        # The exec read already answered over the same link, so the ESP is readable: an
+        # autotune read failure refuses (B1-1); the warning path is only for an unreadable exec read.
+        return (f"error: refusing to {action} ESP -- autotune state could not be read ({exc}). "
+                + override)
+    if at.state not in (0, 5, 6):
+        return (f"error: refusing to {action} ESP while autotune is {at.state_name!r} -- "
+                "a halt would freeze the relay control loop. " + override)
+    return None
+
+
 @_core._tool()
 def debug_reset(
     peer: str,
@@ -324,6 +382,7 @@ def debug_reset(
     verify: bool = True,
     verify_window_s: float = reset_probe.DEFAULT_WINDOW_S,
     allow_dark_rereset: bool = False,
+    allow_running: bool = False,
 ) -> str:
     """Resets `peer` ("esp"/"pico"). `mode` is "run" (default, resumes
     execution), "halt" (resets and halts), or "init" (resets and runs any
@@ -353,7 +412,15 @@ def debug_reset(
     S6b needs owner authorization. The refusal states how many seconds remain
     in the window. Pass allow_dark_rereset=True (exactly True) to override. A
     missing/corrupt history never blocks. The Pico peer is not gated: resetting
-    the Pico does not lengthen ESP link silence (it re-handshakes on boot)."""
+    the Pico does not lengthen ESP link silence (it re-handshakes on boot).
+
+    Guard (peer="esp"): also REFUSES while a profile is running or paused
+    (a reset mid-firing drops relay control); pass allow_running=True
+    (exactly True) to override."""
+    if peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("reset")
+        if refusal is not None:
+            return refusal
     if peer == debug_probe.PEER_ESP and allow_dark_rereset is not True:
         dark = reset_probe.recent_dark_esp_reset(debug_probe._repo_root())
         if dark is not None:
@@ -468,28 +535,20 @@ def _probe_esp_after_reset(window_s: float) -> "reset_probe.ProbeResult":
 
 
 @_core._tool()
-def debug_halt(peer: str) -> str:
+def debug_halt(peer: str, allow_running: bool = False) -> str:
     """Halts `peer`'s core.
 
     Guard: for peer="esp", refuses if a fire profile is currently running or
     paused (halting the ESP mid-profile freezes relay control and stops its
     telemetry to the Pico, which would correctly read it as a dead main
     controller and trip -- see debug_probe.py's module docstring). If the ESP
-    doesn't answer the status query at all, the halt is allowed -- a board
-    that isn't reachable over the UART link isn't running a profile you'd be
-    interrupting, so that failure shouldn't block an unrelated JTAG halt.
+    doesn't answer the status query at all, or the executor/autotune state is
+    unreadable or unknown, the halt is REFUSED (fail closed). Pass allow_running=True (exactly True) to override.
     """
-    if peer == debug_probe.PEER_ESP:
-        try:
-            status = _srv._profiles.get_exec_status(timeout=2.0)
-        except Exception:  # noqa: BLE001 - unreachable ESP must not block the halt
-            status = None
-        if status is not None and status.state in (1, 2):
-            return (
-                f"error: refusing to halt ESP while a profile is {status.state_name} -- "
-                "this would freeze relay control mid-firing. Use debug_reset/profiles "
-                "stop tools if you really need to interrupt it."
-            )
+    if peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("halt")
+        if refusal is not None:
+            return refusal
     ok, output = debug_probe.halt(peer)
     _log_openocd_result(f"debug_halt(peer={peer})", ok, output)
     if ok:
@@ -509,10 +568,15 @@ def debug_resume(peer: str) -> str:
 
 
 @_core._tool()
-def debug_step(peer: str) -> str:
+def debug_step(peer: str, allow_running: bool = False) -> str:
     """Single-steps `peer`'s core one instruction. If it was running, this
     halts it first (it does not resume running after the step -- it stays
-    halted at the next instruction)."""
+    halted at the next instruction). For peer="esp" refuses while a profile or
+    autotune runs (or their state is unreadable) unless allow_running=True."""
+    if peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("step")
+        if refusal is not None:
+            return refusal
     ok, output = debug_probe.step(peer)
     _log_openocd_result(f"debug_step(peer={peer})", ok, output)
     if ok:
@@ -523,7 +587,8 @@ def debug_step(peer: str) -> str:
 @_core._tool()
 def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
                       leave_halted: bool = False,
-                      target: str | None = None) -> str:
+                      target: str | None = None,
+                      allow_running: bool = False) -> str:
     """Reads `count` `width`-bit (8/16/32) words from `peer`'s memory starting
     at `address`. Read-only, no guard needed. Halts the core if it wasn't
     already (OpenOCD requires this for a memory read), then resumes it unless
@@ -538,6 +603,10 @@ def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
     and parts of the SCB are banked per core on the RP2040, so NVIC_ISER
     (0xE000E100) or VTOR (0xE000ED08) read without naming a core describes
     core 0 only, whichever core you meant."""
+    if leave_halted is True and peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("leave halted")
+        if refusal is not None:
+            return refusal
     ok, output = debug_probe.read_memory(peer, address, count, width,
                                          leave_halted=leave_halted,
                                          target=target)
@@ -549,7 +618,8 @@ def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
 
 @_core._tool()
 def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int = 32,
-                      elf_path: Optional[str] = None, leave_halted: bool = False) -> str:
+                      elf_path: Optional[str] = None, leave_halted: bool = False,
+                      allow_running: bool = False) -> str:
     """Reads a named symbol from `peer`'s memory ("esp" or "pico"). Same as
     debug_read_memory() but resolves the address from the peer's build ELF,
     so a counter or register image can be read by name without looking up an
@@ -567,6 +637,10 @@ def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width
         member's offset from DWARF (`objdump --dwarf=info`); assuming offset 0
         is how a correct register image was misread as garbage on 2026-08-25.
     """
+    if leave_halted is True and peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("leave halted")
+        if refusal is not None:
+            return refusal
     try:
         ok, output = debug_probe.read_symbol(peer, symbol, count=count, width=width,
                                              elf_path=elf_path, leave_halted=leave_halted)
@@ -607,8 +681,25 @@ def debug_list_symbols(peer: str, pattern: str, elf_path: Optional[str] = None, 
     return "\n".join(lines)
 
 
+def _write_readback_note(peer: str, address: int, value: int, width: int) -> str:
+    try:
+        rok, rout = debug_probe.read_memory(peer, address, 1, width)
+    except Exception as exc:  # noqa: BLE001 - the write already happened
+        return f"\nWARNING: read-back raised ({type(exc).__name__}: {exc}); write UNVERIFIED."
+    m = re.search(r"MEMRD 0x[0-9a-fA-F]+ 0x([0-9a-fA-F]+)", rout or "") if rok else None
+    if m is None:
+        return "\nWARNING: read-back failed or unparseable; write UNVERIFIED."
+    got = int(m.group(1), 16)
+    if got != value & ((1 << width) - 1):
+        return (f"\nFAILED: read-back 0x{got:x} != written 0x{value:x} -- the write did not "
+                "take, or the location is a volatile register that legitimately differs.")
+    return f"\nread-back OK (0x{got:x})"
+
+
 @_core._tool()
-def debug_write_memory(peer: str, address: int, value: int, width: int = 32, confirm: bool = False) -> str:
+def debug_write_memory(
+    peer: str, address: int, value: int, width: int = 32, confirm: bool = False, allow_running: bool = False
+) -> str:
     """Writes one `width`-bit (8/16/32) `value` at `address` in `peer`'s
     memory. Live RAM/flash-mapped memory write on a running board -- refused
     unless `confirm=True` is passed explicitly.
@@ -619,9 +710,25 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
     debug_probe.py's module docstring) and refuses the write if that state
     reads ARMED, OR if it could not be confidently determined at all (fail
     closed -- an unreadable state is never treated as "not armed"). This is
-    additive to, never a replacement for, the confirm=True gate below."""
-    if not confirm:
+    additive to, never a replacement for, the confirm=True gate below.
+
+    The core is halted for the write and resumed afterwards (always -- there is
+    deliberately no leave_halted option on the write path: the read-back that
+    follows resumes the core anyway, and a Pico halt must always be resumed);
+    a failed resume or write
+    is reported even when OpenOCD printed an Error: line. ARMED is checked once
+    before the write (the same window every debug_write_memory has).
+
+    For peer="esp" it also refuses while a profile is running or paused
+    (allow_running=True, exactly True, overrides). After a successful write
+    the word is read back; a mismatch is reported as FAILED (a volatile
+    register legitimately differs but is still not the written value), an unreadable read-back as unverified."""
+    if confirm is not True:
         return "error: memory write refused without confirm=True -- this writes live RAM/flash-mapped memory on a running board"
+    if peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("write memory on")
+        if refusal is not None:
+            return refusal
     if peer == debug_probe.PEER_PICO:
         armed, detail = debug_probe.pico_armed_state()
         if armed is not False:
@@ -637,7 +744,13 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
         _srv._session_log.warning(
             "debug_write_memory: peer=%s address=0x%x value=0x%x width=%d ok=True", peer, address, value, width
         )
-        return f"wrote 0x{value:x} ({width}-bit) to {peer} 0x{address:x}"
+        msg = f"wrote 0x{value:x} ({width}-bit) to {peer} 0x{address:x}"
+        note = _write_readback_note(peer, address, value, width)
+        if "FAILED:" in note:
+            return "FAILED - " + msg + note
+        if "UNVERIFIED" in note:
+            return "UNVERIFIED - " + msg + note
+        return msg + note
     _log_openocd_result(
         f"debug_write_memory(peer={peer}, address=0x{address:x}, value=0x{value:x}, width={width})", ok, output
     )
@@ -646,7 +759,7 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
 
 @_core._tool()
 def debug_read_registers(peer: str, target: str | None = None,
-                         leave_halted: bool = False) -> str:
+                         leave_halted: bool = False, allow_running: bool = False) -> str:
     """Reads the core registers for `peer`. Needs the core halted to read
     registers, so this halts it as a side effect if it was running.
 
@@ -657,6 +770,10 @@ def debug_read_registers(peer: str, target: str | None = None,
     Resumes the core afterwards unless `leave_halted` is set, for the same
     reason `debug_read_memory` does.
     """
+    if leave_halted is True and peer == debug_probe.PEER_ESP and allow_running is not True:
+        refusal = _esp_profile_running_refusal("leave halted")
+        if refusal is not None:
+            return refusal
     ok, output = debug_probe.read_registers(peer, target=target,
                                             leave_halted=leave_halted)
     _log_openocd_result(f"debug_read_registers(peer={peer}, target={target})", ok, output)

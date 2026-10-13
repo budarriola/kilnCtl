@@ -35,17 +35,42 @@ import os
 from mcpkit import workbench
 
 
+from _kilnfw_fakes import write_fresh_bins
+
+
+# The REAL artifact gate runs in these tests: every OK fake leaves the fresh
+# bins a real build leaves behind. (The "ELF unchanged" fakes model an
+# incremental build whose ELF ninja did not relink but whose KilnCtrl.bin the
+# always-relinking build_info step did refresh.)
 def _fake_ok_run_locked_relinks_elf(tag, resource_key, argv, **kwargs):
     """Simulates a build that actually relinks build/KilnCtrl.elf."""
     elf = os.path.join(resource_key, "KilnCtrl.elf")
     with open(elf, "ab") as f:
         f.write(b"x")
+    write_fresh_bins(resource_key)
     return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
 
 
 def _fake_ok_run_locked_no_relink(tag, resource_key, argv, **kwargs):
     """Simulates a build where ninja decided nothing needed relinking."""
+    write_fresh_bins(resource_key)
     return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
+
+
+def _fake_ok_run_locked_stale_bins(tag, resource_key, argv, **kwargs):
+    """Exit 0 but nothing was built: no bins at all."""
+    return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
+
+
+def _fake_ok_fullclean(tag, resource_key, argv, **kwargs):
+    for name in os.listdir(resource_key):
+        path = os.path.join(resource_key, name)
+        if os.path.isdir(path):
+            import shutil
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+    return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\ncleaned"
 
 
 def _fake_failed_run_locked(tag, resource_key, argv, **kwargs):
@@ -103,8 +128,24 @@ def test_failed_build_does_not_touch_sibling(monkeypatch, tmp_path):
     assert sibling.read_text(encoding="utf-8") == "# CONFIG_KILNCTL_GPIO_PROBE is not set\n"
 
 
+def test_gate_downgraded_report_skips_refresh(monkeypatch, tmp_path):
+    """LOW-6: an exit-0 build that left no usable bins is downgraded by the real
+    artifact gate, and the sdkconfig sibling is then left untouched."""
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_stale_bins)
+    live = root / "firmware" / "KilnFW" / "sdkconfig"
+    sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
+    live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
+    sibling.write_text("# CONFIG_KILNCTL_GPIO_PROBE is not set\n", encoding="utf-8")
+
+    result = workbench.build_kilnfw(target="build", skip_saftyfw=True)
+
+    assert "kilnfw-build: FAILED" in result
+    assert "sdkconfig-refresh" not in result
+    assert sibling.read_text(encoding="utf-8") == "# CONFIG_KILNCTL_GPIO_PROBE is not set\n"
+
+
 def test_fullclean_target_does_not_refresh(monkeypatch, tmp_path):
-    root = _stub_common(monkeypatch, tmp_path, _fake_ok_run_locked_relinks_elf)
+    root = _stub_common(monkeypatch, tmp_path, _fake_ok_fullclean)
     live = root / "firmware" / "KilnFW" / "sdkconfig"
     sibling = root / "firmware" / "KilnFW" / "build" / "sdkconfig"
     live.write_text("CONFIG_KILNCTL_GPIO_PROBE=y\n", encoding="utf-8")
@@ -112,8 +153,8 @@ def test_fullclean_target_does_not_refresh(monkeypatch, tmp_path):
 
     result = workbench.build_kilnfw(target="fullclean", skip_saftyfw=True)
 
+    assert "kilnfw-fullclean: OK" in result
     assert "sdkconfig-refresh" not in result
-    assert sibling.read_text(encoding="utf-8") == "# CONFIG_KILNCTL_GPIO_PROBE is not set\n"
 
 
 def test_live_differs_and_elf_unchanged_skips_refresh(monkeypatch, tmp_path):

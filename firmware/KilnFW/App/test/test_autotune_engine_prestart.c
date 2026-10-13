@@ -14,7 +14,7 @@
 // every other public function now test s_at.lock == NULL as their first
 // statement and return a clean "not running" answer instead.
 //
-// #includes autotune_engine.c and its four split siblings directly (same
+// This test #includes autotune_engine.c and its four split siblings directly (same
 // convention as test_profile_executor_prestart.c's #include of ITS split --
 // see that file's header comment) -- ROADMAP.md M15 A3 broke autotune_engine.c
 // (4120 lines) into autotune_engine.c/_guard.c/_step_identify.c/_relay.c/
@@ -54,6 +54,20 @@ static void autotune_engine_tick_locked(void)
     ThermoChannelSnapshot snap;
     thermo_channels_read(s_at.thermo_bus, &snap);
     autotune_engine_tick_locked_impl(&snap);
+}
+
+// F2 (flash-worker lock-inversion audit 2026-10-09): autotune_finalize_fit()
+// only parks its coupling persist in s_at.pending_coupling; production's
+// task_entry() (autotune_engine_tick_under_lock()) takes it and dispatches
+// it after giving s_at.lock. Tests that call autotune_finalize_fit() directly
+// finish the same way here, with no lock held.
+static void finalize_fit_then_flush_coupling(void)
+{
+    autotune_finalize_fit();
+    coupling_persist_job_t job;
+    if (autotune_take_pending_coupling_locked(&job)) {
+        autotune_dispatch_coupling_persist(&job);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +166,17 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
     (void)mask; (void)value;
     return ESP_OK;
 }
+static uint32_t g_at_fake_off_epoch = 0;
+static int g_at_stale_on_drops = 0;
+uint32_t kiln_io_relay_off_epoch(void) { return g_at_fake_off_epoch; }
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value, uint32_t since_epoch)
+{
+    if (since_epoch != g_at_fake_off_epoch && value != 0) {
+        g_at_stale_on_drops++;
+        return ESP_ERR_INVALID_STATE; /* stale ON dropped, as the real owner does */
+    }
+    return kiln_io_owner_command_set_relay_mask_authorized(mask, value);
+}
 
 static int s_heat_zone_claim_begin_calls;
 static bool s_test_update_claim_after_heat_claim = false; /* MED-1 (review 3) */
@@ -222,16 +247,65 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
     if (autotune_running_out) *autotune_running_out = s_stub_autotune_running;
 }
 
+/* When set, the stub reproduces relay_authority.c's real relay_authority_on_blocked()
+ * body (NULL link -> APP source; otherwise blocked iff the link's fault_sources != 0,
+ * and an uninitialised link reads 0 -- safety_link_get_fault_sources()). Kept in step by
+ * hand with drivers/owners/relay_authority.c relay_authority_on_blocked(). DRIFT NOTE (sweep
+ * INFO-5): linking the real function would pull relay_authority.c's own dependencies into this
+ * executable, so it is not linked; instead, any change to the real function's semantics
+ * (NULL link, uninitialised link, nonzero fault_sources) must be mirrored here, and the real
+ * semantics are exercised in the "safety_link" host-test executable (test_safety_link_compile.c
+ * #includes relay_authority.c; build_host_tests.ps1), though only with a live link and fault
+ * sources -- the NULL-link (APP source) and uninitialised-link branches mirrored here are not
+ * pinned there. */
+static bool s_stub_blocked_real_semantics = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
-    (void)safety;
+    if (s_stub_blocked_real_semantics) {
+        if (!safety) {
+            if (out_sources) *out_sources = SAFETY_FAULT_SRC_APP;
+            return true;
+        }
+        uint32_t src = safety->initialized ? safety->fault_sources : 0u;
+        if (out_sources) *out_sources = src;
+        return src != 0u;
+    }
     if (out_sources) *out_sources = 0;
     return false;
 }
 
+/* LD-01: autotune_begin_run_locked() now also requires safety_link_get_status() link_up
+ * (relay_authority_start_blocked(), the REAL inline helper from relay_authority.h).
+ * Default: link up; modes 1/2 = never-up / uninitialised. */
+static int s_stub_link_mode = 0;
+esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
+{
+    (void)link;
+    /* LOW-1 (REVIEW_LD01_WWFIX): like the real function, leave *out as garbage that LOOKS link-up on an
+     * error return, so a caller that ignores the return code reads link_up and starts. */
+    if (s_stub_link_mode >= 2 && s_stub_link_mode != 5) {
+        if (out) memset(out, 0xFF, sizeof(*out));
+        return s_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE : ESP_FAIL;
+    }
+    if (out) memset(out, 0, sizeof(*out));
+    if (out) out->link_up = (s_stub_link_mode == 0 || s_stub_link_mode == 5);
+    /* F5HOLDERFX4: start also needs a DIAG received since the Pico's last reboot and fresh; a link-up board
+     * in this stub has one (state 0 is not TRIPPED). */
+    if (out && (s_stub_link_mode == 0 || s_stub_link_mode == 5)) {
+        out->diag_ever_received = true;
+        out->diag_since_reboot = true;
+        out->diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+        /* mode 5: link up but the DIAG is one tick past fresh -> start must refuse. */
+        out->diag_frame_age_ms = (s_stub_link_mode == 5) ? (SAFETY_LINK_DIAG_FRESH_MS + 1u) : 0u;
+    }
+    return ESP_OK;
+}
+
+static bool g_at_bump_epoch_in_gate = false;
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
+    if (g_at_bump_epoch_in_gate) g_at_fake_off_epoch++; /* LOW-3: an all-off lands during the gate decision */
     if (out_sources) *out_sources = 0;
     return false;
 }
@@ -626,11 +700,23 @@ static void reset_coupling_cell_calls(void)
  * existing counter) lets a future test assert the persist step went through
  * this path at all, not just that the cells landed. */
 int g_flash_worker_submit_calls = 0;
+/* Flash-worker lock-inversion audit 2026-10-09 F2: the real worker runs
+ * UART autotune handlers (status, abort, accept, start) that take s_at.lock.
+ * This stub plays that worker: if any lock is held at dispatch time (the
+ * stub semaphore's process-wide g_test_stub_lock_depth -- the only lock these
+ * paths hold is s_at.lock), the worker would block on it while the caller
+ * blocks on the worker. That deadlock is recorded and the job is NOT run,
+ * the same as on the board, where it never completes. */
+int g_flash_worker_dispatch_under_lock = 0;
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
     g_flash_worker_submit_calls++;
     if (!fn) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (g_test_stub_lock_depth > 0) {
+        g_flash_worker_dispatch_under_lock++;
+        return ESP_ERR_TIMEOUT;
     }
     fn(arg);
     return ESP_OK;
@@ -734,7 +820,7 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return true;
 }
 
-// docs/ON_OFF_ZONE_PLAN.md step 1: same shape as s_stub_thermo_mask above --
+// docs/ON_OFF_ZONE.md step 1: same shape as s_stub_thermo_mask above --
 // false (HEATER) by default so every existing test in this file is
 // unaffected; test_run_refuses_on_off_zone() below sets this true to
 // exercise autotune_begin_run_locked()'s new prestart refusal.
@@ -781,8 +867,11 @@ bool zones_current_sweep_is_active(void)
  * tuning-quality write can flip it to true -- same convention as
  * s_stub_set_pid_result below. */
 static bool s_stub_set_model_result = false;
+static int s_stub_set_model_call_count = 0;
+static bool s_stub_atomic_reject = false; /* F1: combined model+gains setter refuses */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    s_stub_set_model_call_count++;
     s_zones_write_total++;
     (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
     return s_stub_set_model_result;
@@ -919,6 +1008,28 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_stub_set_pid_result;
 }
 
+/* Dev review 9 L2: accept() now goes through the _checked setter so it can tell a run-claimed
+ * refusal from a bad value. s_stub_set_pid_busy makes the stub report BUSY_RUNNING without
+ * touching the fake store, modelling the real setter's claim re-check inside zones_cfg_lock. */
+static bool s_stub_set_pid_busy = false;
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd)
+{
+    if (s_stub_set_pid_busy) {
+        s_zones_write_total++;
+        s_fake_set_pid_call_count++;
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    return zones_config_set_pid(zone_index, kp, ki, kd) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
+
+/* Dev review 9 L1: stand-in for adaptive_tune_any_write_in_flight(); a test sets it to model the
+ * run-end apply pass holding write_in_flight. Never set outside the test that wants it. */
+static bool s_stub_adaptive_write_in_flight = false;
+bool adaptive_tune_any_write_in_flight(void)
+{
+    return s_stub_adaptive_write_in_flight;
+}
+
 /* TODO.md 6A.4 -- autotune_engine_accept()'s opt-in ceiling-adopt write.
  * Call-count/last-args capture, same convention as
  * s_stub_set_coupling_diag_k_dc_* above, so a test can prove both the
@@ -929,6 +1040,8 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
  * persist). Default true so a positive-path test does not also have to set
  * this. */
 static bool s_stub_set_max_ramp_result = true;
+static bool s_stub_set_max_ramp_ram_on_fail = false;
+static float s_stub_get_max_ramp_value; /* fwd: defined with the getter stub below */
 static int s_stub_set_max_ramp_call_count = 0;
 static uint8_t s_stub_set_max_ramp_zone = 0xFF;
 static float s_stub_set_max_ramp_value = -1.0f;
@@ -940,6 +1053,9 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     s_stub_set_max_ramp_value = c_per_hr;
     if (s_stub_set_max_ramp_result) {
         s_fake_zone_max_ramp = c_per_hr;
+    }
+    if (!s_stub_set_max_ramp_result && s_stub_set_max_ramp_ram_on_fail) {
+        s_stub_get_max_ramp_value = c_per_hr; /* nvs_save() failed AFTER the RAM write */
     }
     return s_stub_set_max_ramp_result;
 }
@@ -1048,6 +1164,34 @@ bool backup_import_restore_in_flight(void)
     return s_test_restore_in_flight;
 }
 
+// HTTP audit E1 finding 1: see test_profile_executor_prestart.c's identical fake.
+uint32_t zones_config_generation(void)
+{
+    return 0;
+}
+static bool s_test_zones_gen_bump_after_heat_claim = false;
+bool zones_config_changed_since(uint32_t gen_snapshot)
+{
+    (void)gen_snapshot;
+    return s_test_zones_gen_bump_after_heat_claim && s_heat_zone_claim_begin_calls > 0;
+}
+
+// LCD review R1/R2: danger_mode_blocks_start() fake -- closed, open from the start (early gate), or
+// opening only after the heat claim is published (commit recheck).
+static bool s_test_danger_mode_active = false;
+static bool s_test_danger_opens_after_heat_claim = false;
+bool danger_mode_blocks_start(void)
+{
+    return s_test_danger_mode_active || (s_test_danger_opens_after_heat_claim && s_heat_zone_claim_begin_calls > 0);
+}
+
+// Factory reset in flight: see test_profile_executor_prestart.c's identical fake.
+static bool s_test_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void)
+{
+    return s_test_reset_in_flight;
+}
+
 // The distinguishing observation is the same one
 // test_profile_executor_prestart.c's equivalent tests use: the gate runs
 // BEFORE the s_at.lock == NULL guard, so a blocked board answers the gate's
@@ -1093,6 +1237,15 @@ static void test_begin_run_refused_by_restore_in_flight(void)
     begin_run_and_expect_gate_refusal("a backup restore in flight refuses an autotune start",
                                        "backup restore is in progress");
     s_test_restore_in_flight = false;
+}
+
+static void test_begin_run_refused_by_danger_mode(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the system mode gate -- danger mode active (LCD review R1)");
+    reset_readiness_facts_to_ready();
+    s_test_danger_mode_active = true;
+    begin_run_and_expect_gate_refusal("an open danger window refuses an autotune start", "danger mode is active");
+    s_test_danger_mode_active = false;
 }
 
 static void test_begin_run_refused_by_readiness_safety_trip(void)
@@ -1622,7 +1775,7 @@ static void run_one_dither_case_end_to_end(float dither_c, const char *label)
      * trace. */
     s_at.zone_trace[0][n_samples - 1] = flat_value + (int16_t)lroundf(dither_c * 10.0f);
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
 
     char msg[128];
     snprintf(msg, sizeof(msg), "%s: the direct fit must succeed (a clean 8*tau trace)", label);
@@ -1677,7 +1830,7 @@ static void test_finalize_fit_uses_the_requested_rule(void)
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
     write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                 /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a well-formed trace must fit");
     TEST_CHECK(s_at.model.valid, "the FOPDT fit must have succeeded");
     TEST_CHECK(s_at.proposed_gains.rule == AUTOTUNE_RULE_SIMC, "SIMC requested -> SIMC reported");
@@ -1696,7 +1849,7 @@ static void test_finalize_fit_uses_the_requested_rule(void)
     s_at.step_rule = AUTOTUNE_RULE_COHEN_COON;
     write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                 /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the same trace must fit again");
     TEST_CHECK(s_at.model.valid, "the FOPDT fit must have succeeded");
     TEST_CHECK(s_at.proposed_gains.rule == AUTOTUNE_RULE_COHEN_COON, "Cohen-Coon requested -> Cohen-Coon reported");
@@ -1747,7 +1900,7 @@ static void test_finalize_fit_persists_valid_cross_gain_cells(void)
     // that never reported during the run.
     s_at.zone_baseline_valid[2] = false;
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
     TEST_CHECK(s_at.model.valid, "zone 1's own model must be valid");
     TEST_CHECK(s_at.coupling.cell[1][0].valid, "zone 0's cross-gain cell was fitted and marked valid");
@@ -1800,7 +1953,7 @@ static void test_finalize_fit_persists_cross_gain_tau_dead_time_in_correct_orien
     write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/40.0f,
                                          /*dead_time_s=*/5.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     s_at.zone_baseline_valid[2] = false; // zone 2 not part of this run's fixture
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "run 1 (zone 0 stepped) direct fit must succeed");
     TEST_CHECK(s_coupling_cell_calls[1][0].called, "cell [1][0] (zone 1 affected, zone 0 stepped) was persisted");
     // The FOPDT curve fit does not reproduce the fed-in tau/L exactly off a
@@ -1828,7 +1981,7 @@ static void test_finalize_fit_persists_cross_gain_tau_dead_time_in_correct_orien
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/90.0f,
                                          /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     s_at.zone_baseline_valid[2] = false;
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "run 2 (zone 1 stepped) direct fit must succeed");
     TEST_CHECK(s_coupling_cell_calls[0][1].called, "cell [0][1] (zone 0 affected, zone 1 stepped) was persisted");
     float run2_tau = s_coupling_cell_calls[0][1].tau_s;
@@ -1882,7 +2035,7 @@ static void test_finalize_fit_does_not_persist_tau_dead_time_for_invalid_peer(vo
     // existing !s_at.zone_baseline_valid[j] check must skip.
     s_at.zone_baseline_valid[2] = false;
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
     TEST_CHECK(!s_at.coupling.cell[1][2].valid, "zone 2's cell is invalid -- its baseline never went valid");
     TEST_CHECK(!s_coupling_cell_calls[2][1].called,
@@ -1932,7 +2085,7 @@ static void test_finalize_fit_routes_persist_through_flash_worker(void)
     write_synthetic_fopdt_trace_for_zone(2, /*baseline_c=*/23.0f, /*k_gain_c_per_duty=*/0.7f, /*tau_s=*/160.0f,
                                          /*dead_time_s=*/16.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
     TEST_CHECK(s_coupling_cell_calls[0][1].called, "zone 0's cell was persisted");
     TEST_CHECK(s_coupling_cell_calls[2][1].called, "zone 2's cell was persisted");
@@ -1944,6 +2097,96 @@ static void test_finalize_fit_routes_persist_through_flash_worker(void)
               "this guards against)");
 
     s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+/* F2, flash-worker lock-inversion audit 2026-10-09: production runs
+ * autotune_finalize_fit() under s_at.lock (task_entry() -> tick body). It
+ * used to dispatch coupling_persist_job to bx_flash_worker from right there,
+ * and the worker's UART autotune handlers take s_at.lock: deadlock. Called
+ * here with s_at.lock held, exactly as the tick holds it, finalize must
+ * dispatch NOTHING and leave the job parked for after the give. */
+static void test_finalize_fit_under_lock_does_not_dispatch_coupling_persist(void)
+{
+    TEST_SECTION("F2: autotune_finalize_fit() under s_at.lock parks the coupling persist instead of "
+                 "dispatching to the flash worker while the lock is held");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    g_flash_worker_submit_calls = 0;
+    g_flash_worker_dispatch_under_lock = 0;
+    s_stub_thermo_count = 3;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true;
+    write_synthetic_fopdt_trace_for_zone(1, 25.0f, 50.0f, 200.0f, 20.0f, 1.0f, 60);
+    write_synthetic_fopdt_trace_for_zone(0, 22.0f, 0.5f, 150.0f, 15.0f, 1.0f, 60);
+    write_synthetic_fopdt_trace_for_zone(2, 23.0f, 0.7f, 160.0f, 16.0f, 1.0f, 60);
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    autotune_finalize_fit();
+    TEST_CHECK(g_flash_worker_dispatch_under_lock == 0,
+               "MUST GO RED if autotune_finalize_fit() dispatches to the flash worker while s_at.lock is "
+               "held -- the worker's UART autotune handlers take s_at.lock, so that deadlocks");
+    TEST_CHECK(g_flash_worker_submit_calls == 0, "nothing is submitted from under the lock");
+    TEST_CHECK(s_at.pending_coupling_valid && s_at.pending_coupling.count == 2 &&
+                   s_at.pending_coupling.stepped_zone == 1,
+               "both valid peer cells are parked in s_at.pending_coupling for task_entry() to dispatch");
+    xSemaphoreGive(s_at.lock);
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
+    TEST_CHECK(!s_coupling_cell_calls[0][1].called && !s_coupling_cell_calls[2][1].called,
+               "no coupling cell is written before the dispatch");
+
+    memset(&s_at, 0, sizeof(s_at));
+    s_stub_thermo_count = 0;
+}
+
+/* F2 companion: drives task_entry()'s real lock section
+ * (autotune_engine_tick_under_lock()) with a parked coupling persist. The
+ * engine is idle, so no tick body runs; the helper must still take the
+ * parked job under the lock and dispatch it after the give. The stub worker
+ * refuses (records a deadlock) if any lock is held at dispatch. */
+static void test_tick_under_lock_dispatches_coupling_persist_after_give(void)
+{
+    TEST_SECTION("F2: autotune_engine_tick_under_lock() dispatches the parked coupling persist only after "
+                 "giving s_at.lock, and writes exactly the parked cells");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    g_flash_worker_submit_calls = 0;
+    g_flash_worker_dispatch_under_lock = 0;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.pending_coupling_valid = true;
+    s_at.pending_coupling.stepped_zone = 1;
+    s_at.pending_coupling.count = 2;
+    s_at.pending_coupling.affected_zone[0] = 0;
+    s_at.pending_coupling.coeff[0] = 0.5f;
+    s_at.pending_coupling.tau_s[0] = 150.0f;
+    s_at.pending_coupling.dead_time_s[0] = 15.0f;
+    s_at.pending_coupling.affected_zone[1] = 2;
+    s_at.pending_coupling.coeff[1] = 0.7f;
+    s_at.pending_coupling.tau_s[1] = 160.0f;
+    s_at.pending_coupling.dead_time_s[1] = 16.0f;
+
+    ThermoChannelSnapshot unused_snap;
+    memset(&unused_snap, 0, sizeof(unused_snap));
+    int depth_before = g_test_stub_lock_depth;
+    bool not_running = autotune_engine_tick_under_lock(false, false, &unused_snap);
+    TEST_CHECK(not_running, "an idle (DONE) engine reports not running");
+    TEST_CHECK(g_test_stub_lock_depth == depth_before, "the helper gives every lock it takes");
+    TEST_CHECK(g_flash_worker_dispatch_under_lock == 0,
+               "MUST GO RED if the coupling persist is dispatched before xSemaphoreGive(s_at.lock)");
+    TEST_CHECK(g_flash_worker_submit_calls == 1, "exactly one flash-worker job for the parked persist");
+    TEST_CHECK(!s_at.pending_coupling_valid, "the parked persist is consumed, never dispatched twice");
+    TEST_CHECK(s_coupling_cell_calls[0][1].called && s_coupling_cell_calls[2][1].called,
+               "both parked cells were written ([affected][stepped])");
+    TEST_CHECK_NEAR(s_coupling_cell_calls[0][1].coeff, 0.5f, 1e-6, "cell [0][1] carries the parked coeff");
+    TEST_CHECK_NEAR(s_coupling_cell_calls[2][1].tau_s, 160.0f, 1e-6, "cell [2][1] carries the parked tau");
+
+    g_flash_worker_submit_calls = 0;
+    autotune_engine_tick_under_lock(false, false, &unused_snap);
+    TEST_CHECK(g_flash_worker_submit_calls == 0, "a second tick with nothing parked dispatches nothing");
+
+    memset(&s_at, 0, sizeof(s_at));
 }
 
 /* Item (4), round-2 review: coupling-cell persistence used to run
@@ -1970,7 +2213,7 @@ static void test_finalize_fit_skips_coupling_persist_when_unsettled(void)
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
                                          /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct fit itself still succeeds -- settled gates "
                                                     "persistence, not the fit");
     TEST_CHECK(!s_at.model.settled, "sanity: this run really is unsettled");
@@ -2011,7 +2254,7 @@ static void test_finalize_fit_skips_coupling_persist_when_extrapolation_did_not_
                                          /*dead_time_s=*/15.0f, /*duty_step=*/1.0f,
                                          /*n_samples=*/s_at.trace_count);
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct fit itself still succeeds");
     TEST_CHECK(s_at.model.settled, "sanity: settled is true -- isolating the NEW conditions specifically");
     TEST_CHECK(!s_at.model.extrapolation_converged || !s_at.model.tau_consistent_with_gain,
@@ -2058,7 +2301,7 @@ static void test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain(void)
                                          /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     s_at.zone_baseline_valid[2] = false;
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must still succeed");
     TEST_CHECK(s_at.coupling.cell[1][0].valid, "zone 0's cross-gain cell fit itself is valid -- the FIT is not "
               "what's wrong here, only the recovered gain's magnitude");
@@ -2098,7 +2341,7 @@ static void test_finalize_fit_persists_nothing_on_an_invalid_direct_fit(void)
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
                                          /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
 
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a flat, unfittable direct trace must abort the run");
     TEST_CHECK(!s_at.model.valid, "the direct model must be invalid");
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
@@ -2323,6 +2566,10 @@ static void test_step_slow_healthy_zone_without_model_still_false_trips_guard1(v
                  "it, i.e. this is a real behavioural difference, not a test that would pass either way");
     start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/1.0f);
     s_at.guard_cfg.wrong_dir_window_s = GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S;
+    // Firing review 2026-10-09 item 6: with no model a wrong_dir_window_s-derived window is now floored
+    // at 120 s by thermal_guard.c, so the false-trip shape needs the operator's OWN progress_window_s
+    // (honoured unchanged) to stay short.
+    s_at.guard_cfg.progress_window_s = GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S;
     // g_stub_model_valid[0] left at this suite's default (false) -- no model
     // fitted yet, zone_model_at() returns false, climb_window_floor_s stays
     // 0.0f ("don't touch window_s"), identical to today's pre-fix behaviour
@@ -3150,7 +3397,7 @@ static void test_run_refuses_zone_with_no_thermo_mask(void)
     TEST_CHECK(ok, "control: with a thermo_mask assigned, the identical setup must succeed");
 }
 
-// docs/ON_OFF_ZONE_PLAN.md step 1: an on/off zone must refuse autotune at
+// docs/ON_OFF_ZONE.md step 1: an on/off zone must refuse autotune at
 // prestart, the same shape/place as the thermo_mask==0 refusal just above --
 // and BEFORE it, so a TC-equipped on/off zone gets this message rather than
 // passing the thermo_mask check only to fail later on a flat trace.
@@ -3333,6 +3580,104 @@ static void test_run_refuses_when_update_claims_after_early_check(void)
     TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
     TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
 }
+// HTTP audit E1 finding 1: zones config committed during the start -> refused at commit, claims released.
+static void test_run_refuses_when_zones_config_changes_during_start(void)
+{
+    TEST_SECTION("autotune_engine_run() -- zones config changed during the start refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_zones_gen_bump_after_heat_claim = true;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_zones_gen_bump_after_heat_claim = false;
+    TEST_CHECK(!ok, "a zones config commit during the start must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "zones configuration changed") != NULL, "the refusal names the config change");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
+// Factory reset in flight: a reset mark set before the start's late check refuses it, claims released.
+static void test_run_refuses_when_factory_reset_in_flight(void)
+{
+    TEST_SECTION("autotune_engine_run() -- a factory reset in flight refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_reset_in_flight = true;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "a factory reset in flight must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "factory reset in progress") != NULL, "the refusal names the factory reset");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_begin_calls >= 1, "the heat claim was published before the mark was read");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
+// LCD review R2: danger mode opening after the early gate refuses at commit and releases claims.
+static void test_run_refuses_when_danger_mode_opens_at_commit(void)
+{
+    TEST_SECTION("autotune_engine_run() -- danger mode opening after the early gate refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_danger_opens_after_heat_claim = true;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_danger_opens_after_heat_claim = false;
+    TEST_CHECK(!ok, "danger mode opening after the early gate must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "danger mode is active") != NULL, "the refusal names danger mode");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_begin_calls >= 1, "the heat claim was published before danger mode was re-read");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
 // Review of 933a7eec: autotune start peeks profile_executor_zone_is_active()
 // and profile start peeks autotune_engine_is_active_on_zone(), but each peek
 // runs BEFORE the caller's own module lock, so two starts on the same zone
@@ -3468,6 +3813,103 @@ static void test_autotune_manual_abort_releases_heat_enable(void)
     heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
     heat_enable_service_pending_release();
     TEST_CHECK(s_req_enable_false_calls == 1, "the per-tick backstop is free after the first release");
+}
+
+
+/* Host-test campaign (linkdn). With the safety link down/stale/never up AND the poll task's
+ * SAFETY_FAULT_SRC_SAFETY_LINK source latched, the begin-run gate refuses, names the source and
+ * requests no heat. The un-latched variant is test_begin_run_refuses_unlatched_link_down() (LD-01, fixed). See docs/audits/HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md, LD-01. */
+static void test_begin_run_refuses_on_down_link_with_latched_link_source(void)
+{
+    TEST_SECTION("autotune begin-run: link down with SAFETY_LINK source latched -- refuses, names it, no heat request");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    reset_heat_enable_recorder(false);
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    safety.initialized = true;
+    safety.fault_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 0.0f;
+    s_stub_min_temp_c = 0.0f;
+    s_stub_ch0_ok = true;
+    s_stub_blocked_real_semantics = true;
+
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_stub_blocked_real_semantics = false;
+
+    TEST_CHECK(!ok, "start must be refused while the safety link is down");
+    TEST_CHECK(s_req_enable_true_calls == 0, "and no heat-enable request may be made");
+    TEST_CHECK(strstr(errbuf, "heat is blocked") != NULL, "and the refusal says why");
+    TEST_CHECK(strstr(errbuf, "0x") == NULL, "with a decoded source, not a hex value");
+}
+
+/* LD-01 fixed: link never up / stale / uninitialised with NO fault source latched (the un-latched
+ * window) must refuse and request no heat. */
+static void test_begin_run_refuses_unlatched_link_down(void)
+{
+    TEST_SECTION("autotune begin-run: link not positively up, no fault source latched -- refuses, no heat (LD-01)");
+    for (int mode = 1; mode <= 4; mode++) { /* 1 never-up, 2 uninit, 3 ESP_FAIL, 4 NULL safety */
+        static MAX31856BusClass bus;
+        static SafetyLinkClass safety;
+        reset_heat_enable_recorder(false);
+        memset(&s_at, 0, sizeof(s_at));
+        memset(&bus, 0, sizeof(bus));
+        memset(&safety, 0, sizeof(safety));
+        bus.initialized = true;
+        safety.initialized = (mode != 2);
+        safety.fault_sources = 0;
+        s_at.thermo_bus = &bus;
+        s_at.safety = (mode == 4) ? NULL : &safety;
+        s_at.lock = xSemaphoreCreateMutex();
+        s_stub_max_temp_c = 0.0f;
+        s_stub_min_temp_c = 0.0f;
+        s_stub_ch0_ok = true;
+        s_stub_blocked_real_semantics = true;
+        s_stub_link_mode = (mode == 4) ? 1 : mode;
+        char errbuf[128] = {0};
+        bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+        s_stub_blocked_real_semantics = false;
+        s_stub_link_mode = 0;
+        TEST_CHECK(!ok, "start refused while the link is not positively up");
+        TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
+        TEST_CHECK(mode == 4 || strstr(errbuf, "safety link is down") != NULL, "refusal names the safety link");
+        TEST_CHECK(strstr(errbuf, "0x") == NULL, "decoded, not hex");
+    }
+}
+
+/* MED-1 (REVIEW_SAFETYFX7): link up and ARMED but the DIAG is stale -> start refuses and requests no heat. */
+static void test_begin_run_refuses_stale_diag(void)
+{
+    TEST_SECTION("autotune begin-run: link up but Pico DIAG stale -- refuses, no heat (F5HOLDERFX4)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    reset_heat_enable_recorder(false);
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    safety.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 0.0f;
+    s_stub_min_temp_c = 0.0f;
+    s_stub_ch0_ok = true;
+    s_stub_blocked_real_semantics = true;
+    s_stub_link_mode = 5;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_stub_blocked_real_semantics = false;
+    s_stub_link_mode = 0;
+    TEST_CHECK(!ok, "start refused while the DIAG is stale");
+    TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
+    TEST_CHECK(strstr(errbuf, "status report") != NULL, "refusal says it is waiting for the safety processor status report");
 }
 
 static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
@@ -3904,6 +4346,8 @@ static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
     s_fake_zone_max_ramp = seed_ramp;
     s_fake_set_pid_call_count = 0;
     int ramp_calls_before = s_stub_set_max_ramp_call_count;
+    int model_calls_before = s_stub_set_model_call_count;
+    int clear_ki_calls_before = g_clear_ki_baseline_calls;
     s_zones_write_total = 0;
     autotune_accept_opts_t adopt = {.adopt_ceiling = true};
 
@@ -3920,6 +4364,9 @@ static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
         TEST_CHECK(s_zones_write_total == 0, "refused accept must call NO zones_config_set_* writer");
         TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before,
                    "refused accept must not call the zones-config max_ramp write");
+        TEST_CHECK(s_stub_set_model_call_count == model_calls_before, "refused accept must not call zones_config_set_model");
+        TEST_CHECK(g_clear_ki_baseline_calls == clear_ki_calls_before, "refused accept must not call adaptive_tune_clear_ki_baseline");
+        TEST_CHECK(!s_at.external_write_reserved, "refused accept must not leave external_write_reserved set");
         TEST_CHECK(memcmp(&s_fake_zone_kp, &seed_kp, sizeof(float)) == 0 &&
                    memcmp(&s_fake_zone_ki, &seed_ki, sizeof(float)) == 0 &&
                    memcmp(&s_fake_zone_kd, &seed_kd, sizeof(float)) == 0,
@@ -3978,6 +4425,44 @@ static void test_autotune_engine_accept_rechecks_gate_before_writes(void)
     TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before, "set_max_ramp must be called 0 times");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "result not consumed");
     TEST_CHECK(!s_at.external_write_reserved, "reservation must be released on the refusal");
+    s_stub_set_pid_result = false;
+}
+
+/* Dev review 9 L1/L2: Accept refuses (409 path) while an adaptive run-end write is in flight, and
+ * when the setter reports the zone is run-claimed. Both must write nothing and release the reservation. */
+static void test_autotune_engine_accept_refused_by_adaptive_write_and_run_claim(void)
+{
+    TEST_SECTION("autotune_engine_accept() refuses on adaptive write_in_flight and on BUSY_RUNNING");
+    for (int pass = 0; pass < 2; pass++) {
+        memset(&s_at, 0, sizeof(s_at));
+        s_at.lock = xSemaphoreCreateMutex();
+        s_at.state = AUTOTUNE_ENGINE_DONE;
+        s_at.method = AUTOTUNE_METHOD_STEP;
+        s_at.zone_index = 0;
+        s_at.model.valid = true;
+        s_at.model.settled = true;
+        s_at.model.extrapolation_converged = true;
+        s_at.model.tau_consistent_with_gain = true;
+        s_at.model.k_gain_c_per_duty = 10.0f;
+        s_at.model.tau_s = 100.0f;
+        s_at.model.dead_time_s = 5.0f;
+        s_stub_set_pid_result = true;
+        s_stub_profile_running = false;
+        s_stub_autotune_running = false;
+        s_fake_set_pid_call_count = 0;
+        s_zones_write_total = 0;
+        s_stub_adaptive_write_in_flight = (pass == 0);
+        s_stub_set_pid_busy = (pass == 1);
+        autotune_accept_result_t res = {0};
+        bool ok = autotune_engine_accept(NULL, &res);
+        s_stub_adaptive_write_in_flight = false;
+        s_stub_set_pid_busy = false;
+        TEST_CHECK(!ok, "accept must be refused");
+        TEST_CHECK(res.refused_by_mode_gate && res.mode_reason[0] != '\0', "flagged as a mode-gate refusal (409)");
+        TEST_CHECK(pass == 0 ? s_fake_set_pid_call_count == 0 : true, "adaptive write in flight: set_pid never called");
+        TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "result not consumed");
+        TEST_CHECK(!s_at.external_write_reserved, "reservation must be released on the refusal");
+    }
     s_stub_set_pid_result = false;
 }
 
@@ -4188,13 +4673,14 @@ static void test_autotune_engine_accept_skips_tuning_quality_when_model_persist_
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_atomic_reject = true; /* the case under test -- the atomic model+gains write refuses */
     s_stub_tuning_quality_call_count = 0;
 
     bool accepted = autotune_engine_accept(NULL, NULL);
 
-    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live, per this "
-                         "function's own comment on why a model-persist failure is logged, not propagated");
+    TEST_CHECK(!accepted, "F1: model and gains are one atomic write, so a refused write fails the accept "
+                          "(no gains-without-model state to report success for)");
+    s_stub_atomic_reject = false;
     TEST_CHECK(s_stub_tuning_quality_call_count == 0,
               "zones_config_set_tuning_quality() must NOT be called when the model failed to persist");
 
@@ -4311,12 +4797,13 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_pers
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_atomic_reject = true; /* the case under test -- the atomic model+gains write refuses */
     s_stub_set_coupling_diag_k_dc_call_count = 0;
 
     bool accepted = autotune_engine_accept(NULL, NULL);
 
-    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
+    TEST_CHECK(!accepted, "F1: atomic write refused -> accept fails, nothing follow-on written");
+    s_stub_atomic_reject = false;
     TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 0,
               "zones_config_set_coupling_diag_k_dc() must NOT be called when the model failed to persist");
 
@@ -4433,12 +4920,13 @@ static void test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_when_
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_atomic_reject = true; /* the case under test -- the atomic model+gains write refuses */
     s_stub_set_autotune_baseline_k_dc_call_count = 0;
 
     bool accepted = autotune_engine_accept(NULL, NULL);
 
-    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
+    TEST_CHECK(!accepted, "F1: atomic write refused -> accept fails, nothing follow-on written");
+    s_stub_atomic_reject = false;
     TEST_CHECK(s_stub_set_autotune_baseline_k_dc_call_count == 0,
               "zones_config_set_autotune_baseline_k_dc() must NOT be called when the model failed to persist");
 
@@ -4678,6 +5166,7 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
     s_stub_set_model_result = true;
     s_stub_set_max_ramp_call_count = 0;
     s_stub_set_max_ramp_result = false; /* forces the persist to fail */
+    s_stub_set_max_ramp_ram_on_fail = true; /* ... AFTER the RAM write, like the real nvs_save() failure */
     s_stub_get_max_ramp_result = true;
     s_stub_get_max_ramp_value = 0.0f; /* no ceiling configured yet -- would otherwise be adoptable */
 
@@ -4685,6 +5174,7 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
     autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,
                                         .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
     bool accepted = autotune_engine_accept(&opts, &result);
+    s_stub_set_max_ramp_ram_on_fail = false;
 
     TEST_CHECK(accepted, "the accept itself still succeeds -- gains/model are already live");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 1,
@@ -4702,6 +5192,55 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
                     "was not persisted");
     TEST_CHECK_NEAR(result.old_ceiling_c_per_hr, 0.0f, 1e-4,
                     "reported old ceiling is what a reboot will revert to");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_set_max_ramp_result = true;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+}
+
+/* Review 15 LOW-2: a setter refusal that wrote nothing (a run holds the heat
+ * claim) must NOT be reported as FAILED_TO_PERSIST ("live in RAM"). */
+static void test_autotune_engine_accept_ceiling_claim_refusal_not_live_in_ram(void)
+{
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) reports REFUSED_NOT_WRITTEN when the setter "
+                 "refuses without writing RAM");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 123.5f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_set_max_ramp_result = false;
+    s_stub_set_max_ramp_ram_on_fail = false; /* refusal: nothing written */
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    (void)autotune_engine_accept(&opts, &result);
+
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN,
+              "a refusal that wrote nothing is REFUSED_NOT_WRITTEN, not FAILED_TO_PERSIST");
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 0.0f, 1e-4,
+                    "reported ceiling is the unchanged old value, not the refused estimate");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
@@ -4898,7 +5437,7 @@ static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
     s_at.guard_cfg.max_temp_c = 0.0f;
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/1.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a below-floor rise must abort the run, not accept the fit");
     TEST_CHECK(strstr(s_at.abort_reason, "rise") != NULL,
               "the refusal is surfaced through the existing abort_reason channel with a specific reason "
@@ -4918,7 +5457,7 @@ static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
     s_at.guard_cfg.max_temp_c = 1200.0f;
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/22.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
               "a 22C rise (one of the two real incident gains) must be refused against a 1200C-ceiling "
               "zone's scaled threshold -- the old bare 3.0C floor would have accepted it");
@@ -4936,7 +5475,7 @@ static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
     s_at.guard_cfg.max_temp_c = 1200.0f;
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/1200.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
               "positive control: a 1200C rise against the same 1200C-ceiling zone clears both the "
               "scaled (B) threshold and the (C) plausibility check, and must still fit");
@@ -4977,7 +5516,7 @@ static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_t
     s_at.guard_cfg.max_temp_c = 0.0f;
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.model.valid, "sanity: the fit itself must succeed before the plausibility case matters");
     float implied_max_c = 25.0f + s_at.model.k_gain_c_per_duty + 30.0f;
     char expect_implied[32], expect_limit[32];
@@ -4990,7 +5529,7 @@ static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_t
     s_at.guard_cfg.max_temp_c = 500.0f;
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "an implausible gain must refuse, not accept the fit");
     TEST_CHECK(strstr(s_at.abort_reason, expect_implied) != NULL, "abort reason names the implied ceiling");
     TEST_CHECK(strstr(s_at.abort_reason, expect_limit) != NULL, "abort reason names the configured max_temp_c (500.0C)");
@@ -5004,7 +5543,7 @@ static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_t
     s_at.guard_cfg.max_temp_c = 0.0f;
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
               "max_temp_c == 0 (guard disabled) must NOT trigger the plausibility refusal");
     TEST_CHECK(s_at.model.valid, "the fit itself is unaffected by the check being skipped");
@@ -5046,7 +5585,7 @@ static void test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start(
      * cold ambient reading -- exactly what the real SETTLING->STEPPING
      * transition captures via cj_c when a run starts mid-firing. */
     s_at.step_ambient_c = 25.0f;
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
 
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
               "ambient (25C) + K (100C) + coupling (30C) = 155C is below the 250C ceiling -- must "
@@ -5106,7 +5645,7 @@ static void test_coupling_reachable_ceiling_is_accepted_even_with_low_single_zon
                                          /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/90);
     s_at.step_ambient_c = 29.8f; /* cold-junction reading at SETTLING->STEPPING, same as baseline here */
     s_at.step_settled = true;    /* tonight's real runs both genuinely settled -- not the max-duration backstop */
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
 
     TEST_CHECK(s_at.model.valid, "sanity: the fit itself must succeed");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
@@ -5147,7 +5686,7 @@ static void test_nonsense_negative_gain_fit_is_still_rejected(void)
      * uses, just with a negative synthetic gain. */
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/120.0f, /*k_gain_c_per_duty=*/-50.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
 
     TEST_CHECK(s_at.model.valid, "sanity: the two-point fit itself succeeds on a clean (if negative) exponential");
     TEST_CHECK(s_at.model.k_gain_c_per_duty < 0.0f, "sanity: the synthetic trace really does fit a negative gain");
@@ -5187,7 +5726,7 @@ static void test_rejected_fit_diagnostics_survive_the_reject_but_clear_on_next_r
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     s_at.lock = xSemaphoreCreateMutex();
     TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "sanity: this trace must actually be rejected (by (B))");
 
     autotune_engine_status_t status;
@@ -5225,7 +5764,7 @@ static void test_model_settled_flag_reflects_step_settled(void)
     s_at.step_settled = false; /* simulates the AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S backstop path */
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the fit itself still succeeds -- settled is a flag, not a gate");
     TEST_CHECK(!s_at.model.settled, "settled must read false -- this run never satisfied the detector");
 
@@ -5235,7 +5774,7 @@ static void test_model_settled_flag_reflects_step_settled(void)
     s_at.step_settled = true; /* simulates the honest detector having genuinely fired */
     write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the fit succeeds here too");
     TEST_CHECK(s_at.model.settled, "settled must read true -- carried through from s_at.step_settled");
 }
@@ -5890,7 +6429,7 @@ static void test_target_achieved_c_reflects_the_fitted_model_not_the_request(voi
     // this test with a DIFFERENT abort.
     write_synthetic_fopdt_trace(/*baseline_c=*/30.0f, /*k_gain_c_per_duty=*/45.0f, /*tau_s=*/285.0f,
                                 /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/600);
-    autotune_finalize_fit();
+    finalize_fit_then_flush_coupling();
 
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "sanity: this trace must fit");
     TEST_CHECK(s_at.model.valid, "sanity: the fit must be valid");
@@ -6877,13 +7416,29 @@ static void test_accept_is_gated_by_the_reservation_too(void)
     s_stub_set_pid_result = false;
 }
 
+static void test_autotune_apply_relay_samples_epoch_before_gate(void)
+{
+    TEST_SECTION("LOW-E -- autotune_apply_relay() samples the all-off epoch BEFORE its gate decision, so an all-off during the gate drops the ON");
+    static int s_io_dummy;
+    s_at.zone_index = 0;
+    s_at.io = (kiln_io_t *)&s_io_dummy;
+    g_at_stale_on_drops = 0;
+    g_at_bump_epoch_in_gate = true;
+    autotune_apply_relay(true);
+    g_at_bump_epoch_in_gate = false;
+    TEST_CHECK(g_at_stale_on_drops == 1, "the ON stamped before the gate was dropped as stale");
+    s_at.io = NULL;
+}
+
 void run_test_autotune_engine_prestart(void)
 {
+    test_autotune_apply_relay_samples_epoch_before_gate();
     test_heat_enable_acquire_never_called_under_s_at_lock();
     test_run_refuses_before_start();
     test_run_relay_refuses_before_start();
     test_begin_run_refused_by_readiness_recovery_mode();
     test_begin_run_refused_by_restore_in_flight();
+    test_begin_run_refused_by_danger_mode();
     test_begin_run_refused_by_readiness_safety_trip();
     test_begin_run_refused_by_readiness_crash_report();
     test_begin_run_refused_by_readiness_estop_unverified();
@@ -6906,6 +7461,8 @@ void run_test_autotune_engine_prestart(void)
     test_finalize_fit_persists_cross_gain_tau_dead_time_in_correct_orientation();
     test_finalize_fit_does_not_persist_tau_dead_time_for_invalid_peer();
     test_finalize_fit_routes_persist_through_flash_worker();
+    test_finalize_fit_under_lock_does_not_dispatch_coupling_persist();
+    test_tick_under_lock_dispatches_coupling_persist_after_give();
     test_finalize_fit_skips_coupling_persist_when_unsettled();
     test_finalize_fit_skips_coupling_persist_when_extrapolation_did_not_converge();
     test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain();
@@ -6919,6 +7476,7 @@ void run_test_autotune_engine_prestart(void)
     test_settle_detector_ignores_two_quantum_dead_time_noise();
     test_autotune_engine_accept_gates_on_settled();
     test_autotune_engine_accept_refused_by_mode_gate_while_running();
+    test_autotune_engine_accept_refused_by_adaptive_write_and_run_claim();
     test_autotune_engine_accept_rechecks_gate_before_writes();
     test_autotune_engine_accept_gates_on_extrapolation_converged();
     test_autotune_engine_accept_gates_on_tau_consistent();
@@ -6939,6 +7497,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_skips_when_it_would_tighten();
     test_autotune_engine_accept_skips_ceiling_adoption_when_read_fails();
     test_autotune_engine_accept_reports_ceiling_persist_failure();
+    test_autotune_engine_accept_ceiling_claim_refusal_not_live_in_ram();
     test_autotune_engine_accept_rejects_out_of_range_not_clamped();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
@@ -6993,6 +7552,9 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_monitor_only_zone();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();
+    test_run_refuses_when_zones_config_changes_during_start();
+    test_run_refuses_when_factory_reset_in_flight();
+    test_run_refuses_when_danger_mode_opens_at_commit();
     test_run_refuses_at_atomic_zone_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own
@@ -7002,6 +7564,9 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_guard_trip_releases_heat_enable();
     test_autotune_manual_abort_releases_heat_enable();
     test_autotune_start_on_a_down_link_does_not_claim_heat();
+    test_begin_run_refuses_on_down_link_with_latched_link_source();
+    test_begin_run_refuses_unlatched_link_down();
+    test_begin_run_refuses_stale_diag();
 
     // Target-temperature step mode (slice 1) -- order-independent, each
     // re-zeroes s_at via its own helper.
@@ -7217,9 +7782,10 @@ static void test_task_entry_reads_before_taking_s_at_lock(void)
                    "task_entry() gates the tick body on peek_active after taking s_at.lock "
                    "(if (!not_running && peek_active))");
         TEST_CHECK(ae_count_in_range(b, e, "autotune_engine_tick_locked_impl(") == 1 &&
-                       ae_count_in_range(b, e, "autotune_engine_tick_locked_impl(&pre_lock_snap)") == 1 &&
+                       ae_count_in_range(b, e, "autotune_engine_tick_locked_impl(pre_lock_snap)") == 1 &&
                        call && gate && call > gate,
-                   "task_entry()'s only tick call passes &pre_lock_snap, inside the peek_active gate");
+                   "task_entry()'s only tick call (in autotune_engine_tick_under_lock()) passes the pre-lock "
+                   "snapshot, inside the peek_active gate");
     }
 
     if (!ae_find_body(code, "static void autotune_engine_tick_locked_impl(", "static void task_entry(void *arg)", &b, &e)) {
@@ -7248,4 +7814,30 @@ int main(void)
     }
     printf("all passed\n");
     return 0;
+}
+
+/* Dev review 9 fix review (F1/F3/F5): stand-ins for the atomic model+PID setter and the idle-only
+ * coupling-cell setter. Composed from this file's existing fakes so their hooks/probes still fire. */
+static bool s_stub_claim_busy = false; /* models the real setter's in-lock heat-claim re-check */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid)
+{
+    if (s_stub_claim_busy || s_stub_set_pid_busy) {
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    if (s_stub_atomic_reject) {
+        return ZONES_SET_REJECTED;
+    }
+    (void)expect_prior_pid; /* Accept passes NULL */
+    (void)zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s); /* records the call/args */
+    return zones_config_set_pid(zone_index, kp, ki, kd) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s)
+{
+    if (s_stub_claim_busy) {
+        return false;
+    }
+    return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
 }

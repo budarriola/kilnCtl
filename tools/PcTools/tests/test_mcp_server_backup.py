@@ -42,6 +42,11 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="backup_mcp_test_")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        # Review confx HIGH-1: no test here may reach the board; individual tests patch over this.
+        _p = unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                        side_effect=backup_export_http_client.BackupExportHttpError("no board in tests"))
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _resolve_host_patch(self):
         return unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5")
@@ -146,6 +151,8 @@ class BackupImportSuccessTest(_Base):
 
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness", side_effect=fake_readiness), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                        side_effect=[("", {"profiles": []}), ("", dict(_GOOD_DOC))]), \
              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')) as post_mock:
             result = msi.backup_import(path, confirm=True)
         post_mock.assert_called_once()
@@ -154,6 +161,39 @@ class BackupImportSuccessTest(_Base):
         self.assertIn("readiness after", result)
         self.assertIn("1 not_done", result)  # before
         self.assertIn("2 ok", result)  # after
+
+    def _import_with(self, readiness, export):
+        path = os.path.join(self._tmpdir, "backup.json")
+        with open(path, "w") as f:
+            f.write(json.dumps(_GOOD_DOC))
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(readiness_http_client, "get_readiness", side_effect=readiness), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export", side_effect=export), \
+             unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
+            return msi.backup_import(path, confirm=True)
+
+    def test_unreadable_readiness_after_is_unverified(self):
+        def rd(host):
+            if not hasattr(rd, "n"):
+                rd.n = 1
+                return _READINESS_OK
+            raise readiness_http_client.ReadinessHttpError("down")
+        out = self._import_with(rd, lambda h: ("", dict(_GOOD_DOC)))
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertNotIn("ok - restored", out)
+
+    def test_zone_count_mismatch_is_unverified(self):
+        bad = dict(_GOOD_DOC)
+        bad["zones"] = []
+        out = self._import_with(lambda h: _READINESS_OK, lambda h: ("", bad))
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn("zones", out)
+
+    def test_reexport_failure_is_unverified(self):
+        def boom(h):
+            raise backup_export_http_client.BackupExportHttpError("boom")
+        out = self._import_with(lambda h: _READINESS_OK, boom)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
 
     def test_dry_run_reports_plan_and_does_not_claim_restored(self):
         path = os.path.join(self._tmpdir, "backup.json")
@@ -179,6 +219,8 @@ class BackupImportSuccessTest(_Base):
             f.write(json.dumps(_GOOD_DOC))
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                        side_effect=[("", {"profiles": []}), ("", dict(_GOOD_DOC))]), \
              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
             result = msi.backup_import(path, confirm=True)
         self.assertIn("synchronous", result)
@@ -240,6 +282,217 @@ class BackupImportRefusalTest(_Base):
                  side_effect=bi.BackupImportHttpError("unreachable")):
             result = msi.backup_import(path, confirm=True)
         self.assertIn("error", result.lower())
+
+
+class BackupImportTransportWordingTest(_Base):
+    def test_transport_failure_says_outcome_unknown_may_have_committed(self):
+        path = os.path.join(self._tmpdir, "backup.json")
+        with open(path, "w") as f:
+            f.write(json.dumps(_GOOD_DOC))
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
+             unittest.mock.patch.object(bi, "post_import", side_effect=bi.BackupImportHttpError("timed out")):
+            result = msi.backup_import(path, confirm=True)
+        self.assertIn("UNKNOWN", result)
+        self.assertIn("MAY HAVE COMMITTED", result)
+
+
+
+
+class StaleStoresNoteTest(_Base):
+    """persfx3 LOW-4: stale_or_unknown_stores is surfaced by export and by an import of such a file."""
+
+    def test_export_warns_when_stores_are_stale(self):
+        doc = dict(_GOOD_DOC, stale_or_unknown_stores=["zones.json", "aux_outputs.bin"])
+        out_path = os.path.join(self._tmpdir, "out.json")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                         return_value=(json.dumps(doc), doc)):
+            result = msi.backup_export(out_path=out_path)
+        self.assertIn("WARNING", result)
+        self.assertIn("zones.json", result)
+
+    def test_export_silent_when_key_absent(self):
+        out_path = os.path.join(self._tmpdir, "out.json")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                         return_value=(json.dumps(_GOOD_DOC), _GOOD_DOC)):
+            result = msi.backup_export(out_path=out_path)
+        self.assertNotIn("stale_or_unknown_stores", result)
+
+    def test_note_helper(self):
+        self.assertEqual(msi._stale_stores_note({"stale_or_unknown_stores": []}, "x"), "")
+        self.assertEqual(msi._stale_stores_note([], "x"), "")
+        self.assertIn("a.bin", msi._stale_stores_note({"stale_or_unknown_stores": ["a.bin"]}, "x"))
+
+
+class ReadbackContentTest(unittest.TestCase):
+    """mcpfx2 M2: the post-import read-back compares content per profile id and zone index."""
+
+    WANT = {"zones": [{"index": 0, "pid_kp": 1.5, "max_temp_c": 1200.0}],
+            "profiles": [{"id": 3, "name": "a", "zone_mask": 1, "segments": [{"zone": 0, "target": 100.0}]}]}
+
+    def _problem(self, got):
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            return msi._backup_import_readback_problem("h", json.dumps(self.WANT), "ready")
+
+    def test_identical_is_ok(self):
+        self.assertIsNone(self._problem(json.loads(json.dumps(self.WANT))))
+
+    def test_float_print_rounding_tolerated(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["pid_kp"] = 1.5000000001
+        self.assertIsNone(self._problem(got))
+
+    def test_zone_gain_not_written_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["pid_kp"] = 9.0
+        self.assertIn("pid_kp", self._problem(got))
+
+    def test_profile_body_not_written_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["profiles"][0]["segments"][0]["target"] = 50.0
+        self.assertIn("target", self._problem(got))
+        got["profiles"][0]["name"] = "b"
+        self.assertIn("profiles[id=3]", self._problem(got))
+
+    def test_absent_key_in_reexport_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        del got["zones"][0]["max_temp_c"]
+        self.assertIn("absent from the re-export", self._problem(got))
+
+    def test_list_length_difference_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["profiles"][0]["segments"].append({"zone": 1, "target": 5.0})
+        self.assertIn("entries", self._problem(got))
+        got["profiles"][0]["segments"] = []
+        self.assertIn("entries", self._problem(got))
+
+    def test_legacy_import_only_zone_keys_not_demanded(self):
+        want = json.loads(json.dumps(self.WANT))
+        want["zones"][0].update(coupling_coeff=0.1, coupling_neighbor_zone=1)
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["coupling_c1"] = 0.1  # the derived cell (LOW-3 verifies it)
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+
+    def test_idless_profile_matched_by_content_not_position(self):
+        want = {"profiles": [{"name": "n", "zone_mask": 1, "segments": []}]}
+        got = {"profiles": [{"id": 1, "name": "other", "zone_mask": 1, "segments": []},
+                            {"id": 2, "name": "n", "zone_mask": 1, "segments": []}]}
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+        got["profiles"][1]["name"] = "zzz"
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNotNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+
+    def _idless(self, want_profiles, got_profiles, before=None):
+        want = {"profiles": want_profiles}
+        got = {"profiles": got_profiles}
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            return msi._backup_import_readback_problem("h", json.dumps(want), "ready", before)
+
+    P = {"name": "n", "zone_mask": 1, "segments": []}
+
+    def test_two_identical_idless_profiles_one_landed_detected(self):
+        # MED-1 case 1: both backup entries must not pair with the one board slot.
+        got = [dict(self.P, id=1), dict(self.P, id=2, name="other")]
+        self.assertIsNotNone(self._idless([dict(self.P), dict(self.P)], got))
+        got[1] = dict(self.P, id=2)
+        self.assertIsNone(self._idless([dict(self.P), dict(self.P)], got))
+
+    def test_idless_does_not_reuse_slot_claimed_by_id_entry(self):
+        # MED-1 case 2.
+        self.assertIsNotNone(self._idless([dict(self.P, id=1), dict(self.P)], [dict(self.P, id=1)]))
+
+    def test_idless_matching_preexisting_board_profile_detected(self):
+        # MED-1 case 3: the identical profile was already on the board and the import wrote nothing.
+        got = [dict(self.P, id=1)]
+        self.assertIsNotNone(self._idless([dict(self.P)], got, before=[dict(self.P, id=1)]))
+        # Landed in a new slot alongside the old one: fine.
+        got2 = [dict(self.P, id=1), dict(self.P, id=2)]
+        self.assertIsNone(self._idless([dict(self.P)], got2, before=[dict(self.P, id=1)]))
+
+    def test_legacy_coupling_pair_derived_cell_verified(self):
+        want = json.loads(json.dumps(self.WANT))
+        want["zones"][0].update(coupling_coeff=0.1, coupling_neighbor_zone=1)
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["coupling_c1"] = 0.1
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+        got["zones"][0]["coupling_c1"] = 0.7
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIn("coupling_c1", msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+
+    def test_profile_missing_by_id_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["profiles"][0]["id"] = 4
+        self.assertIn("missing", self._problem(got))
+
+
+class BackupImportSnapshotTest(_Base):
+    """Review testnet MED-B/MED-C/LOW-3/LOW-4: the pre-import snapshot wiring."""
+
+    P = {"name": "n", "zone_mask": 1, "segments": []}
+
+    def _run(self, backup_profiles, export, dry_run=False):
+        doc = dict(_GOOD_DOC, profiles=backup_profiles)
+        path = os.path.join(self._tmpdir, "backup.json")
+        with open(path, "w") as f:
+            f.write(json.dumps(doc))
+        with self._resolve_host_patch(), \
+                unittest.mock.patch.object(
+                    readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
+                unittest.mock.patch.object(
+                    backup_export_http_client, "get_export", side_effect=export) as ge, \
+                unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
+            out = msi.backup_import(path, confirm=True, dry_run=dry_run)
+        return out, ge
+
+    def test_snapshot_failure_with_idless_profile_is_unverified(self):  # MED-B
+        after = ("", dict(_GOOD_DOC, profiles=[dict(self.P, id=1)]))
+        err = backup_export_http_client.BackupExportHttpError("snapshot down")
+        out, _ = self._run([dict(self.P)], [err, after])
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn("snapshot unavailable", out)
+        self.assertNotIn("ok - restored", out)
+
+    def test_snapshot_profiles_not_a_list_is_unverified(self):  # LOW-1
+        after = ("", dict(_GOOD_DOC, profiles=[dict(self.P, id=1)]))
+        for bad in ({"profiles": None}, {}, {"profiles": "x"}):
+            out, _ = self._run([dict(self.P)], [("", bad), after])
+            self.assertTrue(out.startswith("UNVERIFIED"), (bad, out))
+            self.assertIn("snapshot unavailable", out)
+            self.assertNotIn("ok - restored", out)
+
+    def test_preexisting_identical_profile_is_unverified_via_tool(self):  # MED-C
+        same = dict(self.P, id=1)
+        out, ge = self._run([dict(self.P)], [("", {"profiles": [same]}), ("", {
+            "kind": "kilnctl_backup", "profiles": [same], "zones": [{"id": 0}]})])
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertEqual(ge.call_count, 2)
+
+    def test_new_slot_next_to_preexisting_is_ok_via_tool(self):  # MED-C control
+        old = dict(self.P, id=1)
+        out, _ = self._run([dict(self.P)], [("", {"profiles": [old]}), ("", {
+            "kind": "kilnctl_backup", "profiles": [old, dict(self.P, id=2)], "zones": [{"id": 0}]})])
+        self.assertIn("ok - restored", out)
+
+    def test_snapshot_skipped_when_every_profile_has_id(self):  # LOW-3
+        profs = [dict(self.P, id=1)]
+        out, ge = self._run(profs, [("", dict(_GOOD_DOC, profiles=profs))])
+        self.assertIn("ok - restored", out)
+        self.assertEqual(ge.call_count, 1)
+
+    def test_snapshot_skipped_on_dry_run(self):  # LOW-3
+        out, ge = self._run([dict(self.P)], [AssertionError("no export on dry run")], dry_run=True)
+        self.assertIn("dry run only", out)
+        ge.assert_not_called()
+
+    def test_idless_before_idcarrying_does_not_reuse_its_slot(self):  # LOW-4
+        P = self.P
+        self.assertIsNotNone(ReadbackContentTest._idless(
+            ReadbackContentTest, [dict(P), dict(P, id=1)], [dict(P, id=1), dict(P, id=2, name="x")]))
 
 
 if __name__ == "__main__":

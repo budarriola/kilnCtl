@@ -1,4 +1,4 @@
-# check_littlefs_component_pinned.ps1 -- docs/FILESYSTEM_PLAN.md step 1.
+# check_littlefs_component_pinned.ps1 -- docs/FILESYSTEM.md step 1.
 #
 # Step 1 of the SPIFFS->LittleFS track is deliberately tiny: add the
 # `joltwallet/littlefs` managed component to App/idf_component.yml and
@@ -52,7 +52,7 @@ $errors = @()
 $ymlLines = Get-Content -Path $YmlPath
 $ymlMatch = $ymlLines | Where-Object { $_ -match '^\s*joltwallet/littlefs\s*:\s*"?\^?[\d.]+"?\s*$' }
 if (-not $ymlMatch) {
-    $errors += "$YmlPath does not declare 'joltwallet/littlefs' as a dependency (FILESYSTEM_PLAN.md step 1)"
+    $errors += "$YmlPath does not declare 'joltwallet/littlefs' as a dependency (FILESYSTEM.md step 1)"
 }
 
 $lockText = Get-Content -Path $LockPath -Raw
@@ -67,7 +67,7 @@ if ($errors.Count -gt 0) {
     foreach ($e in $errors) {
         Write-Host "  $e" -ForegroundColor Red
     }
-    throw "$($errors.Count) problem(s) found -- see docs/FILESYSTEM_PLAN.md step 1"
+    throw "$($errors.Count) problem(s) found -- see docs/FILESYSTEM.md step 1"
 }
 
 Write-Host "LittleFS component pin check passed: 'joltwallet/littlefs' declared in $YmlPath and hash-pinned in $LockPath."

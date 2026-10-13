@@ -494,11 +494,54 @@ so the check had nothing left to guard against. `PROFILE_EXECUTOR_FIRING_CEILING
 |---|---|---|
 | 0 | u8 | `0x0A` |
 | 1..2 | u16 LE | `trip_mask` being acknowledged — must match the current one |
+| 3 | u8 | `trip_seq` (optional, 4-byte form, `KILNLINK_PROTOCOL_VERSION` 16 -> 17) — the trip occurrence being acknowledged, echoed from DIAG byte 30 |
+| 4 | u8 | `pico_boot_id` (optional, 5-byte form, `KILNLINK_PROTOCOL_VERSION` 17 -> 18) — the Pico boot the clear was issued against, echoed from DIAG byte 31. A 5-byte form always carries `trip_seq` too. WP1 defines the wire form only; the Pico does not yet act on it (docs/TEST_TRIP_PLAN.md WP2) |
 
 Refused, with the reason reported in the next diagnostic frame, if the
 tripping condition is still true or if `trip_mask` does not match. Echoing the
 mask back prevents a stale "clear" queued before a *second*, different trip
 from clearing that one too.
+
+**Trip occurrence binding (kilnlink audit 2026-10-09 M4).** The mask alone
+cannot tell a clear for one trip from a later trip of the *same* guard: a
+duplicated or late 3-byte clear would clear the second occurrence too. Since
+protocol 17 the Pico sends DIAG byte 30 (`trip_seq`, the latched trip's
+`TRIP_EVENT` sequence number) to a peer whose `ANNOUNCE_VERSION` named >= 17,
+and the ESP echoes it here whenever its last DIAG carried it. The Pico then:
+
+- refuses a 4-byte clear whose `trip_seq` is not the one latched when
+  `safety_core` dequeues the request (`refused-stale-occurrence`, outcome 4
+  in the clear-trip diagnostic; `try_clear` never runs);
+- refuses a 3-byte clear from a peer that announced >= 17
+  (`LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED`), so a protocol 17 ESP cannot fall
+  back to an unbound clear;
+- accepts a 3-byte clear from a peer that announced < 17, or before any
+  `ANNOUNCE_VERSION` arrived (peer version 0), exactly as before. This keeps
+  the boot-time S6a clear working while the link handshake is still coming
+  up; the ESP's bounded boot-clear retry covers a 30-byte DIAG cached in the
+  short window before the Pico learned the ESP's version.
+
+**Known rollback hazard (kilnlink v17 review LOW-3).** If the ESP is rolled
+back from a protocol 17 image to a 16 one while the Pico stays up (it keeps
+`peer=17` from the earlier `ANNOUNCE_VERSION`) and the rolled-back ESP's
+ANNOUNCE burst is lost, the Pico keeps sending the 31-byte DIAG and keeps
+refusing 3-byte clears (`LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED`), which the
+16 ESP can only send. A latched trip then cannot be cleared from the ESP side.
+Recovery: reboot the Pico (`debug_reset(peer="pico")` or a power cycle) so it
+forgets the peer version and re-learns it from the next ANNOUNCE. Also see
+UPDATE_PROTOCOL.md's `ota_rollback(processor)` bullet. On a protocol 17 ESP the
+boot-time clear now waits for a DIAG carrying `trip_seq` rather than spending a
+retry on an unbound clear. Whether the Pico refuses depends on the Pico knowing
+the ESP is >= 17 (learned from the ESP's ANNOUNCE), not on the ESP knowing the
+Pico is; while the gate blocks, the ESP re-sends its ANNOUNCE
+(`reannounce_pending`) so the Pico moves to the 31-byte DIAG.
+
+The old and new lengths are each accepted only by a peer that knows them (the exact length
+sets are {30,31} before protocol 17 and {30,31,32} DIAG / {3,4,5} CLEAR_TRIP from 18); what keeps
+`KILNLINK_MIN_COMPATIBLE` at 7 is that each longer form is only sent to a peer that announced the
+version that introduced it. The
+PC wire is unchanged: `safety_clear_trip` still sends no mask or seq, and the
+ESP fills both from its own cached DIAG.
 
 This is the GUI's path to acknowledging a trip. The E-stop assert/release cycle
 remains available as the physical alternative (`firmware/SaftyFW/docs/SAFETY_MODEL.md` §6).
@@ -764,6 +807,59 @@ old Pico gets no reply at all, and `safety_link_send_reboot()` reports
 DELIBERATELY NOT BUMPED" entry for the full argument, including what would
 force a bump if this frame ever became Pico-initiated.
 
+### `SAFETY_CMD_TEST_TRIP` = `0x2E` (ESP → Pico)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x2E` |
+| 1 | u8 | `pico_boot_id` — the Pico boot (DIAG byte 31) the request is bound to |
+| 2 | u8 | `request_id` — echoed in the reply; lets the ESP match a result to its request and lets the Pico recognise a repeat |
+| 3 | u8 | `magic` — must be `0xA5` |
+
+Admin-only deliberate test trip (`docs/TEST_TRIP_PLAN.md`). Added
+`KILNLINK_PROTOCOL_VERSION` 17 -> 18. The codec carries `magic` verbatim: a wrong
+magic still decodes, and the Pico answers it `REFUSED_BAD_FRAME`. Exactly 4
+bytes; any other length is a codec error. `KILNLINK_MIN_COMPATIBLE` stays 7.
+The trip it causes uses `SAFETY_TRIP_TEST = 4` (mask `0x0008`, the S4 gap).
+
+### `SAFETY_CMD_TEST_TRIP_RESULT` = `0x2F` (Pico → ESP)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x2F` |
+| 1 | u8 | `request_id` — echoed from the request |
+| 2 | u8 | `outcome` (closed enum below) |
+| 3 | u8 | `trip_seq` — the latched test trip when `ACCEPTED` (or `DUPLICATE` of an accepted one), else 0 |
+
+| Value | Outcome |
+|---|---|
+| 0 | `ACCEPTED` |
+| 1 | `REFUSED_ALREADY_TRIPPED` |
+| 2 | `REFUSED_BOOT_ID` |
+| 3 | `REFUSED_PEER_VERSION` |
+| 4 | `REFUSED_RATE_LIMIT` (one test trip per 10 s) |
+| 5 | `REFUSED_UPDATING` |
+| 6 | `REFUSED_BAD_FRAME` |
+| 7 | `DUPLICATE` |
+
+The outcome is a closed enum: encode and decode both refuse a value above 7
+(`ERR_BAD_OUTCOME`) rather than aliasing it onto a real outcome. The reply is
+request-triggered (only an 18 ESP sends `0x2E`), so it needs no peer-version
+gate, like `REBOOT_RESULT`.
+
+**Version 18 compatibility.** Both new frames and both extended lengths are
+additive on the wire, but an old peer does NOT tolerate the new lengths: a 17 peer
+rejects the 32-byte DIAG and the 5-byte CLEAR_TRIP (exact length sets) and drops
+the unknown opcodes 0x2E/0x2F. `KILNLINK_MIN_COMPATIBLE` stays 7 because every
+new length and opcode is sent only to a peer that announced >= 18. Note that
+trip_mask bit 3 is `SAFETY_TRIP_TEST` while warn_mask bit 3 is S4: the two masks
+do not share a bit-to-guard table. A peer that announces 18 but predates the
+TEST_TRIP handler (a WP1-only image) never answers 0x2E; the ESP reports that as
+a timeout ("peer did not answer; it may predate TEST_TRIP"), never as success. Fallback for a clear from a peer
+of unknown version (owner decision 2026-10-10): refused until `ANNOUNCE_VERSION`
+arrives; after 30 s with no ANNOUNCE the legacy form is accepted. These are Pico
+behaviours (WP2), not codec behaviour.
+
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
 One byte, no arguments. Sent by the ESP at boot and whenever the Pico's
@@ -967,6 +1063,22 @@ honoured just because a well-formed frame was sent. This codec
 (`kilnlink_inject_tc.{c,h}`) only serializes the payload bytes; it has no
 opinion about, and cannot see, whether the gate is currently open.
 
+The Pico additionally refuses INJECT_TC while its relay is ARMED or energized
+(thermo_inject_allowed). That is deliberately stricter than the heat-possible
+signal that gates `APPLY_CONFIG_VOLATILE` (0x2D): while heat is possible the Pico
+refuses a volatile install (reported as COMMIT_CONFIG_REJECTED / REJECT_ARMED)
+that changes any trip-relevant field outside a short allowlist; an idle,
+de-energized board accepts it.
+
+**CT commissioning order (SaftyFW review LOW-1, documented, check unchanged pending owner).** The heat-possible
+probe counts `current_task_any_current_present()` as heat, and on a CT chain marked fitted but not yet calibrated
+the op-amp offset floor can read as current present (hardware-dependent: the uncalibrated fallback margin is 25 counts), so the probe can stay true. While that holds, `APPLY_CONFIG_VOLATILE`
+refuses every non-tightening trip-relevant change (`k_ct_v_per_a`, an `abs_max_temp_c` raise), and `COMMIT_CONFIG`
+is refused while ARMED. `link_task_heat_possible_probe()` does not check ARMED, so the volatile path may be refused on a disarmed board too. Commission the CT parameters (`SET_CT_CAL` / `COMMIT_CONFIG`) while the Pico is disarmed,
+before arming; do not rely on the volatile path to calibrate a fitted CT. The check fails
+closed on purpose and is pinned by `scenario_heat_probe_current_floor` in `test_link_task_fuzz.c`; loosening it
+is a safety-semantics change that needs an owner decision.
+
 ---
 
 ## 5. The fault line (out of band)
@@ -1033,7 +1145,7 @@ is what makes phase 2 of `TODO.md` possible before any ESP work lands.
 | 15..18 | f32 LE | current 2, A |
 | 19..22 | f32 LE | current 3, A |
 | 23 | u8 | **V2 only** (24 bytes total) — `tx_dropped_sat`, saturating uart_owner TX-ring-drop count, 255 = "254 or more" |
-| 24 | u8 | **V3 only** (26 bytes total) — flags2: bit0 `BORROWED` (this reading is sourced, at least partly, from another zone's probe — `tc_source` is `BORROWED_ZONE` or `BOTH`); bit1 `CJ_VALID`; bit2 `TC_CONFIG_REASSERTED` (2026-09-23 — sticky for the rest of this boot once `thermo_task.c` has ever re-asserted the MAX31856's CR0/CR1 config against a live-readback mismatch; see `thermo_task_live_config_mismatch_count()`); bit3 `ACTIVE_SLOT_KNOWN` / bit4 `ACTIVE_SLOT_B` (2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64 — the Pico's own bootloader A/B slot, from `update_task_get_active_slot()`; bit4 only meaningful when bit3 is set, same paired-with-a-`_known`-gate convention as bit1/CJ_VALID); bits 5-7 spare |
+| 24 | u8 | **V3 only** (26 bytes total) — flags2: bit0 `BORROWED` (this reading is sourced, at least partly, from another zone's probe — `tc_source` is `BORROWED_ZONE` or `BOTH`); bit1 `CJ_VALID`; bit2 `TC_CONFIG_REASSERTED` (2026-09-23 — sticky for the rest of this boot once `thermo_task.c` has ever re-asserted the MAX31856's CR0/CR1 config against a live-readback mismatch; see `thermo_task_live_config_mismatch_count()`); bit3 `ACTIVE_SLOT_KNOWN` / bit4 `ACTIVE_SLOT_B` (2026-09-23, docs/PICO_AUTO_UPDATE.md:64 — the Pico's own bootloader A/B slot, from `update_task_get_active_slot()`; bit4 only meaningful when bit3 is set, same paired-with-a-`_known`-gate convention as bit1/CJ_VALID); bits 5-7 spare |
 | 25 | u8 | **V3 only** — `borrowed_zone_index` (0..2), or `0xFF` if the borrowed zone itself is not commissioned on the Pico |
 
 Flags: bits 0 (`LINK_UP`) and 1 (`FAULT`) are the **ESP's** to own — the Pico
@@ -1082,6 +1194,8 @@ Everything the 23-byte frame has no room for. A `KilnFW` that has never heard of
 | 24 | u8 | `state` (0 init, 1 grace, 2 armed, 3 warn, 4 **tripped**) |
 | 25 | u8 | flags: bit0 `sim_context_seen`, bit1 `calibration_missing`, bit2 `estop_unwired_suspect` |
 | 26..29 | u32 LE | `log_frames_dropped` — `log_task.c`'s own drop counter (queue full), added `KILNLINK_PROTOCOL_VERSION` 15 -> 16 |
+| 30 | u8 | `trip_seq` (optional, 31-byte form, `KILNLINK_PROTOCOL_VERSION` 16 -> 17) — the latched trip occurrence; sent only to a peer that announced >= 17. See §4 `CLEAR_TRIP` |
+| 31 | u8 | `pico_boot_id` (optional, 32-byte form, `KILNLINK_PROTOCOL_VERSION` 17 -> 18) — identifies this Pico boot so a test-trip or clear issued against a previous boot can be refused. A 32-byte frame always carries byte 30 (`trip_seq`) as well. Sent only to a peer that announced >= 18 (Pico behaviour: WP2) |
 
 `boot_reason` bit 1 is the one to watch on a bench: a safety processor that is
 silently watchdog-resetting in a loop presents as a working system with an

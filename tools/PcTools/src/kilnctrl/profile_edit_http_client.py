@@ -13,7 +13,7 @@ Extending that wire format would be a firmware change (new bytes in
 PROFILES_CMD_SAVE's payload, parsed by the bridge, on top of the existing
 segment loop) -- out of scope for a PC-only fix. The already-existing,
 already-ADMIN-tier HTTP form endpoint (profiles_parse_profile_fields()'s
-"rule%u_zone"/"rule%u_segment"/... family, ON_OFF_ZONE_PLAN.md plan step 5)
+"rule%u_zone"/"rule%u_segment"/... family, ON_OFF_ZONE.md plan step 5)
 covers exactly this need without touching firmware, so this module is a thin
 wrapper around it -- same "stdlib urllib.request, no framework" convention as
 zones_http_client.py/ota_http_client.py.
@@ -88,7 +88,7 @@ ON_OFF_TEMP_CMP_BELOW = 2
 
 #: temp_source encoding (profiles_types.h profile_on_off_rule_t.temp_source).
 #: Only 0/1 are wired by profile_resolve_on_off_rule() as of
-#: ON_OFF_ZONE_PLAN.md plan step 5.
+#: ON_OFF_ZONE.md plan step 5.
 ON_OFF_TEMP_SOURCE_NONE = 0
 ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE = 1
 
@@ -119,7 +119,7 @@ def build_post_fields(
     """Builds the ``rule%u_*``/``seg%u_*`` form-field list
     ``profiles_parse_profile_fields()`` expects. ``profile_id`` targets an
     existing user slot (create-or-overwrite, same convention as
-    profile_post_handler()'s ``id`` field: 0..7 addresses that exact slot).
+    profile_post_handler()'s ``id`` field: 0..99 addresses that exact user slot; builtins (>=128) map to a new slot).
     ``on_off_rules`` defaults to none -- an ordinary segment-only save, same
     as every existing caller of this family. A list longer than
     PROFILE_MAX_ON_OFF_RULES (8) is refused by the firmware (validate_
@@ -188,6 +188,10 @@ def post_profile(
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise ProfileEditHttpError(f"POST /api/profile unreachable: {detail}") from exc
+    except (http_auth.HttpAuthError, TimeoutError, OSError) as exc:
+        # A login failure, read timeout or socket error is still a transport
+        # failure: callers catch only ProfileEditHttpError.
+        raise ProfileEditHttpError(f"POST /api/profile failed: {type(exc).__name__}: {exc}") from exc
     try:
         parsed = json.loads(body_text)
     except Exception as exc:

@@ -4,8 +4,8 @@
 # nav menu against MOCKED /api data and asserts key DOM, nav group placement,
 # nav links resolving to real firmware routes, and no console errors.
 # Sibling of check_ui_responsive_sweep.ps1 (layout only); same SKIP/FAIL policy:
-# no node / no Chrome / DevTools port never up -> exit 3 (SKIP), assertion
-# failure or hang -> throw.
+# no node / no Chrome -> exit 3 (SKIP); Chrome present but DevTools never up or
+# any harness error -> FAIL; assertion failure or hang -> throw.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\check_ui_content_smoke.ps1
 $ErrorActionPreference = "Stop"
@@ -41,7 +41,7 @@ if ($stdout) { Write-Host $stdout }
 if ($stderrText) { Write-Host $stderrText }
 
 if ($code -eq 3) {
-    Write-Host "check_ui_content_smoke.ps1: SKIP -- smoke SKIPPED or hit a harness error (see output above)." -ForegroundColor Yellow
+    Write-Host "check_ui_content_smoke.ps1: SKIP -- smoke SKIPPED (no Chrome/Edge found; see output above)." -ForegroundColor Yellow
     exit 3
 }
 if ($code -ne 0) { throw "check_ui_content_smoke.ps1: FAIL -- ui_content_smoke.mjs exit $code (see output above)." }

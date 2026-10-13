@@ -6,6 +6,8 @@
 
 #include "kiln_ui.h"
 #include "lvgl_port.h" /* lvgl_port_touch_cal_support() -- gates the Touch Calibration cell */
+#include "touch_cal_store.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_profiles.h"
 #include "ui_page_safety.h"
 #include "ui_theme.h"
@@ -62,45 +64,92 @@ static const char *TAG __attribute__((unused)) = "ui_page_config";
 // is conditional -- see its build site -- so the hub renders five or six
 // cells; both occupy three rows of a ROW_WRAP grid, 2+2+2 and 2+2+1, so the
 // fixed grid height is right either way and neither can scroll.)
+/* LCD review L3 (N1 defence in depth): each read-page cell carries its own USER
+ * check instead of trusting every path into the hub to have passed the Menu
+ * gate. Owner rule: read pages need USER, never ADMIN. Runs the action at once
+ * when a USER (or higher) role is held, else raises the PIN keypad. */
+static void temperature_open_apply(void *user_data)
+{
+    (void)user_data;
+    kiln_ui_show("temperature");
+}
+
 static void temperature_nav_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("temperature");
+    ui_lcd_lock_run_gated("Enter PIN", LCD_PIN_ROLE_USER, temperature_open_apply, NULL);
+}
+
+static void network_open_apply(void *user_data)
+{
+    (void)user_data;
+    kiln_ui_show("network");
 }
 
 static void network_nav_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("network");
+    ui_lcd_lock_run_gated("Enter PIN", LCD_PIN_ROLE_USER, network_open_apply, NULL);
 }
 
+static void touch_cal_open_apply(void *user_data)
+{
+    (void)user_data;
+    kiln_ui_show("touch_cal");
+}
+
+/* L11: re-calibrating overwrites the saved calibration (admin on the web
+ * side). A never-calibrated board stays open: the PIN keypad itself needs
+ * working touch, so gating first-boot calibration would lock the board out. */
 static void touch_cal_nav_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("touch_cal");
+    if (!touch_cal_store_is_calibrated()) {
+        kiln_ui_show("touch_cal");
+        return;
+    }
+    ui_lcd_lock_run_gated("Admin PIN to recalibrate touch", LCD_PIN_ROLE_ADMIN, touch_cal_open_apply, NULL);
+}
+
+static void diagnostics_open_apply(void *user_data)
+{
+    (void)user_data;
+    kiln_ui_show("diagnostics");
 }
 
 static void diagnostics_nav_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("diagnostics");
+    ui_lcd_lock_run_gated("Enter PIN", LCD_PIN_ROLE_USER, diagnostics_open_apply, NULL);
+}
+
+static void safety_open_apply(void *user_data)
+{
+    (void)user_data;
+    ui_page_safety_open(true); /* hub is PIN-gated: Back may return here */
 }
 
 static void safety_nav_cb(lv_event_t *e)
 {
     (void)e;
-    ui_page_safety_open(true); /* hub is PIN-gated: Back may return here */
+    ui_lcd_lock_run_gated("Enter PIN", LCD_PIN_ROLE_USER, safety_open_apply, NULL);
 }
 
-static void profiles_nav_cb(lv_event_t *e)
+static void profiles_open_apply(void *user_data)
 {
-    (void)e;
+    (void)user_data;
     /* "profiles" is now the unified live list (UI_PLAN.md 6.2) -- refresh
      * before showing, since kiln_ui_show() caches the page after its first
      * build and a stale render would otherwise survive a delete/import made
      * elsewhere (e.g. the web dashboard). */
     ui_page_profiles_refresh();
     kiln_ui_show("profiles");
+}
+
+static void profiles_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Enter PIN", LCD_PIN_ROLE_USER, profiles_open_apply, NULL);
 }
 
 /* ROADMAP.md 2026-08-21 "a real shared temperature-unit setting": an
@@ -124,21 +173,30 @@ static void units_cell_set_label(void)
     lv_label_set_text(s_units_cell_label, buf);
 }
 
+static void units_toggle_apply(void *user_data)
+{
+    (void)user_data;
+    if (!ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        return;
+    }
+    unit_pref_t next =
+        unit_pref_get() == UNIT_PREF_FAHRENHEIT ? UNIT_PREF_CELSIUS : UNIT_PREF_FAHRENHEIT;
+    bool adopted = false;
+    esp_err_t err = unit_pref_set_ex(next, &adopted);
+    if (err != ESP_OK) {
+        /* Live value unchanged unless `adopted` (file holds the new value, RAM matches);
+         * the repaint below shows whichever unit is live. */
+        ESP_LOGW(TAG, "unit preference save not verified -- %s",
+                 adopted ? "live value now matches the file" : "live value unchanged");
+    }
+    units_cell_set_label();
+}
+
+/* L11: unit preference is an ADMIN web write. */
 static void units_toggle_cb(lv_event_t *e)
 {
     (void)e;
-    unit_pref_t next =
-        unit_pref_get() == UNIT_PREF_FAHRENHEIT ? UNIT_PREF_CELSIUS : UNIT_PREF_FAHRENHEIT;
-    esp_err_t err = unit_pref_set(next);
-    if (err != ESP_OK) {
-        /* Live value still took effect (unit_pref_set() updates RAM before
-         * attempting the NVS write) -- only persistence failed, same
-         * "reported but not treated as user-facing failure" convention
-         * dashboard_http.c's unit_pref_post_handler() uses for the same
-         * case. */
-        ESP_LOGW(TAG, "unit preference applied but not persisted -- will not survive a reboot");
-    }
-    units_cell_set_label();
+    ui_lcd_lock_run_gated("Admin PIN to change units", LCD_PIN_ROLE_ADMIN, units_toggle_apply, NULL);
 }
 
 static ui_topbar_t s_topbar;

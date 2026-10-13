@@ -1,6 +1,6 @@
 // Host tests for App/drivers/persist/pico_update_attempts.c -- the
 // persisted, per-pair attempt-budget counter behind
-// docs/PICO_AUTO_UPDATE_PLAN.md sec 7. #includes the .c directly (same
+// docs/PICO_AUTO_UPDATE.md sec 7. #includes the .c directly (same
 // convention as test_boot_guard.c) to reach its static helpers, and uses
 // fake_kv.h's RAM-backed hal_kv fake the same way.
 #include <string.h>
@@ -216,7 +216,7 @@ static void test_record_attempt_refuses_success_when_every_write_lies(void)
                "exactly the 2026-09-08 boot_guard failure shape this module copies the fix for");
 }
 
-// Embedded-slot alternation (docs/PICO_AUTO_UPDATE_PLAN.md sec 9 step 4): a
+// Embedded-slot alternation (docs/PICO_AUTO_UPDATE.md sec 9 step 4): a
 // fresh pair always starts at slot 0 (A); each recorded attempt flips which
 // slot the NEXT attempt for the SAME pair should try, and that choice
 // survives a simulated reboot (a fresh in-memory struct, same NVS-backed

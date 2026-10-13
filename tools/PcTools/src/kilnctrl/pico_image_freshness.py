@@ -199,7 +199,7 @@ def find_one_identity(buf: bytes) -> ImageIdentity:
 # hwAbstraction/pico/* and hwAbstraction/common/hal_status.c, and only
 # includes from hwAbstraction/interface) -- a host- or esp-only edit under
 # hwAbstraction must NOT restamp SAFTYFW_GIT_COMMIT, and did spuriously
-# before this narrowing (review round 3, docs/PICO_AUTO_UPDATE_PLAN.md sec
+# before this narrowing (review round 3, docs/PICO_AUTO_UPDATE.md sec
 # 13: 33 of the last 62 hwAbstraction-only commits touched only those
 # unreached subtrees). Kept as one list here, referenced by
 # git_saftyfw_scoped_head() below. stale_check.py's check_saftyfw_stale()
@@ -220,7 +220,7 @@ SCOPED_PATHS = (
 
 def git_saftyfw_scoped_head(repo_root: Path) -> Optional[str]:
     """Mirrors gen_build_info.cmake's exact invocation as of the
-    hwAbstraction-narrowing fix (docs/PICO_AUTO_UPDATE_PLAN.md sec 13): `git
+    hwAbstraction-narrowing fix (docs/PICO_AUTO_UPDATE.md sec 13): `git
     log -1 --format=%h -- firmware/SaftyFW firmware/CommonFW
     firmware/hwAbstraction/pico firmware/hwAbstraction/common
     firmware/hwAbstraction/interface` (SCOPED_PATHS above), run with
@@ -270,7 +270,7 @@ def check_slot_bins_fresh(slot_a: Path, slot_b: Path, repo_root: Path) -> Freshn
             "FAIL",
             f"slotA ({len(a_bytes)} bytes) and slotB ({len(b_bytes)} bytes) "
             "are not equal length -- they must be, since only their slot "
-            "position differs (docs/PICO_AUTO_UPDATE_PLAN.md).",
+            "position differs (docs/PICO_AUTO_UPDATE.md).",
         )
     if a_bytes == b_bytes:
         return FreshnessResult(

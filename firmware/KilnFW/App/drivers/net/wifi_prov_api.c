@@ -25,7 +25,7 @@
  * timed out simply never copies out, leaving the next one to overwrite it.
  * Declared extern in wifi_prov_internal.h: wifi_prov.c's owner_task() also
  * passes this straight to do_scan() for the CMD_SCAN case. */
-wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
+EXT_RAM_BSS_ATTR wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
 
 /* How long a scan's producer waits. A full active scan of every 2.4GHz
  * channel at 50-150ms dwell is seconds, not milliseconds, and the existing
@@ -134,8 +134,17 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
     if (!password || password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
     }
+    /* An embedded NUL (%00 in the form) would be stored truncated (audit L15). */
+    if (memchr(ssid, '\0', ssid_len) != NULL || memchr(password, '\0', password_len) != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
+    }
+    /* LOW-2: the stored record is unreadable/newer; writing the in-RAM list
+     * would destroy it. Refuse until it is readable or reset. */
+    if (s_saved_nets_refused) { /* LOW-2 add */
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     wifi_cmd_t cmd = { .type = CMD_ADD_NETWORK };
@@ -207,8 +216,14 @@ esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
     if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
     }
+    if (memchr(ssid, '\0', ssid_len) != NULL) { /* embedded NUL (audit L15) */
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_saved_nets_refused) { /* LOW-2, see wifi_prov_add_network() */
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     wifi_cmd_t cmd = { .type = CMD_FORGET_NETWORK };
@@ -433,6 +448,11 @@ esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
          * for a station password (open network); refuse it outright. */
         return ESP_ERR_INVALID_SIZE;
     }
+    /* LOW-3: length-counted callers (UART bridge) can carry an embedded NUL,
+     * which strncpy would silently truncate. */
+    if (memchr(ssid, '\0', ssid_len) != NULL) { /* LOW-3 ssid */
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -494,6 +514,11 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
          * compile-time Kconfig default does in apply_ap_config() (there is
          * no request to fail in that case, just a build to warn about). */
         return ESP_ERR_INVALID_SIZE;
+    }
+    /* LOW-3: an embedded NUL would store a truncated (possibly < 8 char or
+     * empty) value and bring the AP up open while reporting success. */
+    if (password_len > 0 && memchr(password, '\0', password_len) != NULL) { /* LOW-3 pw */
+        return ESP_ERR_INVALID_ARG;
     }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
@@ -655,7 +680,7 @@ static bool dns_arg_valid(const char *s)
         return true;
     }
     esp_ip4_addr_t a;
-    return strlen(s) < WIFI_PROV_IPV4_STR_MAX && parse_ipv4(s, &a) && a.addr != 0;
+    return wifi_prov_parse_strict_ipv4(s, &a) && a.addr != 0;
 }
 
 esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway, const char *dns,
@@ -671,7 +696,13 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
      * (wifi_prov_ip_in_ap_subnet() below does its own parse of `ip` for the
      * AP-subnet check). */
     esp_ip4_addr_t tmp;
-    if (!parse_ipv4(ip, &tmp) || !parse_ipv4(netmask, &tmp) || !parse_ipv4(gateway, &tmp)) {
+    if (!wifi_prov_parse_strict_ipv4(ip, &tmp) || !wifi_prov_parse_strict_ipv4(netmask, &tmp) ||
+        !wifi_prov_parse_strict_ipv4(gateway, &tmp)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* LOW-4: contiguous netmask, gateway inside the subnet, no special
+     * addresses (0.x, loopback, multicast, network/broadcast). */
+    if (!wifi_prov_static_ip_config_valid(ip, netmask, gateway)) {
         return ESP_ERR_INVALID_ARG;
     }
     /* Review fix (2026-09-29): reject a static IP inside the fallback AP's
@@ -930,7 +961,7 @@ esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *
         found = (uint16_t)max_results;
     }
 
-    static wifi_ap_record_t records[20];
+    static EXT_RAM_BSS_ATTR wifi_ap_record_t records[20]; /* driver memcpy target, not DMA */
     uint16_t to_fetch = found > (sizeof(records) / sizeof(records[0]))
                             ? (uint16_t)(sizeof(records) / sizeof(records[0]))
                             : found;

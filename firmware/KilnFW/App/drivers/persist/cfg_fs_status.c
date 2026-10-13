@@ -183,6 +183,36 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
         APPEND(",\"capacity\":{\"known\":false}");
     }
 
+    /* persfx MED-1: stores frozen this boot (file unreadable / zones undecided): saves to them are refused until
+     * reboot. At most 6 names listed, the count is exact. */
+    {
+        int dn = cfg_fs_degraded_count();
+        APPEND(",\"degraded_count\":%d,\"degraded\":[", dn);
+        bool emitted = false; /* INFO-2: a failed name() must not leave a leading comma */
+        for (int i = 0; i < dn && i < 6; i++) {
+            char dname[48];
+            if (cfg_fs_degraded_name(i, dname, sizeof(dname))) {
+                APPEND("%s\"%s\"", emitted ? "," : "", dname);
+                emitted = true;
+            }
+        }
+        APPEND("]");
+    }
+    /* FIRELOWFX3 LOW-5: runtime conditions (no save refused, not boot-unreadable stores). */
+    {
+        int cn = cfg_fs_condition_count();
+        APPEND(",\"conditions_count\":%d,\"conditions\":[", cn);
+        bool emitted = false;
+        for (int i = 0; i < cn; i++) { /* INFO-1: every condition (table max 8) is listed, no cap below it */
+            char cname[48];
+            if (cfg_fs_condition_name(i, cname, sizeof(cname))) {
+                APPEND("%s\"%s\"", emitted ? "," : "", cname);
+                emitted = true;
+            }
+        }
+        APPEND("]");
+    }
+
     APPEND(",\"file_count\":%lu,\"files\":[", (unsigned long)file_count);
     for (size_t i = 0; i < file_count; i++) {
         long sz = file_size_or_unknown(base_dir_for_sizes, NULL, files[i].name);
@@ -269,13 +299,13 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
      * ADAPTIVE_TUNE_KIBASE_FILE_PATH/pref_cfg_fs_resolve() call, and
      * firing_stats_cfg_fs.c/.h existing as a real bridge module, not against
      * the prior report alone. This list is empty by construction now: every
-     * item docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracks as "MOVE" has
+     * item docs/FILESYSTEM_USER_DATA.md section 5 tracks as "MOVE" has
      * a bridge module AND a dual_write.items[] row. cfgfs_nvs_only_drift_
      * check.py fails the moment a new persist/'*'_cfg_fs.c bridge appears
      * without a matching row, so this list cannot go stale the same way a
      * third time without the check catching it. */
     APPEND(",\"nvs_only\":[]");
-    /* Distinct from the above: items docs/FILESYSTEM_USER_DATA_PLAN.md's
+    /* Distinct from the above: items docs/FILESYSTEM_USER_DATA.md's
      * "KEEP in NVS" section says stay in NVS FOREVER, by design, for boot-
      * ordering or safety-isolation reasons -- not "not migrated yet". Listed
      * separately so an operator reading /api/cfgfs cannot mistake "working

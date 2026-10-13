@@ -1,6 +1,6 @@
 // Host test for App/drivers/http/kiln_cfg_http.c's apply_post_handler() --
 // POST /api/kiln_configs/apply. Added to close a known test gap named in
-// docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 4: this handler's
+// docs/SYSTEM_MODE_GATE.md section 3.6 slice 4: this handler's
 // system_mode_gate wiring (owner decision Q2, 2026-09-25) was verified only
 // by code-pattern review and an ESP-IDF target build, never a host-test
 // assertion. kiln_cfg_http.c has NO other host-test coverage at all today
@@ -126,10 +126,14 @@ bool kiln_cfg_store_slot_hardware_differs(int32_t id, char *msg, size_t msg_cap)
     if (msg && msg_cap) snprintf(msg, msg_cap, "hardware differs (stub)");
     return g_stub_hardware_differs;
 }
+int g_stub_save_calls = 0;
+int32_t g_stub_save_last_id = -99;
 bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32_t *out_id,
                                  char *reason_out, size_t reason_cap)
 {
-    (void)name; (void)id_or_negative;
+    (void)name;
+    g_stub_save_calls++;
+    g_stub_save_last_id = id_or_negative;
     if (out_id) *out_id = 1;
     if (reason_out && reason_cap) reason_out[0] = '\0';
     return true;
@@ -302,7 +306,7 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 }
 
 static int s_last_status = 200;
-static char s_last_resp_body[512];
+static char s_last_resp_body[1024];
 static bool s_test_ok_called = false;
 
 esp_err_t httpd_resp_send_err(httpd_req_t *req, httpd_err_code_t error, const char *msg)
@@ -486,8 +490,81 @@ static void test_apply_idle_and_clear_reaches_swap_worker(void)
     TEST_CHECK(s_last_status == 202, "an accepted apply reports 202 Accepted");
 }
 
+// HTTP fuzz campaign part 2: hostile apply bodies never reach the interlock or the swap worker.
+static void test_apply_hostile_bodies_never_reach_swap(void)
+{
+    TEST_SECTION("apply_post_handler fuzz -- malformed id bodies are 4xx and never reach the swap worker");
+    static const char *const bodies[] = {
+        "", "id", "id=", "id=abc", "id=1x", "id=-1", "id=%00", "id=1%002", "id=%zz",
+        "id=0x1", "id=1.5", "id=+", "foo=1", "&&&", "id=1e2", "id=--1",
+        "id=+1", "id=%2B1", "id=%201", "id=99999999999", "id=2147483648",
+    };
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        test_reset();
+        s_test_id_exists = true;
+        snprintf(s_test_post_body, sizeof(s_test_post_body), "%s", bodies[i]);
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        req.content_len = (long long)strlen(bodies[i]);
+        (void)apply_post_handler(&req);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "body '%s' refused", bodies[i]);
+        TEST_CHECK(s_test_err_called && !s_test_ok_called, msg);
+        snprintf(msg, sizeof(msg), "body '%s': swap worker never reached", bodies[i]);
+        TEST_CHECK(g_stub_swap_submit_calls == 0 && g_probe_interlock_called == 0, msg);
+    }
+    /* oversized Content-Length (past the 256 B scratch) refused without a read */
+    test_reset();
+    s_test_id_exists = true;
+    snprintf(s_test_post_body, sizeof(s_test_post_body), "id=1");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 100000;
+    (void)apply_post_handler(&req);
+    TEST_CHECK(s_test_err_called && g_stub_swap_submit_calls == 0, "100000-byte Content-Length refused");
+}
+
+// Review fwbatch13 LOW-1: optional save id is parsed strictly; a malformed id must not save a NEW slot.
+static void test_save_optional_id_strict(void)
+{
+    TEST_SECTION("save_post_handler optional id -- strict parse");
+    static const char *const bad[] = {
+        "name=a&id=%zz", "name=a&id=+5", "name=a&id=%205", "name=a&id=99999999999",
+        "name=a&id=-1", "name=a&id=1x", "name=a&id=2147483648", "name=a&id=%2B5",
+        "name=a&id=", "name=a&id=&x=1",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        test_reset();
+        g_stub_save_calls = 0;
+        snprintf(s_test_post_body, sizeof(s_test_post_body), "%s", bad[i]);
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        req.content_len = (long long)strlen(bad[i]);
+        (void)save_post_handler(&req);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "save body '%s' refused without saving", bad[i]);
+        TEST_CHECK(s_test_err_called && g_stub_save_calls == 0, msg);
+    }
+    test_reset();
+    g_stub_save_calls = 0;
+    snprintf(s_test_post_body, sizeof(s_test_post_body), "name=a&id=7");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(s_test_post_body);
+    (void)save_post_handler(&req);
+    TEST_CHECK(g_stub_save_calls == 1 && g_stub_save_last_id == 7, "valid id=7 reaches the store");
+    test_reset();
+    g_stub_save_calls = 0;
+    snprintf(s_test_post_body, sizeof(s_test_post_body), "name=a");
+    req.content_len = (long long)strlen(s_test_post_body);
+    (void)save_post_handler(&req);
+    TEST_CHECK(g_stub_save_calls == 1 && g_stub_save_last_id == -1, "absent id saves a new slot (-1)");
+}
+
 int main(void)
 {
+    test_save_optional_id_strict();
+    test_apply_hostile_bodies_never_reach_swap();
     test_apply_nonexistent_id_refused_before_mode_gate();
     test_apply_refused_by_mode_gate_before_interlock();
     test_apply_refused_by_mode_gate_autotune_running();

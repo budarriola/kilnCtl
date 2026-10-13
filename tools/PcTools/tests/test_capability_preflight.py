@@ -71,6 +71,12 @@ def _urlopen_router(responses: dict):
                 if isinstance(value, Exception):
                     raise value
                 return _fake_response(value)
+        # Healthy defaults for the safety reads: a failed read now REFUSES
+        # (fail closed), so a test that does not care must answer them.
+        if "/api/crash_report" in url:
+            return _fake_response(json.dumps({"present": False}).encode())
+        if "/api/readiness" in url:
+            return _fake_response(json.dumps({"items": []}).encode())
         raise AssertionError(f"unexpected URL in test: {url}")
 
     return _fake_urlopen
@@ -277,9 +283,13 @@ class UnacknowledgedCrashReportTest(unittest.TestCase):
         self.assertFalse(report.board.crash_unacknowledged)
         self.assertNotIn("UNACKNOWLEDGED CRASH REPORT", report.describe())
 
-        with self.assertRaises(cp.PreflightFailed):
-            cp.preflight_or_raise(preset, "192.168.1.50", zones_host="192.168.1.50",
-                                   preset_name="test-preset")
+        # An unreachable board (mocked; the guard forbids a real connect) must raise.
+        with unittest.mock.patch.object(
+                cp.urllib.request, "urlopen",
+                side_effect=urllib.error.URLError("connection refused")):
+            with self.assertRaises(cp.PreflightFailed):
+                cp.preflight_or_raise(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
 
     def test_unreachable_board_not_ok_even_with_zero_required_capabilities(self):
         # Isolates PreflightReport.ok's own "board must have answered"
@@ -352,7 +362,7 @@ class ManifestMatchesApplyPresetTest(unittest.TestCase):
 
     def test_manifest_matches_apply_preset_ramp_assist_pin(self):
         import inspect
-        src = inspect.getsource(config_presets.apply_preset)
+        src = inspect.getsource(config_presets._apply_preset_stages)
         # apply_preset() only calls ramp_assist_http_client.set_enabled(...)
         # inside its `if zones_host:` branch -- confirm that call site is
         # still there and still gated the way this manifest assumes.
@@ -360,7 +370,7 @@ class ManifestMatchesApplyPresetTest(unittest.TestCase):
         set_enabled_idx = src.index("ramp_assist_http_client.set_enabled")
         self.assertGreater(
             set_enabled_idx, if_zones_idx,
-            "apply_preset() no longer pins ramp_assist_enabled inside its "
+            "_apply_preset_stages() no longer pins ramp_assist_enabled inside its "
             "'if zones_host:' branch -- capability_preflight.py's "
             "_CAPABILITY_MANIFEST precondition for 'ramp_assist' is now "
             "stale and must be updated to match (see this module's "
@@ -540,3 +550,55 @@ class TaskLivenessGatingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailClosedSafetyReadsTest(unittest.TestCase):
+    """crash_report / readiness read failures are 'could not determine' and refuse."""
+
+    def _run(self, extra, **kw):
+        preset = _preset(False)
+        responses = dict(extra)
+        responses.setdefault("/api/status", _STATUS_BODY)
+        responses.setdefault("/api/ramp_assist", _RAMP_ASSIST_PRESENT_BODY)
+        with unittest.mock.patch.object(cp.urllib.request, "urlopen",
+                                         side_effect=_urlopen_router(responses)):
+            return cp.run_preflight(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                    preset_name="t", **kw)
+
+    def _http_err(self, code):
+        import urllib.error
+        return urllib.error.HTTPError("http://x", code, "err", {}, io.BytesIO(b""))
+
+    def test_crash_report_401_refuses(self):
+        r = self._run({"/api/crash_report": self._http_err(401)})
+        self.assertFalse(r.ok)
+        self.assertTrue(any("crash_report" in u for u in r.undetermined_reads))
+        self.assertIn("UNDETERMINED", r.describe())
+
+    def test_crash_report_5xx_refuses(self):
+        self.assertFalse(self._run({"/api/crash_report": self._http_err(503)}).ok)
+
+    def test_crash_report_timeout_refuses(self):
+        self.assertFalse(self._run({"/api/crash_report": TimeoutError("t")}).ok)
+
+    def test_readiness_401_refuses(self):
+        r = self._run({"/api/readiness": self._http_err(401)})
+        self.assertFalse(r.ok)
+        self.assertTrue(any("readiness" in u for u in r.undetermined_reads))
+
+    def test_missing_acknowledged_is_unacknowledged(self):
+        body = json.dumps({"present": True}).encode()
+        r = self._run({"/api/crash_report": body})
+        self.assertTrue(r.board.crash_unacknowledged)
+        self.assertFalse(r.ok)
+
+    def test_task_liveness_unavailable_refuses(self):
+        r = self._run({}, task_liveness_unavailable="no link")
+        self.assertFalse(r.ok)
+
+    def test_allow_undetermined_override(self):
+        r = self._run({"/api/crash_report": self._http_err(401)}, allow_undetermined=True)
+        self.assertTrue(r.ok)
+
+    def test_healthy_reads_ok(self):
+        self.assertTrue(self._run({}).ok)

@@ -38,7 +38,7 @@
 #include "ota_pico_relay.h"
 #include "ota_record.h"
 #include "pico_image_manifest.h" /* pico_image_manifest_store() -- record what was staged, so a
-                                  * LATER BOOT can re-use this image (PICO_AUTO_UPDATE_PLAN.md G1) */
+                                  * LATER BOOT can re-use this image (PICO_AUTO_UPDATE.md G1) */
 #include "pico_image_source.h" /* pico_image_source_describe() -- reads back the image just staged
                                 * to learn its declared link_protocol_version, TODO.md 9.4 */
 #include "pico_img_stage.h" /* shared erase/write/manifest sequence -- owner decision 2026-09-20,
@@ -204,7 +204,16 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
     // no faster than it can be written to flash is the same principle
     // applied to this (fast) staging step.
     int last_logged_decile = 0;
+    const uint64_t upload_start_ms = hal_time_now_us() / 1000u;
+    const uint64_t upload_budget_ms = ota_http_upload_budget_ms(content_len);
     while (stage.written < content_len) {
+        if (ota_http_upload_deadline_passed(upload_start_ms, hal_time_now_us() / 1000u, upload_budget_ms)) {
+            snprintf(fail_reason, sizeof(fail_reason), "upload exceeded its overall deadline at %u/%u bytes",
+                     (unsigned)stage.written, (unsigned)content_len);
+            ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
+            (void)ota_http_send_upload_too_slow(req);
+            goto cleanup;
+        }
         size_t want = content_len - stage.written;
         if (want > sizeof(s_ota_pico_chunk)) {
             want = sizeof(s_ota_pico_chunk);
@@ -249,7 +258,7 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
         sha_op_active = false; // finished (or failed to finish) -- nothing left to abort in cleanup
     }
 
-    // docs/PICO_AUTO_UPDATE_PLAN.md G1: remember what was just staged, so a
+    // docs/PICO_AUTO_UPDATE.md G1: remember what was just staged, so a
     // LATER BOOT can re-use this image. pico_img_stage_finish() persists the
     // read-back-verified manifest (pico_image_manifest_store()) and hands
     // back the final CRC-32 -- written BEFORE the relay starts on purpose:

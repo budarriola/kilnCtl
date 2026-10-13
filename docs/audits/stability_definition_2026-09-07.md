@@ -4,7 +4,7 @@
 
 The owner's stated sequence is: current-sensor commissioning, then confirm
 the board is **stable**, then start the filesystem work (`docs/
-FILESYSTEM_PLAN.md`). "Stable" had no threshold or evidence trail behind it
+FILESYSTEM.md`). "Stable" had no threshold or evidence trail behind it
 -- it could not actually be demonstrated, only asserted. This document
 defines it in measurable terms and points at the script
 (`tools/PcTools/scripts/stability_soak.py`) that gathers the evidence.
@@ -17,7 +17,7 @@ All of the following, over the soak window (see "How long" below):
 |---|---|---|---|
 | Unacknowledged crash report | `GET /api/crash_report` (via `get_heap_status`) | none, ever | The 2026-08-31 incident ran 5 hours unnoticed before this check existed; a crash any time in the window is an automatic FAIL, not something to average away. |
 | ESP reset_reason | same call | never one of `panic/exception`, `panic`, `exception`, `watchdog`, `brownout` (`UNCLEAN_RESET_REASONS`) at any sample | An unclean reset seen mid-soak means the board rebooted uncleanly during the window, even if it now looks fine. |
-| `heap_internal.free` | `GET /api/status` | stays above **36000 B**, and does not trend down over the run | 11.9 kB free is the *documented, measured* point where HTTP sockets started resetting (`docs/bench_snapshots/2026-09-04.md`, `docs/FILESYSTEM_PLAN.md`). The floor here is 3x that with a round number -- a working margin, not the failure point itself. This is evidence-derived, not guessed. |
+| `heap_internal.free` | `GET /api/status` | stays above **36000 B**, and does not trend down over the run | 11.9 kB free is the *documented, measured* point where HTTP sockets started resetting (`docs/bench_snapshots/2026-09-04.md`, `docs/FILESYSTEM.md`). The floor here is 3x that with a round number -- a working margin, not the failure point itself. This is evidence-derived, not guessed. |
 | `heap_internal.min_free` | same | reported, not gated | Low-water mark since boot; useful context for the free-trend reading, not a separate pass/fail line (it can only go down, so gating on it would fail every long-lived board). |
 | Per-task stack margin | `GET_STACK_MARGIN` (UART) | every alive task reports `StackMarginLevel.OK` at every sample | The firmware already classifies LOW/CRITICAL against each task's *configured* stack size -- that classification already *is* "above its registered minimum," not a separate percentage invented for this doc. **Caveat, and it is a real one:** a soak run with no firing active is an idle-only exercise. The idle-baseline finding (`project_idle_stack_baseline_is_a_floor`) applies directly -- both LOW-priority tasks have deep paths that never run idle, so an idle PASS here is a *floor*, not proof the same tasks are fine under a firing's deep paths. Run the soak with `--firing-in-progress` for real coverage; see below. |
 | Safety-link counters (`crc_errors`, `timeouts`, `broadcast_dropped`) | `GET_LINK_STATS`/`GET_DIAG` (UART) | flat (no increase) over the run | These have never been observed to self-heal; any climb during the window is real loss happening now, not residue from before the soak started. |

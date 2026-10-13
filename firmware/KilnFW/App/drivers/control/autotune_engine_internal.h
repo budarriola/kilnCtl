@@ -618,6 +618,20 @@ extern const char *AT_TAG;
  * autotune_engine_step_identify.c. */
 float autotune_scale_threshold_c(float base_c, float probe_k_rough);
 
+
+/* One run's coupling-cell persist, gathered under s_at.lock by
+ * autotune_finalize_fit() and written by bx_flash_worker after the lock is
+ * given (see autotune_dispatch_coupling_persist()). */
+typedef struct {
+    uint8_t affected_zone[MAX31856_CHANNEL_COUNT];
+    float   coeff[MAX31856_CHANNEL_COUNT];
+    float   tau_s[MAX31856_CHANNEL_COUNT];
+    float   dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t count;
+    uint8_t stepped_zone;
+    uint8_t fail_count;
+} coupling_persist_job_t;
+
 typedef struct {
     kiln_io_t *io;
     MAX31856BusClass *thermo_bus;
@@ -820,6 +834,15 @@ typedef struct {
      * user. */
     bool     external_write_reserved;
     uint8_t  external_write_reserved_zone;
+
+    /* Flash-worker lock-inversion audit 2026-10-09 F2: autotune_finalize_fit()
+     * runs under s_at.lock, and the UART autotune handlers (status, abort,
+     * accept, start) take s_at.lock ON bx_flash_worker. So the coupling
+     * persist it decides on is parked here, not dispatched, and task_entry()
+     * dispatches it after giving the lock. Written and taken only under
+     * s_at.lock. */
+    bool                   pending_coupling_valid;
+    coupling_persist_job_t pending_coupling;
 } s_at_t;
 
 extern s_at_t s_at;
@@ -846,21 +869,18 @@ void abort_locked(const char *reason);
 autotune_sample_t *autotune_unpack_zone_trace(uint8_t zone, size_t count);
 
 /* ---- coupling-matrix cross-gain persistence (autotune_engine_coupling.c) --
- * autotune_finalize_fit() (autotune_engine_step_identify.c) is the one caller: it
- * gathers every cell to write into one of these and hands it to
- * bx_flash_worker in a single job -- see coupling_persist_job()'s own
- * comment for why a direct zones_config_set_coupling_cell() call from
- * task_entry()'s task is a hard panic, not just a bug. */
-typedef struct {
-    uint8_t affected_zone[MAX31856_CHANNEL_COUNT];
-    float   coeff[MAX31856_CHANNEL_COUNT];
-    float   tau_s[MAX31856_CHANNEL_COUNT];
-    float   dead_time_s[MAX31856_CHANNEL_COUNT];
-    uint8_t count;
-    uint8_t stepped_zone;
-    uint8_t fail_count;
-} coupling_persist_job_t;
+ * coupling_persist_job_t itself is declared above s_at_t (s_at carries the
+ * pending one). autotune_finalize_fit() (autotune_engine_step_identify.c)
+ * gathers every cell to write into s_at.pending_coupling under s_at.lock;
+ * task_entry() takes it with autotune_take_pending_coupling_locked() and
+ * hands it to bx_flash_worker with autotune_dispatch_coupling_persist()
+ * AFTER giving s_at.lock -- see autotune_dispatch_coupling_persist()'s own
+ * comment for the deadlock that ordering prevents, and
+ * coupling_persist_job()'s for why a direct zones_config_set_coupling_cell()
+ * call from task_entry()'s task is a hard panic, not just a bug. */
 void coupling_persist_job(void *arg);
+bool autotune_take_pending_coupling_locked(coupling_persist_job_t *out);
+void autotune_dispatch_coupling_persist(coupling_persist_job_t *job);
 
 /* ---- STEP method: settle/onset detection, the FOPDT fit and its guards,
  * target-mode probe handling (autotune_engine_step_identify.c) -- called

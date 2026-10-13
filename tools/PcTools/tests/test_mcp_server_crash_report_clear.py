@@ -389,5 +389,16 @@ class AsyncClearTest(_Base):
         self.assertIn("ok - cleared and confirmed", result)
 
 
+class ClearTimeoutWordingTest(_Base):
+    _run = AsyncClearTest._run
+
+    def test_timeout_then_still_present_does_not_say_returned_ok(self):
+        to = crash_report_clear_http_client.CrashReportClearTimeout("timed out")
+        result, _, _ = self._run([to], gets=[_PRESENT_ACKED], images=[_IMAGE_PRESENT])
+        self.assertIn("FAILED", result)
+        self.assertIn("timed out", result)
+        self.assertNotIn("returned ok", result)
+
+
 if __name__ == "__main__":
     unittest.main()

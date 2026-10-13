@@ -426,7 +426,7 @@ def test_decode_status_frame_a_tc_config_reasserted_bit():
 
 def test_decode_status_frame_a_active_slot_bits():
     # flags2 bits 3/4 (0x08/0x10, LINK_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B,
-    # 2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64) ride the same V3 flags2
+    # 2026-09-23, docs/PICO_AUTO_UPDATE.md:64) ride the same V3 flags2
     # byte -- proves they decode into a single "A"/"B"/"unknown" string,
     # independent of the other bits, and that B (0x10) alone without KNOWN
     # (0x08) still reads "unknown" rather than a confident B.
@@ -857,3 +857,105 @@ def test_decoders_match_commonfw_vectors(filename):
         # Non-vacuity: a vector that compared nothing would pass silently.
         if len(payload) > 1:
             assert compared > 0, f"{filename}:{vec.get('name')} compared no fields"
+
+
+# ---------------------------------------------------------------------------
+# kilnlink audit 2026-10-09 M4 (KILNLINK_PROTOCOL_VERSION 16 -> 17): DIAG may
+# carry byte30 trip_seq (31 bytes) and CLEAR_TRIP may carry byte3 trip_seq
+# (4 bytes). Both legacy lengths still decode, without the key.
+# ---------------------------------------------------------------------------
+
+_M4_DIAG_FIELDS = {
+    "trip_reason": 6,
+    "warn_mask": 0,
+    "trip_mask": 0x0020,
+    "uptime_ms": 1,
+    "boot_reason": "KILNLINK_DIAG_BOOT_POWERON",
+    "context_age_100ms": 0,
+    "context_frames_ok": 0,
+    "context_frames_bad": 0,
+    "tx_frames_dropped": 0,
+    "state": "KILNLINK_DIAG_STATE_TRIPPED",
+    "flags": 0,
+    "log_frames_dropped": 0,
+}
+
+
+def test_m4_diag_trip_seq_round_trip():
+    from kilnctrl import kilnlink_codec as codec
+
+    legacy = codec.encode_diag(_M4_DIAG_FIELDS)
+    bound = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=0xA7))
+    assert len(legacy) == 30
+    assert len(bound) == 31 and bound[:30] == legacy and bound[30] == 0xA7
+    assert "trip_seq" not in kc.decode_payload(7, 7, legacy)[1]
+    assert kc.decode_payload(7, 7, bound)[1]["trip_seq"] == 0xA7
+
+
+def test_m4_clear_trip_trip_seq_round_trip():
+    from kilnctrl import kilnlink_codec as codec
+
+    legacy = codec.encode_clear_trip({"trip_mask": 0x0020})
+    bound = codec.encode_clear_trip({"trip_mask": 0x0020, "trip_seq": 5})
+    assert legacy == bytes.fromhex("0a2000")
+    assert bound == bytes.fromhex("0a200005")
+    d_legacy = kc.decode_payload(7, 7, legacy)[1]
+    d_bound = kc.decode_payload(7, 7, bound)[1]
+    assert d_legacy == {"trip_mask": 0x0020}
+    assert d_bound == {"trip_mask": 0x0020, "trip_seq": 5}
+
+
+@pytest.mark.parametrize("payload_hex", ["0a20", "0a2000050f11"])
+def test_m4_clear_trip_bad_lengths_rejected(payload_hex):
+    name, decoded, err = kc.decode_payload(7, 7, bytes.fromhex(payload_hex))
+    assert err is not None and decoded is None
+
+
+def test_m4_diag_32_bytes_rejected():
+    from kilnctrl import kilnlink_codec as codec
+
+    too_long = codec.encode_diag(dict(_M4_DIAG_FIELDS, pico_boot_id=1)) + b"\x00"
+    name, decoded, err = kc.decode_payload(7, 7, too_long)
+    assert err is not None and decoded is None
+
+
+# ---------------------------------------------------------------------------
+# KILNLINK_PROTOCOL_VERSION 17 -> 18 (docs/TEST_TRIP_PLAN.md WP1): DIAG V3
+# (32 bytes, byte31 pico_boot_id), CLEAR_TRIP V3 (5 bytes, byte4
+# pico_boot_id), TEST_TRIP 0x2E and TEST_TRIP_RESULT 0x2F. Vectors are frozen
+# and match firmware/CommonFW/test.
+# ---------------------------------------------------------------------------
+
+
+def test_v18_diag_pico_boot_id_round_trip():
+    from kilnctrl import kilnlink_codec as codec
+
+    v3 = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=0xA7, pico_boot_id=0x5C))
+    assert len(v3) == 32 and v3[30] == 0xA7 and v3[31] == 0x5C
+    d = kc.decode_payload(7, 7, v3)[1]
+    assert d["trip_seq"] == 0xA7 and d["pico_boot_id"] == 0x5C
+    v2 = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=0xA7))
+    assert "pico_boot_id" not in kc.decode_payload(7, 7, v2)[1]
+
+
+def test_v18_clear_trip_pico_boot_id_vector():
+    from kilnctrl import kilnlink_codec as codec
+
+    v3 = codec.encode_clear_trip({"trip_mask": 0x0008, "trip_seq": 0x05, "pico_boot_id": 0x11})
+    assert v3 == bytes.fromhex("0a08000511")
+    assert kc.decode_payload(7, 7, v3)[1] == {"trip_mask": 0x0008, "trip_seq": 5, "pico_boot_id": 0x11}
+
+
+def test_v18_test_trip_vectors():
+    name, d, err = kc.decode_payload(7, 7, bytes.fromhex("2e0742a5"))
+    assert err is None and d == {"pico_boot_id": 7, "request_id": 0x42, "magic": 0xA5}
+    name, d, err = kc.decode_payload(7, 7, bytes.fromhex("2f420009"))
+    assert err is None and d == {"request_id": 0x42, "outcome": "ACCEPTED", "trip_seq": 9}
+    name, d, err = kc.decode_payload(7, 7, bytes.fromhex("2f010703"))
+    assert err is None and d["outcome"] == "DUPLICATE"
+
+
+@pytest.mark.parametrize("payload_hex", ["2e0742", "2e0742a500", "2f4200", "2f42000900", "2f420800"])
+def test_v18_test_trip_bad_frames_rejected(payload_hex):
+    name, decoded, err = kc.decode_payload(7, 7, bytes.fromhex(payload_hex))
+    assert err is not None and decoded is None

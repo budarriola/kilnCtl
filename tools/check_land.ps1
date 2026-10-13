@@ -31,14 +31,19 @@ function Commit-File([string]$dir, [string]$name, [string]$text, [string]$msg) {
 function New-Clone([string]$name) {
     $d = Join-Path $tmp $name
     git clone $origin $d *>$null
+    Set-Content -LiteralPath (Join-Path (Join-Path $d '.git') 'kilnctl_scratch_repo') -Value 'scratch' -Encoding ascii
     return $d
 }
-function OriginHead { (git -C $origin rev-parse main).Trim() }
+function OriginHead { (git -C $origin rev-parse dev).Trim() }
+function Write-Log([string]$dir, [string[]]$lines, [string]$tree = "", [switch]$Append) {
+    $t = if ($tree) { $tree } else { (git -C $dir rev-parse "HEAD^{tree}").Trim() }
+    $all = @("Run tree: $t dirty=0 partial=0", "Run mode: full") + $lines
+    if ($Append) { Add-Content -LiteralPath $script:log -Value $all -Encoding Unicode } else { $all | Set-Content -LiteralPath $script:log -Encoding Unicode }
+}
 function Run-Land([string]$dir, [string[]]$more) {
     Push-Location $dir
     try {
-        $tgt = if ($more -contains "-Target") { @() } else { @("-Target", "main") }
-        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone @tgt @more 2>&1 | Out-String
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone @more 2>&1 | Out-String
         $code = $LASTEXITCODE
     } finally { Pop-Location }
     $line = ($out -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
@@ -60,6 +65,8 @@ try {
     Commit-File $seed "f.txt" "base" "seed"
     Commit-File $seed "g.txt" "base" "seed2"
     git -C $seed push origin HEAD:main *>$null
+    git -C $seed push origin HEAD:dev *>$null
+    $log = Join-Path $tmp "run.log"
 
     Write-Host "case: nothing ahead"
     $c = New-Clone "c_ahead"
@@ -92,6 +99,11 @@ try {
     Assert ($r.Code -eq 0 -and $r.Json.dry_run -eq $true -and $r.Json.landed -eq $false) "dry run exits 0, landed false"
     Assert ((OriginHead) -eq $before) "dry run pushed nothing"
 
+    Write-Host "case: MaxPushTries 0 refused at parameter binding (TOOLFX13 INFO-5)"
+    $r = Run-Land $c @("-MaxPushTries", "0", "-ChecksScript", $okStub)
+    Assert ($r.Code -ne 0 -and $r.Out -match "MaxPushTries" -and -not $r.Json) "MaxPushTries 0 rejected before any work"
+    Assert ((OriginHead) -eq $before) "MaxPushTries 0 pushed nothing"
+
     Write-Host "case: conflict aborts and leaves clean tree"
     $c = New-Clone "c_conf"
     Set-Content -LiteralPath (Join-Path $c "f.txt") -Value "mine" -Encoding ascii
@@ -99,7 +111,7 @@ try {
     $mine = (git -C $c rev-parse HEAD).Trim()
     $other = New-Clone "c_other"
     Commit-File $other "f.txt" "theirs" "theirs"
-    git -C $other push origin HEAD:main *>$null
+    git -C $other push origin HEAD:dev *>$null
     $before = OriginHead
     $r = Run-Land $c @("-ChecksScript", $okStub)
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'conflict' -and $r.Json.error -match 'f\.txt') "conflict reported with file"
@@ -111,21 +123,23 @@ try {
     Write-Host "case: non-fast-forward retry"
     $c = New-Clone "c_nff"
     Commit-File $c "nff.txt" "x" "nff"
-    $racer = New-Clone "c_racer"
+    $racer = New-Clone "c_racer"; git -C $racer checkout -b r origin/dev *>$null
     $marker = Join-Path $tmp "racer.marker"
-    $racerStub = Stub ("if (-not (Test-Path '$marker')) { New-Item '$marker' -ItemType File | Out-Null; Set-Content -LiteralPath '$racer\race.txt' -Value r; git -C '$racer' add race.txt; git -C '$racer' commit -m race; git -C '$racer' push origin HEAD:main }`nexit 0")
+    $cnt = Join-Path $tmp "racer.count"
+    $racerStub = Stub ("Add-Content -LiteralPath '$cnt' -Value x`n" + "if (-not (Test-Path '$marker')) { New-Item '$marker' -ItemType File | Out-Null; Set-Content -LiteralPath '$racer\race.txt' -Value r; git -C '$racer' add race.txt; git -C '$racer' commit -m race; git -C '$racer' push origin HEAD:dev }`nexit 0")
     $r = Run-Land $c @("-ChecksScript", $racerStub)
     $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after retry"
     Assert ($rebases -eq 2) "rebased twice (got $rebases)"
-    git -C $origin merge-base --is-ancestor $r.Json.sha main *>$null
-    Assert ($LASTEXITCODE -eq 0) "sha is on origin/main"
+    $checkRuns = @(Get-Content -LiteralPath $cnt -ErrorAction SilentlyContinue).Count
+    Assert ($checkRuns -eq 2) "LOW-3: the post-rebase narrow checks re-ran on the retry against the newly rebased tree (stub runs: $checkRuns, want 2)"
+    git -C $origin merge-base --is-ancestor $r.Json.sha dev *>$null
+    Assert ($LASTEXITCODE -eq 0) "sha is on origin/dev"
 
     Write-Host "case: FAIL in UTF-16 log refused; -AllowFail permits"
     $c = New-Clone "c_log"
     Commit-File $c "log.txt" "x" "log"
-    $log = Join-Path $tmp "run.log"
-    "  PASS  tools/check_a.ps1`r`n  FAIL  tools/check_x.ps1 (exit 1)`r`n1 of 3 checks FAILED:`r`n1 passed, 0 skipped (0 due to -Fast), 1 failed." | Set-Content -LiteralPath $log -Encoding Unicode
+    Write-Log $c @("  PASS  tools/check_a.ps1", "  FAIL  tools/check_x.ps1 (exit 1)", "1 of 3 checks FAILED:", "1 passed, 0 skipped (0 due to -Fast), 1 failed.")
     $before = OriginHead
     $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'check_x') "FAIL refused"
@@ -137,16 +151,17 @@ try {
     Write-Host "case: log without summary refused; green log accepted"
     $c = New-Clone "c_log2"
     Commit-File $c "log2.txt" "x" "log2"
-    "  PASS  tools/check_a.ps1" | Set-Content -LiteralPath $log -Encoding Unicode
+    Write-Log $c @("  PASS  tools/check_a.ps1")
     $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'no run_all_checks summary') "summary-less log refused"
-    "5 passed, 0 skipped (0 due to -Fast), 0 failed." | Set-Content -LiteralPath $log -Encoding Unicode
+    Write-Log $c @("5 passed, 0 skipped (0 due to -Fast), 0 failed.")
     $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "green log lands"
 
     Write-Host "case: log held open by a writer (FileShare.ReadWrite) is still read; exclusive lock fails fast"
     $c = New-Clone "c_log3"
     Commit-File $c "log3.txt" "x" "log3"
+    Write-Log $c @("5 passed, 0 skipped (0 due to -Fast), 0 failed.")
     $hold = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
     try {
         $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
@@ -154,6 +169,7 @@ try {
     } finally { $hold.Dispose() }
     $c = New-Clone "c_log4"
     Commit-File $c "log4.txt" "x" "log4"
+    Write-Log $c @("5 passed, 0 skipped (0 due to -Fast), 0 failed.")
     $hold = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
     try {
         $t0 = Get-Date
@@ -162,24 +178,149 @@ try {
         Assert (((Get-Date) - $t0).TotalSeconds -lt 120) "fail-fast well before the wait deadline"
     } finally { $hold.Dispose() }
 
-    Write-Host "case: default target is dev; main untouched; -Target main still works"
-    git -C $origin branch dev main *>$null
+    Write-Host "case: default target is dev; main untouched"
     $c = New-Clone "c_dev"
-    git -C $c fetch origin *>$null
     git -C $c checkout -b work origin/dev *>$null
     Commit-File $c "dev.txt" "x" "devcommit"
-    $mainBefore = OriginHead
+    $mainBefore = (git -C $origin rev-parse main).Trim()
     $r = Run-Land $c @("-Target", "dev", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "land to dev succeeds (no check log needed)"
-    Assert ((OriginHead) -eq $mainBefore) "origin/main not advanced by a dev land"
+    Assert (((git -C $origin rev-parse main).Trim()) -eq $mainBefore) "origin/main not advanced by a dev land"
     Assert ((git -C $origin rev-parse dev).Trim() -eq $r.Json.sha) "origin/dev advanced to the landed sha"
     $c = New-Clone "c_dev2"
-    git -C $c fetch origin *>$null
     git -C $c checkout -b work origin/dev *>$null
     Commit-File $c "dev2.txt" "x" "dev2"
     Push-Location $c
     try { $dout = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone -DryRun 2>&1 | Out-String } finally { Pop-Location }
     Assert ($dout -match 'rebase onto origin/dev') "default target (no -Target) is dev"
+
+    Write-Host "case: -Target main needs -Coordinator AND -CheckLog (F1)"
+    $c = New-Clone "c_tm"
+    Commit-File $c "tm.txt" "x" "tm"
+    Write-Log $c @("5 passed, 0 skipped (0 due to -Fast), 0 failed.")
+    $mainBefore = (git -C $origin rev-parse main).Trim()
+    foreach ($variant in @(@("-Target", "main"), @("-Target", "main", "-Coordinator"), @("-Target", "main", "-CheckLog", $log))) {
+        $r = Run-Land $c ($variant + @("-ChecksScript", $okStub))
+        Assert ($r.Code -eq 1 -and $r.Out -match 'refused') "refused: $($variant -join ' ')"
+    }
+    Assert (((git -C $origin rev-parse main).Trim()) -eq $mainBefore) "main untouched by refusals"
+    $r = Run-Land $c @("-Target", "main", "-Coordinator", "-CheckLog", $log, "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0 -and $r.Json.dry_run -eq $true) "main with -Coordinator and -CheckLog passes the gate (dry run)"
+
+    Write-Host "case: check log evidence (F9, F10)"
+    $c = New-Clone "c_ev"
+    Commit-File $c "ev.txt" "x" "ev"
+    $green = "5 passed, 0 skipped (0 due to -Fast), 0 failed."
+    Write-Log $c @($green) "0123456789abcdef0123456789abcdef01234567"
+    $r = Run-Land $c @("-CheckLog", $log, "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1 -and $r.Json.error -match 'tree') "log for a different tree refused"
+    Write-Log $c @($green)
+    Write-Log $c @("  FAIL  tools/check_x.ps1 (exit 1)", "1 passed, 0 skipped (0 due to -Fast), 1 failed.") -Append
+    $r = Run-Land $c @("-CheckLog", $log, "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1) "appended run: the LAST (red) run decides"
+    Write-Log $c @("  FAIL  tools/check_x.ps1 (exit 1)", "1 passed, 0 skipped (0 due to -Fast), 1 failed.")
+    Write-Log $c @($green) -Append
+    $r = Run-Land $c @("-CheckLog", $log, "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0) "appended run: the LAST (green) run decides"
+    Write-Log $c @("  FAIL  tools/check_x.ps1 (exit 1)", "2 passed, 0 skipped (0 due to -Fast), 2 failed.")
+    $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x", "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1 -and $r.Out -match 'FAIL line') "FAIL-count mismatch refused even with -AllowFail"
+    # run_all_checks' per-check cap prints "FAIL <rel> (timed out: ...)": it must parse as a normal FAIL for that check
+    # (named, classifiable, -AllowFail-able), never as an unparsed count mismatch and never as a silent pass.
+    Write-Log $c @("  FAIL  tools/check_x.ps1 (timed out: killed after exceeding 900s wall-clock cap)", "1 passed, 0 skipped (0 due to -Fast), 1 failed.")
+    $r = Run-Land $c @("-CheckLog", $log, "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1 -and $r.Json.error -match 'check_x' -and $r.Out -notmatch 'cannot classify') "timed-out FAIL line is parsed as a FAIL for that check and refused"
+    $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x", "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0) "timed-out FAIL line is allowed only via explicit -AllowFail"
+
+    Write-Host "case: [remote rejected] is not retried (F11)"
+    $c = New-Clone "c_rej"
+    Commit-File $c "rej.txt" "x" "rej"
+    $hook = Join-Path $origin "hooks/pre-receive"
+    [IO.File]::WriteAllText($hook, "#!/bin/sh`necho 'no pushes today' >&2`nexit 1`n")
+    try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
+    $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+    Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote') "remote rejection fails with its message"
+    Assert ($rebases -le 1) "no retry loop on remote rejection (rebases: $rebases)"
+
+    # MED-1: a REAL ref race. The pre-receive hook (quarantine env unset so its objects persist) advances refs/heads/dev
+    # with a new commit under the push, so receive-pack itself rejects with its own "incorrect old value provided".
+    function Race-Hook([string]$cond) {
+        $lines = @('#!/bin/sh',
+            'unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES',
+            $cond,
+            'cur=$(git rev-parse refs/heads/dev)',
+            'n=$(git commit-tree -p "$cur" -m racer "$cur^{tree}")',
+            'git update-ref refs/heads/dev "$n" "$cur"',
+            'exit 0')
+        return ($lines -join "`n") + "`n"
+    }
+
+    Write-Host "case: REAL ref race (incorrect old value provided) is retried, not a hard refusal"
+    $c = New-Clone "c_lockref"
+    Commit-File $c "lockref.txt" "x" "lockref"
+    $lm = (Join-Path $tmp "lockref.marker") -replace '\\','/'
+    $hook = Join-Path $origin "hooks/pre-receive"
+    [IO.File]::WriteAllText($hook, (Race-Hook "if [ -f '$lm' ]; then exit 0; fi; touch '$lm'"))
+    try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
+    $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after real-race retry"
+    Assert ($rebases -eq 2) "rebased twice after real ref race (got $rebases)"
+
+    Write-Host "case: persistent REAL race ends with git's last output in the error"
+    $c = New-Clone "c_lkpersist"
+    Commit-File $c "lkp.txt" "x" "lkp"
+    [IO.File]::WriteAllText($hook, (Race-Hook "true"))
+    try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
+    Assert ($r.Code -eq 1 -and $r.Out -match 'still rejected after' -and $r.Out -match 'incorrect old value provided') "persistent race: final error keeps the git output"
+    $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+    Assert ($rebases -eq 3) "LOW-3: a persistent race stops after exactly 3 attempts (rebases: $rebases)"
+
+    Write-Host "case: Get-PushRejectVerdict classification (porcelain status lines only)"
+    $fnText = [regex]::Match([IO.File]::ReadAllText($land), '(?ms)^function Get-PushRejectVerdict.*?^\}').Value
+    Assert ($fnText.Length -gt 50) "found Get-PushRejectVerdict in land.ps1"
+    . ([scriptblock]::Create($fnText))
+    $h40a = 'a' * 40; $h40b = 'b1' * 20
+    $verdictCases = @(
+        @{ n = 'modern git incorrect old value'; o = "To x`n!`tHEAD:refs/heads/dev`t[remote rejected] (incorrect old value provided)`nDone`n"; v = 'race' },
+        @{ n = 'GitHub form 40-hex'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': is at $h40a but expected $h40b)`n"; v = 'race' },
+        @{ n = 'fetch first'; o = "!`tHEAD:refs/heads/dev`t[rejected] (fetch first)`n"; v = 'race' },
+        @{ n = 'non-fast-forward'; o = "!`tHEAD:refs/heads/dev`t[rejected] (non-fast-forward)`n"; v = 'race' },
+        @{ n = 'hook declined'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
+        @{ n = 'protected branch'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (protected branch hook declined)`n"; v = 'refused' },
+        @{ n = 'stale lock file exists'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': Unable to create dev.lock: File exists)`n"; v = 'refused' },
+        @{ n = 'prose in remote: line only'; o = "remote: policy says error: cannot lock ref 'x': is at $h40a but expected $h40b`nremote: (incorrect old value provided)`n!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
+        @{ n = 'prose with no status line'; o = "error: cannot lock ref 'refs/heads/dev': is at $h40a but expected $h40b`nfatal: the remote end hung up`n"; v = 'other' },
+        @{ n = 'forged remote:-prefixed status line before a real decline'; o = "remote: !`tHEAD:refs/heads/dev`t[rejected] (fetch first)`n!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
+        @{ n = 'status-looking prose without the porcelain prefix'; o = "remote: [remote rejected] (incorrect old value provided)`n"; v = 'other' },
+        @{ n = 'short sha is not git form'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb)`n"; v = 'refused' })
+    foreach ($vc in $verdictCases) { Assert ((Get-PushRejectVerdict $vc.o) -eq $vc.v) "verdict $($vc.n) -> $($vc.v)" }
+
+    # LOW-1: a genuine refusal whose free text mentions the race phrases, or a lock that never clears, is NOT a race.
+    foreach ($variant in @(
+        @{ n = 'refusal text'; msg = 'no pushes today: signed commit expected; cannot lock ref until review' },
+        @{ n = 'is at but expected in prose'; msg = 'policy: tip is at review but expected approval' },
+        @{ n = 'stale lock'; msg = "error: cannot lock ref 'refs/heads/dev': Unable to create dev.lock: File exists" })) {
+        Write-Host "case: hook refusal ($($variant.n)) is not a race; message kept"
+        $c = New-Clone ("c_lk_" + ($variant.n -replace '\W', ''))
+        Commit-File $c "lk.txt" "x" "lk"
+        $hook = Join-Path $origin "hooks/pre-receive"
+        [IO.File]::WriteAllText($hook, "#!/bin/sh`necho `"$($variant.msg)`" >&2`nexit 1`n")
+        try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
+        $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+        Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote' -and $r.Out -match [regex]::Escape($variant.msg)) "$($variant.n): refused with its message"
+        Assert ($rebases -le 1) "$($variant.n): not retried (rebases: $rebases)"
+    }
+    Write-Host "case: -RestartMcp really runs mcp_servers.ps1 restart then status (F3)"
+    $c = New-Clone "c_mcp"
+    Commit-File $c "mcp.txt" "x" "mcp"
+    $mdir = Join-Path $c "tools/PcTools/scripts"
+    New-Item -ItemType Directory -Path $mdir -Force | Out-Null
+    $mark = Join-Path $tmp "mcp.marker"
+    Set-Content -LiteralPath (Join-Path $mdir "mcp_servers.ps1") -Encoding ascii -Value "param([string]`$Verb)`nAdd-Content -LiteralPath '$mark' -Value `$Verb`nexit 0"
+    $r = Run-Land $c @("-RestartMcp", "-ChecksScript", $okStub)
+    $mk = if (Test-Path $mark) { @(Get-Content $mark) } else { @() }
+    Assert ($r.Code -eq 0 -and $mk -contains 'restart' -and $mk -contains 'status') "restart and status both ran (marker: $($mk -join ','))"
 
     Write-Host "case: failing post-rebase check blocks push"
     $c = New-Clone "c_post"
@@ -188,6 +329,40 @@ try {
     $r = Run-Land $c @("-ChecksScript", (Stub "exit 1"))
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'post-rebase checks failed') "refused"
     Assert ((OriginHead) -eq $before) "nothing pushed"
+
+    Write-Host "case: unpushed submodule pin blocks push; submodule_pins=fail"
+    $c = New-Clone "c_pin"
+    $om = $origin -replace '\\','/'
+    Set-Content -LiteralPath (Join-Path $c ".gitmodules") -Value "[submodule `"m`"]`n`tpath = m`n`turl = $om`n"
+    git -C $c add .gitmodules *>$null
+    git -C $c update-index --add --cacheinfo "160000,1111111111111111111111111111111111111111,m" *>$null
+    git -C $c commit -q -m "pin" *>$null
+    New-Item -ItemType Directory -Path (Join-Path $c 'm') -Force | Out-Null
+    $before = OriginHead
+    $r = Run-Land $c @("-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "refused with submodule_pins=fail"
+    Assert ((OriginHead) -eq $before) "nothing pushed"
+    Write-Host "case: pin check exit 0 -> pass, 2 -> refused, 3 -> skipped but pushed (T-5)"
+    function PinStub([int]$code) {
+        $p = Join-Path $tmp ("pin_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".ps1")
+        Set-Content -LiteralPath $p -Value ("param([string]`$RepoPath,[string]`$Commit)`nexit $code") -Encoding ascii
+        return $p
+    }
+    $c = New-Clone "c_pin0"
+    Commit-File $c "pin0.txt" "x" "pin0"
+    $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 0))
+    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -match '^pass\(stub:' -and $r.Json.checks_script_override) "exit 0 lands with submodule_pins=pass (got $($r.Json.submodule_pins))"
+    $c = New-Clone "c_pin2"
+    Commit-File $c "pin2.txt" "x" "pin2"
+    $before = OriginHead
+    $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 2))
+    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -match '^fail\(stub:') "exit 2 refused with submodule_pins=fail(stub)"
+    Assert ((OriginHead) -eq $before) "exit 2: nothing pushed"
+    $c = New-Clone "c_pin3"
+    Commit-File $c "pin3.txt" "x" "pin3"
+    $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 3))
+    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -match '^skipped\(stub:' -and $r.Out -match 'WARNING: submodule pin check could not run') "exit 3 warns, lands, submodule_pins=skipped"
+    Assert ((OriginHead) -ne $before) "exit 3: pushed"
 
     Write-Host "case: -RemoveWorktree from a linked worktree whose process cwd is inside it"
     $mainc = New-Clone "c_wtmain"
@@ -202,7 +377,7 @@ try {
     Write-Host "case: two comma-separated -AllowFail regexes; no GetFullPath noise"
     $c = New-Clone "c_two"
     Commit-File $c "two.txt" "x" "two"
-    "  FAIL  tools/check_x.ps1 (exit 1)`r`n  FAIL  tools/check_y.ps1 (exit 1)`r`n2 of 4 checks FAILED:`r`n2 passed, 0 skipped (0 due to -Fast), 2 failed." | Set-Content -LiteralPath $log -Encoding Unicode
+    Write-Log $c @("  FAIL  tools/check_x.ps1 (exit 1)", "  FAIL  tools/check_y.ps1 (exit 1)", "2 of 4 checks FAILED:", "2 passed, 0 skipped (0 due to -Fast), 2 failed.")
     $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x,check_y", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true -and $r.Json.allowed_fails.Count -eq 2) "comma-separated -AllowFail accepts both"
     Assert ($r.Out -notmatch 'GetFullPath') "no GetFullPath exception in output"
@@ -211,6 +386,58 @@ try {
     Commit-File $wt2 "wt2.txt" "x" "wt2"
     $r = Run-Land $wt2 @("-ChecksScript", $okStub)
     Assert ($r.Out -notmatch 'GetFullPath') "linked worktree: no GetFullPath exception"
+    Write-Host "case: -PinCheckScript / -ChecksScript refused without -AllowStandaloneClone (L-1)"
+    $mainl = New-Clone "c_l1main"
+    $wtl = Join-Path $tmp "c_l1_linked"
+    git -C $mainl worktree add -b l1branch $wtl *>$null
+    Commit-File $wtl "l1.txt" "x" "l1"
+    $before = OriginHead
+    foreach ($flag in @("-PinCheckScript", "-ChecksScript")) {
+        Push-Location $wtl
+        try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land $flag $okStub 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
+        Assert ($code -eq 1 -and $out -match 'test seams') "$flag refused outside -AllowStandaloneClone"
+        Assert ((OriginHead) -eq $before) "$flag refusal pushed nothing"
+    }
+
+    Write-Host "case: seams refused in a repo without the scratch marker even with -AllowStandaloneClone"
+    $unmarked = Join-Path $tmp "c_unmarked"
+    git clone $origin $unmarked *>$null
+    Commit-File $unmarked "um.txt" "x" "um"
+    $before = OriginHead
+    foreach ($flag in @("-PinCheckScript", "-ChecksScript")) {
+        Push-Location $unmarked
+        try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone $flag $okStub 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
+        Assert ($code -eq 1 -and $out -match 'scratch repo') "$flag refused in an unmarked repo"
+        Assert ((OriginHead) -eq $before) "$flag unmarked refusal pushed nothing"
+    }
+
+    Write-Host "case: pin check retry skip is keyed on the gitlinks (L-2)"
+    $counter = Join-Path $tmp "pin.count"
+    function CountStub() {
+        $p = Join-Path $tmp ("cnt_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".ps1")
+        Set-Content -LiteralPath $p -Value ("param([string]`$RepoPath,[string]`$Commit)`nAdd-Content -LiteralPath '$counter' -Value x`nexit 0") -Encoding ascii
+        return $p
+    }
+    function PinCalls() { if (Test-Path -LiteralPath $counter) { @(Get-Content -LiteralPath $counter).Count } else { 0 } }
+    foreach ($variant in @("gitlink", "plainfile")) {
+        if (Test-Path -LiteralPath $counter) { [IO.File]::Delete($counter) }
+        $c = New-Clone "c_l2_$variant"
+        Commit-File $c "l2_$variant.txt" "x" "l2 $variant"
+        $racer = New-Clone "c_l2r_$variant"; git -C $racer checkout -b r origin/dev *>$null
+        $marker = Join-Path $tmp "l2_$variant.marker"
+        $om = $origin -replace '\\', '/'
+        if ($variant -eq "gitlink") {
+            $racerBody = '[IO.File]::WriteAllText(''RACER\.gitmodules'', ''[submodule "m"]'' + [char]10 + [char]9 + ''path = m'' + [char]10 + [char]9 + ''url = OMURL'' + [char]10); git -C ''RACER'' add .gitmodules; git -C ''RACER'' update-index --add --cacheinfo ''160000,2222222222222222222222222222222222222222,m'''.Replace('RACER', $racer).Replace('OMURL', $om)
+        } else {
+            $racerBody = "Set-Content -LiteralPath '$racer\race2.txt' -Value r; git -C '$racer' add race2.txt"
+        }
+        $rs = Stub ("if (-not (Test-Path '$marker')) { New-Item '$marker' -ItemType File | Out-Null; $racerBody; git -C '$racer' commit -m race; git -C '$racer' push origin HEAD:dev }`nexit 0")
+        $r = Run-Land $c @("-ChecksScript", $rs, "-PinCheckScript", (CountStub))
+        $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+        Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true -and $rebases -eq 2) "$variant racer: landed after one retry (code $($r.Code), rebases $rebases)"
+        $want = if ($variant -eq "gitlink") { 2 } else { 1 }
+        Assert ((PinCalls) -eq $want) "$variant racer: pin check ran $(PinCalls) time(s), want $want"
+    }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

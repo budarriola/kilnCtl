@@ -1,5 +1,5 @@
 // dualwrite_window -- measures the owner-approved dual-write closure
-// criterion for the cfg-filesystem migration (docs/FILESYSTEM_PLAN.md,
+// criterion for the cfg-filesystem migration (docs/FILESYSTEM.md,
 // "dual-write window"). The owner approved running BOTH the file-backed
 // path and the legacy NVS path in parallel for a BOUNDED window, and wrote
 // down the exit criterion:
@@ -18,7 +18,7 @@
 // window closes is a deliberate, reviewed, owner-visible step performed by
 // hand; automating that step is explicitly out of scope and must stay that
 // way (see this header's "NOT AN AUTOMATION" note below and
-// docs/FILESYSTEM_PLAN.md's "Dual-write window" section).
+// docs/FILESYSTEM.md's "Dual-write window" section).
 //
 // WHY PLAIN NVS, NOT THE FILESYSTEM BEING EVALUATED
 // -----------------------------------------------------------------------
@@ -151,7 +151,7 @@ void dualwrite_window_compute_status(const dualwrite_window_record_t *rec, dualw
  * only the FIRST call in a boot does anything; later calls are no-ops. This
  * is deliberately NOT called from main_boot_early.c (that file's boot/mount
  * wiring is owned elsewhere as of this writing) -- see
- * docs/FILESYSTEM_PLAN.md for the current wiring and what still needs the
+ * docs/FILESYSTEM.md for the current wiring and what still needs the
  * boot-mount owner's hand. Today it runs from dualwrite_window_http_start(),
  * i.e. once HTTP bring-up reaches it, which is after cfg_fs's mount attempt
  * and after crash_report_init() have both already run -- late enough that
@@ -165,7 +165,7 @@ void dualwrite_window_boot_check(void);
  * healthy at HTTP-bring-up time). Resets consecutive_clean_boots to 0 and
  * persists immediately, same as an unclean boot. NOT wired to any call site
  * by this module -- cfg_fs_mount.c is owned elsewhere as of this writing;
- * see this module's report / docs/FILESYSTEM_PLAN.md for the requested call
+ * see this module's report / docs/FILESYSTEM.md for the requested call
  * site. Idempotent to call more than once per boot. */
 void dualwrite_window_note_mount_failure(void);
 

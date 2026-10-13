@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, factory_reset_guard, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -81,13 +81,18 @@ def ui_list_scripts() -> str:
 
 
 @_core._tool()
-def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: bool = True) -> str:
+def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: bool = False,
+                  confirm: bool = False) -> str:
     """Run one UI regression-test script end to end and report a compact
     pass/fail per step.
 
     ``zones_host``/``apply_preset``: same meaning as load_config_preset()'s
     -- forwarded to config_presets.apply_preset() when the script names a
-    ``preset``. The web backend resolves its base_url the same way OTA does
+    ``preset``. ``apply_preset`` defaults to False: applying a preset
+    OVERWRITES every zone's PID gains and thermal model (and zones/ramp_assist
+    with ``zones_host``). It therefore needs ``confirm=True`` exactly, refuses
+    while a profile or autotune run is live or cannot be ruled out, and FAILS
+    the call (no steps run) if any preset stage did not land. The web backend resolves its base_url the same way OTA does
     (see ``_ota_resolve_host``); the lcd backend drives the already-connected
     board over task 14.
     """
@@ -97,6 +102,14 @@ def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: boo
         script = ui_test_runner.load_ui_script(name)
     except ui_test_runner.UiScriptError as exc:
         return f"error: {exc}"
+    if apply_preset and "preset" in script:
+        if confirm is not True:
+            return (f"refused: ui_run_script({name!r}, apply_preset=True) overwrites PID gains and the thermal "
+                    "model for every zone in the script's preset; pass confirm=True, exactly, to apply.")
+        from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+        running = _profile_or_autotune_running_reason()
+        if running is not None:
+            return f"refused: {running} -- will not apply a script preset mid-run"
     web_client = None
     if script["backend"] == "web":
         web_client = WebUiClient(f"http://{_ota_resolve_host(zones_host)}")
@@ -107,6 +120,14 @@ def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: boo
         )
     except (ui_test_runner.UiScriptError, config_presets.ConfigPresetError) as exc:
         return f"error: {exc}"
+    except Exception as exc:  # noqa: BLE001 -- any preset-path error class must still report what was written
+        if not (apply_preset and "preset" in script):
+            raise
+        return (f"error: preset {script['preset']!r} apply raised {type(exc).__name__}: {exc}; "
+                f"NO steps ran, the board may be PARTIALLY written{_partial_note(exc)}")
+    if "preset" in script and not apply_preset and isinstance(result, dict):
+        result["preset_skipped"] = (f"preset {script['preset']!r} skipped (apply_preset=False): "
+                                    "the script ran against the board's current config")
     return json.dumps(result)
 
 
@@ -137,11 +158,20 @@ def ui_step(backend: str, action: str, target: str, timeout_ms: int = 3000,
 FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
 
 
+def _wiped_message(scope: int, backup: str, why: str) -> str:
+    return (f"BOARD WIPED: factory reset (scope={scope}) HAPPENED and the follow-up failed -- {why}. "
+            f"The board is at firmware defaults, NOT configured. Restore from the pre-reset "
+            f"backup: {backup} (backup_import(path=..., confirm=True)), then verify "
+            f"control_get_zones before any firing.")
+
+
 @_core._tool()
 def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN,
                                       host: Optional[str] = None,
                                       safety_host: Optional[str] = None,
-                                      use_ct_map_backup: bool = False) -> str:
+                                      use_ct_map_backup: bool = False,
+                                      confirm: bool = False,
+                                      skip_backup: bool = False) -> str:
     """Factory-default the board, then apply a known-good preset -- one
     callable step so a test always starts from the same place.
 
@@ -192,14 +222,35 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     This is the disruptive lever in this module: it reboots the board and
     then writes PID/model gains (and, with `host`, zones config too). Never
     invoke it against a bench with a firing in progress or with the safety
-    processor ARMED.
-    """
-    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    processor ARMED. Refuses unless ``confirm is True`` exactly (it erases
+    NVS partitions).
 
+    BACKUP FIRST (docs/audits/KILN_NVS_LOSS_2026-10-09.md): before sending the
+    reset this exports GET /api/backup/export to logs/backup_export/ and
+    REFUSES to reset if the export fails, unless ``skip_backup=True``. The
+    saved path is reported in every result. If the preset apply fails after the
+    reset the result says the board is WIPED and names the file to restore with
+    ``backup_import``. Log every reset (time, reason) in docs/BENCH_TEST_LOG.md.
+    """
+    if confirm is not True:
+        return (
+            "error: refusing to factory-default the board without confirm=True -- "
+            f"scope {scope} erases NVS partition(s) and reboots the board. Pass "
+            "confirm=True once you have reviewed exactly what this will destroy."
+        )
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not factory-default the board mid-run (nothing erased)"
     try:
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
         return f"error: {exc}"
+    ok, backup = factory_reset_guard.backup_before_reset(_ota_resolve_host(host), skip_backup)
+    if not ok:
+        return backup
     # Arm BEFORE sending, so a reboot fast enough to push before the wait
     # below starts is still counted rather than cleared away.
     _srv._info.arm_boot_push()
@@ -224,7 +275,8 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             f"refused: factory reset request was ACKed, but no reboot was observed "
             f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s (no unsolicited FW-version "
             f"boot push) -- most likely refused by the board's system mode gate "
-            f"(e.g. a firing or autotune run in progress); preset NOT applied"
+            f"(e.g. a firing or autotune run in progress); preset NOT applied. "
+            f"backup: {backup}"
         )
     resolved = _ota_resolve_host(host) if host else None
     resolved_safety = _ota_resolve_host(safety_host) if safety_host else None
@@ -233,13 +285,31 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             _srv._control, preset, zones_host=resolved, safety_host=resolved_safety,
             use_ct_map_backup=use_ct_map_backup)
     except ControlQueryError as exc:
-        return f"factory reset ok, but preset apply failed: {exc}"
+        return _wiped_message(scope, backup, f"preset apply failed: {exc}{_partial_note(exc)}")
     except zones_http_client.ZonesHttpError as exc:
-        return f"factory reset ok, PID/model applied, but zones config write failed (host={resolved}): {exc}"
+        return _wiped_message(scope, backup, f"PID/model UART writes were sent (see stages below for read-back), but zones config write failed (host={resolved}): {exc}{_partial_note(exc)}")
     except safety_cfg_http_client.SafetyCfgHttpError as exc:
-        return ("factory reset ok, PID/model applied, but safety config write failed "
-                f"(host={resolved_safety}): {exc}")
-    return f"factory reset ok (scope={scope})\n" + result.describe()
+        return _wiped_message(scope, backup, "PID/model UART writes were sent (see stages below for read-back), but safety config write failed "
+                              f"(host={resolved_safety}): {exc}{_partial_note(exc)}")
+    except Exception as exc:  # noqa: BLE001 -- after a wipe EVERY failure must still name the backup
+        return _wiped_message(scope, backup, f"preset apply raised {type(exc).__name__}: {exc}{_partial_note(exc)}")
+    if not result.all_ok:
+        return _wiped_message(scope, backup, "preset only PARTIALLY applied:\n" + result.describe())
+    return f"factory reset ok (scope={scope})\nbackup: {backup}\n" + result.describe()
+
+
+def _partial_note(exc: BaseException) -> str:
+    """Stages that landed before ``exc`` (config_presets.apply_preset attaches
+    ``preset_partial``), or empty."""
+    partial = getattr(exc, "preset_partial", None)
+    if partial is None:
+        return ""
+    if not partial:
+        return ("\nno stage had confirmed landing before the failure; a write in flight "
+                "may still have applied")
+    return ("\nstages that had ALREADY landed before the failure (board is partially written; "
+            f"the failing stage's own write may also have applied):\n{partial}")
+
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

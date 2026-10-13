@@ -148,6 +148,12 @@ _CONTENTION_SIGNATURES = (
 )
 
 
+def _clean_env(base: "Optional[dict[str, str]]" = None) -> "dict[str, str]":
+    """Copy of ``base`` (default os.environ) without the Git Bash MSYS vars."""
+    src = os.environ if base is None else base
+    return {k: v for k, v in src.items() if k.upper() not in _MSYS_ENV_VARS}
+
+
 def _contention_note(output: str) -> "Optional[str]":
     for pattern, explanation in _CONTENTION_SIGNATURES:
         if pattern.search(output):
@@ -176,8 +182,7 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
     """
     argv = list(argv)
     started = time.monotonic()
-    if env is None:
-        env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+    env = _clean_env(env)
     proc = None
     try:
         proc = subprocess.Popen(
@@ -192,6 +197,13 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
             # spaces, and a shell would be one more quoting layer to get wrong.
             shell=False,
         )
+        # Tie the build tree to this process's life (REVIEW_BUILDFX3 MED-2):
+        # a server restart mid-build must not leave an orphan writing build/.
+        try:
+            from .jobtree import assign_to_kill_on_close_job
+            assign_to_kill_on_close_job(proc.pid)
+        except Exception:  # pragma: no cover - best effort
+            pass
         # If a build-gate slot is held by this thread, tell it which process
         # is the compile so a max-hold expiry kills only this tree.
         try:
@@ -312,7 +324,8 @@ def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
 def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
                  wait_timeout: "Optional[float]" = None,
                  gate_label: "Optional[str]" = None,
-                 gate_wait: "Optional[GateWaitResult]" = None, **kwargs: Any) -> str:
+                 gate_wait: "Optional[GateWaitResult]" = None,
+                 lock_info: "Optional[dict[str, float]]" = None, **kwargs: Any) -> str:
     """``_run``, but serialized against any other caller contending for the
     same ``resource_key`` (typically a build directory).
 
@@ -333,17 +346,23 @@ def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
     just around the subprocess and release it the moment it returns -- never
     while waiting on the lock. A gate timeout is reported in the same
     "FAILED (lock contention)" shape as a lock timeout.
+
+    ``lock_info`` (optional dict) receives ``start_wall``: ``time.time()`` taken
+    right after the build lock is acquired, so a freshness baseline never
+    predates another holder's build of the same directory.
     """
     if wait_timeout is None:
         wait_timeout = float(kwargs.get("timeout", 900)) + 90.0
     started = time.monotonic()
     try:
         with build_lock(resource_key, wait_timeout=wait_timeout):
+            if lock_info is not None:
+                lock_info["start_wall"] = time.time()
             if gate_label is None:
                 return _run(tag, argv, **kwargs)
             try:
                 with kiln_build_gate(gate_label, wait_result=gate_wait):
-                    kwargs["env"] = child_env(kwargs.get("env"))
+                    kwargs["env"] = child_env(_clean_env(kwargs.get("env")))
                     return _run(tag, argv, **kwargs)
             except TimeoutError as exc:
                 return f"{tag}: FAILED (lock contention) -- {exc}"
@@ -410,7 +429,7 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
             sdk_path = resolve_pico_sdk_path()
         except PicoSdkNotFoundError as exc:
             return f"{tag}: error: {exc}"
-        configure_env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+        configure_env = _clean_env()
         configure_env["PICO_SDK_PATH"] = sdk_path
         configure_argv = ["cmake", "-S", src, "-B", build_dir, "-G", "Ninja"]
         result = _run_locked(f"{tag}-configure", build_dir, configure_argv, cwd=src, env=configure_env)
@@ -433,6 +452,131 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
 #: Puts idf.py, cmake, ninja and the Xtensa toolchain on PATH in one step.
 #: Everything else is a partial environment that fails later and less clearly.
 _IDF_PROFILE = r"C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
+
+
+_MSYS_MESSAGE = "MSys/Mingw is no longer supported"
+
+#: Only KilnCtrl.bin is judged fresh: it always relinks (drivers_build_info is an
+#: ALL target that rewrites build_info.h every build). ninja leaves
+#: bootloader.bin / partition-table.bin untouched on an incremental build.
+_KILNFW_APP_BIN = ("KilnCtrl.bin",)
+_KILNFW_STATIC_BINS = (
+    ("bootloader", "bootloader.bin"),
+    ("partition_table", "partition-table.bin"),
+)
+_FRESH_TOLERANCE_S = 2.0
+
+
+def _msys_output_problems(output: str) -> "list[str]":
+    """``output_check`` for every kilnfw-* step: idf.py exits 0 doing nothing
+    when MSYSTEM leaked into its environment."""
+    if _MSYS_MESSAGE in output:
+        return [f"idf.py reported '{_MSYS_MESSAGE}'"]
+    return []
+
+
+def _app_image_problem(path: str) -> "Optional[str]":
+    """Problem text for a bad/short image (esp_app_desc_t magic), else None.
+    The desc build time is deliberately NOT read: an incremental build does not
+    recompile app_desc's TU, so it is old while the link rewrites the .bin."""
+    from kilnctrl.esp_app_desc import AppDescError, parse_app_desc_file
+    try:
+        parse_app_desc_file(path)
+    except AppDescError as exc:
+        return f"not a valid app image: {path} ({exc})"
+    except OSError as exc:
+        return f"unreadable: {path} ({exc})"
+    return None
+
+
+def _enforce_fresh_artifacts(report: str, tag: str, build_dir: str, since: float) -> str:
+    """Downgrade an OK ``tag`` report unless the build produced a usable app.
+
+    ``KilnCtrl.bin`` must exist, be non-empty, carry the esp_app_desc_t magic and
+    be fresh (its mtime at or after ``since`` less 2 s; never the embedded build
+    time, which an incremental build leaves old). ``bootloader.bin`` and ``partition-table.bin`` only have to exist and be
+    non-empty: an incremental build legitimately leaves them old."""
+    ok_prefix = f"{tag}: OK"
+    if ok_prefix not in report:
+        return report
+    problems = []
+    app = os.path.join(build_dir, *_KILNFW_APP_BIN)
+    try:
+        app_mtime = os.path.getmtime(app)
+        app_size = os.path.getsize(app)
+    except OSError:
+        problems.append(f"missing: {app}")
+    else:
+        if app_size <= 0:
+            problems.append(f"empty (0 bytes): {app}")
+        else:
+            bad = _app_image_problem(app)
+            if bad:
+                problems.append(bad)
+            else:
+                # mtime, not the embedded desc time: the desc time comes from the
+                # last recompile of app_desc's TU, which an incremental build does
+                # not redo (observed 2026-10-12), while the link rewrites the .bin.
+                stamp = app_mtime
+                if stamp < since - _FRESH_TOLERANCE_S:
+                    problems.append(f"stale (older than job start): {app}")
+    for parts in _KILNFW_STATIC_BINS:
+        path = os.path.join(build_dir, *parts)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            problems.append(f"missing: {path}")
+            continue
+        if size <= 0:
+            problems.append(f"empty (0 bytes): {path}")
+    if not problems:
+        return report
+    return _downgrade(report, tag, "exit code OK but build artifacts not usable", problems)
+
+
+def _downgrade(report: str, tag: str, why: str, problems: "list[str]") -> str:
+    lines = report.splitlines()
+    log_line = next((ln for ln in lines if ln.startswith("full log:")), "full log: (unknown)")
+    tail = "\n".join(lines[1:][-25:])
+    return (f"{tag}: FAILED ({why}): " + "; ".join(problems)
+            + f"\n{log_line}\n--\noutput tail:\n{tail}")
+
+
+def _enforce_target_effect(report: str, target: str, build_dir: str, since: float) -> str:
+    """reconfigure must have rewritten CMakeCache.txt; fullclean must leave
+    build/ empty or absent. Guards an OK that came from a no-op wrapper."""
+    tag = f"kilnfw-{target}"
+    if f"{tag}: OK" not in report:
+        return report
+    problems = []
+    if target == "reconfigure":
+        cache = os.path.join(build_dir, "CMakeCache.txt")
+        try:
+            if os.path.getmtime(cache) < since - _FRESH_TOLERANCE_S:
+                problems.append(f"stale (older than job start): {cache}")
+        except OSError:
+            problems.append(f"missing: {cache}")
+    elif target == "fullclean":
+        try:
+            left = os.listdir(build_dir)
+        except OSError:
+            left = []
+        if left:
+            problems.append(f"build dir not empty after fullclean: {build_dir} "
+                            f"({len(left)} entries, e.g. {left[0]})")
+    if not problems:
+        return report
+    return _downgrade(report, tag, "exit code OK but target had no effect", problems)
+
+
+def _idf_command(inner: str, tool: str = "idf.py") -> str:
+    """PowerShell -Command text: load the IDF profile, then run ``inner`` such
+    that a missing tool or a command that never set $LASTEXITCODE is a failure,
+    never exit 0."""
+    return (f"& '{_IDF_PROFILE}' *>&1 | Out-Null; $ErrorActionPreference='Stop'; "
+            f"if (-not (Get-Command {tool} -ErrorAction SilentlyContinue)) {{ exit 97 }}; "
+            f"$global:LASTEXITCODE=$null; {inner}; "
+            f"if ($null -eq $LASTEXITCODE) {{ exit 98 }}; exit $LASTEXITCODE")
 
 
 def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False,
@@ -461,7 +605,7 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     `kiln_fw_root`" section) -- neither is a full build, so neither goes
     through the build gate.
 
-    2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW APPLICATION build
+    2026-09-20 (docs/PICO_AUTO_UPDATE.md): the KilnFW APPLICATION build
     now ``EMBED_FILES`` two SaftyFW slot images
     (``firmware/SaftyFW/build/SaftyFW_slotA.bin``/``slotB.bin``) so the ESP
     can update the Pico automatically at boot, and fails at CMake configure
@@ -547,7 +691,8 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
         if not os.path.isfile(os.path.join(lvgl_dir, "CMakeLists.txt")):
             submodule_result = _run_locked(
                 "kilnfw-submodule-init", kiln_fw_dir,
-                ["git", "submodule", "update", "--init", "components/lvgl"], cwd=kiln_fw_dir)
+                ["git", "submodule", "update", "--init", "components/lvgl"], cwd=kiln_fw_dir,
+                output_check=_msys_output_problems)
             if "kilnfw-submodule-init: OK" not in submodule_result:
                 return submodule_result
             setup_note += f"{submodule_result}\n"
@@ -571,13 +716,15 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
             set_target_result = _run_locked(
                 "kilnfw-set-target", kiln_fw_dir,
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-                 f"& '{_IDF_PROFILE}' *>&1 | Out-Null; idf.py -C '{kiln_fw_dir}' set-target esp32s3; "
-                 f"exit $LASTEXITCODE"])
+                 _idf_command(f"idf.py -C '{kiln_fw_dir}' set-target esp32s3")],
+                output_check=_msys_output_problems)
             if "kilnfw-set-target: OK" not in set_target_result:
                 return f"{setup_note}{set_target_result}"
             setup_note += f"{set_target_result}\n"
+    tool = "idf.py"
     if jobs > 0 and target == "build":
         inner = f"cd '{build_dir}'; ninja -j {jobs}"
+        tool = "ninja"
     else:
         inner = f"idf.py -C '{kiln_fw_dir}' {target}"
     # powershell.exe does NOT propagate a native command's exit code as its own
@@ -586,9 +733,11 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     # or ninja failed, which is exactly the false-pass bug this wrapper exists
     # to avoid. See _MSYS_ENV_VARS above for the sibling false-pass this same
     # command is also guarding against.
-    command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
+    command = _idf_command(inner, tool)
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
+    job_start_wall = time.time()  # fallback; replaced by the post-lock time below
+    lock_info: "dict[str, float]" = {}
     wait_result = GateWaitResult()
     # Lock first, slot only around the compile (inside _run_locked).
     kilnfw_report = _run_locked(
@@ -596,7 +745,15 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
         timeout=_build_ceiling_seconds(),
         stall_seconds=_env_seconds("KILNCTL_BUILD_STALL_S", 900),
-        gate_label=f"kilnfw-{target}", gate_wait=wait_result)
+        gate_label=f"kilnfw-{target}", gate_wait=wait_result, lock_info=lock_info,
+        output_check=_msys_output_problems)
+    job_start_wall = lock_info.get("start_wall", job_start_wall)
+    if target == "build":
+        kilnfw_report = _enforce_fresh_artifacts(kilnfw_report, "kilnfw-build", build_dir,
+                                                 job_start_wall)
+    else:
+        kilnfw_report = _enforce_target_effect(kilnfw_report, target, build_dir,
+                                               job_start_wall)
     if "FAILED (lock contention)" in kilnfw_report and saftyfw_report:
         return f"{saftyfw_report}\n\n{kilnfw_report}"
     if wait_result.waited_seconds > 0:

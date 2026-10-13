@@ -3,7 +3,7 @@
 2026-09-08. Harness: `firmware/KilnFW/App/test/sim_wide_temp_sweep.c` (new,
 host-only, `main()`-style data generator, not a `TEST_CHECK` suite). Links
 the real `pid.c`, `heater_output.c`, `zone_coupling_solve.c` and
-`sim_plant.c` unmodified, per ITER_TUNE_REDESIGN_PLAN.md sec 6.3. Raw output
+`sim_plant.c` unmodified, per ITER_TUNE_REDESIGN.md sec 6.3. Raw output
 captured in `firmware/KilnFW/App/test/build/sweep_out.txt` (regenerate with
 the build command in the harness file's header comment).
 

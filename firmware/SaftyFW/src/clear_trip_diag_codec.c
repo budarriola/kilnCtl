@@ -21,7 +21,7 @@
 //   [7]     tc_valid
 //   [6]     spi_failed
 //   [5]     tc_c_is_nan
-//   [4:2]   outcome (safety_clear_trip_outcome_t, 3 bits, values 0-3 all fit)
+//   [4:2]   outcome (safety_clear_trip_outcome_t, 3 bits, values 0-4 all fit)
 //   [1:0]   reserved, always 0
 #define CLEAR_TRIP_DIAG_MAGIC_SHIFT 24u
 #define CLEAR_TRIP_DIAG_STAGE_SHIFT 20u

@@ -148,11 +148,8 @@ typedef enum {
 typedef struct {
     bool     tick_stale;               /* control task's own liveness tick is too old (guard 9 proper) */
     uint32_t tick_stale_ms;            /* how long, for the fault_reason text; meaningful only if tick_stale */
-    bool     safety_processor_tripped; /* diag_state == TRIPPED off a FRESH (non-stale) DIAG frame --
-                                         * the caller is responsible for the staleness gate (against
-                                         * SAFETY_LINK_STALE_MS) before setting this, same as the
-                                         * caller already gates safety_link_silent_30s below against
-                                         * its own, much larger threshold. */
+    bool     safety_processor_tripped; /* cached diag_state == TRIPPED, counted at ANY age (SAFETYFX7 I-1: a stale
+                                         * DIAG never relabels a trip as OK); only the K4 timing uses freshness. */
     uint8_t  safety_trip_reason;       /* SAFETY_TRIP_* (SaftyFW's safety_guards.h); meaningful only if
                                          * safety_processor_tripped */
     bool     safety_link_silent_30s;   /* link silent >= SAFETY_LINK_FIRING_ABORT_SILENCE_MS */
@@ -188,6 +185,7 @@ static inline const char *profile_executor_safety_trip_words(uint8_t reason)
     case 1:  return "chamber over absolute temperature limit (S1)";
     case 2:  return "chamber over setpoint for too long (S2)";
     case 3:  return "relay/contactor stuck on, no heat commanded (S3)";
+    case 4:  return "safety test trip requested by administrator (TEST)";
     case 5:  return "safety thermocouple reading invalid (S5)";
     case 6:  return "main controller (ESP) reported a fault (S6a)";
     case 7:  return "safety link to main controller went silent (S6b)";
@@ -351,7 +349,7 @@ typedef struct {
 typedef enum {
     PROFILE_EXEC_RELAY_DENIED_NONE = 0,
     /* The zone is typed ZONE_TYPE_ON_OFF and the profile has no enabled
-     * on/off rule for it in the current segment, so docs/ON_OFF_ZONE_PLAN.md
+     * on/off rule for it in the current segment, so docs/ON_OFF_ZONE.md
      * sec 3 rule 6 holds the relay OFF -- regardless of what its (unused)
      * control mode's duty says. profile_executor_run() refuses a profile
      * where this would hold for EVERY segment; this reports the per-segment
@@ -480,6 +478,14 @@ size_t profile_executor_get_history_count(void);
  * its own -- at 2880 entries that's real memory, worth not doubling up. */
 size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_index, size_t max_entries);
 
+/* Samples zone `zone`'s actual_c at n ascending run-relative times t_s[] with
+ * ONE acquisition of the executor lock (LCD audit L24/L27). Each time is matched
+ * to the retained entry whose elapsed_s is nearest (not ring index * period, so
+ * a wrapped ring or a sampling gap stays correct); out_c[i] is NAN when no entry
+ * lies within tol_s, the sample is invalid, or the ring is empty. Returns how
+ * many out_c values are non-NAN. */
+size_t profile_executor_history_sample_actual(uint8_t zone, const float *t_s, size_t n, float tol_s, float *out_c);
+
 /* Brings the module up and starts its control task plus a second,
  * independent watchdog task (guard 9 -- "a control loop cannot be its own
  * watchdog", TODO.md 6A.3). Matches every other driver's
@@ -537,12 +543,26 @@ void profile_executor_halt(void);
  * (leaves fault_reason as whatever a prior fault already set, or empty). */
 void profile_executor_fault_halt(const char *reason);
 
+/* Register a non-executor holder of SAFETY_FAULT_SRC_APP (boot safe-state latch). The executor
+ * then never releases the bit. Sticky for the boot; call BEFORE asserting the bit. */
+void profile_executor_note_external_app_hold(void);
+
 /* Pause/resume: pause drops every active zone's relays and freezes the
  * shared ramp/dwell schedule; resume picks up exactly where it left off.
  * Both return false (no state change) if the executor isn't in a state
  * where the transition makes sense. */
 bool profile_executor_pause(void);
+/* Same as profile_executor_pause(), recording `reason` (a string literal, at
+ * most 47 chars) in /api/profile_exec's pause_reason so an executor-initiated
+ * pause is distinguishable from an operator pause. */
+bool profile_executor_pause_with_reason(const char *reason);
+/* Watchdog-task variant: s_exec.lock take bounded to 1 s (returns false on timeout) so a wedged
+ * control task cannot block guard 9 / the 30 s link abort. */
+bool profile_executor_pause_with_reason_bounded(const char *reason);
 bool profile_executor_resume(void);
+/* F5HOLDERFX4 LOW-1: copies the reason the last profile_executor_resume() was refused by the start gate
+ * (e.g. "the safety processor is tripped ..."). Returns false and leaves an empty string when there is none. */
+bool profile_executor_resume_refusal(char *out, size_t cap);
 
 
 /* PID_EXPANSION_PLAN.md Phase 7a-2/7a-3: copies up to
@@ -591,7 +611,7 @@ bool profile_executor_get_active_id(uint8_t *out_id);
  * /api/status and the LCD, which must not materialize a profile_exec_status_t. */
 uint8_t profile_executor_aux_claim_mask(void);
 
-/* docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: GET /api/profile/live's one locked
+/* docs/LIVE_PROFILE_EDIT.md pass 2: GET /api/profile/live's one locked
  * read of the live-edit-relevant slice of s_exec -- the run's identity/
  * segment position (meaningful only while active), and the last definitive
  * pickup refusal (s_exec.live_edit_last_refusal). This is the ONLY sanctioned

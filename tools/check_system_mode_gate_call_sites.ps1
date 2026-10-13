@@ -1,5 +1,5 @@
 # checkcache: ok
-# check_system_mode_gate_call_sites.ps1 -- docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 6.
+# check_system_mode_gate_call_sites.ps1 -- docs/SYSTEM_MODE_GATE.md section 3.6 slice 6.
 # Every mutation handler (or the single helper a handler routes through) on the explicit
 # allowlist below must contain a system_mode_gate_check() call. Fails when:
 #   - an allowlisted function is missing from its file (rename/delete: cannot go vacuous),

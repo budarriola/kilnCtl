@@ -532,6 +532,17 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 
   const belowCeiling = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1100, max_ramp_c_per_hr: 200 }], 1200);
   assert(belowCeiling.valid === true, 'step6: a zone max_temp_c below the Pico ceiling is allowed');
+
+  // Raw %.9g zone max vs the Pico ceiling printed %.6g (review PROFILESFX5 MED-1).
+  const fracEqual = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.30005, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracEqual.valid === true, 'step6: raw 1260.30005 vs printed ceiling 1260.3 is accepted');
+  const fracOver = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.5, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracOver.valid === false, 'step6: a genuinely over fractional max (1260.5 vs 1260.3) is refused');
+  const fracJustOver = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.35, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracJustOver.valid === false, 'step6: 1260.35 vs 1260.3 (0.05 over, past kgR6) is refused -- no 0.1 slack');
+  // kgR6 vs the pre-fix 0.01 slack (REVIEW_ZPRECFX5 LOW-3): old code accepted 1260.305 <= 1260.3 + 0.01.
+  const fracSlack = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.305, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracSlack.valid === false, 'step6: 1260.305 vs 1260.3 is refused (kgR6 1260.31 > 1260.3) -- no 0.01 slack');
 })();
 
 // ---- getAbsMaxTempC(): reads the Pico's abs_max_temp_c off GET
@@ -834,7 +845,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // ct_installed=0 (:869) and the same treatment `deliberately_off` gets.
 (function testCtSkipPostsDoneNotSkipped() {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');
-  assert(/postStepState\(8, 'done', 'ct_installed=0, nothing to verify'\)/.test(html),
+  assert(/postStepState\(8, 'done', 'ct_installed=0, no check'\)/.test(html),
     'step8: the no-CT exit posts done (a complete answer), not skipped (which blocks forever)');
   assert(!/postStepState\(8, 'skipped', 'ct_installed=0, nothing to verify'\)/.test(html),
     'step8: the old skipped-forever call is gone');
@@ -963,6 +974,20 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(ctx.validateStep7(aboveCeiling, [1200]).valid === true,
     'step7: abs_max_temp_c above every zone ceiling is accepted');
 
+  const fracEq = Object.assign({}, base, { absMaxTempC: 1260.3 });
+  assert(ctx.validateStep7(fracEq, [1260.30005]).valid === true,
+    'step7: typed 1260.3 vs raw zone max 1260.30005 is accepted');
+  const fracUnder = Object.assign({}, base, { absMaxTempC: 1260.1 });
+  assert(ctx.validateStep7(fracUnder, [1260.30005]).valid === false,
+    'step7: a genuinely lower ceiling (1260.1 vs 1260.30005) is refused');
+  const fracJustUnder = Object.assign({}, base, { absMaxTempC: 1260.25 });
+  assert(ctx.validateStep7(fracJustUnder, [1260.3]).valid === false,
+    'step7: 1260.25 vs zone max 1260.3 (0.05 tighter, past kgR6) is refused -- no 0.1 slack');
+
+  const fracSlack = Object.assign({}, base, { absMaxTempC: 1260.294 });
+  assert(ctx.validateStep7(fracSlack, [1260.3]).valid === false,
+    'step7: 1260.294 vs zone max 1260.3 is refused (kgR6 1260.29 < 1260.3) -- no 0.01 slack');
+
   const belowCeiling = Object.assign({}, base, { absMaxTempC: 1000 });
   const v = ctx.validateStep7(belowCeiling, [1200]);
   assert(v.valid === false, 'step7: abs_max_temp_c BELOW a zone max_temp_c is refused, not clamped');
@@ -1056,6 +1081,100 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const liveMinTempOnly = [{ max_temp_c: 1200, max_ramp_c_per_hr: 200, min_temp_c: 5 }];
   assert(ctx.step6LimitConfirmLines(prior, liveMinTempOnly, 1).length === 0,
     'step6: a changed min_temp_c alone produces no confirm line');
+})();
+
+// ---- Lossless unedited save (zprecfx3 MED-1/LOW-1): inputs show kgR6(raw)
+// but remember the exact GET value; an unedited field must post raw and must
+// not trip the ceiling-change confirm.
+function parseInputsFromHtml(html) {
+  const inputs = {};
+  const re = /<input\b([^>]*)>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const attrs = {};
+    const are = /([\w-]+)="([^"]*)"/g;
+    let a;
+    while ((a = are.exec(m[1]))) attrs[a[1]] = a[2];
+    const cls = attrs['class'];
+    let val = attrs.value;
+    inputs[cls] = { get value() { return val; }, set value(v) { val = String(v); }, getAttribute: (k) => (k in attrs ? attrs[k] : null) };
+  }
+  return inputs;
+}
+function fakeStep6El(htmlByZone) {
+  const cards = htmlByZone.map((h) => parseInputsFromHtml(h));
+  return {
+    cards,
+    querySelector: (sel) => {
+      const mm = /data-zone="(\d+)"/.exec(sel);
+      const card = cards[Number(mm[1])];
+      return { querySelector: (cs) => card[cs.replace(/^\./, '')] || null };
+    },
+  };
+}
+
+(function testWizardKgR6AndKgPost() {
+  const ctx = loadPageScript(noopFetch);
+  assert(ctx.kgR6(null) === '' && ctx.kgR6(undefined) === '', 'wizard kgR6: null/undefined render empty');
+  assert(ctx.kgR6(NaN) === '', 'wizard kgR6: NaN renders empty');
+  assert(ctx.kgR6(123.400002) === 123.4, 'wizard kgR6: rounds to 6 significant digits');
+  assert(ctx.formatZoneLimitC(1260.30005) === '1260.3\u00b0C', 'wizard formatZoneLimitC rounds via kgR6');
+  const raw = { 'data-raw': '123.400002', 'data-disp': '123.4' };
+  const mk = (value) => ({ value, getAttribute: (k) => (k in raw ? raw[k] : null) });
+  assert(ctx.kgPost(mk('123.4')) === '123.400002', 'wizard kgPost: unedited posts raw');
+  assert(ctx.kgPost(mk('500')) === '500', 'wizard kgPost: edited posts the edited value');
+})();
+
+(function testWizardStep6UneditedSaveIsLossless() {
+  const ctx = loadPageScript(noopFetch);
+  const zones = [{ name: 'Z', zone_type: 0, max_temp_c: 123.400002, max_ramp_c_per_hr: 123.400002, min_temp_c: -20.1000004, cal_offset_c: 0.100000024 }];
+  const el = fakeStep6El([ctx.step6ZoneRowHtml(0, zones[0])]);
+  assert(String(el.cards[0].s6maxtemp.value) === '123.4' && String(el.cards[0].s6ramp.value) === '123.4' && String(el.cards[0].s6mintemp.value) === '-20.1',
+    'step6: inputs display the 6-digit rounded value');
+  const live = ctx.step6ReadLiveZones(el, zones, 1);
+  assert(ctx.step6LimitConfirmLines(zones, live, 1).length === 0,
+    'step6: unedited fractional max_temp/max_ramp gives zero confirm lines');
+  const q = ctx.zoneToPostParams(live[0], 0).join('&');
+  assert(q.indexOf('z0_maxtemp=123.400002') >= 0, 'step6: unedited save posts raw max_temp');
+  assert(q.indexOf('z0_ramp=123.400002') >= 0, 'step6: unedited save posts raw max_ramp');
+  assert(q.indexOf('z0_mintemp=-20.1000004') >= 0, 'step6: unedited save posts raw min_temp');
+  // Edited value posts the edited value and does produce a confirm line.
+  el.cards[0].s6maxtemp.value = '1300';
+  const live2 = ctx.step6ReadLiveZones(el, zones, 1);
+  assert(ctx.zoneToPostParams(live2[0], 0).join('&').indexOf('z0_maxtemp=1300') >= 0,
+    'step6: edited max_temp posts the edited value');
+  assert(ctx.step6LimitConfirmLines(zones, live2, 1).length === 1, 'step6: edited max_temp gives a confirm line');
+  // Revert puts the displayed (rounded) value back and the field reads unedited again.
+  el.cards[0].s6ramp.value = '999';
+  ctx.step6RevertInputsOn(el, zones, 1);
+  assert(String(el.cards[0].s6maxtemp.value) === '123.4', 'step6RevertInputs restores the displayed value');
+  assert(String(el.cards[0].s6ramp.value) === '123.4', 'step6RevertInputs restores the displayed ramp value');
+  assert(ctx.step6LimitConfirmLines(zones, ctx.step6ReadLiveZones(el, zones, 1), 1).length === 0,
+    'step6RevertInputs: reverted fields read as unedited');
+})();
+
+(function testWizardStep3CalUneditedPostsRaw() {
+  const ctx = loadPageScript(noopFetch);
+  const z = { tc_type: 3, cal_offset_c: 0.100000024 };
+  const inputs = parseInputsFromHtml(ctx.step3ZoneRowHtml(0, z));
+  assert(inputs.s3cal.getAttribute('data-raw') === '0.100000024', 'step3: cal input carries data-raw');
+  assert(String(inputs.s3cal.value) === '0.1', 'step3: cal input displays the rounded value');
+  assert(ctx.kgPost(inputs.s3cal) === '0.100000024', 'step3: unedited cal posts raw');
+  const card = { querySelector: (cs) => (cs === '.s3type' ? { value: '3' } : inputs[cs.replace(/^\./, '')]) };
+  const doc0 = ctx.document;
+  ctx.document = Object.assign({}, doc0, { querySelector: () => card });
+  assert(ctx.step3ReadCurrentZones(1, [{}])[0].cal_offset_c === 0.100000024, 'step3: unedited read-back keeps the raw cal');
+  inputs.s3cal.value = '0.5';
+  assert(ctx.step3ReadCurrentZones(1, [{}])[0].cal_offset_c === 0.5, 'step3: edited read-back uses the edited cal');
+})();
+
+(function testKgR6CopiesIdenticalToZonesPage() {
+  const zp = fs.readFileSync(resolveDriverFile(resolveDriversDir(__dirname), 'zones_page.html'), 'utf8').split('\n').map((l) => l.replace(/\r$/, ''));
+  const wz = fs.readFileSync(PAGE_PATH, 'utf8').split('\n').map((l) => l.replace(/\r$/, ''));
+  ['function kgR6(', 'function kgRawAttrs(', 'function kgPost('].forEach((pre) => {
+    const a = zp.find((l) => l.indexOf(pre) === 0), b = wz.find((l) => l.indexOf(pre) === 0);
+    assert(!!a && a === b, 'drift pin: ' + pre + ' identical in zones_page.html and setup_wizard_page.html');
+  });
 })();
 
 // ---- commissioning_shared.js: the read-back verification itself (Non-

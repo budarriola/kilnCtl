@@ -296,7 +296,7 @@ Commit hashes cited above, each verified present in this repository
 
 **Still gated.** `sim_credibility_gate` still FAILS (dwell offset 5 of 6, plus z2
 CALIBRATION ramp MAE), by decision rather than by omission. Per
-`ITER_TUNE_REDESIGN_PLAN.md` sec 6.5's own stated consequence, `sim_iter_tune.c`
+`ITER_TUNE_REDESIGN.md` sec 6.5's own stated consequence, `sim_iter_tune.c`
 and `sim_wide_temp_sweep.c` results remain internal-consistency checks only.
 
 The gate closes when the coupling matrix is **re-identified on hardware** via the

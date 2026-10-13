@@ -33,7 +33,7 @@ $failures = @()
 #
 #   strcmp(reason, "refused: relay is ARMED, config writes are refused while ARMED")
 #
-# `relay` matched the word inside that literal and failed the check. That
+# `\brelay\b` matched the word inside that literal and failed the check. That
 # line never touches GPIO6 or any relay API -- it is wire-protocol text being
 # mapped onto a rejection enum, i.e. prose that happens to live in a string
 # rather than in a comment. Treating it as a violation would have pushed

@@ -240,7 +240,8 @@ class ZoneTests(unittest.TestCase):
     def test_zone11_exact_key_paths(self):
         z = zones_body()
         z["zones"][0]["tuning_valid"] = True
-        z["zones"][0]["method"] = "x"
+        z["zones"][0]["tuning_method"] = "x"
+        z["zones"][0]["tuning_settled"] = True
         html = "tuningQuality firingStatsCurrent firingStatsHistory"
 
         def mk(pe, fh):
@@ -260,11 +261,62 @@ class ZoneTests(unittest.TestCase):
         # a sample_count NOT at zones[].firing_stats must not count
         self.assertEqual(run("WEB-ZONE-11", mk({"x": {"firing_stats": {"sample_count": 9}}}, {})).verdict, Verdict.FAIL)
 
+    def test_zone11_tuning_field_names(self):
+        html = "tuningQuality firingStatsCurrent firingStatsHistory"
+        pe = {"zones": [{"firing_stats": {"sample_count": 5}}]}
+
+        def ctx(zz):
+            z = zones_body()
+            z["zones"][0].update(zz)
+            return {"http_get_json": lambda p: (200, z) if p == "/api/zones" else (200, pe if p == "/api/profile_exec" else {}),
+                    "web_client": Web(html), "_results": {"HP-01": CaseResult(Verdict.PASS)}}
+        # healthy board after HP-01: real firmware keys
+        self.assertEqual(run("WEB-ZONE-11", ctx({"tuning_valid": True, "tuning_method": 1, "tuning_settled": True})).verdict, Verdict.PASS)
+        # old invented names are not accepted; the real ones are required
+        self.assertEqual(run("WEB-ZONE-11", ctx({"tuning_valid": True, "method": "x", "settled": True})).verdict, Verdict.FAIL)
+        self.assertEqual(run("WEB-ZONE-11", ctx({"tuning_valid": True, "tuning_method": 1})).verdict, Verdict.FAIL)
+
+    def test_zone06_relay_states_are_active(self):
+        html = "atStartBtn atAbortBtn atAcceptBtn atAckUnsettled /api/autotune/start /api/autotune/abort /api/autotune/accept"
+
+        def ctx(state):
+            return {"http_get_json": lambda p: (200, {"state": state}), "web_client": Web(html),
+                    "_results": {"AT-02": CaseResult(Verdict.PASS)}}
+        for ok in ("idle", "done", "aborted"):
+            self.assertEqual(run("WEB-ZONE-06", ctx(ok)).verdict, Verdict.PASS)
+        for active in ("relay_approach", "relay_cycling", "settling", "stepping"):
+            self.assertEqual(run("WEB-ZONE-06", ctx(active)).verdict, Verdict.FAIL)
+
+    def test_zone06_at01_relay_states_are_active(self):
+        html = "atStartBtn atAbortBtn atAcceptBtn atAckUnsettled /api/autotune/start /api/autotune/abort /api/autotune/accept"
+
+        def ctx(state):
+            return {"http_get_json": lambda p: (200, {"state": state}), "web_client": Web(html),
+                    "_results": {"AT-01": CaseResult(Verdict.PASS)}}
+        self.assertEqual(run("WEB-ZONE-06", ctx("done")).verdict, Verdict.PASS)
+        for active in ("relay_approach", "relay_cycling"):
+            self.assertEqual(run("WEB-ZONE-06", ctx(active)).verdict, Verdict.FAIL)
+
+    def test_zone03_fewer_relays_ok_and_short_zones_fail(self):
+        z = zones_body(relay_count=2)
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.PASS)
+        z = zones_body(relay_count=5)
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.FAIL)
+        z = zones_body()
+        z["zones"] = []
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.FAIL)
+
     def test_zone03(self):
         self.assertEqual(run("WEB-ZONE-03", self.ctx(zones_body())).verdict, Verdict.PASS)
         bad = zones_body()
         bad["zones"][0]["zone_type"] = 7
         self.assertEqual(run("WEB-ZONE-03", self.ctx(bad)).verdict, Verdict.FAIL)
+        # firmware emits failsafe_state as a JSON bool (zones_http_get.c)
+        b = zones_body()
+        b["zones"][0]["failsafe_state"] = False
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(b)).verdict, Verdict.PASS)
+        b["zones"][0]["failsafe_state"] = None
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(b)).verdict, Verdict.FAIL)
 
     def test_zone02_pass_identity(self):
         z = zones_body()
@@ -327,6 +379,75 @@ class ZoneTests(unittest.TestCase):
         self.assertEqual(run("WEB-ZONE-12", c).verdict, Verdict.PASS)
         del d["zones"][1]["model_fit_temp_c"]
         self.assertEqual(run("WEB-ZONE-12", c).verdict, Verdict.FAIL)
+
+
+class AuditTwoProfTests(unittest.TestCase):
+    """Web judge contract audit 2: L2, L7, L8, L9, M1 wrap."""
+
+    def _z09_with_autotune(self, state):
+        c = self._zone09(False)
+        base = c["http_get_json"]
+        c["http_get_json"] = lambda p: (200, {"state": state}) if p == "/api/autotune" else base(p)
+        return c
+
+    def test_l2_done_autotune_does_not_block_mutating_gate(self):
+        for st in ("done", "aborted"):
+            r = run("WEB-ZONE-09", self._z09_with_autotune(st))
+            self.assertNotEqual(r.verdict, Verdict.SKIP, r.reason)
+
+    def test_l2_running_autotune_still_blocks(self):
+        self.assertEqual(run("WEB-ZONE-09", self._z09_with_autotune("relay_cycling")).verdict, Verdict.SKIP)
+
+    def test_l7_live_blocks_do_not_fail_zone05(self):
+        n = {"i": 0}
+
+        def get(p):
+            if p == "/api/zones":
+                n["i"] += 1
+                zz = zones_body()
+                zz["safety_ceiling"]["pico_current_c"] = 1300 + n["i"]
+                return 200, zz
+            return 200, {"state": "idle"}
+        c = {"suite": "web", "http_get_json": get, "http_post_json": lambda p, f: (200, {"ok": True}),
+             "web_client": Web("")}
+        r = run("WEB-ZONE-05", c)
+        self.assertNotEqual(r.verdict, Verdict.FAIL, r.reason)
+
+    def _zone09(self, warn):
+        st = {"en": False}
+        n = {"posts": 0}
+
+        def get(p):
+            if p == "/api/adaptive_tune":
+                return 200, {"zones": [{"zone": 0, "enabled": st["en"]}]}
+            if p == "/api/zones":
+                return 200, zones_body()
+            return 200, {"state": "idle"}
+
+        def post(p, f):
+            st["en"] = f["enabled"] == "1"
+            n["posts"] += 1
+            return 200, ({"ok": True, "warning": "applied live, save failed"} if warn and n["posts"] == 1 else {"ok": True})
+        return {"suite": "web", "http_get_json": get, "http_post_json": post}
+
+    def test_l8_persist_warning_fails_zone09(self):
+        self.assertEqual(run("WEB-ZONE-09", self._zone09(True)).verdict, Verdict.FAIL)
+        self.assertEqual(run("WEB-ZONE-09", self._zone09(False)).verdict, Verdict.PASS)
+
+    def test_l9_sweep_started_between_reads_is_not_aborted(self):
+        reads = {"n": 0}
+        posted = []
+
+        def get(p):
+            if p == "/api/zones/current_sweep/status":
+                reads["n"] += 1
+                return 200, {"state": "idle" if reads["n"] == 1 else "running"}
+            return 200, {"state": "idle"}
+        c = {"suite": "web", "http_get_json": get, "http_post_json": lambda p, f: posted.append(p) or (200, {"ok": True}),
+             "web_client": Web("sweepStartBtn sweepAbortBtn")}
+        r = run("WEB-ZONE-10", c)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE, r.reason)
+        self.assertEqual(posted, [])
 
 
 if __name__ == "__main__":

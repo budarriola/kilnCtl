@@ -123,7 +123,7 @@ static esp_err_t settings_tz_post_handler(httpd_req_t *req)
          * live value took effect, so this is reported as an error to the
          * client rather than silently swallowed, but is not a 500: the
          * board is in a consistent (if not-yet-persisted) state. */
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, TIME_SYNC_TZ_FILE_PATH, err);
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -199,17 +199,19 @@ static esp_err_t settings_display_power_post_handler(httpd_req_t *req)
     body[received] = '\0';
 
     char field[16];
-    if (http_form_find_field(body, "brightness", field, sizeof(field)) <= 0) {
+    int br_len = http_form_find_field(body, "brightness", field, sizeof(field));
+    long brightness_raw = 0;
+    if (br_len <= 0 || !http_form_parse_long(field, br_len, -2147483647L, 2147483647L, &brightness_raw)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "brightness field missing or invalid");
         return ESP_OK;
     }
-    long brightness_raw = strtol(field, NULL, 10);
 
-    if (http_form_find_field(body, "timeout", field, sizeof(field)) <= 0) {
+    int to_len = http_form_find_field(body, "timeout", field, sizeof(field));
+    long timeout_raw = 0;
+    if (to_len <= 0 || !http_form_parse_long(field, to_len, -2147483647L, 2147483647L, &timeout_raw)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "timeout field missing or invalid");
         return ESP_OK;
     }
-    long timeout_raw = strtol(field, NULL, 10);
 
     if (http_form_find_field(body, "keep_on_while_firing", field, sizeof(field)) <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "keep_on_while_firing field missing or invalid");
@@ -243,7 +245,7 @@ static esp_err_t settings_display_power_post_handler(httpd_req_t *req)
          * (see its own comment) -- a non-OK here means the values took
          * effect for the rest of this boot but a save failed, same
          * "consistent but not-yet-persisted" reporting as the tz handler. */
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, DISPLAY_POWER_FILE_PATH, err);
     }
 
     httpd_resp_set_type(req, "application/json");

@@ -1,7 +1,7 @@
 # checkcache: ok
 # check_gate_negative_test_table.ps1 -- every check that run_all_checks.ps1
 # discovers must have a row in docs/audits/GATE_NEGATIVE_TEST_EVIDENCE.md
-# (docs/RELEASE_HARDENING_PLAN.md section 3, acceptance step 4), and every
+# (docs/RELEASE_HARDENING.md section 3, acceptance step 4), and every
 # row must name a check that still exists.
 #
 # A row whose status is "NOT AUDITED" is allowed: the point is that a gate is
@@ -32,8 +32,20 @@ $rows = @{}
 foreach ($l in (Get-Content $table)) {
     if ($l -match '^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|') { $rows[$Matches[1]] = $Matches[2] }
 }
-$valid = 'NEGATIVE-TESTED', 'PARTIAL', 'REVIEWED, NOT MUTATED', 'NOT AUDITED'
+# A non-blank line that directly follows a table row but does not start with '|' is a row
+# split by a mangled escape (e.g. a backslash-n path written as "tools" + newline).
 $bad = @()
+$inTable = $false
+$ln = 0
+foreach ($l in (Get-Content $table)) {
+    $ln++
+    if ($l -match '^\|') { $inTable = $true }
+    elseif ($inTable) {
+        if ($l.Trim() -eq '') { $inTable = $false }
+        else { $bad += "line ${ln}: non-table line inside the table block (split row?): $l" }
+    }
+}
+$valid = 'NEGATIVE-TESTED', 'PARTIAL', 'REVIEWED, NOT MUTATED', 'NOT AUDITED'
 foreach ($d in $discovered) {
     if (-not $rows.ContainsKey($d)) { $bad += "no row for discovered check: $d" }
 }

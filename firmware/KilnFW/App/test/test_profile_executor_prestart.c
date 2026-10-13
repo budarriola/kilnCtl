@@ -122,10 +122,23 @@ static void test_task_delay_hook(TickType_t ticks)
 // translation unit must still link.
 // ---------------------------------------------------------------------------
 
+static int g_pe_seq = 0;                 /* call-order spy shared by the two stubs below */
+static int g_seq_all_relays_off = 0;
+static int g_seq_set_fault_source = 0;
+static int g_kiln_io_all_relays_off_calls = 0;
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
 {
     (void)io;
+    g_kiln_io_all_relays_off_calls++;
+    g_seq_all_relays_off = ++g_pe_seq;
     return ESP_OK;
+}
+
+static bool g_kiln_io_relay_unknown = false;
+bool kiln_io_relay_state_unknown(const kiln_io_t *io)
+{
+    (void)io;
+    return g_kiln_io_relay_unknown;
 }
 
 // profile_executor_firing_stats.c's last-run cache (PROFILE_SLOTS_100.md
@@ -242,10 +255,10 @@ static void arm_test_thermo_bus(void)
     s_exec.thermo_bus = &s_test_thermo_bus;
 }
 
+static uint8_t g_stub_autotune_zone_bits; /* bit z set = autotune active on zone z */
 bool autotune_engine_is_active_on_zone(uint8_t zone_index)
 {
-    (void)zone_index;
-    return false;
+    return zone_index < 8 && (g_stub_autotune_zone_bits & (1u << zone_index)) != 0;
 }
 
 /* Instrumentation for the leave-on-at-end tests below -- records every
@@ -272,6 +285,17 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
         g_aux_write_log_n++;
     }
     return g_relay_write_fail ? ESP_FAIL : ESP_OK;
+}
+/* LOW-E: tests bump g_fake_off_epoch to model an all-off between a caller's gate decision and its post. */
+static uint32_t g_fake_off_epoch = 0;
+uint32_t kiln_io_relay_off_epoch(void) { return g_fake_off_epoch; }
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value, uint32_t since_epoch)
+{
+    if (since_epoch != g_fake_off_epoch && value != 0) {
+        (void)kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return kiln_io_owner_command_set_relay_mask_authorized(mask, value);
 }
 
 /* Spare-relay WP-3: controllable aux store. The executor's aux evaluator and
@@ -323,10 +347,12 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
 static int g_heat_zone_claim_begin_calls;
 /* MED-1 (review 3): models an update claim taken AFTER the early check: blocks only once the heat claim has been published. */
 static bool s_test_update_claim_after_heat_claim = false;
+static void s_test_tick_bump_on_update_refusal(void);
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap) reason_out[0] = '\0';
     if (s_test_update_claim_after_heat_claim && g_heat_zone_claim_begin_calls > 0) {
+        s_test_tick_bump_on_update_refusal();
         if (reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
         return true;
     }
@@ -352,15 +378,46 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     return true;
 }
 #endif
+// L23 (HTTP input parsing audit): profile_executor_run()'s locked re-check that
+// the copied slot is not being (or has not been) deleted. Default true so every
+// other test reaches past it unchanged.
+static bool s_test_slot_runnable = true;
+#ifndef PEX_STORE_LINK_TEST
+bool profiles_http_slot_runnable(uint8_t id)
+{
+    (void)id;
+    return s_test_slot_runnable;
+}
+// L23 residual: revision capture. s_test_slot_rev_bump_on_capture simulates a
+// delete + re-save landing between the capture and the locked re-check.
+static uint32_t s_test_slot_rev = 7;
+static bool s_test_slot_rev_bump_on_capture = false;
+uint32_t profiles_http_slot_rev(uint8_t id)
+{
+    (void)id;
+    uint32_t r = s_test_slot_rev;
+    if (s_test_slot_rev_bump_on_capture) {
+        s_test_slot_rev++;
+    }
+    return r;
+}
+bool profiles_http_loaded(void) { return true; }
+bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
+{
+    return profiles_http_slot_runnable(id) && captured_rev == s_test_slot_rev;
+}
+#endif
 
 // Settable for the M13 fault-source-decode negative test below -- see
 // s_test_profiles_http_get_ok's comment for the pattern. Default false
 // (matching the old hardcoded behavior) for every other test in this file.
 static bool s_test_relay_authority_blocked = false;
 static uint32_t s_test_relay_authority_blocked_sources = 0;
+static bool s_test_bump_epoch_in_aux_gate = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
     (void)safety;
+    if (s_test_bump_epoch_in_aux_gate) g_fake_off_epoch++; /* LOW-3: an all-off lands during the aux gate */
     if (out_sources) *out_sources = s_test_relay_authority_blocked ? s_test_relay_authority_blocked_sources : 0;
     return s_test_relay_authority_blocked;
 }
@@ -371,10 +428,12 @@ bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 // below and the guard-scenario tests for why this needed to become
 // controllable rather than a bare `return false;`.
 static bool s_test_relay_authority_zone_blocked = false;
+static bool s_test_bump_epoch_in_gate = false;
 static uint32_t s_test_relay_authority_zone_blocked_sources = 0;
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
+    if (s_test_bump_epoch_in_gate) g_fake_off_epoch++; /* an all-off lands during the gate decision */
     if (out_sources) *out_sources = s_test_relay_authority_zone_blocked ? s_test_relay_authority_zone_blocked_sources : 0;
     return s_test_relay_authority_zone_blocked;
 }
@@ -439,6 +498,12 @@ void relay_authority_claim_mask(uint8_t relay_mask, relay_owner_t owner)
     g_relay_claim_calls++;
     g_last_claim_mask = relay_mask;
     g_last_claim_owner = owner;
+}
+
+static relay_owner_t g_stub_relay_owner[9]; /* index = 1-based relay number; default RELAY_OWNER_NONE */
+relay_owner_t relay_authority_get_owner(uint8_t relay_index)
+{
+    return relay_index < 9 ? g_stub_relay_owner[relay_index] : RELAY_OWNER_NONE;
 }
 
 void relay_authority_release_mask(uint8_t relay_mask)
@@ -547,8 +612,19 @@ void relay_cycles_add(uint8_t relay_mask, uint32_t cycles)
     g_relay_cycles_last_mask = relay_mask;
 }
 
+/* Flash-worker lock-inversion audit 2026-10-09 F1: the real
+ * relay_cycles_maybe_persist() dispatches reset_persist_job to bx_flash_worker
+ * and waits portMAX_DELAY, while the worker's UART profile handlers take
+ * s_exec.lock -- so calling it with s_exec.lock held deadlocks. Count calls
+ * and record any made while a stub semaphore is held. */
+static int g_relay_cycles_persist_calls = 0;
+static int g_relay_cycles_persist_under_lock = 0;
 void relay_cycles_maybe_persist(void)
 {
+    g_relay_cycles_persist_calls++;
+    if (g_test_stub_lock_depth > 0) {
+        g_relay_cycles_persist_under_lock++;
+    }
 }
 
 esp_err_t relay_cycles_flush(void)
@@ -581,12 +657,12 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
     (void)snap;
 }
 
-/* Fakes for FILESYSTEM_PLAN.md's dual-write window (drivers/persist/
+/* Fakes for FILESYSTEM.md's dual-write window (drivers/persist/
  * dualwrite_window.h/cfg_fs.h): profile_executor.c's PROFILE_EXEC_DONE
  * transitions call cfg_fs_is_available() to gate a
  * dualwrite_window_note_firing_complete() call. cfg_fs_is_available() USED
  * to be a fake here (always false) -- now the REAL cfg_fs.c is linked in
- * instead (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 9: adaptive_
+ * instead (docs/FILESYSTEM_USER_DATA.md section 5 item 9: adaptive_
  * tune.c, also linked into this executable, now calls into pref_cfg_fs.c,
  * which needs cfg_fs_write_atomic()/cfg_fs_read()/cfg_fs_is_available() for
  * real -- a second fake definition of just cfg_fs_is_available() here would
@@ -600,32 +676,80 @@ void dualwrite_window_note_firing_complete(void)
 {
 }
 
+/* Controllable: default ESP_FAIL (no status). The aux fault-drop tick tests
+ * set g_stub_safety_rc/g_stub_safety_st to drive the Pico-tripped derivation. */
+static esp_err_t g_stub_safety_rc = ESP_FAIL;
+static safety_link_status_t g_stub_safety_st;
+
+/* LD-01: relay_authority_start_blocked() (the start gate) reads link_up through this stub.
+ * Default: link up, so the many tests that reach the gate stay unaffected; aux_tick_case() turns
+ * it off to keep its explicit rc/st control, and the LD-01 test drives g_stub_link_mode. */
+static bool g_stub_force_link_up = true;
+static int g_stub_link_calls = 0; /* mode 5 only: calls seen since the test armed it */
+static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INVALID_STATE), 3 = ESP_FAIL, 4 = NULL link (INVALID_ARG) */
+
+static bool g_stub_diag_tripped = false;      /* F5HOLDERFX3: the Pico DIAG reads TRIPPED ... */
+static uint16_t g_stub_diag_age_ms = 0;        /* ... with this age (fresh unless >= SAFETY_LINK_STALE_MS) */
+static bool g_stub_diag_since_reboot = true;     /* F5HOLDERFX4: ... independent of diag_ever_received */
+static bool g_stub_diag_received = true;        /* F5HOLDERFX4: a DIAG was received since the Pico's reboot ... */
+static uint32_t g_stub_diag_frame_age_ms = 0;   /* ... this old (diag_frame_age_ms; age_ms is the STATUS age) */
+static bool s_test_bump_epoch_in_link = false; /* LOW-3: an all-off lands during every start-gate link read */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
-    if (out) memset(out, 0, sizeof(*out));
-    return ESP_FAIL;
+    if (s_test_bump_epoch_in_link) g_fake_off_epoch++;
+    if (g_stub_force_link_up) {
+        /* LOW-1: error returns leave garbage that looks link-up (the real function leaves *out untouched). */
+        if (g_stub_link_mode >= 2 && g_stub_link_mode <= 4) {
+            if (out) memset(out, 0xFF, sizeof(*out));
+            return g_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE
+                 : g_stub_link_mode == 3 ? ESP_FAIL : ESP_ERR_INVALID_ARG; /* 4 = NULL link */
+        }
+        if (out) memset(out, 0, sizeof(*out));
+        /* mode 5 = up on the first call (the entry gate), down on every later one (commit recheck). */
+        if (g_stub_link_mode == 5) g_stub_link_calls++;
+        if (out) {
+            out->diag_ever_received = g_stub_diag_received;
+            out->diag_since_reboot = g_stub_diag_since_reboot;
+            out->diag_frame_age_ms = g_stub_diag_frame_age_ms;
+            out->age_ms = g_stub_diag_age_ms;
+            if (g_stub_diag_tripped) out->diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+        }
+        if (out) out->link_up = (g_stub_link_mode == 0) || (g_stub_link_mode == 5 && g_stub_link_calls <= 1);
+        return ESP_OK;
+    }
+    if (out) {
+        if (g_stub_safety_rc == ESP_OK) *out = g_stub_safety_st;
+        else memset(out, 0, sizeof(*out));
+    }
+    return g_stub_safety_rc;
 }
 
 /* Spy state for the guard9_assert_stale_tick_fault() tests below (audit
  * 2026-08-27 item 2) -- every other test in this file leaves these unread. */
 static int      g_set_fault_source_calls = 0;
+static int      g_fault_source_deassert_count = 0;
 static uint32_t g_last_fault_source_mask = 0;
 static bool     g_last_fault_source_assert = false;
 
+static void (*g_on_deassert_hook)(void) = NULL;
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_mask, bool assert_fault)
 {
     (void)link;
+    if (!assert_fault && g_on_deassert_hook) { void (*hk)(void) = g_on_deassert_hook; g_on_deassert_hook = NULL; hk(); }
     g_set_fault_source_calls++;
+    g_seq_set_fault_source = ++g_pe_seq;
     g_last_fault_source_mask = source_mask;
     g_last_fault_source_assert = assert_fault;
+    if (!assert_fault) g_fault_source_deassert_count++;
     return ESP_OK;
 }
 
+static uint32_t g_stub_link_fault_sources = 0;
 uint32_t safety_link_get_fault_sources(SafetyLinkClass *link)
 {
     (void)link;
-    return 0;
+    return g_stub_link_fault_sources;
 }
 
 /* Spy for the heat-enable (K4) wiring tests below -- profile_executor.c now
@@ -672,6 +796,23 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c)
 uint32_t zones_config_generation(void)
 {
     return 0;
+}
+
+// HTTP audit E1 finding 1: a POST /api/zones commit landing after the heat claim is published is
+// modeled by the generation reading changed only once the claim has been taken.
+static bool s_test_zones_gen_bump_after_heat_claim = false;
+bool zones_config_changed_since(uint32_t gen_snapshot)
+{
+    (void)gen_snapshot;
+    return s_test_zones_gen_bump_after_heat_claim && g_heat_zone_claim_begin_calls > 0;
+}
+
+// Factory reset in flight: factory_reset.c's execute_scope() sets this mark before it re-checks the
+// heat claim and dispatches the erase. Modeled here as "set before the start reached its late check".
+static bool s_test_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void)
+{
+    return s_test_reset_in_flight;
 }
 
 // live_profile.c/profiles_http.c are the http/persist tier, deliberately not
@@ -1044,6 +1185,12 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
  * whether/why it was called, the same shape as g_stub_autotune_status. */
 static int g_autotune_abort_calls = 0;
 static char g_last_autotune_abort_reason[160];
+bool autotune_engine_abort_bounded(const char *reason, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    autotune_engine_abort(reason);
+    return true;
+}
 void autotune_engine_abort(const char *reason)
 {
     g_autotune_abort_calls++;
@@ -1267,7 +1414,7 @@ bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
 #include "fake_kv.h" /* fake_kv_reset_all()/fake_kv_set_write_safe_here() -- the firing-stats
                         * tests below call these directly. Was relying on an implicit
                         * declaration (C4013); now an error. */
-#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA.md
                        * section 5 item 7's firing-stats cfg-filesystem bridge tests, appended near the
                        * bottom of this file. */
 
@@ -1343,7 +1490,7 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_thermo_mask[zone_index] != 0;
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md step 1: same shape as g_stub_thermo_mask above --
+/* docs/ON_OFF_ZONE.md step 1: same shape as g_stub_thermo_mask above --
  * every zone defaults to HEATER (false) so every pre-existing test in this
  * file is bit-identical to before this field existed; step-2-shaped bit-
  * identical proof this file doesn't otherwise carry. */
@@ -1361,7 +1508,7 @@ bool zone_is_monitor_only(uint8_t zone_index)
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_zone_monitor_only[zone_index];
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3/7 -- on_off_trigger_decide's report-only
+/* docs/ON_OFF_ZONE.md sec 3/7 -- on_off_trigger_decide's report-only
  * wiring in profile_executor.c reads these every tick for an on/off zone.
  * Fixed, defaults-shaped fakes (never true/nonzero) so every pre-existing
  * test in this file, which never types a zone on/off, is unaffected; a
@@ -1474,9 +1621,23 @@ static void reset_readiness_facts_to_ready(void)
 // calls from it. Defaults false (no restore in progress), same "default
 // describes nothing wrong" convention as s_test_readiness_facts above.
 static bool s_test_restore_in_flight = false;
+/* MED-2 table: a restore that opens only AFTER the heat claim is published (the late recheck). */
+static bool s_test_restore_opens_after_heat_claim = false;
 bool backup_import_restore_in_flight(void)
 {
-    return s_test_restore_in_flight;
+    return s_test_restore_in_flight || (s_test_restore_opens_after_heat_claim && g_heat_zone_claim_begin_calls > 0);
+}
+
+static bool s_test_danger_mode_active = false;
+/* LCD review R2: danger mode that opens AFTER the heat claim is published (the late recheck). */
+static bool s_test_danger_opens_after_heat_claim = false;
+bool danger_mode_active(void)
+{
+    return s_test_danger_mode_active;
+}
+bool danger_mode_blocks_start(void)
+{
+    return s_test_danger_mode_active || (s_test_danger_opens_after_heat_claim && g_heat_zone_claim_begin_calls > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,6 +1716,16 @@ static void test_run_refused_by_restore_in_flight(void)
     run_and_expect_gate_refusal("a backup restore in flight refuses a firing at run()",
                                 "backup restore is in progress");
     s_test_restore_in_flight = false;
+}
+
+static void test_run_refused_by_danger_mode(void)
+{
+    /* LCD review N2: danger mode refuses a start at the shared choke point (LCD/UART/web). */
+    TEST_SECTION("profile_executor_run() is refused by the system mode gate -- danger mode active");
+    reset_readiness_facts_to_ready();
+    s_test_danger_mode_active = true;
+    run_and_expect_gate_refusal("danger mode refuses a firing at run()", "danger mode is active");
+    s_test_danger_mode_active = false;
 }
 
 static void test_run_refused_by_readiness_safety_trip(void)
@@ -1917,6 +2088,10 @@ static void reset_relay_claim_test_state(void)
     g_zone_claim_end_calls = 0;
     g_last_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
     g_last_zone_claim_mask = 0;
+    g_stub_link_fault_sources = 0;
+    pe_app_owner_foreign = false;
+    s_relay_unknown_fault_asserted = false;
+    s_guard9_bookkeeping_pending = false;
 }
 
 static void test_escalate_guard_trip_global_releases_relay_claim(void)
@@ -2053,7 +2228,7 @@ static void test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted(void)
     TEST_SECTION("escalate_guard_trip() per-zone trip, continue-on-trip policy -- "
                  "an on/off zone (a vent/fan, not a heat source) must not count toward "
                  "'the run is still alive', and must not itself block the FAULTED "
-                 "aggregation either (docs/ON_OFF_ZONE_PLAN.md sec 1, executor watchdog inputs row)");
+                 "aggregation either (docs/ON_OFF_ZONE.md sec 1, executor watchdog inputs row)");
     reset_relay_claim_test_state();
     g_continue_on_zone_trip = true;
     s_exec.zones[0].active = true; /* heater */
@@ -2147,6 +2322,51 @@ static void test_pause_keeps_claim_resume_reclaims_it(void)
               "resume() must reclaim RELAY_OWNER_PROFILE over the same mask");
 }
 
+/* REVIEW_LD01_WWFIX MED-1: resume shares the start gate. A down/unconfirmed/unreadable link refuses and
+ * leaves the run PAUSED with no heat request; the same call succeeds once the link is positively up. */
+static void test_resume_refuses_unless_link_positively_up(void)
+{
+    TEST_SECTION("profile_executor_resume() is gated on the link being positively up (LD-01 MED-1)");
+    for (int mode = 1; mode <= 4; mode++) {
+        reset_relay_claim_test_state();
+        s_exec.lock = xSemaphoreCreateMutex();
+        s_exec.safety = NULL;
+        s_exec.state = PROFILE_EXEC_PAUSED;
+        s_exec.claimed_relay_mask = 0x05;
+        s_test_relay_authority_blocked = false;
+        g_request_enable_true_calls = 0;
+        g_stub_link_mode = mode;
+        TEST_CHECK(!profile_executor_resume(), "resume refused while the link is not positively up");
+        TEST_CHECK(s_exec.state == PROFILE_EXEC_PAUSED, "run stays PAUSED after a refused resume");
+        TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request on a refused resume");
+    }
+    {
+        /* F5HOLDERFX4 LOW-1: a TRIPPED refusal carries its reason; a stale DIAG says to wait. */
+        char why[128] = {0};
+        reset_relay_claim_test_state();
+        s_exec.lock = xSemaphoreCreateMutex();
+        s_exec.safety = NULL;
+        s_exec.state = PROFILE_EXEC_PAUSED;
+        s_exec.claimed_relay_mask = 0x05;
+        s_test_relay_authority_blocked = false;
+        g_stub_link_mode = 0;
+        g_stub_diag_tripped = true;
+        TEST_CHECK(!profile_executor_resume(), "resume refused while the Pico is TRIPPED");
+        TEST_CHECK(profile_executor_resume_refusal(why, sizeof(why)) && strstr(why, "tripped") != NULL,
+                   "refusal reason names the trip");
+        g_stub_diag_tripped = false;
+        g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+        TEST_CHECK(!profile_executor_resume(), "resume refused on a stale DIAG");
+        TEST_CHECK(profile_executor_resume_refusal(why, sizeof(why)) && strstr(why, "waiting for the safety processor") != NULL,
+                   "stale-DIAG reason says to wait");
+        g_stub_diag_frame_age_ms = 0;
+    }
+    g_stub_link_mode = 0;
+    TEST_CHECK(profile_executor_resume(), "resume succeeds once the link is up");
+    TEST_CHECK(!profile_executor_resume_refusal((char[8]){0}, 8), "a successful resume leaves no refusal reason");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "state is RUNNING after the link-up resume");
+}
+
 // guard9_assert_stale_tick_fault() tests (audit 2026-08-27 item 2) --
 // guard9_assert_stale_tick_fault() is a plain static function, same
 // "reachable without a real task loop" case as escalate_guard_trip() above
@@ -2212,6 +2432,295 @@ static void test_guard9_fault_source_cleared_on_halt(void)
     TEST_CHECK(g_last_fault_source_mask == SAFETY_FAULT_SRC_APP, "must clear exactly the mask that was asserted");
     TEST_CHECK(g_last_fault_source_assert == false, "must clear (false), not assert again");
     TEST_CHECK(s_exec.global_fault_source == 0, "global_fault_source must be back to 0 after halt()");
+}
+
+static void test_relay_state_unknown_is_a_fault(void);
+static void test_guard9_watchdog_source_order(void);
+static void test_guard9_pending_verdict_survives_lock_timeout(void);
+static void test_heat_acquire_result_not_discarded(void);
+static void test_zone_off_pending_retry(void);
+static void test_zone_off_pending_retry_while_running(void);
+static void test_zone_off_pending_retry_ownership_edges(void);
+
+// Guard 9 audit 2026-10-09 item 1: the staleness test and the relay cut must
+// not wait on s_exec.lock. The host stub is single-threaded, so "another task
+// holds the lock" is modelled by a stub depth/take-failure: the prelock check
+// must make ZERO xSemaphoreTake calls (so a held lock cannot block it) and
+// the bounded take must give up (fail_nth) without hanging the watchdog.
+static void test_guard9_fires_while_another_task_holds_exec_lock(void)
+{
+    TEST_SECTION("guard 9 -- stale tick cuts relays and asserts the APP fault source with s_exec.lock "
+                 "held by another task (no lock taken before the cut)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = false;
+    /* Another task "holds" s_exec.lock: depth 1, and every Take would time out. */
+    g_test_stub_lock_depth = 1;
+    g_test_stub_semaphore_fail_nth = 1;
+    s_exec.last_tick_tick = (TickType_t)(0u - (TickType_t)pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u));
+    g_kiln_io_all_relays_off_calls = 0;
+    g_set_fault_source_calls = 0;
+
+    uint32_t since_ms = 0;
+    bool stale = guard9_prelock_check(&since_ms);
+
+    TEST_CHECK(stale, "stale tick must be detected lock-free");
+    TEST_CHECK(since_ms > WATCHDOG_TICK_DEAD_MS, "age reported");
+    TEST_CHECK(g_test_stub_semaphore_fail_nth == 1, "prelock check must not call xSemaphoreTake at all");
+    TEST_CHECK(g_kiln_io_all_relays_off_calls == 1, "relays forced off through kiln_io before any lock take");
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+                   g_last_fault_source_assert,
+               "SAFETY_FAULT_SRC_APP asserted without s_exec.lock");
+    TEST_CHECK(s_guard9_bookkeeping_pending, "locked bookkeeping is left pending for the next obtainable lock");
+    /* The bounded take gives up instead of blocking forever. */
+    TEST_CHECK(!guard9_take_lock_bounded(), "bounded take must time out while the lock is held elsewhere");
+    g_test_stub_lock_depth = 0;
+    g_test_stub_semaphore_fail_nth = 0;
+    s_guard9_bookkeeping_pending = false;
+
+    /* Fresh tick: no cut. */
+    s_exec.last_tick_tick = 0;
+    g_kiln_io_all_relays_off_calls = 0;
+    TEST_CHECK(!guard9_prelock_check(NULL) && g_kiln_io_all_relays_off_calls == 0,
+               "a fresh tick must not trip guard 9");
+}
+
+// K7 MED-1: relay_state_unknown must surface as a fault, not as OFF. The
+// watchdog retries the fail-safe all-off and holds SAFETY_FAULT_SRC_APP until
+// the flag clears; only then is the hold released (and a guard-9 assertion of
+// the same bit is never released by this path).
+static void test_relay_state_unknown_is_a_fault(void)
+{
+    TEST_SECTION("K7 MED-1 -- relay_state_unknown retries all-off and holds the APP fault source until it clears");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_exec.global_fault_source = 0;
+    g_kiln_io_relay_unknown = false;
+    g_kiln_io_all_relays_off_calls = 0;
+    g_set_fault_source_calls = 0;
+
+    relay_unknown_prelock_check();
+    TEST_CHECK(g_kiln_io_all_relays_off_calls == 0 && g_set_fault_source_calls == 0,
+               "known relay state: no retry, no fault");
+
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(g_kiln_io_all_relays_off_calls == 1, "unknown state: fail-safe all-off retried");
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+                   g_last_fault_source_assert,
+               "unknown state: SAFETY_FAULT_SRC_APP asserted (fault, not OFF)");
+    relay_unknown_prelock_check();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert,
+               "still unknown: LOW-2 level hold -- APP re-asserted every pass (idempotent)");
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert, "still unknown: hold not released");
+
+    g_kiln_io_relay_unknown = false;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 3 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+                   !g_last_fault_source_assert,
+               "cleared by a verified read/all-off: hold released");
+
+    /* A guard-9 assertion of the same bit must survive. */
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    g_kiln_io_relay_unknown = false;
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 0, "guard-9 held APP bit is not released by the relay-unknown path");
+    s_exec.global_fault_source = 0;
+    s_exec.io = NULL;
+}
+
+// K7 review F5: SAFETY_FAULT_SRC_APP is shared; it drops only when no owner holds it.
+static void test_app_fault_source_is_owner_tracked(void)
+{
+    TEST_SECTION("K7 F5 -- APP fault bit: halt cannot drop a live relay-unknown hold; release cannot clear a foreign latch");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+
+    /* (a) guard 9 + relay-unknown both hold APP; a halt (clear_this_runs_faults) must keep the bit */
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    guard9_assert_stale_tick_fault();
+    g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP;
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "halt does not deassert APP while the relay-unknown hold is live");
+    TEST_CHECK(s_exec.global_fault_source == 0, "the run's own claim is still forgotten");
+    g_kiln_io_relay_unknown = false;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 1 && !g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "once the relay-unknown hold is the last owner its release drops APP");
+
+    /* (b) a boot safe-state latch already on the link is foreign: neither path may release it */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP; /* asserted by main_kiln_enter_safe_state() */
+    profile_executor_note_external_app_hold();        /* ... which registers itself (LOW-2) */
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(pe_app_owner_foreign, "a registered boot latch is a foreign holder");
+    g_kiln_io_relay_unknown = false;
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 0, "relay-unknown release never clears the boot safe-state latch");
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "halt never clears the boot safe-state latch either");
+    pe_app_owner_foreign = false;
+    s_exec.io = NULL;
+}
+
+// LOW-2 (REVIEW_DK7FIX_2026-10-10): explicit holder registration + level relay-unknown assert.
+static void test_app_holder_races_low2(void)
+{
+    TEST_SECTION("LOW-2 -- (a) no inferred foreign holder, (b) relay-unknown re-asserted every pass, (c) boot latch registered while executor holds APP");
+    /* (a) link shows APP, global is 0 (a halt cleared it between the two reads): nothing is inferred. */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    pe_app_owner_foreign = false;
+    g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP;
+    s_exec.global_fault_source = 0;
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(!pe_app_owner_foreign, "(a) lock-free check never invents a foreign holder");
+    g_kiln_io_relay_unknown = false;
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 1 && !g_last_fault_source_assert,
+               "(a) APP is released once the last real holder lets go (no outage until reboot)");
+
+    /* (b) a locked halt dropped the APP bit while relay state is still unknown: the next pass re-asserts. */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(s_relay_unknown_fault_asserted, "(b) first pass raised the hold");
+    g_set_fault_source_calls = 0;
+    g_last_fault_source_assert = false;
+    relay_unknown_prelock_check(); /* flag already true: edge-triggered code would do nothing */
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "(b) every pass while unknown re-asserts APP");
+    g_kiln_io_relay_unknown = false;
+    relay_unknown_release_locked();
+
+    /* (c) executor already holds APP (global claim); a boot latch registers afterwards: release keeps the bit. */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    pe_app_owner_foreign = false;
+    guard9_assert_stale_tick_fault();
+    profile_executor_note_external_app_hold();
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "(c) executor release never clears a latch registered after it asserted");
+    pe_app_owner_foreign = false;
+    s_exec.io = NULL;
+}
+
+// F5HOLDER LOW-2/LOW-3
+static void test_f5holder_low2_low3(void)
+{
+    TEST_SECTION("F5HOLDER LOW-2 -- latch registering inside the release window is honoured; LOW-3 -- halt keeps APP while guard 9 pending");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    pe_app_owner_foreign = false;
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    g_kiln_io_relay_unknown = false;
+    g_on_deassert_hook = profile_executor_note_external_app_hold; /* registers after the foreign check */
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "LOW-2: relay-unknown release re-asserts APP when a boot latch registered mid-release");
+    pe_app_owner_foreign = false;
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    g_on_deassert_hook = profile_executor_note_external_app_hold;
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert,
+               "LOW-2: halt release re-asserts APP when a boot latch registered mid-release");
+    g_on_deassert_hook = NULL;
+    pe_app_owner_foreign = false;
+
+    /* LOW-3 */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = true;
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "LOW-3: halt does not deassert APP while guard-9 bookkeeping is pending");
+    s_guard9_bookkeeping_pending = false;
+    s_exec.io = NULL;
+}
+
+// K7 review F4 / N1: one real watchdog_task_entry() pass (vTaskDelay hook: one delay through, the
+// second longjmps out). With relay_state_unknown raised the pass must retry the all-off and hold
+// APP (N1: the prelock call is wired in); and when guard 9 fires in the same pass the APP bit must
+// never be released in between (F4: the release runs after the guard-9 bookkeeping).
+static void test_watchdog_pass_wires_relay_unknown_and_orders_release(void)
+{
+    TEST_SECTION("K7 N1/F4 -- one watchdog pass: relay-unknown wired in; release after guard 9 never drops APP");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_exec.last_tick_tick = xTaskGetTickCount();
+    g_kiln_io_relay_unknown = true;
+    g_kiln_io_all_relays_off_calls = 0;
+    g_set_fault_source_calls = 0;
+    g_task_delay_budget = 1;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        watchdog_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+    TEST_CHECK(g_kiln_io_all_relays_off_calls >= 1, "N1: the watchdog pass retried the fail-safe all-off");
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "N1: the watchdog pass asserted APP for the unknown relay state");
+
+    /* F4: relay state recovered AND guard 9 stale in the same pass -> APP is never deasserted */
+    s_guard9_bookkeeping_pending = false;
+    s_exec.global_fault_source = 0;
+    g_kiln_io_relay_unknown = false;
+    s_exec.last_tick_tick = xTaskGetTickCount() - pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u);
+    g_set_fault_source_calls = 0;
+    g_last_fault_source_assert = true;
+    int deasserts = 0;
+    g_fault_source_deassert_count = 0;
+    BaseType_t saved_take_f4 = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE; /* default pdFALSE would skip the locked half */
+    g_task_delay_budget = 1;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        watchdog_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+    deasserts = g_fault_source_deassert_count;
+    g_test_stub_semaphore_take_default = saved_take_f4;
+    TEST_CHECK(!s_guard9_bookkeeping_pending && (s_exec.global_fault_source & SAFETY_FAULT_SRC_APP),
+               "F4 sanity: locked half ran");
+    TEST_CHECK(!s_relay_unknown_fault_asserted, "F4 sanity: relay-unknown hold released");
+    TEST_CHECK(deasserts == 0, "F4: guard 9 firing in the same pass as a relay-unknown release never drops APP");
+    s_exec.global_fault_source = 0;
+    s_exec.io = NULL;
 }
 
 // profile_zones_have_ceiling() tests (audit 2026-08-27 items 1/2: "Guard 5's
@@ -2350,6 +2859,324 @@ static void reset_io_seg_test_state(void)
     g_last_io_write_level = false;
     g_relay_claim_calls = 0;
     g_relay_release_calls = 0;
+}
+
+static void test_io_seg_start_on_gated_by_relay_authority(void)
+{
+    TEST_SECTION("EXECTEST INFO-1 -- a RELAY_IO segment's ON is refused (driven OFF) while relay_authority blocks");
+    reset_io_seg_test_state();
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 2;
+    seg.io_state = 1;
+    seg.dwell_min = 5;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &seg);
+    s_test_relay_authority_blocked = false;
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) == 0,
+               "blocked: the segment's relay is commanded OFF, never ON");
+    reset_io_seg_test_state();
+    io_seg_start(0, &seg);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0,
+               "not blocked: the same segment still commands ON");
+    io_seg_finish(0, false);
+}
+
+static void test_io_seg_dropped_on_retried_through_gate(void)
+{
+    TEST_SECTION("F5HOLDER LOW-4 -- a gate-dropped RELAY_IO ON reports OFF, is not leave-on, and is retried through the gate");
+    reset_io_seg_test_state();
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 2;
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+    seg.io_leave_on_at_end = 1;
+    seg.dwell_min = 5;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &seg);
+    TEST_CHECK(!s_exec.io_segs[0].state_on && s_exec.io_segs[0].wants_on, "dropped ON: state_on false, wants_on kept");
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0, "still blocked: the retry writes nothing");
+    s_test_relay_authority_blocked = false;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0 && s_exec.io_segs[0].state_on,
+               "gate clear: ON is applied once and state_on follows");
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0, "no repeat writes once ON");
+    io_seg_finish(0, false);
+
+    /* leave_on must not hand over a relay that is physically OFF */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &seg);
+    g_relay_write_calls = 0;
+    io_seg_finish(0, true);
+    s_test_relay_authority_blocked = false;
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "dropped ON + leave_on: finish forces OFF, no leave-on handover");
+}
+
+
+static void test_f5holderfx_retry_semantics(void)
+{
+    TEST_SECTION("F5HOLDERFX MED-1 -- newest segment on a relay wins; a finish never leaves a pending retry; LOW-1 pico TRIPPED refuses");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.io_blocking = 0;
+    on_seg.dwell_min = 5;
+    profile_segment_t off_seg = on_seg;
+    off_seg.io_state = 0;
+
+    /* A (non-blocking) ON dropped by the gate, then B OFF on the same relay: A's retry must not fire. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &on_seg);
+    io_seg_start(1, &off_seg);
+    TEST_CHECK(!s_exec.io_segs[0].wants_on, "MED-1: starting B clears A's pending ON");
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "MED-1: gate opens, A does not turn relay ON over B's OFF");
+    io_segs_force_all_off(false);
+
+    /* Warm-start replay shape: A (ON, dropped) replayed first, B (OFF) replayed after. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    io_seg_start(1, &off_seg);
+    io_seg_start(2, &off_seg);
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0, "MED-1 replay: no replayed segment retries ON after a later OFF");
+    io_segs_force_all_off(false);
+
+    /* Variant: B's finish releases the relay; A's pending ON must not survive it. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    s_exec.io_segs[1] = s_exec.io_segs[0];
+    s_exec.io_segs[1].wants_on = false;
+    s_exec.io_segs[1].state_on = false;
+    s_test_relay_authority_blocked = false;
+    io_seg_finish(1, false);
+    TEST_CHECK(!s_exec.io_segs[0].wants_on, "MED-1: B's finish clears A's pending retry (no unowned ON)");
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0, "MED-1: no retry after the other segment released the relay");
+    io_segs_force_all_off(false);
+
+    /* LOW-1: fresh Pico TRIPPED report refuses the retry; clears when it is gone. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(true);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "LOW-1: Pico TRIPPED pending -> no retry");
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.io_segs[0].state_on, "LOW-1: retry proceeds once not tripped");
+    io_segs_force_all_off(false);
+
+    /* LOW-2: the countdown tick itself never writes an ON; only the post-guard retry does. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_tick(1.0f);
+    TEST_CHECK(g_relay_write_calls == 0, "LOW-2: io_segs_tick (top of tick) never switches a relay ON");
+    io_segs_force_all_off(false);
+}
+
+static char *profile_executor_c_read_source(void);
+static char *pe_strip_c_comments(const char *src);
+
+static const char *pe_last_occurrence(const char *hay, const char *needle)
+{
+    const char *last = NULL;
+    for (const char *q = strstr(hay, needle); q; q = strstr(q + 1, needle)) {
+        last = q;
+    }
+    return last;
+}
+
+/* F5HOLDERFX3 LOW-4: copy of `code` without #if 0 ... (#else|#endif) regions, nesting-aware. */
+static char *pe_strip_if0_blocks(const char *code)
+{
+    size_t n = strlen(code);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    int depth = 0, skip_depth = 0;
+    const char *line = code;
+    while (*line) {
+        const char *eol = strchr(line, '\n');
+        size_t len = eol ? (size_t)(eol - line) + 1 : strlen(line);
+        const char *t = line;
+        while (t < line + len && (*t == ' ' || *t == '\t')) t++;
+        bool keep = (skip_depth == 0);
+        if (*t == '#') {
+            t++;
+            while (*t == ' ' || *t == '\t') t++;
+            if (!strncmp(t, "if", 2)) {
+                depth++;
+                if (skip_depth == 0 && !strncmp(t, "if 0", 4) && (t[4] == '\0' || t[4] == ' ' || t[4] == '\n' || t[4] == '\r' || t[4] == '\t')) {
+                    skip_depth = depth;
+                    keep = false;
+                }
+            } else if (!strncmp(t, "else", 4) || !strncmp(t, "elif", 4)) {
+                if (skip_depth == depth) { skip_depth = 0; keep = false; }
+            } else if (!strncmp(t, "endif", 5)) {
+                if (skip_depth == depth) { skip_depth = 0; keep = false; }
+                depth--;
+            }
+        }
+        if (keep) { memcpy(out + o, line, len); o += len; }
+        line += len;
+    }
+    out[o] = '\0';
+    return out;
+}
+
+static int pe_count_in_range(const char *begin, const char *end, const char *needle);
+static void test_f5holderfx3_start_gate_pico_tripped(void);
+static void test_f5holderfx3_aux_tick_pico_gate(void);
+static void test_safetyfx7_stale_diag_on_gates(void);
+static void test_safetyfx7_watchdog_any_age_tripped(void);
+static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void);
+static void test_safetyfx10_stale_log_once_per_segment_and_run(void);
+
+static void test_f5holderfx2_retry_placement_and_pico_gate(void)
+{
+    TEST_SECTION("F5HOLDERFX2 LOW-1/3/4 -- retry is the last relay write of the RUNNING tick; other-relay ON survives; Pico TRIPPED gates starts");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.dwell_min = 5;
+    profile_segment_t other_on = on_seg;
+    other_on.io_target = 3;
+    profile_segment_t other_off = other_on;
+    other_off.io_state = 0;
+
+    /* LOW-4 H6: a pending ON on relay 2 survives a start and a finish on relay 3. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &on_seg);
+    io_seg_start(1, &other_off);
+    TEST_CHECK(s_exec.io_segs[0].wants_on, "H6: a start on relay 3 keeps relay 2's pending ON");
+    io_seg_finish(1, false);
+    TEST_CHECK(s_exec.io_segs[0].wants_on, "H6: a finish on relay 3 keeps relay 2's pending ON");
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0 && s_exec.io_segs[0].state_on,
+               "H6: relay 2's pending ON is still retried after relay 3's segment ended");
+    io_segs_force_all_off(false);
+
+    /* LOW-3: a fresh Pico TRIPPED report makes a normal segment start drive OFF and keep the request. */
+    reset_io_seg_test_state();
+    io_seg_start_pico(0, &on_seg, true);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) == 0 && !s_exec.io_segs[0].state_on &&
+                   s_exec.io_segs[0].wants_on,
+               "LOW-3: Pico TRIPPED -> segment ON driven OFF, wants_on kept for the retry");
+    io_segs_force_all_off(false);
+    reset_io_seg_test_state();
+    io_seg_start_pico(0, &on_seg, false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0, "LOW-3: not tripped -> ON as before");
+    io_segs_force_all_off(false);
+
+    /* LOW-3: aux relay ON refused while the Pico is TRIPPED; OFF never gated. */
+    reset_io_seg_test_state();
+    s_exec.aux_claim_mask = 0;
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, true);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "LOW-3: aux ON with Pico TRIPPED writes OFF");
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value != 0, "LOW-3: aux ON without TRIPPED writes ON");
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, false, true);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "LOW-3: aux OFF under TRIPPED still written");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* LOW-1 / LOW-4 H5: placement of the retry inside profile_executor.c's tick loop. */
+    char *src = profile_executor_c_read_source();
+    TEST_CHECK(src != NULL, "could locate profile_executor.c");
+    if (src) {
+        char *nocomment = pe_strip_c_comments(src);
+        free(src);
+        char *code_all = nocomment ? pe_strip_if0_blocks(nocomment) : NULL;
+        free(nocomment);
+        /* F5HOLDERFX3 LOW-4: scope every scan to executor_task_entry()'s body (up to the next column-0 "}"). */
+        char *code = NULL;
+        const char *fn = code_all ? strstr(code_all, "void executor_task_entry(void *arg)") : NULL;
+        TEST_CHECK(fn != NULL, "found executor_task_entry()");
+        if (fn) {
+            const char *body_end = strstr(fn, "\n}");
+            size_t blen = body_end ? (size_t)(body_end - fn) : strlen(fn);
+            code = (char *)malloc(blen + 1);
+            memcpy(code, fn, blen);
+            code[blen] = '\0';
+        }
+        TEST_CHECK(code_all && strstr(code_all, "safety_status.diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS") != NULL,
+                   "F5HOLDERFX4 MED-1: watchdog DIAG validity uses diag_frame_age_ms");
+        TEST_CHECK(code_all && strstr(code_all, "safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status);") != NULL,
+                   "F5HOLDERFX4 MED-1: watchdog treats a cached TRIPPED as tripped at any age");
+        free(code_all);
+        TEST_CHECK(code && pe_count_in_range(code, code + strlen(code), "io_segs_retry_on(") == 1,
+                   "LOW-4: exactly one io_segs_retry_on( call in the tick body (a second, ungated retry goes red)");
+        const char *retry = code ? strstr(code, "io_segs_retry_on(") : NULL;
+        TEST_CHECK(retry != NULL, "MUST GO RED if the executor loop stops calling io_segs_retry_on()");
+        TEST_CHECK(retry && strncmp(retry, "io_segs_retry_on(retry_pico_tripped);", 37) == 0,
+                   "LOW-2: the retry uses the under-lock re-sampled Pico state");
+        {
+            const char *ps = code ? strstr(code, "relay_authority_pico_tripped(&post_st)") : NULL;
+            const char *lk = NULL;
+            for (const char *q = code ? strstr(code, "xSemaphoreTake(s_exec.lock, portMAX_DELAY);") : NULL; q && ps && q < ps;
+                 q = strstr(q + 1, "xSemaphoreTake(s_exec.lock, portMAX_DELAY);")) lk = q;
+            TEST_CHECK(lk && ps && ps - lk < 400, "F5HOLDERFX4 LOW-2: the re-sample directly follows the lock take");
+            const char *fd = code ? strstr(code, "profile_executor_aux_fault_drop(pre_lock_pico_tripped)") : NULL;
+            TEST_CHECK(lk && ps && fd && ps > lk && ps < fd,
+                       "F5HOLDERFX4 LOW-2: Pico state re-sampled right after the lock take, before aux_fault_drop/io_seg_start/aux_tick");
+        }
+        TEST_CHECK(code && strstr(code, "relay_authority_pico_tripped(&retry_st)") != NULL,
+                   "LOW-2: the Pico state is re-sampled under the lock before the retry");
+        if (retry) {
+            const char *tg = pe_last_occurrence(code, "thermal_guard_tick(");
+            const char *eg = pe_last_occurrence(code, "escalate_guard_trip(");
+            const char *aux = pe_last_occurrence(code, "profile_executor_aux_tick_pico(");
+            const char *mc = pe_last_occurrence(code, "exec_mode_state_check(");
+            const char *give = strstr(retry, "xSemaphoreGive(s_exec.lock)");
+            TEST_CHECK(tg && eg && aux && mc && retry > tg && retry > eg && retry > aux && retry > mc,
+                       "LOW-1: retry comes after the thermal guards, guard escalation, aux tick and mode check "
+                       "(a same-tick guard trip never has an ON write after it)");
+            TEST_CHECK(give != NULL && (give - retry) < 400, "LOW-1: retry is before the lock is released");
+            char gate[700];
+            size_t n = (size_t)(retry - code) < sizeof(gate) - 1 ? (size_t)(retry - code) : sizeof(gate) - 1;
+            memcpy(gate, retry - n, n);
+            gate[n] = '\0';
+            TEST_CHECK(strstr(gate, "PROFILE_EXEC_RUNNING") != NULL, "MUST GO RED if the retry loses its state == RUNNING gate");
+            const char *st = strstr(code, "io_seg_start_pico(s_exec.segment_index, seg, pre_lock_pico_tripped)");
+            TEST_CHECK(st != NULL, "LOW-3: the normal segment start receives the tick's Pico TRIPPED report");
+            TEST_CHECK(strstr(code, "profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, on_off_cap, pre_lock_pico_tripped)") != NULL,
+                       "LOW-3: the aux tick receives the tick's Pico TRIPPED report");
+        }
+        free(code);
+    }
 }
 
 static void test_io_seg_finish_default_forces_off_on_done(void)
@@ -2491,6 +3318,55 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     s_test_sweep_active = false;
 }
 
+// L23 (HTTP input parsing audit): a profile delete that is in flight (its
+// mark set before its own running check) or already finished since `p` was
+// copied must refuse the start in the same s_exec.lock section that would
+// commit RUNNING. profiles_http_slot_runnable() is the delete side's answer.
+static void test_run_refuses_slot_being_deleted(void)
+{
+    TEST_SECTION("profile_executor_run() refuses a slot whose delete is in flight (L23)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_slot_runnable = false;
+
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(3, err, sizeof(err));
+    TEST_CHECK(!ok, "L23: a start racing a delete of the same slot is refused");
+    TEST_CHECK(strstr(err, "deleted") != NULL, "the refusal names the delete");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused run never leaves IDLE");
+
+    // Control: with no delete in flight the refusal (if any, further down this
+    // stubbed path) is not the delete one.
+    s_test_slot_runnable = true;
+    err[0] = '\0';
+    profile_executor_run(3, err, sizeof(err));
+    TEST_CHECK(strstr(err, "deleted") == NULL, "control: no delete in flight, no delete refusal");
+
+#ifndef PEX_STORE_LINK_TEST
+    // Residual edge: slot deleted and re-saved (rev bumped) after the capture.
+    s_test_slot_runnable = true;
+    s_test_slot_rev_bump_on_capture = true;
+    err[0] = '\0';
+    ok = profile_executor_run(3, err, sizeof(err));
+    s_test_slot_rev_bump_on_capture = false;
+    TEST_CHECK(!ok, "L23: a start whose slot was re-saved after the copy is refused");
+    TEST_CHECK(strstr(err, "re-saved") != NULL, "the refusal names the re-save");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a stale-rev run never leaves IDLE");
+
+#endif
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+
 // ROADMAP.md M13: the "heat is blocked" refusal used to show the operator a
 // bare fault-source hex value (0x%02X) instead of naming what tripped it --
 // the same defect class S6a was the motivating example for. Proves the fix
@@ -2525,6 +3401,60 @@ static void test_run_decodes_fault_sources_instead_of_hex(void)
     s_test_zones_config_valid = false;
     s_test_relay_authority_blocked = false;
     s_test_relay_authority_blocked_sources = 0;
+}
+
+/* LD-01: with NO fault source asserted (relay_authority_on_blocked() false -- the un-latched
+ * window) the start gate must still refuse unless the link is positively up and fresh. */
+static void test_run_refuses_unless_link_positively_up(void)
+{
+    TEST_SECTION("profile_executor_run() refuses when the link is not positively up even with no fault source (LD-01)");
+    for (int mode = 1; mode <= 4; mode++) {
+        reset_relay_claim_test_state();
+        g_request_enable_true_calls = 0;
+        s_exec.safety = NULL;
+        s_exec.lock = xSemaphoreCreateMutex();
+        s_exec.state = PROFILE_EXEC_IDLE;
+        memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+        s_test_profiles_http_get_out.zone_mask = 0x01;
+        s_test_profiles_http_get_out.segment_count = 1;
+        s_test_profiles_http_get_ok = true;
+        s_test_zones_config_valid = true;
+        s_test_relay_authority_blocked = false;
+        g_stub_link_mode = mode;
+        char err[128] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        TEST_CHECK(!ok, mode == 1 ? "never-up/stale link refuses the start" : "uninitialised link refuses the start");
+        TEST_CHECK(strstr(err, "safety link is down") != NULL, "the refusal is decoded and names the safety link");
+        TEST_CHECK(strstr(err, "0x") == NULL, "no bare hex");
+        TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request");
+        g_stub_link_mode = 0;
+        s_test_profiles_http_get_ok = false;
+        s_test_zones_config_valid = false;
+    }
+}
+
+/* LOW-4: the link drops between the entry gate and the commit point. The second gate call must
+ * refuse the start, unwind the claims and name the cause. */
+static void monitor_only_tick_setup(bool zone1_monitor_only);
+static void test_run_refuses_when_link_drops_before_commit(void)
+{
+    TEST_SECTION("profile_executor_run() rechecks the link right before RUNNING (LD-01 LOW-4)");
+    bool saved_force = g_stub_force_link_up;
+    monitor_only_tick_setup(false);
+    g_request_enable_true_calls = 0;
+    g_stub_link_calls = 0;
+    g_stub_force_link_up = true;
+    g_stub_link_mode = 5;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    int calls = g_stub_link_calls;
+    g_stub_link_mode = 0;
+    g_stub_force_link_up = saved_force;
+    TEST_CHECK(calls >= 2, "the gate ran a second time before commit");
+    TEST_CHECK(!ok, "start refused when the link drops before commit");
+    TEST_CHECK(strstr(err, "safety link is down or not yet confirmed up") != NULL, "refusal names the actual cause");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "run did not enter RUNNING");
+    TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request");
 }
 
 // CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: a config the
@@ -2723,9 +3653,241 @@ static void test_run_refuses_when_update_claims_after_early_check(void)
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;
 }
+// HTTP audit E1 finding 1: a POST /api/zones commit that lands after the early config reads but
+// before the heat claim was visible to it must refuse the start, with every claim released.
+static void test_run_refuses_when_zones_config_changes_during_start(void)
+{
+    TEST_SECTION("profile_executor_run() -- zones config changed during the start refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_zones_gen_bump_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_zones_gen_bump_after_heat_claim = false;
+    TEST_CHECK(!ok, "a zones config commit during the start must refuse the start");
+    TEST_CHECK(strstr(err, "zones configuration changed") != NULL, "the refusal names the config change");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// Factory reset in flight: a reset that set its mark before this start reached its late check must make
+// the start refuse, with every claim released (the reset's own re-check then sees no heat claim).
+static void test_run_refuses_when_factory_reset_in_flight(void)
+{
+    TEST_SECTION("profile_executor_run() -- a factory reset in flight refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_reset_in_flight = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "a factory reset in flight must refuse the start");
+    TEST_CHECK(strstr(err, "factory reset in progress") != NULL, "the refusal names the factory reset");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_begin_calls >= 1, "the heat claim was published before the mark was read");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// MED-2 (FIRING_PATH_AUDIT_2026-10-10): a start refused from DONE must leave the finished run, its
+// fs_persisted flag and its zone accumulators exactly as they were (the next DONE tick would otherwise
+// persist a firing-stats record for the refused profile and feed adaptive tune a fabricated clean run).
+static bool s_test_bump_tick = false;
+static void s_test_tick_bump_on_update_refusal(void)
+{
+    if (s_test_bump_tick) s_exec.last_tick_tick = 0x7777;
+}
+static void med2_arrange_done(void)
+{
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.profile_id = 7;
+    s_exec.profile.zone_mask = 0x02;
+    s_exec.fs_persisted = true;
+    s_exec.total_elapsed_s = 1234.0f;
+    s_exec.zones[1].active = true;
+    s_exec.zones[0].active = false;
+    s_exec.run_started_unix_s = 1700000000u;
+}
+static void med2_check_done_untouched(const char *why)
+{
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_DONE, why);
+    TEST_CHECK(s_exec.profile_id == 7, "DONE run's profile id survives a refused start");
+    TEST_CHECK(s_exec.profile.zone_mask == 0x02, "DONE run's profile copy survives a refused start");
+    TEST_CHECK(s_exec.fs_persisted, "fs_persisted stays true so no bogus firing-stats record is written");
+    TEST_CHECK(s_exec.total_elapsed_s == 1234.0f, "DONE run's elapsed time survives a refused start");
+    TEST_CHECK(s_exec.zones[1].active && !s_exec.zones[0].active, "DONE run's zone set survives a refused start");
+    TEST_CHECK(s_exec.run_started_unix_s == 1700000000u, "DONE run's start stamp survives a refused start");
+}
+static void test_run_refused_from_done_leaves_done_state_untouched(void)
+{
+    TEST_SECTION("MED-2 -- a start refused from DONE (late commit refusal) leaves the finished run untouched");
+    med2_arrange_done();
+    s_test_reset_in_flight = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "late refusal refuses");
+    TEST_CHECK(strstr(err, "factory reset in progress") != NULL, "late refusal names the factory reset");
+    med2_check_done_untouched("state stays DONE after a late refusal");
+
+    TEST_SECTION("MED-2 -- a start refused from DONE (no heating zone) leaves the finished run untouched");
+    med2_arrange_done();
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_OFF;
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "no-heating-zone start refuses");
+    med2_check_done_untouched("state stays DONE after the no-heating-zone refusal");
+
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// MED-A / MED-2 table: every late refusal site, from DONE and from a warm start with a skipped RELAY_IO ON.
+typedef struct {
+    const char *name;
+    void (*arm)(bool on);
+} refuse_site_t;
+static void site_reset(bool on) { s_test_reset_in_flight = on; }
+static void site_restore(bool on) { s_test_restore_opens_after_heat_claim = on; }
+static void site_danger(bool on) { s_test_danger_mode_active = on; }
+static void site_danger_commit(bool on) { s_test_danger_opens_after_heat_claim = on; }
+static void site_update_claim(bool on) { s_test_update_claim_after_heat_claim = on; }
+static void site_zones_gen(bool on) { s_test_zones_gen_bump_after_heat_claim = on; }
+static void site_heat_claim(bool on) { s_test_heat_zone_claim_refused = on; }
+static void site_zone_claim(bool on) { s_test_zone_claim_refused = on; }
+static void site_sweep(bool on) { s_test_sweep_active = on; }
+static void site_no_heat_zone(bool on) { g_stub_control_mode[0] = on ? ZONE_CONTROL_MODE_OFF : ZONE_CONTROL_MODE_PID; }
+static void site_link(bool on) { g_stub_link_mode = on ? 5 : 0; }
+static const refuse_site_t k_refuse_sites[] = {
+    { "factory reset", site_reset },       { "restore", site_restore },
+    { "danger early", site_danger },       { "danger at commit", site_danger_commit },
+    { "update claim", site_update_claim }, { "zones generation", site_zones_gen },
+    { "heat claim", site_heat_claim },     { "zone claim", site_zone_claim },
+    { "sweep active", site_sweep },        { "no heating zone", site_no_heat_zone },
+    { "LD-01 link", site_link },
+};
+static void test_med2_restore_at_every_refusal_site(void)
+{
+    for (size_t i = 0; i < sizeof(k_refuse_sites) / sizeof(k_refuse_sites[0]); i++) {
+        TEST_SECTION("MED-2 table -- refusal from DONE leaves the finished run untouched");
+        printf("  site: %s\n", k_refuse_sites[i].name);
+        med2_arrange_done();
+        k_refuse_sites[i].arm(true);
+        char err[128] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        k_refuse_sites[i].arm(false);
+        TEST_CHECK(!ok, "site refuses the start");
+        med2_check_done_untouched(k_refuse_sites[i].name);
+        s_exec.state = PROFILE_EXEC_IDLE;
+    }
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+static void test_refused_start_preserves_last_tick_and_history(void)
+{
+    TEST_SECTION("MED-2/LOW-B -- refusal keeps the live last_tick_tick (written by the control task after the snapshot)");
+    med2_arrange_done();
+    s_exec.last_tick_tick = 0x1111;
+    s_test_bump_tick = true;
+    s_test_update_claim_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_update_claim_after_heat_claim = false;
+    s_test_bump_tick = false;
+    TEST_CHECK(!ok, "refused");
+    TEST_CHECK(s_exec.last_tick_tick == 0x7777, "live last_tick_tick survives the snapshot restore");
+    TEST_CHECK(s_exec.history != NULL, "LOW-B: the history buffer this start allocated is kept, not orphaned by the restore");
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// LCD review R2: the early gate saw danger mode closed, danger_mode_request_start() then opened its window
+// before the RUNNING commit. The commit-side recheck (after the heat claim is published) must refuse and
+// release every claim.
+static void test_run_refuses_when_danger_mode_opens_at_commit(void)
+{
+    TEST_SECTION("profile_executor_run() -- danger mode opening after the early gate refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_danger_opens_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_danger_opens_after_heat_claim = false;
+    TEST_CHECK(!ok, "danger mode opening after the early gate must refuse the start at commit");
+    TEST_CHECK(strstr(err, "danger mode is active") != NULL, "the refusal names danger mode");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_heat_zone_claim_begin_calls >= 1, "the heat claim was published before danger mode was re-read");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
 // HP-02 (bench, 2026-09-25..27, ESP 0fb8ad98): zone 2 had been left typed
 // on/off (zone_type 1) by an earlier HP-03/HP-07 preset, and the 3-zone
-// profile carried no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6
+// profile carried no on/off rule for it. docs/ON_OFF_ZONE.md sec 3 rule 6
 // holds such a zone's relay OFF for the whole firing while (pre-fix) pass 1
 // still ran its PID and reported duty 1.00 -- a zone that could never heat,
 // with nothing naming why. profile_executor_run() now refuses that
@@ -3197,6 +4359,44 @@ static void test_pause_releases_heat_enable_and_resume_reacquires(void)
     TEST_CHECK(heat_enable_is_granted(), "granted again after resume");
 }
 
+static void test_pause_reason_reaches_status_and_undecided_reboot_is_surfaced(void)
+{
+    TEST_SECTION("pause_reason reaches /api/profile_exec (review K11); an undecided Pico reboot is "
+                 "shown while RUNNING (sl3 item 2)");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x01;
+
+    profile_exec_status_t st;
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.pause_reason[0] == 0, "healthy RUNNING shows no pause_reason");
+
+    /* Pico reboot with a claim held, new boot's DIAG not seen: undecided. */
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.state == PROFILE_EXEC_RUNNING && strcmp(st.pause_reason, "pico_reboot_undecided") == 0,
+               "RUNNING with an undecided reboot reports pause_reason pico_reboot_undecided");
+    /* Benign DIAG decides it: the marker goes away, the run continues. */
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2500u);
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.pause_reason[0] == 0, "decided benign reboot clears the marker");
+
+    BaseType_t saved_take = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE; /* bounded path honours a failed take */
+    TEST_CHECK(profile_executor_pause_with_reason_bounded("pico_fatal_reboot"), "bounded pause succeeds");
+    g_test_stub_semaphore_take_default = saved_take;
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.state == PROFILE_EXEC_PAUSED && strcmp(st.pause_reason, "pico_fatal_reboot") == 0,
+               "the stored pause_reason reaches the status snapshot");
+}
+
 static void test_heat_enable_release_survives_a_down_link(void)
 {
     TEST_SECTION("profile_executor_halt() -- releases K4 even when the safety link is down");
@@ -3446,6 +4646,32 @@ static void test_warm_start_mid_ramp_entry_never_below_current(void)
     profile_executor_halt();
 }
 
+static void test_med_a_refused_warm_start_leaves_relay_off_and_unclaimed(void)
+{
+    for (size_t i = 0; i < sizeof(k_refuse_sites) / sizeof(k_refuse_sites[0]); i++) {
+        TEST_SECTION("MED-A -- refused warm start with a skipped RELAY_IO ON never energizes or claims the relay");
+        printf("  site: %s\n", k_refuse_sites[i].name);
+        profile_t p;
+        memset(&p, 0, sizeof(p));
+        p.zone_mask = 0x01;
+        p.segment_count = 3;
+        p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1, 1, 5);
+        p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+        p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+        warm_start_test_setup(&p, 300.0f);
+        g_relay_write_calls = 0;
+        g_last_relay_write_value = 0;
+        k_refuse_sites[i].arm(true);
+        char err[128] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        k_refuse_sites[i].arm(false);
+        TEST_CHECK(!ok, "site refuses the warm start");
+        TEST_CHECK(g_last_relay_write_value != 0x01, "no ON write for the skipped segment reached hardware");
+        TEST_CHECK(!s_exec.io_segs[0].active, "replayed segment not registered");
+        TEST_CHECK(s_exec.claimed_relay_mask == 0, "no PROFILE relay claim left behind");
+        s_exec.state = PROFILE_EXEC_IDLE;
+    }
+}
 // Test 3 (mandatory coverage item 3): a skipped RELAY_IO segment's command
 // is replayed, and the replayed segment is still registered for the
 // end-of-run sweep so it cannot be left energized with nothing owning it
@@ -6652,6 +7878,23 @@ static void test_apply_relay_refreshes_heat_blocked_even_on_a_want_on_false_tick
     g_stub_relay_mask[0] = 0;
 }
 
+static void test_apply_relay_samples_epoch_before_gate(void)
+{
+    TEST_SECTION("LOW-E -- apply_relay() samples the all-off epoch BEFORE its gate decision, so an all-off during the gate drops the ON");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[0].active = true;
+    s_exec.io = &s_test_kiln_io;
+    g_stub_relay_mask[0] = 0x01u;
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF;
+    s_test_bump_epoch_in_gate = true;
+    apply_relay(/*zi=*/0, /*want_on=*/true);
+    s_test_bump_epoch_in_gate = false;
+    TEST_CHECK(g_relay_write_calls >= 1, "a write was attempted");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "the ON was dropped to OFF (epoch moved since the caller sampled)");
+    g_stub_relay_mask[0] = 0;
+}
+
 // Runs n_ticks of thermal_guard_tick() at a constant target duty, computing
 // commanded_duty EITHER the OLD way (relay_commanded_on-gated, PWM-chopped
 // via the REAL heater_output_duty(), reproducing exactly what the shipped
@@ -8468,6 +9711,30 @@ static void test_firing_stats_load_discards_unknown_size_blob(void)
     fake_kv_reset_all();
 }
 
+static void test_firing_stats_persist_skips_write_when_load_fails(void)
+{
+    TEST_SECTION("firing_stats_persist() -- an unreadable existing record is NOT replaced by a one-entry "
+                 "history (audit L3)");
+    fs_fresh_mounted();
+    uint8_t garbage[PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 - 4];
+    memset(garbage, 0x5A, sizeof(garbage));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION)
+                   == HAL_OK, "setup: open");
+    TEST_CHECK(hal_kv_set_blob(&h, "fs_13", garbage, sizeof(garbage)) == HAL_OK, "setup: garbage blob");
+    hal_kv_close(&h);
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 13;
+    rec.duration_s = 777;
+    firing_stats_persist(&rec);
+
+    profile_firing_history_blob_t out;
+    TEST_CHECK(!firing_stats_load(13, &out), "the unreadable record was left alone, not overwritten with one entry");
+    fake_kv_reset_all();
+}
+
 // ---- last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW,
 // "list perf") -- profile_executor_last_run_started_unix_s()'s O(1)-per-
 // request fix. Each test below uses a profile id nothing else in this file
@@ -9336,7 +10603,7 @@ static void run_test_exec_mode_state_check(void)
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule(),
+// docs/ON_OFF_ZONE.md plan step 5 -- profile_resolve_on_off_rule(),
 // the pure lookup profile_executor.c's per-tick wiring calls to feed
 // on_off_trigger_decide()'s real .rule field. Called directly against a
 // hand-built profile_t; no s_exec/tick machinery needed (see this function's
@@ -9409,7 +10676,7 @@ static void test_resolve_on_off_rule_reserved_temp_source_drops_temp_axis(void)
               "evaluate against the wrong reading");
 }
 
-// docs/ON_OFF_ZONE_PLAN.md plan step 5: a rules-free profile (on_off_rule_count == 0,
+// docs/ON_OFF_ZONE.md plan step 5: a rules-free profile (on_off_rule_count == 0,
 // the migration default for every pre-existing profile) must behave byte-identically to
 // before this field existed -- profile_resolve_on_off_rule() must never fabricate a match.
 static void test_resolve_on_off_rule_rules_free_profile_never_matches(void)
@@ -9437,7 +10704,7 @@ static void run_test_profile_resolve_on_off_rule(void)
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md plan step 8 -- actual relay actuation.
+// docs/ON_OFF_ZONE.md plan step 8 -- actual relay actuation.
 // UNEXERCISED ON HARDWARE: these tests drive the real production functions
 // (on_off_trigger_decide() -> profile_executor_on_off_actuation_gate() ->
 // profile_executor_on_off_cap_denies(), wrapped as one production function
@@ -10060,6 +11327,44 @@ static void aux_test_setup(const profile_t *p)
     g_stub_aux[0].enabled = true;
 }
 
+/* MED-2: the pre-claim cap / no-rule refusals also restore the DONE snapshot. Each case arms its own profile. */
+static void med2_done_fields_after_setup(void)
+{
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.profile_id = 7;
+    s_exec.profile.zone_mask = 0x02;
+    s_exec.fs_persisted = true;
+    s_exec.total_elapsed_s = 1234.0f;
+    s_exec.zones[1].active = true;
+    s_exec.zones[0].active = false;
+    s_exec.run_started_unix_s = 1700000000u;
+}
+static void test_med2_restore_at_cap_and_no_rule_sites(void)
+{
+    char err[256] = {0};
+    for (int c = 0; c < 3; c++) {
+        TEST_SECTION("MED-2 -- cap / no-on-off-rule refusal from DONE leaves the finished run untouched");
+        profile_t p = aux_test_profile();
+        if (c == 0) { /* on/off zone count alone meets the cap */
+            p.on_off_rules[0].zone_index = 0;
+        } else if (c == 2) { /* on/off zone, no rule for it */
+            p.on_off_rule_count = 0;
+        }
+        aux_test_setup(&p);
+        if (c == 0) { g_stub_zone_is_on_off[0] = true; g_stub_max_simultaneous_relays = 1; }
+        if (c == 1) { g_stub_max_simultaneous_relays = 1; }
+        if (c == 2) { g_stub_zone_is_on_off[0] = true; g_stub_max_simultaneous_relays = 0; }
+        med2_done_fields_after_setup();
+        err[0] = '\0';
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        TEST_CHECK(!ok, "case refuses the start");
+        med2_check_done_untouched(c == 0 ? "cap on/off" : c == 1 ? "cap aux" : "no on/off rule");
+        g_stub_zone_is_on_off[0] = false;
+        g_stub_max_simultaneous_relays = 0;
+        s_exec.state = PROFILE_EXEC_IDLE;
+    }
+}
+
 /* Starts a run on the standard profile; returns run()'s result. */
 static bool aux_test_start_run(char *err, size_t cap)
 {
@@ -10213,6 +11518,64 @@ static void test_aux_fault_drop_covers_disabled_and_raw_spare_relays(void)
     g_stub_thermo_count = 0;
     g_stub_relay_mask[0] = 0;
     s_test_relay_authority_blocked = false;
+}
+
+static void test_aux_apply_relay_samples_epoch_before_gate(void)
+{
+    TEST_SECTION("LOW-E -- aux_apply_relay() samples the all-off epoch BEFORE its gate decision, so an all-off during the gate drops the ON");
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, true);
+    s_exec.io = &s_test_kiln_io;
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF;
+    s_test_bump_epoch_in_aux_gate = true;
+    (void)aux_apply_relay(0, /*want_on=*/true);
+    s_test_bump_epoch_in_aux_gate = false;
+    TEST_CHECK(g_relay_write_calls >= 1, "a write was attempted");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "the aux ON was dropped to OFF (epoch moved since the sample)");
+    s_exec.io = NULL;
+}
+
+static void test_warm_replay_samples_epoch_before_ld01_recheck(void)
+{
+    memset(g_stub_aux, 0, sizeof(g_stub_aux)); /* the preceding aux test left relay 1 bound to an aux output */
+    TEST_SECTION("LOW-E/INFO -- the warm replay samples the epoch BEFORE the LD-01 recheck: an all-off during the recheck drops the replayed ON");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 3;
+    p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1, 1, 5);
+    p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF;
+    s_test_bump_epoch_in_link = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_bump_epoch_in_link = false;
+    TEST_CHECK(ok, "the start itself still succeeds");
+    TEST_CHECK(s_exec.warm_start_replayed_count == 1, "the segment was replayed");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "the replayed ON went out as OFF (epoch moved after the sample)");
+    profile_executor_halt();
+}
+
+static void test_done_start_psram_alloc_failure_refuses_without_internal_fallback(void)
+{
+    TEST_SECTION("LOW-C -- a start from DONE refuses when the PSRAM snapshot allocation fails; no internal-RAM fallback");
+    med2_arrange_done();
+    heap_caps_malloc_test_set_fail_spiram(true); /* internal-capability allocations still succeed */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    heap_caps_malloc_test_set_fail_spiram(false);
+    TEST_CHECK(!ok, "PSRAM exhaustion refuses the start");
+    TEST_CHECK(strstr(err, "out of memory") != NULL, "the refusal says why");
+    med2_check_done_untouched("state stays DONE after the PSRAM refusal");
+    TEST_CHECK(g_relay_claim_calls == 0, "no relay ownership grabbed");
+    /* review LOW-1: do not leave the finished run or the fresh mutex behind for the next test */
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_exec.lock = NULL;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
 }
 
 static void test_aux_apply_relay_failed_write_is_not_a_transition(void)
@@ -10772,7 +12135,7 @@ static void test_aux_handoff_write_failure_sets_pending(void)
     g_relay_write_fail = false;
     TEST_CHECK(ok, "a failed handoff write does not refuse the run");
     TEST_CHECK(s_exec.aux_off_pending, "pending raised so the retry branch re-writes OFF");
-    TEST_CHECK(esp_log_test_capture_contains("retrying via aux_off_pending"), "log names the real mechanism");
+    TEST_CHECK(esp_log_test_capture_contains("retried by aux_off_pending / the first aux tick"), "log names the real mechanism");
     profile_executor_halt();
 }
 
@@ -10836,6 +12199,41 @@ static void test_aux_off_pending_retried_by_task_loop(void)
     s_exec.state = PROFILE_EXEC_IDLE;
 }
 
+/* Host-test gap audit 2026-10-09 gap 2: drive the real task tick so the call
+ * site and the Pico-tripped derivation in executor_task_entry() are covered. */
+static bool aux_tick_case(bool received, uint32_t diag_frame_age_ms, uint8_t diag)
+{
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    memset(&g_stub_safety_st, 0, sizeof(g_stub_safety_st));
+    g_stub_safety_st.diag_ever_received = received;
+    g_stub_safety_st.age_ms = 100; /* STATUS fresh: must not matter (F5HOLDERFX4 MED-1) */
+    g_stub_safety_st.diag_frame_age_ms = diag_frame_age_ms;
+    g_stub_safety_st.diag_since_reboot = received;
+    g_stub_safety_st.diag_state = diag;
+    g_stub_safety_rc = ESP_OK;
+    g_stub_force_link_up = false;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    aux_test_run_task_ticks(1);
+    g_stub_force_link_up = true;
+    g_stub_safety_rc = ESP_FAIL;
+    s_exec.safety = NULL;
+    return aux_test_wrote(0x01, 0x00);
+}
+
+static void test_aux_fault_drop_via_task_tick(void)
+{
+    TEST_SECTION("aux fault-drop through executor_task_entry(): fresh TRIPPED drops; stale/never-received/not-tripped do not");
+    TEST_CHECK(aux_tick_case(true, 100, SAFETY_LINK_DIAG_STATE_TRIPPED), "(a) fresh TRIPPED drops aux OFF");
+    TEST_CHECK(aux_tick_case(true, SAFETY_LINK_DIAG_FRESH_MS + 1, SAFETY_LINK_DIAG_STATE_TRIPPED),
+               "(b) F5HOLDERFX4 MED-1: a cached TRIPPED counts at any age: aux drops OFF");
+    TEST_CHECK(aux_tick_case(true, 60000u, SAFETY_LINK_DIAG_STATE_TRIPPED), "(b2) very old cached TRIPPED still drops");
+    TEST_CHECK(!aux_tick_case(false, 100, SAFETY_LINK_DIAG_STATE_TRIPPED),
+               "(c) never-received status is not tripped: aux stays ON");
+    TEST_CHECK(!aux_tick_case(true, 100, SAFETY_LINK_DIAG_STATE_ARMED),
+               "(d) non-TRIPPED status leaves aux ON");
+    s_exec.state = PROFILE_EXEC_IDLE;
+}
+
 /* ===== SPARE_RELAY_ONOFF_PLAN.md sec 10: monitor-only zone, per-tick wiring =====
  * The predicate tests above prove each consumer on its own; this drives the
  * real executor_task_entry() tick body one tick at a time (budget 1 lets one
@@ -10870,6 +12268,28 @@ static void monitor_only_one_tick(int i, float zone1_c)
     set_test_thermo_reading(0, (i % 2) ? 100.1f : 100.0f);
     set_test_thermo_reading(1, zone1_c);
     aux_test_run_task_ticks(1);
+}
+
+/* F1 (docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md): the
+ * RUNNING tick must call relay_cycles_maybe_persist() only after it gives
+ * s_exec.lock. Drives the real executor_task_entry for one RUNNING tick. */
+static void test_relay_cycles_persist_runs_after_lock_give(void)
+{
+    char err[128];
+    monitor_only_tick_setup(false);
+    err[0] = '\0';
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "F1: run starts");
+    g_test_stub_lock_depth = 0;
+    g_relay_cycles_persist_calls = 0;
+    g_relay_cycles_persist_under_lock = 0;
+    monitor_only_one_tick(0, 25.0f);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "F1: still RUNNING after one tick");
+    TEST_CHECK(g_relay_cycles_persist_calls >= 1, "F1: the RUNNING tick calls relay_cycles_maybe_persist()");
+    TEST_CHECK(g_relay_cycles_persist_under_lock == 0,
+               "F1: relay_cycles_maybe_persist() is never called with s_exec.lock held "
+               "(it waits on the flash worker, whose handlers take s_exec.lock)");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "F1: the tick leaves no lock held");
+    profile_executor_halt();
 }
 
 /* Run-start baseline / warm-start pick must ignore a monitor-only zone
@@ -10930,7 +12350,7 @@ static void test_monitor_only_zone_does_not_drive_warm_start_pick(void)
 }
 
 /* FIX B: an ON_OFF zone has no obligation to the shared setpoint
- * (ON_OFF_ZONE_PLAN.md sec 1), so a valid thermocouple on the LOWEST-index
+ * (ON_OFF_ZONE.md sec 1), so a valid thermocouple on the LOWEST-index
  * ON_OFF zone must not seed the run-start baseline or the warm-start pick;
  * both must use the first zone that actually drives the run. */
 static void on_off_baseline_setup(const profile_t *p, float z0_c, float z1_c)
@@ -11347,18 +12767,76 @@ static void test_monitor_only_zone_tick_wiring(void)
     reset_test_thermo_readings();
 }
 
+/* Firing review 2026-10-09 item 2: a heater zone's thermal guard runs BEFORE
+ * its relay write, so a tripping reading never produces ON-then-OFF. */
+static bool relay_log_has_on_write(uint8_t mask_bit)
+{
+    for (int k = 0; k < g_aux_write_log_n; k++) {
+        if ((g_aux_write_log[k].mask & mask_bit) && (g_aux_write_log[k].value & mask_bit)) return true;
+    }
+    return false;
+}
+
+static void test_guard_trip_tick_never_writes_relay_on_first(void)
+{
+    TEST_SECTION("firing review item 2: on the tick a zone's guard trips (reading over max_temp_c while PID still "
+                 "wants heat), its relay is never written ON before the guard's OFF");
+    char err[192];
+    monitor_only_tick_setup(false);
+    err[0] = '\0';
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    g_aux_write_log_n = 0;
+    for (int i = 0; i < 30; i++) monitor_only_one_tick(i, 25.0f);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "still RUNNING while cold");
+    TEST_CHECK(relay_log_has_on_write(0x02), "sanity: a cold heater zone 1 does get its relay written ON");
+
+    g_stub_max_temp_c[1] = 150.0f;
+    s_exec.zones[1].guard_cfg.max_temp_c = 150.0f; /* operator lowers the ceiling mid-run */
+    g_aux_write_log_n = 0;
+    monitor_only_one_tick(30, 160.0f); /* over the 150 C ceiling, far below the 600 C target: PID still wants heat */
+    TEST_CHECK(s_exec.zones[1].guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP, "the over-temperature guard tripped");
+    TEST_CHECK(!relay_log_has_on_write(0x02),
+               "MUST GO RED if the relay is commanded before the guard: no ON write to the tripping zone's relay");
+    profile_executor_halt();
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    reset_test_thermo_readings();
+}
+
+/* Firing review 2026-10-09 item 3: elapsed seconds accumulate in ms, no per-tick rounding. */
+static void test_elapsed_accumulates_ms_without_rounding_loss(void)
+{
+    TEST_SECTION("firing review item 3: total/segment elapsed accumulate sub-second dt exactly (no per-tick rounding)");
+    uint32_t sec = 0;
+    uint16_t rem = 0;
+    for (int i = 0; i < 10; i++) exec_elapsed_accumulate(&sec, &rem, 0.4f);
+    TEST_CHECK(sec == 4 && rem == 0, "ten 0.4 s ticks make 4 s (the old per-tick rounding gave 0)");
+    sec = 0; rem = 0;
+    for (int i = 0; i < 10; i++) exec_elapsed_accumulate(&sec, &rem, 0.6f);
+    TEST_CHECK(sec == 6 && rem == 0, "ten 0.6 s ticks make 6 s (the old per-tick rounding gave 10)");
+    sec = 5; rem = 0;
+    exec_elapsed_accumulate(&sec, &rem, -1.0f);
+    exec_elapsed_accumulate(&sec, &rem, NAN);
+    TEST_CHECK(sec == 5 && rem == 0, "negative / NaN dt adds nothing");
+}
+
 static void run_test_aux_wp3(void)
 {
     test_aux_start_control_run_succeeds();
     test_aux_start_refusals();
     test_aux_manual_toggle_handoff_at_start();
     test_aux_rule_drives_relay_on_and_off();
+    test_f5holderfx3_aux_tick_pico_gate();
+    test_safetyfx7_stale_diag_on_gates();
+    test_safetyfx7_watchdog_any_age_tripped();
+    test_safetyfx9_unreadable_and_trip_event_and_stale_accounting();
+    test_safetyfx10_stale_log_once_per_segment_and_run();
     test_aux_disabled_mid_run_opens_once_and_stops_driving();
     test_aux_pause_holds_state_resume_continues();
     test_aux_off_on_every_end_path();
     test_aux_failed_off_write_is_retried();
     test_aux_sweep_does_not_flag_a_driven_aux();
     test_aux_start_refused_when_cap_unsatisfiable();
+    test_med2_restore_at_cap_and_no_rule_sites();
     test_aux_relay_io_refusal_is_logged();
     test_aux_contact_cycles_are_counted();
     test_aux_on_time_and_switch_count();
@@ -11366,7 +12844,12 @@ static void run_test_aux_wp3(void)
     test_aux_handoff_write_failure_sets_pending();
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();
+    test_aux_fault_drop_via_task_tick();
     test_monitor_only_zone_tick_wiring();
+    test_guard_trip_tick_never_writes_relay_on_first();
+    test_elapsed_accumulates_ms_without_rounding_loss();
+    test_relay_cycles_persist_runs_after_lock_give();
+    test_run_refuses_when_link_drops_before_commit();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();
     test_zone_drives_run_predicate();
@@ -11395,6 +12878,10 @@ static void run_test_on_off_actuation(void)
     test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries();
     test_aux_fault_drop_covers_disabled_and_raw_spare_relays();
     test_aux_apply_relay_failed_write_is_not_a_transition();
+    test_aux_apply_relay_samples_epoch_before_gate();
+    test_warm_replay_samples_epoch_before_ld01_recheck();
+    test_f5holderfx3_start_gate_pico_tripped();
+    test_done_start_psram_alloc_failure_refuses_without_internal_fallback();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();
@@ -11408,7 +12895,7 @@ static void run_test_on_off_actuation(void)
     run_test_on_off_log_transition();
 }
 
-// ITER_TUNE_REDESIGN_PLAN.md step 8 (review add): firing_stats_zone_tick()
+// ITER_TUNE_REDESIGN.md step 8 (review add): firing_stats_zone_tick()
 // recovers the shadow-mode zone index from `z`'s ADDRESS within
 // s_exec.zones (uintptr_t range compare, profile_executor_firing_stats.c).
 // Proves (a) a real &s_exec.zones[1] tick reaches firing_shadow as zone 1 --
@@ -11552,6 +13039,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_before_start();
     test_run_refused_by_readiness_recovery_mode();
     test_run_refused_by_restore_in_flight();
+    test_run_refused_by_danger_mode();
     test_run_refused_by_readiness_safety_trip();
     test_run_refused_by_readiness_crash_report();
     test_run_refused_by_readiness_estop_unverified();
@@ -11580,19 +13068,46 @@ void run_test_profile_executor_prestart(void)
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
+    test_guard9_fires_while_another_task_holds_exec_lock();
+    test_relay_state_unknown_is_a_fault();
+    test_app_fault_source_is_owner_tracked();
+    test_app_holder_races_low2();
+    test_f5holder_low2_low3();
+    test_watchdog_pass_wires_relay_unknown_and_orders_release();
+    test_guard9_watchdog_source_order();
+    test_guard9_pending_verdict_survives_lock_timeout();
+    test_heat_acquire_result_not_discarded();
+    test_zone_off_pending_retry();
+    test_zone_off_pending_retry_while_running();
+    test_zone_off_pending_retry_ownership_edges();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
     test_profile_zones_have_ceiling_ignores_off_zones_in_mask();
     test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy();
+    test_io_seg_start_on_gated_by_relay_authority();
+    test_io_seg_dropped_on_retried_through_gate();
+    test_f5holderfx_retry_semantics();
+    test_f5holderfx2_retry_placement_and_pico_gate();
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
     test_run_refuses_while_zone_sweep_is_active();
+    test_run_refuses_slot_being_deleted();
     test_run_decodes_fault_sources_instead_of_hex();
+    test_run_refuses_unless_link_positively_up();
+    test_resume_refuses_unless_link_positively_up();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();
+    test_run_refuses_when_zones_config_changes_during_start();
+    test_run_refuses_when_factory_reset_in_flight();
+    test_run_refused_from_done_leaves_done_state_untouched();
+    test_med2_restore_at_every_refusal_site();
+    test_apply_relay_samples_epoch_before_gate();
+    test_med_a_refused_warm_start_leaves_relay_off_and_unclaimed();
+    test_refused_start_preserves_last_tick_and_history();
+    test_run_refuses_when_danger_mode_opens_at_commit();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
@@ -11605,6 +13120,7 @@ void run_test_profile_executor_prestart(void)
     test_operator_halt_still_records_halted();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();
+    test_pause_reason_reaches_status_and_undecided_reboot_is_surfaced();
     test_heat_enable_release_survives_a_down_link();
 
     test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact();
@@ -11713,6 +13229,7 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_persist_load_round_trip_and_ring_depth();
     test_firing_stats_load_migrates_known_old_size_blob();
     test_firing_stats_load_discards_unknown_size_blob();
+    test_firing_stats_persist_skips_write_when_load_fails();
     test_firing_stats_last_run_cache_hit_avoids_nvs_reads();
     test_firing_stats_last_run_cache_first_miss_then_hit();
     test_firing_stats_last_run_cache_invalidated_on_persist_and_erase();
@@ -11767,17 +13284,17 @@ void run_test_profile_executor_prestart(void)
     // production path.
     run_test_exec_handle_mode_state_violation();
 
-    // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule().
+    // docs/ON_OFF_ZONE.md plan step 5 -- profile_resolve_on_off_rule().
     run_test_profile_resolve_on_off_rule();
 
-    // docs/ON_OFF_ZONE_PLAN.md plan step 8 -- actual relay actuation.
+    // docs/ON_OFF_ZONE.md plan step 8 -- actual relay actuation.
     run_test_on_off_actuation();
 }
 
 
 // ---------------------------------------------------------------------
 // cfg-filesystem dual-write bridge for firing stats/history
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 7). Uses the real
+// (docs/FILESYSTEM_USER_DATA.md section 5, item 7). Uses the real
 // firing_stats_load()/firing_stats_persist() public entry points plus a
 // real cfg_fs.c against a temp directory -- same convention as
 // test_relay_names_cfg_fs.c/test_relay_cycles.c's own cfg_fs sections.
@@ -11875,6 +13392,33 @@ static void test_fscf_partition_absent_behaves_like_before(void)
     TEST_CHECK(firing_stats_load(5, &out), "load succeeds with no `cfg` partition mounted");
     TEST_CHECK(out.count == 1 && out.runs[0].profile_id == 5 && out.runs[0].run_started_unix_s == 1000,
                "the legacy run reloads from NVS alone and the failed persist did not touch it");
+}
+
+static bool s_fscf_refuse = false;
+static bool fscf_refuse_hook(void) { return s_fscf_refuse; }
+
+// MED-1 (rstfence review): the firing-stats writer's default write fn is the raw cfg_fs_write_atomic();
+// it must be refused by the factory-reset fence and allowed again (the reset job's exemption lives in the
+// predicate) when the fence is down.
+static void test_fscf_writer_refused_by_reset_fence(void)
+{
+    TEST_SECTION("firing_stats_cfg_fs: default writer refused while the reset fence is up");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    cfg_fs_set_write_refuse_hook(fscf_refuse_hook);
+    firing_stats_cfg_fs_write_fn_t w = firing_stats_cfg_fs_get_write_fn();
+    s_fscf_refuse = true;
+    TEST_CHECK(w("stats/fs9.dat", "x", 1) == ESP_ERR_INVALID_STATE, "write refused under the fence");
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists("stats/fs9.dat", &exists) == ESP_OK && !exists, "nothing was written");
+    s_fscf_refuse = false;
+    TEST_CHECK(w("stats/fs9.dat", "x", 1) == ESP_OK, "write allowed again with the fence down (reset job exempt)");
+    {
+        char fp[128];
+        snprintf(fp, sizeof(fp), "%s/stats/fs9.dat", FS_SCRATCH_BASE);
+        remove(fp);
+    }
+    cfg_fs_set_write_refuse_hook(NULL);
 }
 
 static void test_fscf_migrates_then_prefers_file(void)
@@ -12219,6 +13763,328 @@ static int pe_count_in_range(const char *begin, const char *end, const char *nee
     return n;
 }
 
+/* F5HOLDERFX3 LOW-1: the shared start gate refuses a fresh Pico TRIPPED; a stale/never-received DIAG does not
+ * (policy documented at relay_authority_pico_tripped()). Warm replay never drives ON while TRIPPED. */
+static void test_f5holderfx3_start_gate_pico_tripped(void)
+{
+    TEST_SECTION("F5HOLDERFX3 LOW-1 -- start gate refuses a fresh Pico TRIPPED; warm replay never drives ON");
+    char err[160] = {0};
+    bool saved_force = g_stub_force_link_up;
+    g_stub_force_link_up = true;
+    g_stub_link_mode = 0;
+
+    g_stub_diag_tripped = false;
+    TEST_CHECK(!relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "Pico not tripped -> start allowed");
+    g_stub_diag_tripped = true;
+    g_stub_diag_age_ms = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "Pico fresh TRIPPED -> start refused");
+    TEST_CHECK(strstr(err, "tripped") != NULL, "refusal names the trip");
+    g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    g_stub_diag_age_ms = 100;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"),
+               "F5HOLDERFX4 MED-1: stale cached TRIPPED DIAG on a live link -> refused (fail closed, any age)");
+    TEST_CHECK(strstr(err, "tripped") != NULL, "stale TRIPPED still names the trip");
+    g_stub_diag_tripped = false;
+    /* Freshness boundary: age == FRESH is allowed, FRESH+1 refused (st->age_ms stays fresh throughout). */
+    g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS;
+    TEST_CHECK(!relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "diag age == FRESH_MS -> allowed");
+    g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    err[0] = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "diag age == FRESH_MS+1 -> refused");
+    TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "stale-DIAG refusal says to wait and retry");
+    g_stub_diag_frame_age_ms = 0;
+    g_stub_diag_received = false;
+    err[0] = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "no DIAG since reboot -> refused");
+    TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "missing-DIAG refusal says to wait");
+    g_stub_diag_received = true;
+    g_stub_diag_since_reboot = false; /* a DIAG was received, but not since the Pico's last reboot */
+    err[0] = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "DIAG not since Pico reboot -> refused");
+    TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "pre-reboot-DIAG refusal says to wait");
+    g_stub_diag_since_reboot = true;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 3;
+    p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1, 1, 5);
+    p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0;
+    g_stub_diag_tripped = true;
+    g_stub_diag_age_ms = 0;
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    g_stub_diag_tripped = false;
+    TEST_CHECK(!ok, "warm start refused while the Pico is TRIPPED");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "warm replay never drove relay 1 ON while TRIPPED");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "not RUNNING");
+
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok && g_last_relay_write_value == 0x01, "same warm start with the Pico not tripped still replays ON");
+    profile_executor_halt();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    g_stub_force_link_up = saved_force;
+}
+
+/* F5HOLDERFX3 INFO (mutation H-f): the aux tick refuses an ON while the tick's Pico report says TRIPPED. */
+static void test_f5holderfx3_aux_tick_pico_gate(void)
+{
+    TEST_SECTION("F5HOLDERFX3 INFO -- aux tick with Pico TRIPPED never writes ON; ON resumes once clear");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    for (int i = 0; i < 4; i++) {
+        xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+        profile_executor_aux_tick_pico(2.0f, false, 0, 4, true);
+        xSemaphoreGive(s_exec.lock);
+    }
+    TEST_CHECK(!aux_test_wrote(0x01, 0x01), "no ON written for aux relay 1 while Pico TRIPPED");
+    TEST_CHECK(!s_exec.aux[0].actuated_on, "aux 1 not actuated while Pico TRIPPED");
+    aux_test_settle();
+    TEST_CHECK(aux_test_wrote(0x01, 0x01), "ON written once the Pico is not tripped");
+    profile_executor_halt();
+}
+
+/* Drive the safety_link stub: link reports a DIAG of the given frame age and state. */
+static void safetyfx7_set_diag(uint32_t frame_age_ms, uint8_t state)
+{
+    memset(&g_stub_safety_st, 0, sizeof(g_stub_safety_st));
+    g_stub_safety_st.link_up = true;
+    g_stub_safety_st.age_ms = 100; /* STATUS fresh: must not matter */
+    g_stub_safety_st.diag_ever_received = true;
+    g_stub_safety_st.diag_since_reboot = true;
+    g_stub_safety_st.diag_frame_age_ms = frame_age_ms;
+    g_stub_safety_st.diag_state = state;
+    g_stub_safety_rc = ESP_OK;
+    g_stub_force_link_up = false;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+}
+
+static void safetyfx7_clear_diag(void)
+{
+    g_stub_force_link_up = true;
+    g_stub_safety_rc = ESP_FAIL;
+    s_exec.safety = NULL;
+}
+
+/* SAFETYFX7 LOW-1: a stale-but-NOT-tripped DIAG refuses every mid-run switch-ON (aux, io segment start, io
+ * segment retry) and never touches an OFF or an output that is already on. */
+static void test_safetyfx7_stale_diag_on_gates(void)
+{
+    TEST_SECTION("SAFETYFX7 LOW-1 -- stale (not tripped) DIAG refuses aux/segment/retry ON; OFF and already-on untouched");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.dwell_min = 5;
+    const uint32_t stale = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+
+    /* aux_apply_relay_pico */
+    reset_io_seg_test_state();
+    s_exec.aux_claim_mask = 0;
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "stale DIAG: aux ON writes OFF instead");
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "stale DIAG: aux not commanded on");
+    safetyfx7_set_diag(SAFETY_LINK_DIAG_FRESH_MS, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value != 0, "fresh DIAG (age == FRESH): aux ON written");
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value != 0 && s_exec.aux[0].commanded_on,
+               "DIAG goes stale while aux is already on: it is held, not dropped");
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, false, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "stale DIAG: aux OFF still written");
+    safetyfx7_clear_diag();
+
+    /* io_seg_start_pico: ON refused, request kept for the retry */
+    reset_io_seg_test_state();
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    io_seg_start_pico(0, &on_seg, false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) == 0 && !s_exec.io_segs[0].state_on &&
+                   s_exec.io_segs[0].wants_on,
+               "stale DIAG: segment ON driven OFF, wants_on kept");
+
+    /* io_segs_retry_on: refused while stale, proceeds once fresh */
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "stale DIAG: retry does not switch ON");
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED);
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.io_segs[0].state_on, "fresh DIAG: retry switches ON");
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    io_segs_force_all_off(false);
+    TEST_CHECK(g_relay_write_calls >= 1 && (g_last_relay_write_value & 0x02u) == 0, "stale DIAG: forced OFF still written");
+    safetyfx7_clear_diag();
+    memset(&s_exec, 0, sizeof(s_exec));
+}
+
+/* SAFETYFX7 LOW-5: one real watchdog pass over a RUNNING firing. A cached TRIPPED DIAG whose frame is far past
+ * SAFETY_LINK_DIAG_FRESH_MS must still fault the run (any age); an equally old non-tripped DIAG must not. */
+static void safetyfx7_wd_case(uint8_t diag_state, profile_exec_state_t *state_out)
+{
+    monitor_only_tick_setup(false);
+    char err[128] = {0};
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "watchdog case: run starts");
+    s_exec.last_tick_tick = xTaskGetTickCount();
+    safetyfx7_set_diag(60000u, diag_state);
+    g_stub_safety_st.diag_trip_reason = 1;
+    BaseType_t saved_take = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE;
+    g_task_delay_budget = 1;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        watchdog_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+    g_test_stub_semaphore_take_default = saved_take;
+    *state_out = s_exec.state;
+    safetyfx7_clear_diag();
+    profile_executor_halt();
+    s_exec.state = PROFILE_EXEC_IDLE;
+}
+
+static void test_safetyfx7_watchdog_any_age_tripped(void)
+{
+    TEST_SECTION("SAFETYFX7 LOW-5 -- watchdog faults a RUNNING firing on a cached TRIPPED DIAG of any age");
+    profile_exec_state_t st = PROFILE_EXEC_IDLE;
+    safetyfx7_wd_case(SAFETY_LINK_DIAG_STATE_TRIPPED, &st);
+    TEST_CHECK(st == PROFILE_EXEC_FAULTED, "old cached TRIPPED DIAG faults the run (MUST GO RED if the any-age wiring is gated on freshness)");
+    safetyfx7_wd_case(SAFETY_LINK_DIAG_STATE_ARMED, &st);
+    TEST_CHECK(st == PROFILE_EXEC_RUNNING, "an equally old non-tripped DIAG does NOT fault the run");
+}
+
+/* SAFETYFX8 LOW-1 / LOW-2 / LOW-3 / I-2. */
+/* SAFETYFX10 I-3: the stale-DIAG log-once flags are per segment and re-armed per run. */
+static void test_safetyfx10_stale_log_once_per_segment_and_run(void)
+{
+    TEST_SECTION("SAFETYFX10 I-3: stale-DIAG warning logs once per segment (not once globally) and re-arms per run");
+    profile_executor_stale_log_reset();
+    TEST_CHECK(stale_log_once_seg(0), "segment 0 logs the first time");
+    TEST_CHECK(!stale_log_once_seg(0), "segment 0 does not log twice");
+    TEST_CHECK(stale_log_once_seg(1), "a second segment in the same episode still logs");
+    TEST_CHECK(!stale_log_once_seg(1), "segment 1 does not log twice");
+    TEST_CHECK(stale_log_once_aux(0x01), "aux 0 logs the first time");
+    TEST_CHECK(!stale_log_once_aux(0x01), "aux 0 does not log twice");
+    TEST_CHECK(stale_log_once_aux(0x02), "aux 1 logs independently");
+    profile_executor_stale_log_reset();
+    TEST_CHECK(stale_log_once_seg(0) && stale_log_once_seg(1), "a new run re-arms both segments");
+    TEST_CHECK(stale_log_once_aux(0x01) && stale_log_once_aux(0x02), "a new run re-arms both aux");
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED); /* fresh read re-arms too */
+    TEST_CHECK(!pico_diag_stale_for_on(), "fresh DIAG: not stale");
+    TEST_CHECK(stale_log_once_seg(0), "after a fresh read segment 0 logs again");
+    safetyfx7_clear_diag();
+    /* the real run start re-arms the warnings (profile_executor_run.c) */
+    TEST_CHECK(stale_log_once_seg(3) && stale_log_once_aux(0x04), "setup: warnings consumed");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    TEST_CHECK(stale_log_once_seg(3) && stale_log_once_aux(0x04), "run start re-armed the warnings");
+    profile_executor_halt();
+    profile_executor_stale_log_reset();
+}
+
+static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void)
+{
+    TEST_SECTION("SAFETYFX8 LOW-1: unreadable link status counts as stale (aux/segment/retry ON refused)");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.dwell_min = 5;
+
+    reset_io_seg_test_state();
+    s_exec.aux_claim_mask = 0;
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_stub_safety_rc = ESP_FAIL; /* link bound, status unreadable */
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0 && !s_exec.aux[0].commanded_on,
+               "unreadable status: aux ON refused (writes OFF)");
+    io_seg_start_pico(0, &on_seg, false);
+    TEST_CHECK((g_last_relay_write_value & 0x02u) == 0 && !s_exec.io_segs[0].state_on && s_exec.io_segs[0].wants_on,
+               "unreadable status: segment ON driven OFF, wants_on kept");
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "unreadable status: retry skipped");
+    safetyfx7_clear_diag();
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    TEST_SECTION("SAFETYFX8 LOW-2: stale-DIAG refusal keeps actuated_on idle and names a rule_reason");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    safetyfx7_set_diag(SAFETY_LINK_DIAG_FRESH_MS + 1u, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_aux_write_log_n = 0;
+    for (int i = 0; i < 6; i++) aux_test_tick(2.0f);
+    TEST_CHECK(!aux_test_wrote(0x01, 0x01), "stale DIAG: no ON written");
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "stale DIAG: not commanded/actuated on");
+    TEST_CHECK(s_exec.aux[0].rule_reason == (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUTHORITY,
+               "stale DIAG: rule_reason names the denial");
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED);
+    aux_test_settle();
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on && s_exec.aux[0].actuated_on, "fresh DIAG: aux switches ON");
+    safetyfx7_clear_diag();
+    profile_executor_halt();
+
+    TEST_SECTION("SAFETYFX8 LOW-3: a TRIP_EVENT newer than the last DIAG reads as Pico tripped (aux already on is dropped)");
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.diag_ever_received = true;
+    st.diag_since_reboot = true;
+    st.diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+    st.diag_frame_age_ms = 5000;
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "no trip event: not tripped");
+    st.trip_event_ever_received = true;
+    st.trip_event_age_ms = 100;
+    st.trip_event_after_diag = true; /* event after the DIAG, DIAG still ARMED */
+    TEST_CHECK(relay_authority_pico_tripped(&st), "trip event newer than DIAG: tripped");
+    st.trip_event_after_diag = false; /* DIAG after the event: normal clear flow, no latch */
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "newer DIAG ARMED supersedes the event (no sticky latch)");
+    /* SAFETYFX10 MED-1 / I-2: ages are irrelevant. A 2^32 ms alias makes the event age look small or equal; with the
+     * DIAG later in arrival order it must not trip (no spurious abort), and it must still trip the other way. */
+    st.trip_event_age_ms = 5;
+    st.diag_frame_age_ms = 5;
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "equal (aliased) ages, DIAG later: not tripped");
+    st.trip_event_age_ms = 1;
+    st.diag_frame_age_ms = 1900;
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "small event age but DIAG later in arrival order: not tripped");
+    st.trip_event_after_diag = true;
+    st.trip_event_age_ms = 5;
+    st.diag_frame_age_ms = 5;
+    TEST_CHECK(relay_authority_pico_tripped(&st), "equal ages, event later in arrival order: tripped");
+    st.trip_event_age_ms = 4000000000u;
+    st.diag_frame_age_ms = 10;
+    TEST_CHECK(relay_authority_pico_tripped(&st), "ancient-looking event age but later in arrival order: tripped");
+    st.trip_event_after_diag = false;
+    st.diag_ever_received = false;
+    TEST_CHECK(relay_authority_pico_tripped(&st), "trip event with no DIAG ever: tripped");
+
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    memset(&st, 0, sizeof(st));
+    st.diag_ever_received = true;
+    st.diag_since_reboot = true;
+    st.diag_frame_age_ms = 60000;
+    st.trip_event_ever_received = true;
+    st.trip_event_after_diag = true;
+    st.trip_event_age_ms = 10;
+    profile_executor_aux_fault_drop(relay_authority_pico_tripped(&st));
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "trip event with no new DIAG drops an on aux");
+    memset(&s_exec, 0, sizeof(s_exec));
+}
+
 static void test_task_entry_reads_before_taking_s_exec_lock(void)
 {
     TEST_SECTION("profile_executor -- executor_task_entry() must call thermo_channels_read() BEFORE "
@@ -12312,6 +14178,88 @@ static void test_thermo_channels_read_fault_filter(void)
     reset_test_thermo_readings();
 }
 
+/* Review F1/F2: behavioural guard-9 pass tests (replace the old source-order scan). */
+static void test_guard9_watchdog_source_order(void)
+{
+    TEST_SECTION("guard 9 -- APP fault source is asserted BEFORE the relay cut (F2)");
+    reset_relay_claim_test_state();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = false;
+    s_exec.last_tick_tick = (TickType_t)(0u - (TickType_t)pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u));
+    g_seq_all_relays_off = g_seq_set_fault_source = 0;
+    TEST_CHECK(guard9_prelock_check(NULL), "stale");
+    TEST_CHECK(g_seq_set_fault_source > 0 && g_seq_all_relays_off > 0 && g_seq_set_fault_source < g_seq_all_relays_off,
+               "fault source asserted before the relays are cut");
+    s_guard9_bookkeeping_pending = false;
+    s_guard9_pending_since_ms = 0;
+}
+
+static void test_guard9_pending_verdict_survives_lock_timeout(void)
+{
+    TEST_SECTION("guard 9 F1 -- stale pass whose lock take times out, then the tick recovers: next pass still FAULTS the run");
+    reset_relay_claim_test_state();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = false;
+    s_guard9_pending_since_ms = 0;
+    /* Pass 1: stale, lock not obtainable -> loop would `continue`. */
+    s_exec.last_tick_tick = (TickType_t)(0u - (TickType_t)pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u));
+    uint32_t since1 = 0;
+    bool stale1 = guard9_prelock_check(&since1);
+    TEST_CHECK(stale1 && s_guard9_bookkeeping_pending, "pass 1 stale, verdict pending");
+    /* Pass 2: control task recovered -> fresh tick, lock obtained. */
+    s_exec.last_tick_tick = xTaskGetTickCount();
+    uint32_t since2 = 0;
+    bool stale2 = guard9_prelock_check(&since2);
+    TEST_CHECK(!stale2, "pass 2 sees a fresh tick");
+    uint32_t ms = since2;
+    bool merged = guard9_merge_pending(stale2, since2, &ms);
+    TEST_CHECK(merged && ms >= WATCHDOG_TICK_DEAD_MS, "pending verdict and its age carry into pass 2");
+    TEST_CHECK(!s_guard9_bookkeeping_pending, "pending consumed");
+    profile_executor_wd_input_t in;
+    memset(&in, 0, sizeof(in));
+    in.tick_stale = merged;
+    in.tick_stale_ms = ms;
+    in.state_running_or_paused = true;
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_FAULT, "run is classified FAULTED");
+    /* No pending and fresh: nothing carried. */
+    uint32_t ms3 = 0;
+    TEST_CHECK(!guard9_merge_pending(false, 5, &ms3) && ms3 == 5, "no pending verdict: fresh pass stays fresh");
+}
+
+/* Firing review 2026-10-09 item 7: start and resume both act on (log) a failed heat request. */
+static void test_heat_acquire_result_not_discarded(void)
+{
+    TEST_SECTION("firing review item 7: neither profile_executor_run() nor profile_executor_resume() discards "
+                 "heat_enable_acquire_since()'s result");
+    static const char *const files[] = {"profile_executor_run.c", "profile_executor_status.c"};
+    for (size_t f = 0; f < 2; f++) {
+        char rel[96], a[128], b[128], c[160];
+        snprintf(rel, sizeof(rel), "../drivers/control/%s", files[f]);
+        snprintf(a, sizeof(a), "../drivers/control/%s", files[f]);
+        snprintf(b, sizeof(b), "App/drivers/control/%s", files[f]);
+        snprintf(c, sizeof(c), "firmware/KilnFW/App/drivers/control/%s", files[f]);
+        const char *cands[] = {a, b, c};
+        char *text = test_read_source_anchored(__FILE__, rel, cands, 3);
+        if (!text) {
+            TEST_CHECK(false, "could not locate the source file to scan");
+            continue;
+        }
+        char *code = pe_strip_c_comments(text);
+        free(text);
+        if (!code) {
+            TEST_CHECK(false, "strip failed");
+            continue;
+        }
+        TEST_CHECK(strstr(code, "(void)heat_enable_acquire_since") == NULL &&
+                       strstr(code, "if (!heat_enable_acquire_since(") != NULL,
+                   "MUST GO RED if the heat request's result is cast to void again");
+        free(code);
+    }
+}
+
 int main(void)
 {
     run_test_profile_executor_prestart();
@@ -12319,6 +14267,7 @@ int main(void)
     test_task_entry_reads_before_taking_s_exec_lock();
     test_thermo_channels_read_fault_filter();
     test_fscf_partition_absent_behaves_like_before();
+    test_fscf_writer_refused_by_reset_fence();
     test_fscf_migrates_then_prefers_file();
     test_fscf_dual_write_stays_in_sync_across_repeated_persists();
     test_fscf_negative_no_file_write_means_file_never_catches_up();
@@ -12335,4 +14284,362 @@ int main(void)
     }
     printf("all passed\n");
     return 0;
+}
+
+/* Dev review 9 fix review (F1/F3/F5): stand-ins for the atomic model+PID setter and the idle-only
+ * coupling-cell setter. Composed from this file's existing fakes so their hooks/probes still fire. */
+static bool s_stub_claim_busy = false; /* models the real setter's in-lock heat-claim re-check */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid)
+{
+    if (s_stub_claim_busy) {
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    float a, b, c;
+    if (expect_prior_pid != NULL && zones_config_get_pid(zone_index, &a, &b, &c) &&
+        (a != expect_prior_pid[0] || b != expect_prior_pid[1] || c != expect_prior_pid[2])) {
+        return ZONES_SET_STALE_PRIOR;
+    }
+    if (!zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s)) {
+        return ZONES_SET_REJECTED;
+    }
+    if (!zones_config_set_pid(zone_index, kp, ki, kd)) {
+        return ZONES_SET_REJECTED;
+    }
+    return ZONES_SET_OK;
+}
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s)
+{
+    if (s_stub_claim_busy) {
+        return false;
+    }
+    return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
+}
+
+static char *profile_executor_run_c_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/control/profile_executor_run.c",
+        "App/drivers/control/profile_executor_run.c",
+        "firmware/KilnFW/App/drivers/control/profile_executor_run.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor_run.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+static void test_zone_off_pending_retry_ownership_edges(void)
+{
+    TEST_SECTION("firefx4: running pending-OFF retry owner check, unreadable-mask early return, autotune-zone "
+                 "exclusion, IO-segment ownership (A-LOW-1)");
+    /* R1: a relay owned by someone else (manual) is never written and its bit is dropped. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(g_stub_relay_owner, 0, sizeof(g_stub_relay_owner));
+    g_stub_autotune_zone_bits = 0;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zone_off_pending_mask = 0x03;
+    g_stub_relay_owner[1] = RELAY_OWNER_MANUAL; /* relay 1 */
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02,
+               "R1: relay held by another owner is not driven OFF, the free one is");
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "R1: foreign-owned bit is forgotten, written bit cleared");
+
+    /* R2: an active zone whose mask is unreadable -> write nothing this cycle. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_owner, 0, sizeof(g_stub_relay_owner));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true; /* g_stub_relay_mask[0] == 0 -> unreadable */
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 0 && s_exec.zone_off_pending_mask == 0x02,
+               "R2: unreadable zone mask -> nothing written, bit stays pending");
+
+    /* R4: an inactive zone with autotune active on it still owns its relays. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    g_stub_relay_mask[1] = 0x02;
+    g_stub_autotune_zone_bits = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 0, "R4: autotune-active zone's relay is never driven OFF by the retry");
+    g_stub_autotune_zone_bits = 0;
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+
+    /* A-LOW-1: relay switched on by an active relay IO segment is owned. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = true;
+    s_exec.io_segs[0].target = PROFILE_IO_TARGET_RELAY_BASE + 1; /* relay 2 -> bit 0x02 */
+    s_exec.io_segs[1].active = false; /* inactive segment owns nothing */
+    s_exec.io_segs[1].is_relay = true;
+    s_exec.io_segs[1].target = PROFILE_IO_TARGET_RELAY_BASE + 2;
+    s_exec.zone_off_pending_mask = 0x06;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x04,
+               "A-LOW-1: IO-segment relay (0x02) is not driven OFF; the inactive segment's relay (0x04) is");
+    TEST_CHECK((s_exec.zone_off_pending_mask & 0x02) != 0, "A-LOW-1: owned bit stays pending");
+
+    /* A-LOW-1, F4 fallback in apply_relay(): unreadable zone mask must not cut the IO-segment relay. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x03;
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = true;
+    s_exec.io_segs[0].target = PROFILE_IO_TARGET_RELAY_BASE + 1; /* relay 2 */
+    g_relay_write_calls = 0;
+    apply_relay(0, false); /* zone 0 mask unreadable */
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x01,
+               "A-LOW-1: F4 fallback excludes the IO-segment relay");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* MED-1: a failed IO-segment relay OFF stays pending after the claim is dropped. */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = true;
+    s_exec.io_segs[0].target = PROFILE_IO_TARGET_RELAY_BASE + 2; /* relay 3 -> 0x04 */
+    g_relay_write_fail = true;
+    io_seg_finish(0, false);
+    g_relay_write_fail = false;
+    TEST_CHECK((s_exec.zone_off_pending_mask & 0x04) != 0, "MED-1: failed IO-segment OFF is recorded as pending");
+    TEST_CHECK(!s_exec.io_segs[0].active, "MED-1: segment is finished");
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x04 && s_exec.zone_off_pending_mask == 0,
+               "MED-1: the retry later opens it and clears the bit");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* Review LOW-1: a pending OFF must not outlive a later successful io_seg_start write, nor a leave-on end. */
+    {
+        profile_segment_t seg;
+        memset(&seg, 0, sizeof(seg));
+        seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+        seg.io_target = PROFILE_IO_TARGET_RELAY_BASE + 2; /* 0x04 */
+        seg.io_state = 1;
+        seg.io_leave_on_at_end = 1;
+        seg.dwell_min = 5;
+        s_exec.io = (kiln_io_t *)0x1;
+        s_exec.state = PROFILE_EXEC_RUNNING;
+        s_exec.zone_off_pending_mask = 0x04;
+        io_seg_start(0, &seg);
+        TEST_CHECK((s_exec.zone_off_pending_mask & 0x04) == 0,
+                   "LOW-1: successful io_seg_start write clears the stale pending OFF bit");
+        s_exec.zone_off_pending_mask = 0x04; /* e.g. set again by a failed OFF of an earlier segment */
+        io_seg_finish(0, true);
+        TEST_CHECK((s_exec.zone_off_pending_mask & 0x04) == 0,
+                   "LOW-1: leave_on_at_end finish clears the pending OFF bit");
+        memset(&s_exec, 0, sizeof(s_exec));
+    }
+
+    /* LOW-4: a failed superseded-mask force-off is recorded as pending. */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    g_relay_write_fail = true;
+    force_relay_mask_off(0, 0x08);
+    g_relay_write_fail = false;
+    TEST_CHECK((s_exec.zone_off_pending_mask & 0x08) != 0, "LOW-4: failed superseded-mask OFF is pending");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* LOW-2: aux disabled mid-run keeps its state until the OFF lands. */
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.aux_claim_mask = 0x01;
+    s_exec.aux[0].commanded_on = true;
+    s_exec.aux[0].actuated_on = true;
+    g_relay_write_fail = true;
+    profile_executor_aux_tick(1.0f, false, 0, 4);
+    TEST_CHECK(s_exec.aux[0].commanded_on || s_exec.aux[0].actuated_on,
+               "LOW-2: failed OFF of a mid-run-disabled aux is not forgotten");
+    g_relay_write_fail = false;
+    profile_executor_aux_tick(1.0f, false, 0, 4);
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "LOW-2: retry lands, state cleared");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* MED-3: DONE state does not write OFF to a relay now held by autotune; a free one still is. */
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(g_stub_relay_owner, 0, sizeof(g_stub_relay_owner));
+    g_stub_relay_mask[0] = 0x01;
+    g_stub_relay_mask[1] = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.zones[0].active = true;
+    s_exec.zones[1].active = true;
+    g_stub_relay_owner[1] = RELAY_OWNER_AUTOTUNE; /* relay 1 */
+    g_relay_write_calls = 0;
+    force_all_relays_off();
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02,
+               "MED-3: only the relay not held by another owner is written OFF in DONE");
+    g_stub_relay_owner[1] = RELAY_OWNER_NONE;
+    g_relay_write_calls = 0;
+    force_all_relays_off();
+    TEST_CHECK(g_relay_write_calls == 2, "MED-3: unowned relays are still driven OFF in DONE");
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(&s_exec, 0, sizeof(s_exec));
+}
+
+static void test_zone_off_pending_retry_while_running(void)
+{
+    TEST_SECTION("review-2 MEDIUM-1: pending OFF bits survive run start; relays the run does not own are "
+                 "retried OFF while RUNNING (bounded cadence); owned relays never driven");
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[0] = 0x01; /* zone 0 (active) owns relay 1 */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.zone_off_pending_mask = 0x07; /* 0x01 owned by the run, 0x04 an enabled-aux claim, 0x02 free */
+    s_exec.aux_claim_mask = 0x04;
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
+               "only the relay the run does not own is driven OFF (never zone 0's 0x01 nor the aux claim 0x04)");
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0x05, "landed bit cleared, owned bits stay pending");
+    /* Bounded cadence: a failing retry is not repeated every tick. */
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_fail = true;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100 + 100); /* 100 ticks later is under the 1 s bound */
+    TEST_CHECK(g_relay_write_calls == 0, "retry is rate limited, not every tick");
+    zone_off_pending_retry_running(100 + 100 + pdMS_TO_TICKS(1500));
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.zone_off_pending_mask == 0x02,
+               "after the bound a failing retry is attempted again and stays pending");
+    g_relay_write_fail = false;
+    zone_off_pending_retry_running(100 + 100 + 2 * pdMS_TO_TICKS(1500));
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "retry lands and clears");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* Run start must not forget a pending OFF (the F4 run-start clear stranded closed relays). */
+    char *rs = profile_executor_run_c_read_source();
+    TEST_CHECK(rs != NULL, "could locate profile_executor_run.c");
+    if (rs) {
+        char *code = pe_strip_c_comments(rs);
+        free(rs);
+        TEST_CHECK(code && strstr(code, "zone_off_pending_mask = 0") == NULL,
+                   "MUST GO RED if run start clears zone_off_pending_mask again (review-2 MEDIUM-1)");
+        free(code);
+    }
+    /* The executor tick must call the RUNNING retry. */
+    char *src = profile_executor_c_read_source();
+    if (src) {
+        char *code = pe_strip_c_comments(src);
+        free(src);
+        const char *skip = code ? strstr(code, "if (!peek_running)") : NULL;
+        const char *call = code ? strstr(code, "zone_off_pending_retry_running(now);") : NULL;
+        TEST_CHECK(skip && call && skip < call,
+                   "MUST GO RED if the RUNNING tick stops retrying pending OFF bits of unowned relays");
+        free(code);
+    }
+}
+
+static void test_zone_off_pending_retry(void)
+{
+    TEST_SECTION("firing review item 4: failed zone OFF write is retried in a non-RUNNING state; unreadable mask still drives OFF");
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[0] = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_DONE;
+    g_relay_write_fail = true;
+    apply_relay(0, false);
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0x02, "failed OFF write must be recorded as pending");
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
+               "retry must write OFF to the pending mask");
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "pending clears after a landed write");
+    /* A retry whose write FAILS must keep the bits pending (fail-safe: the
+     * contacts are not assumed open) and try again on the next call. */
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_fail = true;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.zone_off_pending_mask == 0x02,
+               "a failed retry write keeps the mask pending");
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 2 && s_exec.zone_off_pending_mask == 0x02,
+               "a still-failing retry is attempted again every call, never dropped");
+    g_relay_write_fail = false;
+    zone_off_pending_retry();
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "retry clears pending once the write lands");
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 0, "nothing pending -> no write");
+
+    /* mask getter failure: claimed mask driven OFF anyway */
+    g_stub_relay_mask[0] = 0;
+    s_exec.claimed_relay_mask = 0x02;
+    g_relay_write_calls = 0;
+    apply_relay(0, true);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
+               "unreadable mask must still drive the claimed relays OFF");
+    g_relay_write_fail = true;
+    apply_relay(0, true);
+    g_relay_write_fail = false;
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0x02, "failed fallback OFF must be pending too");
+    s_exec.io = NULL;
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* Review F4: fallback excludes other zones' readable masks and live aux relays. */
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[1] = 0x01; /* zone 1 owns relay 1 (readable) */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x0F;
+    s_exec.aux_claim_mask = 0x08;
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    apply_relay(0, true); /* zone 0 unreadable */
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x06 && g_last_relay_write_value == 0,
+               "fallback OFF mask excludes zone 1's relay (0x01) and the live aux relay (0x08)");
+    /* Nothing attributable: refuse, write nothing, mark nothing pending. */
+    s_exec.claimed_relay_mask = 0x01;
+    g_relay_write_calls = 0;
+    apply_relay(0, true);
+    TEST_CHECK(g_relay_write_calls == 0 && s_exec.zone_off_pending_mask == 0 && !s_exec.zones[0].relay_commanded_on,
+               "empty fallback mask: refuse, never ON, no write");
+    s_exec.claimed_relay_mask = 0;
+    apply_relay(0, true);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.zones[0].relay_commanded_on, "no claim at all: refuse");
+
+    /* Review F4: after the run ended a relay now owned by someone else is not written. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.zone_off_pending_mask = 0x03;
+    g_stub_relay_owner[2] = RELAY_OWNER_MANUAL; /* relay 2 = bit 0x02 */
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x01 && s_exec.zone_off_pending_mask == 0,
+               "retry skips (and forgets) the relay another owner took, still opens ours");
+    g_stub_relay_owner[2] = RELAY_OWNER_NONE;
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* The tick loop must actually call the retry, in the not-RUNNING branch. */
+    char *src = profile_executor_c_read_source();
+    TEST_CHECK(src != NULL, "could locate profile_executor.c");
+    if (src) {
+        char *code = pe_strip_c_comments(src);
+        free(src);
+        const char *retry = code ? strstr(code, "zone_off_pending_retry();") : NULL;
+        const char *fd = code ? strstr(code, "profile_executor_aux_fault_drop(pre_lock_pico_tripped);") : NULL;
+        TEST_CHECK(retry != NULL && fd != NULL && retry < fd,
+                   "MUST GO RED if the tick loop stops retrying failed zone OFF writes in non-RUNNING states");
+        free(code);
+    }
 }

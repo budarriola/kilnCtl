@@ -1,4 +1,4 @@
-﻿# wt_status.ps1 -- report on, and safely prune, the worktrees/dirs under C:\wt.
+# wt_status.ps1 -- report on, and safely prune, the worktrees/dirs under C:\wt.
 #
 # WHY THIS EXISTS. C:\wt is a flat namespace shared by every concurrent
 # session (several hundred entries by 2026-10-07). Cleanup passes recur, and
@@ -15,13 +15,14 @@
 #   powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1 -Prune     # remove
 #
 # REPORT, per directory under -Root: registered in `git worktree list`?,
-# branch or HEAD sha, commits ahead of origin/main, tracked-modified and
+# branch or HEAD sha, commits ahead of -Base (default origin/dev), tracked-modified and
 # untracked counts (gitignored excluded), idle time (newest file mtime,
 # skipping build\ and .git internals and never entering a junction), live
 # processes whose command line / executable path is under the directory,
 # and a class:
 #   ACTIVE       a live process references it, or a file changed < 15 min ago
-#   HAS_WORK     registered, and has commits ahead of origin/main or is dirty
+#   HAS_WORK     registered, and has commits ahead of -Base, is dirty, holds gitignored
+#                data under logs/ or elf_archive/, or is mid-rebase/cherry-pick/merge/revert
 #   STALE_CLEAN  registered, nothing ahead, clean, idle > 2 h, no process
 #   ORPHAN_DIR   not registered, no process, idle > 2 h
 #   UNKNOWN      anything else (locked, git query failed, a .git inside an
@@ -32,15 +33,17 @@
 #
 # PRUNE removes only STALE_CLEAN and ORPHAN_DIR, each re-evaluated just before
 # its removal. Registered worktrees go through worktree_mint.ps1 -Remove
-# (which itself refuses a dirty tree and unlinks junctions first); orphan dirs
+# (-Force: wt_status itself has proven nothing unlanded via git cherry and a clean tree; unlinks junctions first); orphan dirs
 # go through lib_safe_remove.ps1's Remove-TreeSafe (reparse points are deleted
 # as links, never followed). Then `git worktree prune`. -WhatIf lists and
 # removes nothing. Unsure means skip. Exit 1 only if a removal failed.
 #
 # PARAMETERS beyond the above are for tests: -Root, -Repo (a repo whose
-# `git worktree list` is authoritative), -Base (default origin/main),
+# `git worktree list` is authoritative), -Base (default origin/dev),
 # -ActiveMinutes / -StaleHours thresholds, -PassThru (emit objects, never
 # `exit`), -Quiet.
+# LIMIT: another process's cwd is not readable from PowerShell 5.1, so a session whose
+# cwd (but no command line) is in a worktree is only protected by the idle thresholds.
 
 [CmdletBinding()]
 param(
@@ -66,6 +69,7 @@ if (-not ('WtStatusWalk' -as [type])) {
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 public class WtGitResult {
     public int ExitCode;
     public List<string> Lines = new List<string>();
@@ -77,25 +81,86 @@ public class WtWalkResult {
     public bool HasKicad;
     public int Errors;
 }
+public static class WtJob {
+    [StructLayout(LayoutKind.Sequential)] struct BASIC { public long a, b; public uint LimitFlags; public UIntPtr c, d; public uint e; public UIntPtr f; public uint g, h; }
+    [StructLayout(LayoutKind.Sequential)] struct IOC { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct EXT { public BASIC Basic; public IOC Io; public UIntPtr p, j, pm, jm; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr a, string n);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr j, int c, ref EXT i, int l);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr j, IntPtr p);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr j, uint c);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    // Job with KILL_ON_JOB_CLOSE: reaches descendants even after the launcher exited.
+    public static IntPtr Create() {
+        IntPtr j = CreateJobObject(IntPtr.Zero, null);
+        if (j == IntPtr.Zero) return IntPtr.Zero;
+        EXT e = new EXT(); e.Basic.LimitFlags = 0x2000;
+        if (!SetInformationJobObject(j, 9, ref e, Marshal.SizeOf(typeof(EXT)))) { CloseHandle(j); return IntPtr.Zero; }
+        return j;
+    }
+    public static void Assign(IntPtr j, System.Diagnostics.Process p) { if (j != IntPtr.Zero) AssignProcessToJobObject(j, p.Handle); }
+    public static void Kill(IntPtr j) { if (j != IntPtr.Zero) { TerminateJobObject(j, 1); CloseHandle(j); } }
+}
 public static class WtStatusWalk {
     // Runs git with stdin closed (a pooled runspace has no usable console stdin,
     // and a native call from one hung on it) and stderr discarded.
+    // Full path for git: CreateProcess would search the current directory first.
+    static string GitExe() {
+        string cwd = Path.GetFullPath(Directory.GetCurrentDirectory()).TrimEnd((char)92);
+        foreach (string d in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';')) {
+            if (d.Length == 0) continue;
+            try {
+                string full = Path.GetFullPath(d).TrimEnd((char)92);
+                if (string.Equals(full, cwd, StringComparison.OrdinalIgnoreCase)) continue;
+                string c = Path.Combine(full, "git.exe");
+                if (File.Exists(c)) return c;
+            } catch (Exception) { }
+        }
+        return "git";
+    }
+    static void KillTree(System.Diagnostics.Process p) {
+        try {
+            System.Diagnostics.ProcessStartInfo tk = new System.Diagnostics.ProcessStartInfo(
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "taskkill.exe"), "/T /F /PID " + p.Id);
+            tk.UseShellExecute = false; tk.CreateNoWindow = true;
+            tk.RedirectStandardOutput = true; tk.RedirectStandardError = true;
+            using (System.Diagnostics.Process k = System.Diagnostics.Process.Start(tk)) {
+                k.StandardOutput.ReadToEndAsync(); k.StandardError.ReadToEndAsync();
+                k.WaitForExit(15000);
+            }
+        } catch (Exception) { }
+    }
     public static WtGitResult Git(string dir, string args) {
         WtGitResult r = new WtGitResult();
-        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo("git", "-C \"" + dir + "\" " + args);
+        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(GitExe(), "-C \"" + dir + "\" " + args);
         psi.UseShellExecute = false; psi.CreateNoWindow = true;
         psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+        IntPtr job = WtJob.Create();
         try {
             using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi)) {
+                try {
+                WtJob.Assign(job, p);
                 p.StandardInput.Close();
                 System.Threading.Tasks.Task<string> err = p.StandardError.ReadToEndAsync();
-                string line;
-                while ((line = p.StandardOutput.ReadLine()) != null) r.Lines.Add(line);
-                p.WaitForExit();
-                err.Wait();
+                System.Threading.Tasks.Task<string> outT = p.StandardOutput.ReadToEndAsync();
+                if (!outT.Wait(120000) || !p.WaitForExit(120000)) {
+                    KillTree(p);
+                    r.ExitCode = -1;
+                    return r;
+                }
+                using (System.IO.StringReader sr = new System.IO.StringReader(outT.Result)) { string line; while ((line = sr.ReadLine()) != null) r.Lines.Add(line); }
+                if (!err.Wait(15000)) {
+                    // A grandchild kept stderr open: treat as a failed git call.
+                    KillTree(p);
+                    r.ExitCode = -1;
+                    r.Lines.Clear();
+                    return r;
+                }
                 r.ExitCode = p.ExitCode;
+                } catch (Exception) { KillTree(p); throw; }
             }
         } catch (Exception) { r.ExitCode = -1; }
+        finally { WtJob.Kill(job); } // also reaps a stderr-holding grandchild of an already-exited git
         return r;
     }
 
@@ -194,14 +259,15 @@ function Get-ProcCount([string]$dirFull, $texts) {
 $gather = {
     param($dir, $registered, $base, $wantSize)
     $ErrorActionPreference = 'Continue'
-    $f = @{ Dir = $dir; GitOk = $true; Head = ''; Ahead = @(); Unlanded = 0; Mod = 0; Untr = 0; Newest = 0; Bytes = 0; Kicad = $false; Errors = 0; HasGit = $false }
+    if (-not ('WtStatusWalk' -as [type])) { throw 'WtStatusWalk helper type is not loaded (Add-Type at script top did not run in this session)' }
+    $f = @{ Dir = $dir; GitOk = $true; Head = ''; Ahead = @(); Unlanded = 0; Ignored = 0; GitState = ''; Mod = 0; Untr = 0; Newest = 0; Bytes = 0; Kicad = $false; Errors = 0; HasGit = $false }
     $w = [WtStatusWalk]::Walk($dir, [bool]$wantSize)
     $f.Newest = $w.NewestTicksUtc; $f.Bytes = $w.Bytes; $f.Kicad = $w.HasKicad; $f.Errors = $w.Errors
     $topM = (Get-Item -LiteralPath $dir -Force).LastWriteTimeUtc.Ticks
     if ($topM -gt $f.Newest) { $f.Newest = $topM }
     $f.HasGit = Test-Path -LiteralPath (Join-Path $dir '.git')
     if ($registered) {
-        $g2 = [WtStatusWalk]::Git($dir, "log -n 200 --format=%H%x20%s $base..HEAD"); $rc2 = $g2.ExitCode; $ah = @($g2.Lines)
+        $g2 = [WtStatusWalk]::Git($dir, "log --format=%H%x20%s $base..HEAD"); $rc2 = $g2.ExitCode; $ah = @($g2.Lines)
         # git cherry compares patch-ids, so a commit landed on main under a rebased sha reads "-".
         $gc = [WtStatusWalk]::Git($dir, "cherry $base HEAD"); $landed = @{}
         if ($gc.ExitCode -eq 0) { foreach ($cl in $gc.Lines) { if ($cl.Length -gt 2) { $landed[$cl.Substring(2)] = ($cl[0] -eq '-') } } }
@@ -212,6 +278,15 @@ $gather = {
             $ah2 += ($mk + $full.Substring(0, [Math]::Min(8, $full.Length)) + ' ' + $subj)
         }
         $ah = $ah2; $f.Unlanded = $unl
+        # Gitignored captured data under logs/ or elf_archive/ must never be pruned (CLAUDE.md).
+        $gi = [WtStatusWalk]::Git($dir, 'status --porcelain=v1 --ignored')
+        if ($gi.ExitCode -eq 0) { foreach ($il in $gi.Lines) { if ($il.StartsWith('!! ') -and $il.Substring(3) -match '(^|/)(logs|elf_archive)(/|$)') { $f.Ignored++ } } } else { $f.GitOk = $false }
+        # Mid-operation worktrees keep their only copy of commits in rebase state / ORIG_HEAD.
+        $gd = [WtStatusWalk]::Git($dir, 'rev-parse --absolute-git-dir')
+        if ($gd.ExitCode -eq 0 -and $gd.Lines.Count -gt 0) {
+            $gdir = $gd.Lines[0]
+            foreach ($mk in 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'MERGE_HEAD', 'REVERT_HEAD') { if (Test-Path -LiteralPath (Join-Path $gdir $mk)) { $f.GitState = $mk; break } }
+        } else { $f.GitOk = $false }
         $g3 = [WtStatusWalk]::Git($dir, 'status --porcelain=v2 --branch --untracked-files=all'); $rc3 = $g3.ExitCode
         if ($rc2 -ne 0 -or $rc3 -ne 0) { $f.GitOk = $false }
         else {
@@ -248,6 +323,8 @@ function Get-Class($name, $dirFull, $facts, $reg, $isReparse, $procCount) {
     if ($reg) {
         if ($reg.Locked) { return @('UNKNOWN', 'worktree is locked') }
         if (-not $facts.GitOk) { return @('UNKNOWN', 'git query failed') }
+        if ($facts.GitState) { return @('HAS_WORK', "mid-operation ($($facts.GitState))") }
+        if ($facts.Ignored -gt 0) { return @('HAS_WORK', 'gitignored data under logs/ or elf_archive/') }
         if ($facts.Unlanded -gt 0 -or $facts.Mod -gt 0 -or $facts.Untr -gt 0) { return @('HAS_WORK', '') }
         if ($idle -gt ($StaleHours * 60)) { return @('STALE_CLEAN', '') }
         return @('UNKNOWN', 'clean but idle less than the stale threshold')
@@ -320,7 +397,7 @@ $rows = New-Object System.Collections.Generic.List[object]
 foreach ($e in $entries) {
     if ($e.Reparse -or -not $e.Facts) {
         $cls = @('UNKNOWN', $(if ($e.Reparse) { 'is a reparse point' } else { 'could not be inspected' }))
-        $facts = @{ Head = ''; Ahead = @(); Unlanded = 0; Mod = 0; Untr = 0; Newest = 0; Bytes = 0 }
+        $facts = @{ Head = ''; Ahead = @(); Unlanded = 0; Ignored = 0; GitState = ''; Mod = 0; Untr = 0; Newest = 0; Bytes = 0 }
         $pc = 0
     } else {
         $facts = $e.Facts
@@ -356,7 +433,7 @@ if (-not $Quiet) {
     foreach ($r in ($sorted | Where-Object { $_.Ahead -gt 0 })) {
         Write-Host "  ahead of ${Base}: $($r.Name)"
         foreach ($c in ($r.AheadCommits | Select-Object -First 10)) { Write-Host "    $c" }
-        if ($r.Ahead -gt 10) { Write-Host "    ... and $($r.Ahead - 10) more" }
+        if ($r.Ahead -gt 10) { Write-Host "    ... and $($r.Ahead - 10) more (display truncated at 10; counts above are complete)" }
     }
     Write-Host ""
     Write-Host "Helper files and dirs (never pruned): $($helpers.Count)"
@@ -388,8 +465,11 @@ if ($Prune) {
         try {
             if ($r.Class -eq 'STALE_CLEAN') {
                 Push-Location -LiteralPath $Repo
-                try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -Remove -Path $dirFull -WtRoot $rootFull 2>&1; $rc = $LASTEXITCODE } finally { Pop-Location }
-                if ($rc -ne 0) { $res.Result = "FAILED: worktree_mint -Remove exit $rc"; $failed++ }
+                try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -Remove -Force -Path $dirFull -WtRoot $rootFull 2>&1; $rc = $LASTEXITCODE } finally { Pop-Location }
+                if ($rc -ne 0) {
+                    $why = (@($out | ForEach-Object { "$_" }) | Where-Object { $_ -match 'REFUSED|ERROR|git said|fatal|error' } | Select-Object -First 3) -join ' | '
+                    $res.Result = "FAILED: worktree_mint -Remove exit $rc" + $(if ($why) { " ($why)" } else { '' }); $failed++
+                }
                 elseif (Test-Path -LiteralPath $dirFull) { $res.Result = 'PARTIAL: unregistered but directory remnant left'; $failed++ }
                 else { $res.Result = 'removed' }
             } else {

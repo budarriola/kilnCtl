@@ -86,14 +86,14 @@ typedef enum {
      * safety link is actually up (the other four conditions are either
      * link-independent or already surface a down link first). */
     READINESS_GATE_BLOCK_CEILING_MISMATCH,
-    /* docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable
+    /* docs/PICO_AUTO_UPDATE.md owner decision: "on an unrecoverable
      * version mismatch the ESP refuses to fire until matched" -- a real
      * structural block, not a warning surface. Ordered last: like
      * CEILING_MISMATCH this needs the safety link up to even know the
      * Pico's version, so the four link-independent/link-surfacing
      * conditions above take priority. */
     READINESS_GATE_BLOCK_PICO_UPDATE,
-    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision 2, verbatim:
+    /* docs/CT_ATTRIBUTION_VERIFICATION.md, owner decision 2, verbatim:
      * "FAIL blocks both the wizard step and the firing interlock.
      * INCONCLUSIVE blocks only the wizard step and never the firing
      * interlock." A FAIL means a current transformer is not on the conductor
@@ -122,6 +122,10 @@ typedef enum {
  * agreement check greps readiness_http.c's append_item() calls for exactly
  * these, so an item renamed on one side and not the other fails the repo
  * checks rather than silently un-gating a firing. */
+/* Buffer size that holds the longest refusal text readiness_gate_evaluate() can emit untruncated
+ * (167 chars today; test_readiness_gate.c asserts every message fits). */
+#define READINESS_GATE_MSG_CAP 192
+
 #define READINESS_GATE_KEY_RECOVERY_MODE "recovery_mode"
 #define READINESS_GATE_KEY_SAFETY_TRIP   "safety_trip"
 #define READINESS_GATE_KEY_CRASH_REPORT  "crash_report"
@@ -171,7 +175,7 @@ typedef struct {
     bool     estop_verified;     /* estop_verification_is_verified() */
     bool     ceiling_diverged;  /* safety_ceiling_sync_is_diverged() -- the SAME verdict the enforcement acts on */
     bool     pico_update_blocked; /* pico_auto_update_state_is_blocking() -- true only for an
-                                    * unrecoverable version mismatch (docs/PICO_AUTO_UPDATE_PLAN.md's
+                                    * unrecoverable version mismatch (docs/PICO_AUTO_UPDATE.md's
                                     * ABANDONED_* causes), the SAME verdict the boot-time glue computes */
     readiness_ct_attribution_fact_t ct_attribution; /* the stored CT attribution verdict, resolved against
                                     * TODAY's configuration fingerprint (ct_verify_current_fact(),

@@ -217,6 +217,9 @@ def get_heap_status(host: Optional[str] = None) -> str:
             if crash.get("crash_uptime_known")
             else "crash_uptime_s=unknown"
         )
+        stale_note = dashboard_http_client.crash_report_stale_note(crash)
+        if stale_note:
+            lines.append(f"!!! {stale_note} !!!")
         lines.append(
             "!!! UNACKNOWLEDGED CRASH REPORT !!! exc_task="
             f"{crash.get('exc_task')!r} exc_cause_str={crash.get('exc_cause_str')!r} "
@@ -298,8 +301,10 @@ def _describe_crash_report(rec: dict) -> str:
         if rec.get("crash_uptime_known")
         else "crash_uptime_s=unknown"
     )
+    stale_note = dashboard_http_client.crash_report_stale_note(rec)
     return (
-        f"reset_reason={rec.get('found_on_boot_reset_reason')!r} "
+        (f"[{stale_note}] " if stale_note else "")
+        + f"reset_reason={rec.get('found_on_boot_reset_reason')!r} "
         f"exc_task={rec.get('exc_task')!r} exc_cause_str={rec.get('exc_cause_str')!r} "
         f"exc_pc={rec.get('exc_pc')!r} exc_addr={rec.get('exc_addr')!r} "
         f"fw_build={rec.get('fw_build')!r} {uptime_bit} dump_id={rec.get('dump_id')} "
@@ -374,7 +379,7 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
     if before.get("acknowledged"):
         return f"already acknowledged, nothing to do -- {summary} (host={resolved})"
 
-    if not confirm:
+    if confirm is not True:
         return (
             f"DRY RUN (pass confirm=True to actually acknowledge) -- pending crash: {summary} "
             f"(host={resolved})"
@@ -650,7 +655,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
             f"to clear an unreviewed crash anyway -- {summary}; {image_summary} (host={resolved})"
         )
 
-    if not confirm:
+    if confirm is not True:
         return (
             f"DRY RUN (pass confirm=True to actually clear) -- {summary}; {image_summary} "
             f"(host={resolved})"
@@ -661,6 +666,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
     # the read-back after a 202/timeout, all inside one bounded deadline.
     deadline = time.monotonic() + _CLEAR_DEADLINE_S
     poll_readback = False
+    post_timed_out = False
     while True:
         try:
             reply = crash_report_clear_http_client.post_crash_report_clear(resolved)
@@ -673,6 +679,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
             _clear_sleep(_CLEAR_POLL_S)
         except crash_report_clear_http_client.CrashReportClearTimeout:
             poll_readback = True  # the erase may still be running -- poll, do not assume
+            post_timed_out = True
             break
         except crash_report_clear_http_client.CrashReportClearHttpError as exc:
             if exc.status == 500:
@@ -707,7 +714,9 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
         still_present.append("coredump image still present=true")
     if in_progress:
         still_present.append(f"clear_in_progress still true after {_CLEAR_DEADLINE_S:.0f}s")
-    return (f"FAILED: POST /api/crash_report/clear returned ok, but the re-fetch shows "
+    post_said = ("timed out with no reply (outcome unknown)" if post_timed_out
+                 else "returned ok")
+    return (f"FAILED: POST /api/crash_report/clear {post_said}, but the re-fetch shows "
             f"{'; '.join(still_present)} -- {summary}; {_image_summary(image_after)} "
             f"(host={resolved}). Do not trust this as cleared.")
 
@@ -766,7 +775,7 @@ def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = N
         return (f"not quarantined, nothing to do -- {count} saved config(s) visible "
                 f"(host={resolved}): {detail}")
 
-    if not confirm:
+    if confirm is not True:
         return (f"DRY RUN (pass confirm=True to actually clear) -- store IS quarantined: "
                 f"{detail} ({count} saved config(s) currently visible, host={resolved})")
 
@@ -834,7 +843,7 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
 
     resolved = _ota_resolve_host(host)
 
-    if not confirm:
+    if confirm is not True:
         return (f"DRY RUN (pass confirm=True to actually apply) -- would POST "
                 f"/api/kiln_configs/apply for id={id} (ack_hardware_differs={ack_hardware_differs}, "
                 f"host={resolved})")
@@ -883,6 +892,13 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
     state = final.get("state")
     diverged = final.get("diverged")
     reason = final.get("reason")
+    reported_id = final.get("id")
+    if isinstance(reported_id, int) and not isinstance(reported_id, bool) and reported_id != id:
+        # apply_status is a single global slot: a different id means another apply (or a stale
+        # result) is being reported, so this call's outcome was never actually read.
+        return (f"UNKNOWN: apply_status reports id={reported_id!r} (state={state!r}, reason={reason!r}), "
+                f"not the id={id} this call applied -- another apply may have run; outcome of id={id} "
+                f"unconfirmed, re-check by hand (host={resolved})")
     if state == "done_ok" and not diverged:
         return f"ok - applied id={id}, confirmed by apply_status (host={resolved})"
     if diverged:
@@ -1029,7 +1045,138 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     ]
     lines.extend(f"  {s}" for s in section_lines)
     lines.append(f"contains wifi/password-shaped fields: {sensitive}")
+    stale_note = _stale_stores_note(parsed, "this export")
+    if stale_note:
+        lines.append(stale_note)
     return "\n".join(lines)
+
+
+# Keys backup_import.c accepts (legacy format <=3 zone tuning entries, ~line 1763-1810: the
+# coupling_coeff/coupling_neighbor_zone pair maps onto one coupling-matrix cell) but backup_export.c
+# never emits. A re-export cannot contain them, so the compare must not demand them. A key-set diff of
+# the two files found these two are the only import-only keys; add to this list only with a citation.
+_IMPORT_ONLY_KEYS = frozenset({"coupling_coeff", "coupling_neighbor_zone"})
+
+
+def _first_content_diff(want: object, got: object, path: str) -> Optional[str]:
+    """First field where `got` differs from `want` (None if equal). Every key in `want` is compared (a key the
+    board's re-export lacks is a difference); floats compare within the firmware's %.9g print rounding."""
+    if isinstance(want, dict):
+        if not isinstance(got, dict):
+            return f"{path}: expected an object, board has {type(got).__name__}"
+        # Legacy (format <=3) pair: backup_import.c maps it onto ONE cell coupling_c<neighbor> unless the entry
+        # carries explicit coupling_c<n> keys. Verify that derived cell instead of skipping the pair.
+        if "coupling_coeff" in want and "coupling_neighbor_zone" in want:
+            nz = want["coupling_neighbor_zone"]
+            cell = f"coupling_c{nz}"
+            if isinstance(nz, int) and not isinstance(nz, bool) and cell not in want:
+                if cell not in got:
+                    return f"{path}.{cell}: legacy coupling_coeff has no matching cell in the re-export"
+                d = _first_content_diff(want["coupling_coeff"], got[cell], f"{path}.{cell} (from legacy coupling_coeff)")
+                if d:
+                    return d
+        for k, v in want.items():
+            if k in _IMPORT_ONLY_KEYS:
+                continue
+            if k not in got:
+                return f"{path}.{k}: in the backup but absent from the re-export"
+            d = _first_content_diff(v, got[k], f"{path}.{k}")
+            if d:
+                return d
+        return None
+    if isinstance(want, list):
+        if not isinstance(got, list) or len(got) != len(want):
+            return f"{path}: backup has {len(want)} entries, board has {len(got) if isinstance(got, list) else got!r}"
+        for i, (a, b) in enumerate(zip(want, got)):
+            d = _first_content_diff(a, b, f"{path}[{i}]")
+            if d:
+                return d
+        return None
+    if isinstance(want, float) or isinstance(got, float):
+        if (isinstance(want, (int, float)) and isinstance(got, (int, float)) and not isinstance(want, bool)
+                and abs(want - got) <= 1e-6 + 1e-5 * abs(want)):
+            return None
+        return f"{path}: backup {want!r}, board {got!r}"
+    if want != got:
+        return f"{path}: backup {want!r}, board {got!r}"
+    return None
+
+
+def _backup_import_readback_problem(host: str, body_text: str, after_readiness: str,
+                                    before_profiles: Optional[list] = None) -> Optional[str]:
+    """None when the post-import read-back agrees with the backup, else why not.
+    Checks: readiness readable, and a fresh GET /api/backup/export holds at least
+    the backup's profiles and exactly its zones count (count, then per-profile-id / per-zone-index content)."""
+    from . import backup_export_http_client
+
+    if "could not read GET /api/readiness" in after_readiness:
+        return "readiness could not be read after the import"
+    try:
+        want = json.loads(body_text)
+    except ValueError:
+        return None  # the board parsed it; an unparseable local copy has nothing to compare
+    if not isinstance(want, dict):
+        return None
+    try:
+        _raw, got = backup_export_http_client.get_export(host)
+    except Exception as exc:  # noqa: BLE001
+        return f"could not re-export to verify ({exc})"
+    if not isinstance(got, dict):
+        return "re-export was not a JSON object"
+    for key, exact in (("zones", True), ("profiles", False)):
+        w, g = want.get(key), got.get(key)
+        if not isinstance(w, list):
+            continue
+        if not isinstance(g, list):
+            return f"re-export has no {key} list"
+        if (len(g) != len(w)) if exact else (len(g) < len(w)):
+            return f"{key}: backup has {len(w)} entries, board now has {len(g)}"
+        ident = "index" if key == "zones" else "id"
+        by_id = {e.get(ident): e for e in g if isinstance(e, dict)}
+        # Board entries already claimed: by an id-carrying backup entry, or by an earlier id-less match.
+        consumed = {id(by_id[e[ident]]) for e in w
+                    if isinstance(e, dict) and ident in e and e[ident] in by_id}
+        if key == "profiles" and before_profiles:
+            # An id-less entry whose identical twin was already on the board before the import proves nothing.
+            for e in g:
+                if isinstance(e, dict) and any(_first_content_diff(b, e, "") is None
+                                               for b in before_profiles if isinstance(b, dict)
+                                               and b.get("id") == e.get("id")):
+                    consumed.add(id(e))
+        for i, entry in enumerate(w):
+            if not isinstance(entry, dict):
+                continue
+            eid = entry.get(ident, i)
+            if ident in entry:
+                other = by_id.get(eid)
+            else:
+                # No id: the firmware puts it in the first free slot, so position is not meaningful.
+                # Accept an UNCLAIMED re-exported entry that matches it completely, and claim it; else diff
+                # against position (fails safe).
+                other = next((e for e in g if isinstance(e, dict) and id(e) not in consumed
+                              and _first_content_diff(dict(entry), e, "") is None), None)
+                if other is not None:
+                    consumed.add(id(other))
+                else:
+                    other = g[i] if i < len(g) and id(g[i]) not in consumed else None
+            if other is None:
+                return f"{key}[{ident}={eid}]: in the backup but missing from the board's re-export"
+            diff = _first_content_diff(entry, other, f"{key}[{ident}={eid}]")
+            if diff:
+                return diff
+    return None
+
+
+def _stale_stores_note(parsed: object, where: str) -> str:
+    """persfx3 LOW-4: a backup document names, under ``stale_or_unknown_stores``, the cfg stores the board could not
+    read at boot; their exported values are frozen/default, not the operator's real settings. Empty string when
+    the key is absent or empty."""
+    names = parsed.get("stale_or_unknown_stores") if isinstance(parsed, dict) else None
+    if not isinstance(names, list) or not names:
+        return ""
+    return (f"WARNING: {where} lists stale_or_unknown_stores={names}: the board could not read those stores at boot, "
+            f"so their values in this backup are frozen/default and may NOT be the operator's real settings; do "
+            f"not treat it as a good restore point for them.")
 
 
 @_core._tool()
@@ -1149,13 +1296,38 @@ def backup_import(
     except OSError as exc:
         return f"error: could not read {path}: {exc}"
 
+    try:
+        stale_note = _stale_stores_note(json.loads(body_text), "this backup file")
+    except ValueError:
+        stale_note = ""
+    if stale_note:
+        stale_note = "\n" + stale_note
+
+    before_profiles = None
+    snapshot_failed = False
+    if confirm is True and not dry_run:
+        # Only an id-less profile needs a pre-import snapshot (see _backup_import_readback_problem).
+        try:
+            _wp = json.loads(body_text).get("profiles")
+            if isinstance(_wp, list) and any(isinstance(e, dict) and "id" not in e for e in _wp):
+                from . import backup_export_http_client as _bex
+                _bp = _bex.get_export(resolved)[1].get("profiles")
+                before_profiles = _bp if isinstance(_bp, list) else None
+                snapshot_failed = before_profiles is None
+        except Exception:  # noqa: BLE001 - best effort; reported below as UNVERIFIED
+            before_profiles = None
+            snapshot_failed = True
+
     t0 = time.monotonic()
     try:
         status, resp_text = backup_import_http_client.post_import(
             resolved, body_text, mode=mode, dry_run=dry_run,
             ack_delete_count=ack_delete_count, ack_no_safety=ack_no_safety)
     except backup_import_http_client.BackupImportHttpError as exc:
-        return f"error: POST /api/backup/import failed transport-side (host={resolved}): {exc}"
+        return (f"error: POST /api/backup/import failed transport-side (host={resolved}): {exc} -- "
+                f"outcome UNKNOWN: the import MAY HAVE COMMITTED (a 2026-09-28 bench run timed out "
+                f"and had committed). Do not retry blindly; check get_readiness()/control_get_zones() "
+                f"or re-run with dry_run=True before deciding.")
     elapsed_s = time.monotonic() - t0
 
     after_readiness = _readiness_summary("readiness after")
@@ -1166,12 +1338,32 @@ def backup_import(
                 f"ok - dry run only, nothing written. plan:\n{resp_text}\n"
                 f"(POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the full job "
                 f"took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
-                f"{after_readiness}"
+                f"{after_readiness}{stale_note}"
+            )
+        kept_note = ""
+        try:
+            kept = json.loads(resp_text).get("relay_cycles_kept")
+        except Exception:  # noqa: BLE001
+            kept = None
+        if isinstance(kept, list) and kept:
+            kept_note = (f"\nNOTE: relay_cycles counters {kept} were NOT lowered: the backup value was below the "
+                         "live wear count, so the live (higher) count was kept (raise-only).")
+        # Read back before claiming ok: a 2xx alone is the board's word, not proof.
+        problem = _backup_import_readback_problem(resolved, body_text, after_readiness, before_profiles)
+        if not problem and snapshot_failed:
+            problem = ("id-less profile match UNVERIFIED (pre-import profile snapshot unavailable, so a "
+                       "profile that already existed on the board cannot be told from a restored one)")
+        if problem:
+            return (
+                f"UNVERIFIED - POST returned HTTP {status} but the read-back could not confirm the "
+                f"restore: {problem}.{kept_note} Check get_readiness()/control_get_zones() before "
+                f"relying on it; do NOT re-POST blindly. (host={resolved})"
+                f"\n{before_readiness}\n{after_readiness}"
             )
         return (
-            f"ok - restored. (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
+            f"ok - restored (read-back: readiness readable, zones/profiles counts match).{kept_note} (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
             f"full job took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
-            f"{after_readiness}"
+            f"{after_readiness}{stale_note}"
         )
 
     category = backup_import_http_client.classify_refusal(status, resp_text)
@@ -1337,7 +1529,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     """Report the `cfg` LittleFS partition's live state, over HTTP GET
     /api/cfgfs (diagnostics_http.c: cfgfs_status_get_handler()).
 
-    docs/FILESYSTEM_USER_DATA_PLAN.md's user-data-on-a-filesystem migration
+    docs/FILESYSTEM_USER_DATA.md's user-data-on-a-filesystem migration
     left the `cfg` partition otherwise invisible -- mounted or not, how full,
     what files exist, and whether the zones-config dual-write's file and NVS
     copies agree were only findable by grepping the boot log. This is the
@@ -1349,7 +1541,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     why this is a live snapshot, not the historical count reaped at mount),
     and dual_write.zones (file_backed/file_rev/nvs_rev/diverged -- diverged
     means a prior file write failed and only NVS advanced) plus nvs_only, the
-    list of items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 has not yet
+    list of items docs/FILESYSTEM_USER_DATA.md section 5 has not yet
     migrated off NVS.
 
     Same host-resolution order as get_heap_status()."""
@@ -1385,6 +1577,20 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
         lines.append(f"!!! tmp_entries_now={tmp_now} -- a write may be interrupted or repeatedly failing")
     else:
         lines.append(f"tmp_entries_now={tmp_now}")
+
+    # REVIEW_PROFILESFX2 LOW-3: stores refused this boot and runtime conditions were only in the raw JSON.
+    degraded = cfgfs.get("degraded") or []
+    if degraded:
+        lines.append(
+            f"!!! degraded_count={cfgfs.get('degraded_count', len(degraded))} "
+            f"(saves refused until reboot): {', '.join(str(n) for n in degraded)}"
+        )
+    conditions = cfgfs.get("conditions") or []
+    if conditions:
+        lines.append(
+            f"!!! conditions_count={cfgfs.get('conditions_count', len(conditions))}: "
+            f"{', '.join(str(n) for n in conditions)}"
+        )
 
     subdirs = cfgfs.get("subdirs") or []
     for sd in subdirs:
@@ -1436,9 +1642,9 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None, force_health
     DESTRUCTIVE: on success this ERASES EVERY FILE cfg_fs holds (zones,
     prefs, profiles, ramp_assist, tz, relay_cycles, adaptive_tune,
     firing_stats -- whatever get_cfgfs_status() currently lists) and remounts
-    an empty filesystem. NVS stays authoritative and unaffected by this call
-    on its own (see CLAUDE.md's cfg-partition dual-write section) -- this is
-    strictly a `cfg`-partition-only action, not a factory_reset(scope=KILN).
+    an empty filesystem. Since the NVS dual-write close the `cfg` partition is the ONLY
+    copy of zones/prefs/profiles, so erasing it loses them for good (export a backup first).
+    This is a `cfg`-partition-only action, not a factory_reset(scope=KILN).
 
     HEALTHY-CFG GUARD: since the NVS dual-write close, a mounted cfg partition is
     the ONLY copy of zones/profiles/preferences, so the firmware answers 409
@@ -1480,7 +1686,7 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None, force_health
         return f"error: could not read GET /api/cfgfs (host={resolved}): {exc}"
     before_count = before.get("file_count")
 
-    if not confirm:
+    if confirm is not True:
         healthy_note = ""
         if before.get("mounted") is True and not force_healthy:
             healthy_note = ("; cfg is mounted and healthy, so the firmware would refuse (409) unless "

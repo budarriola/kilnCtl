@@ -1297,6 +1297,16 @@ recovery) and 15 (volatile Pico install). All three are in source with host test
 Rename this file without `_PLAN` once that lands. Items below not marked LANDED are
 the original specs; check the code before relying on their open/closed state.
 
+**Verified against origin/dev 2026-10-09 (a7433500):** every software item is in source
+with host tests. Items 1 (KILN_CFG_MAX_COUNT 10), 2/12 (`kiln_package.c`, `pkg_hash`),
+3/4/14 (`/api/kiln_configs/export`, `/import`, hardware-shape compat check in
+`kiln_cfg_store.c`), 5 (`kiln_cfg_swap*.c`), 6 (`safety_cfg_param_table_mirror_drift_check.py`),
+7 (`config_divergence.c`), 13 (`kiln_cfg_store_autosave_from_live`), 15/16 (SaftyFW
+volatile install, unconfigured backstop) are LANDED. The item bodies below are the
+original specs, kept for acceptance criteria only. Nothing software-only remains;
+item 10's measured httpd margin needs a target build and the bench swap confirmation
+above is hardware-gated.
+
 Ordered so useful, low-risk work lands first. Items 1–4, 7 and 9–11 are
 independent of the unresolved section 4.1 question. Every item: **no
 `ZONES_CFG_VERSION` bump**, and every negative test that breaks a production

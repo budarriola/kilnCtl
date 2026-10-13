@@ -27,6 +27,7 @@
 #include "thermo_owner.h"
 #include "unit_pref.h"
 #include "kiln_ui.h"
+#include "ui_lcd_lock.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 
@@ -301,6 +302,25 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_SAFETY_BH_WORST_CASE_HEIGHT_PX <= UI_THEME_PA
                "ui_page_diagnostics.c: 5 Safety Processor rows plus MAX31856_CHANNEL_COUNT "
                "cold-junction rows exceed UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- shrink "
                "a row or move content to another paged screen, don't widen the budget to match.");
+
+/* Trip Detail (audit L20): five rows, each pinned to a line budget and
+ * truncated with LONG_DOT. Worst case = rows * (pad 2 * 4) + pinned lines *
+ * line height + inter-row gaps. */
+#define UI_PAGE_DIAGNOSTICS_TD_REASON_LINES 1
+#define UI_PAGE_DIAGNOSTICS_TD_CAUSE_LINES  3
+#define UI_PAGE_DIAGNOSTICS_TD_REMEDY_LINES 3
+#define UI_PAGE_DIAGNOSTICS_TD_SOURCE_LINES 1
+#define UI_PAGE_DIAGNOSTICS_TD_LATCH_LINES  2
+#define UI_PAGE_DIAGNOSTICS_TD_ROW_COUNT    5
+#define UI_PAGE_DIAGNOSTICS_TD_WORST_CASE_HEIGHT_PX \
+    (((UI_PAGE_DIAGNOSTICS_TD_REASON_LINES + UI_PAGE_DIAGNOSTICS_TD_CAUSE_LINES + \
+       UI_PAGE_DIAGNOSTICS_TD_REMEDY_LINES + UI_PAGE_DIAGNOSTICS_TD_SOURCE_LINES + \
+       UI_PAGE_DIAGNOSTICS_TD_LATCH_LINES) * UI_THEME_FONT_LINE_HEIGHT_PX) + \
+     (UI_PAGE_DIAGNOSTICS_TD_ROW_COUNT * (UI_THEME_PADDING_PX / 2) * 2) + \
+     ((UI_PAGE_DIAGNOSTICS_TD_ROW_COUNT - 1) * (UI_THEME_PADDING_PX / 2)))
+_Static_assert(UI_PAGE_DIAGNOSTICS_TD_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_diagnostics.c: Trip Detail pinned rows exceed UI_THEME_PAGE_CONTENT_BUDGET_PX "
+               "-- cut a line budget, don't scroll.");
 
 /* Thermocouple Faults: MAX31856_CHANNEL_COUNT flex_grow(1) rows sharing one
  * page. Each row's own worst-case CONTENT (not its rendered flex-grow share)
@@ -710,6 +730,12 @@ static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
 
+    /* Audit L21: skip every heavy read (dashboard_get_status, thermo
+     * read-all) while Diagnostics is not the active screen. */
+    if (s_uptime_label == NULL || lv_obj_get_screen(s_uptime_label) != lv_screen_active()) {
+        return;
+    }
+
     char buf[48];
 
     /* Shared by the Safety Processor block below -- same plain-C getter
@@ -1054,9 +1080,8 @@ static void refresh_cb(lv_timer_t *timer)
          * reported one this boot. Only meaningful once a trip is actually
          * on record. */
         lv_label_set_text(s_td_latch_label,
-                           "This trip is LATCHED -- it does not clear on its own, and starting "
-                           "a new firing will NOT clear it. Only Clear Trip does, and it is "
-                           "refused while the cause is still present.");
+                           "LATCHED: a new firing will not clear it. Only Clear Trip does, "
+                           "once the cause is gone.");
     }
 
     /* ---- Board Health (folded from ui_page_board_health.c; the ESP32-S3
@@ -1344,6 +1369,17 @@ static lv_obj_t *build_full_text_row_accent(lv_obj_t *parent, const char *initia
     return label;
 }
 
+/* Trip Detail row: fixed line budget with LONG_DOT so an over-long string is
+ * truncated rather than wrapping past the page (audit L20). LONG_DOT only
+ * truncates with a definite height. */
+static lv_obj_t *build_pinned_text_row(lv_obj_t *parent, const char *initial_text, int lines)
+{
+    lv_obj_t *label = build_full_text_row_accent(parent, initial_text, UI_THEME_COLOR_CARD);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(label, lines * UI_THEME_FONT_LINE_HEIGHT_PX);
+    return label;
+}
+
 static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
 {
     return build_full_text_row_accent(parent, initial_text, UI_THEME_COLOR_CARD);
@@ -1447,9 +1483,11 @@ static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *n
  * flash-worker jobs normally take (a single NVS blob write/read) but short
  * enough that a genuine freeze reads as a momentary pause, not a hang. */
 #define UI_PAGE_DIAGNOSTICS_CRASH_ACK_WAIT_MS 300u
-static void crash_ack_btn_clicked_cb(lv_event_t *e)
+/* L11 (LCD UI audit 2026-10-09): the matching web route is ROUTE_TIER_ADMIN.
+ * Pressing the button without an admin session only raises the PIN keypad;
+ * the success callback then performs the arm step itself. */
+static void crash_ack_do(void)
 {
-    (void)e;
     int64_t now = (int64_t)hal_time_now_us();
     /* LOW-4 debounce: ignore a confirm tap that arrives less than DEBOUNCE_US
      * after the arm tap, so a touch bounce cannot arm-and-confirm from one
@@ -1488,6 +1526,26 @@ static void crash_ack_btn_clicked_cb(lv_event_t *e)
         s_cr_ack_deadline_us = now + UI_PAGE_DIAGNOSTICS_CRASH_ACK_CONFIRM_US;
         lv_label_set_text(s_cr_ack_label, "Confirm?");
     }
+}
+
+/* PIN success runs the same step the tap would have (role re-checked); a
+ * failed/cancelled PIN never reaches it. */
+static void crash_ack_unlocked_cb(void *user_data)
+{
+    (void)user_data;
+    if (ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        crash_ack_do();
+    }
+}
+
+static void crash_ack_btn_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        ui_lcd_lock_run_gated("Admin PIN to acknowledge crash", LCD_PIN_ROLE_ADMIN, crash_ack_unlocked_cb, NULL);
+        return;
+    }
+    crash_ack_do();
 }
 
 /* Summary row + Acknowledge button for the Crash Report page. Same
@@ -1657,11 +1715,11 @@ lv_obj_t *ui_page_diagnostics_build(void)
      * UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). 5 wrapped full-text
      * rows, same shape as the Safety Processor page's own rows. */
     lv_obj_t *trip_detail_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL];
-    s_td_reason_label = build_full_text_row(trip_detail_page, "Reason: --");
-    s_td_cause_label = build_full_text_row(trip_detail_page, "Detected: --");
-    s_td_remedy_label = build_full_text_row(trip_detail_page, "To clear: --");
-    s_td_source_label = build_full_text_row(trip_detail_page, "Fault source: --");
-    s_td_latch_label = build_full_text_row(trip_detail_page, "--");
+    s_td_reason_label = build_pinned_text_row(trip_detail_page, "Reason: --", UI_PAGE_DIAGNOSTICS_TD_REASON_LINES);
+    s_td_cause_label = build_pinned_text_row(trip_detail_page, "Detected: --", UI_PAGE_DIAGNOSTICS_TD_CAUSE_LINES);
+    s_td_remedy_label = build_pinned_text_row(trip_detail_page, "To clear: --", UI_PAGE_DIAGNOSTICS_TD_REMEDY_LINES);
+    s_td_source_label = build_pinned_text_row(trip_detail_page, "Fault source: --", UI_PAGE_DIAGNOSTICS_TD_SOURCE_LINES);
+    s_td_latch_label = build_pinned_text_row(trip_detail_page, "--", UI_PAGE_DIAGNOSTICS_TD_LATCH_LINES);
 
     /* Page 5: Thermocouple Faults -- back to ONE page for all
      * MAX31856_CHANNEL_COUNT channels as of 2026-09-04 (see this file's

@@ -126,6 +126,8 @@ def autotune_start(
     that path, see devices.AUTOTUNE_RULES' wire_byte=None docstring) -- so
     it is refused here with an explicit error rather than silently starting
     a SIMC run while telling the caller Cohen-Coon was selected.
+
+    Not confirm-gated by design: starting an autotune is the routine purpose of this tool; the board gates it on readiness and the safety processor.
     """
     method_map = {"step": devices.AUTOTUNE_METHOD_STEP, "relay": devices.AUTOTUNE_METHOD_RELAY}
     #: dashboard_http.c's own per-method defaults (see the docstring above) --
@@ -188,6 +190,8 @@ def autotune_accept(ack_unsettled: bool = False) -> str:
     actually looking at model_settled and the fitted K/tau/L and deciding
     they are still worth keeping (e.g. re-running the step test is usually
     the better option).
+
+    Not confirm-gated by design: accepting a finished autotune is the routine step after a run; the unsettled case needs the separate ack_unsettled flag.
     """
     try:
         result = _srv._autotune.accept(ack_unsettled=ack_unsettled)

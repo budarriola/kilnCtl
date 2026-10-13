@@ -51,6 +51,7 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "fake_kv.h"
+#include "fake_sysinfo.h"
 #include "psa/crypto.h"
 
 // psa/crypto.h's host stub declares this `extern` (only ONE definition per
@@ -142,14 +143,22 @@ bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, cha
 // synchronously, same shape as test_autotune_engine_prestart.c's/
 // test_ota_http.c's/test_safety_cfg_store.c's identical fakes of this
 // function.
+int g_stub_flash_worker_dispatches = 0;
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
     if (!fn) {
         return ESP_ERR_INVALID_ARG;
     }
+    g_stub_flash_worker_dispatches++;
     fn(arg);
     return ESP_OK;
 }
+
+// nvs_save() runs the autosave inline when already on the flash worker
+// (SET_ZONE_PID/MODEL, AUTOTUNE ACCEPT jobs). Controllable so a test can take
+// both branches.
+bool g_stub_on_flash_worker = false;
+bool uart_bridge_ext_is_on_flash_worker(void) { return g_stub_on_flash_worker; }
 
 #include "../drivers/http/zones_http.c"
 #include "../drivers/persist/zones_config_store.c"
@@ -158,6 +167,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
                                             * fuzzy_model_valid call site (GAP 2,
                                             * docs/audits/observability_gaps_closed_2026-09-14.md) */
 #include "../drivers/http/zones_http_get.c"
+#include "save_section_probe.h"
 #include "../drivers/http/zones_http_post_parse.c"
 #include "../drivers/http/http_async_job.h"
 #include "../drivers/http/zones_http_post.c"
@@ -190,7 +200,9 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
  * still relies on. */
 static int s_ceiling_writer_calls = 0;
 static float s_ceiling_writer_last_target_c = 0.0f;
-static int s_ceiling_writer_bumps_generation = 0; /* simulates a concurrent writer during the blocking ceiling write */
+static int s_ceiling_writer_bumps_generation = 0; /* N > 0: the next N writes each simulate a concurrent writer (blocking window) */
+/* Optional: models a Pico that confirms every write by read-back, so the cached ceiling follows it. */
+static void (*s_ceiling_writer_on_write)(float value) = NULL;
 
 bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap,
@@ -200,7 +212,11 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
     (void)param_id;
     s_ceiling_writer_calls++;
     s_ceiling_writer_last_target_c = value;
-    if (s_ceiling_writer_bumps_generation) {
+    if (s_ceiling_writer_on_write) {
+        s_ceiling_writer_on_write(value);
+    }
+    if (s_ceiling_writer_bumps_generation > 0) { /* a countdown: only the first N writes race */
+        s_ceiling_writer_bumps_generation--;
         s_config_generation++;
     }
     if (reason_out && reason_cap > 0) {
@@ -317,7 +333,7 @@ const uint8_t tuning_recommendations_json_end[1] = { 0 };
 // directly), but every symbol the file references must resolve at link time.
 // Returns OK so that if a future test ever does drive the handler, it is the
 // handler's own logic under test rather than this stand-in refusing first.
-/* Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+/* Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
  * spec): counts calls so a test can prove the system_mode_gate check runs
  * and refuses BEFORE this interlock is ever reached, same
  * !g_probe_interlock_called convention factory_reset.c's own test uses.
@@ -454,6 +470,11 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
     (void)r;
     snprintf(s_test_last_status, sizeof(s_test_last_status), "%s", status ? status : "");
     return ESP_OK;
+}
+esp_err_t httpd_resp_send_custom_err(httpd_req_t *r, const char *status, const char *msg)
+{
+    (void)httpd_resp_set_status(r, status);
+    return httpd_resp_sendstr(r, msg);
 }
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
@@ -707,9 +728,19 @@ bool autotune_engine_is_active(void)
 static relay_heat_sweep_claim_result_t s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_OK;
 static int s_test_heat_sweep_claim_begin_calls = 0;
 static int s_test_heat_sweep_claim_end_calls = 0;
+// relay_authority.h's factory reset in flight mark (HTTP audit L37 follow-up): read by
+// zones_current_sweep_start() after it publishes its claim, and by zones_config_set_coupling_cell().
+// s_test_reset_mark_set_at_sweep_claim models a reset that sets its mark between the sweep's early
+// checks and its post-claim re-read.
+static bool s_test_reset_in_flight = false;
+static bool s_test_reset_mark_set_at_sweep_claim = false;
+bool relay_authority_reset_in_flight(void) { return s_test_reset_in_flight; }
 relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void)
 {
     s_test_heat_sweep_claim_begin_calls++;
+    if (s_test_reset_mark_set_at_sweep_claim) {
+        s_test_reset_in_flight = true;
+    }
     return s_test_heat_sweep_claim_result;
 }
 void relay_authority_heat_sweep_claim_end(void)
@@ -717,7 +748,7 @@ void relay_authority_heat_sweep_claim_end(void)
     s_test_heat_sweep_claim_end_calls++;
 }
 
-/* zones_post_handler() (system_mode_gate wiring, docs/SYSTEM_MODE_GATE_PLAN.md
+/* zones_post_handler() (system_mode_gate wiring, docs/SYSTEM_MODE_GATE.md
  * gate-slices-2/4/5, 2026-09-25) takes this same profile_running/
  * autotune_running snapshot before calling system_mode_gate_check() --
  * derived from the SAME s_test_profile_status/s_test_autotune_active globals
@@ -734,6 +765,13 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
     if (autotune_running_out) {
         *autotune_running_out = s_test_autotune_active;
     }
+}
+
+// LOW-1 (review 10): test-controlled stand-in for kiln_cfg_swap_zone_edits_at_risk().
+static bool s_test_swap_zone_edits_at_risk = false;
+bool kiln_cfg_swap_zone_edits_at_risk(void)
+{
+    return s_test_swap_zone_edits_at_risk;
 }
 
 // ---- safety_link.h -- same reasoning: a small test-controlled stand-in
@@ -1241,6 +1279,34 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
     TEST_CHECK(out.tc_type == current.tc_type, "tc_type preserved when the submission omits z1_tctype entirely");
 }
 
+// F5 (WEB_UI_XSS_AUDIT_2026-10-09): a zone name with a control byte is refused at parse
+// time (the HTTP layer answers 400 with this reason), and the zones emitter escapes it.
+static void test_zone_name_control_chars_refused(void)
+{
+    TEST_SECTION("parse_zone_fields -- control character in z%u_name refused; zones_json_escape escapes controls");
+    zone_cfg_t current = make_stored_zone();
+    const char *bodies[] = {
+        "z0_name=a%0Ab&z0_tctype=2", "z0_name=a%01b&z0_tctype=2",
+        "z0_name=a%7Fb&z0_tctype=2", "z0_name=a%00b&z0_tctype=2",
+    };
+    for (size_t k = 0; k < sizeof(bodies) / sizeof(bodies[0]); k++) {
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(bodies[k], 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(!ok, "control-character zone name refused");
+        TEST_CHECK(strstr(err_reason, "control") != NULL, "reason names the control character");
+    }
+    zone_cfg_t out2;
+    memset(&out2, 0, sizeof(out2));
+    const char *er2 = "unset";
+    (void)zones_http_parse_zone_fields("z0_name=Top%20Zone&z0_tctype=2", 0, 1, 4, 1, &current, &out2, &er2);
+    TEST_CHECK(er2 == NULL || strstr(er2, "control") == NULL, "ordinary name (space) is not refused as control");
+    char esc[32];
+    zones_json_escape("a\nb", esc, sizeof(esc));
+    TEST_CHECK(strcmp(esc, "a\\u000ab") == 0, "zones_json_escape emits \\u000a for newline");
+}
+
 // ZONES_CFG_VERSION 12->13: the whole-page POST /api/zones path is a SECOND
 // gain-writing path (zones_http_parse_zone_fields() writes z->pid_kp/ki/kd directly,
 // never through zones_config_set_pid()'s choke point -- see this function's
@@ -1531,6 +1597,15 @@ static void test_parse_float_field_rejects_trailing_garbage(void)
     TEST_CHECK(out == -1.0f, "out must be untouched on rejection");
 }
 
+static void test_parse_float_field_rejects_leading_space_and_hex(void)
+{
+    TEST_SECTION("parse_float_field -- leading whitespace and hex floats refused (HTTP parser F3)");
+    float out = -1.0f;
+    TEST_CHECK(!zones_config_json_parse_float_field("z0_kp=%201", "z0_kp", 0.0f, 5000.0f, &out), "leading space refused");
+    TEST_CHECK(!zones_config_json_parse_float_field("z0_kp=0x1p3", "z0_kp", 0.0f, 5000.0f, &out), "hex float refused");
+    TEST_CHECK(zones_config_json_parse_float_field("z0_kp=1.5", "z0_kp", 0.0f, 5000.0f, &out) && out == 1.5f, "plain value still parses");
+}
+
 static void test_parse_float_field_rejects_unit_suffix(void)
 {
     TEST_SECTION("parse_float_field -- a value with a trailing unit suffix is rejected (FIX 2)");
@@ -1565,7 +1640,95 @@ static void run_zones_post(const char *body)
     TEST_CHECK(err == ESP_OK, "zones_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
 }
 
-// Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+// HTTP parser fuzz campaign 2026-10-09: hostile values on every REQUIRED per-zone field, and
+// hostile top-level fields through the real handler. Expected: refused (400), nothing written.
+static bool fuzz_parse_with(const char *key, const char *val)
+{
+    char body[1024];
+    const char *fields[][2] = {
+        { "z0_name", "Top" }, { "z0_tctype", "2" }, { "z0_relay_mask", "1" }, { "z0_thermo_mask", "1" },
+        { "z0_timingprofile", "0" }, { "z0_cal", "1.5" }, { "z0_kp", "2.0" }, { "z0_ki", "0.3" },
+        { "z0_kd", "0.05" }, { "z0_ramp", "120" }, { "z0_sanity", "5" }, { "z0_mode", "2" },
+        { "z0_maxtemp", "1300" }, { "z0_mintemp", "-10" }, { "z0_window", "60000" },
+        { "z0_minon", "0" }, { "z0_minoff", "0" },
+    };
+    size_t n = 0;
+    body[0] = '\0';
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        const char *v = strcmp(fields[i][0], key) == 0 ? val : fields[i][1];
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "%s%s=%s", n ? "&" : "", fields[i][0], v);
+    }
+    zone_cfg_t current = make_stored_zone();
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    return zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+}
+
+static void test_fuzz_zone_fields_hostile_values(void)
+{
+    TEST_SECTION("parse_zone_fields fuzz -- NaN/inf/garbage/%00/overflow/out-of-range on required fields");
+    TEST_CHECK(fuzz_parse_with("z0_kp", "2.0"), "control: the base body parses");
+    const char *numeric[] = { "z0_cal", "z0_kp", "z0_ki", "z0_kd", "z0_ramp", "z0_maxtemp", "z0_mintemp",
+                              "z0_window", "z0_sanity" };
+    const char *hostile[] = { "nan", "inf", "-inf", "abc", "1.5x", "%00", "1%00", "1e39", "-1e39",
+                              "99999999999999999999", "" };
+    for (size_t k = 0; k < sizeof(numeric) / sizeof(numeric[0]); k++) {
+        for (size_t h = 0; h < sizeof(hostile) / sizeof(hostile[0]); h++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s=%s refused", numeric[k], hostile[h]);
+            TEST_CHECK(!fuzz_parse_with(numeric[k], hostile[h]), msg);
+        }
+    }
+    const char *intkeys[] = { "z0_relay_mask", "z0_thermo_mask", "z0_mode", "z0_tctype", "z0_timingprofile" };
+    const char *badint[] = { "-1", "256", "99999", "1.5", "0x2", "abc", "%00", "", "1e1", "nan" };
+    for (size_t k = 0; k < sizeof(intkeys) / sizeof(intkeys[0]); k++) {
+        for (size_t h = 0; h < sizeof(badint) / sizeof(badint[0]); h++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s=%s refused", intkeys[k], badint[h]);
+            TEST_CHECK(!fuzz_parse_with(intkeys[k], badint[h]), msg);
+        }
+    }
+    TEST_CHECK(!fuzz_parse_with("z0_relay_mask", "16"), "relay_mask bit 4 with relay_count 4 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_relay_mask", "255"), "relay_mask 255 with relay_count 4 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_thermo_mask", "255"), "thermo_mask 255 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_tctype", "8"), "tctype 8 (voltage mode) refused");
+    TEST_CHECK(!fuzz_parse_with("z0_mode", "4"), "control_mode 4 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_timingprofile", "1"), "timing profile index past count refused");
+    TEST_CHECK(!fuzz_parse_with("z0_name", "123456789012345678901234567890123456789012345678901234567890"),
+               "over-long name refused");
+    TEST_CHECK(!fuzz_parse_with("z0_name", "a%00b"), "name with %00 refused");
+}
+
+static void test_fuzz_zones_post_toplevel_hostile(void)
+{
+    TEST_SECTION("zones_post_handler fuzz -- hostile thermo_count/relay_count/max_simultaneous_relays -> 400, no OK");
+    const char *bodies[] = {
+        "", "thermo_count=0", "relay_count=0", "thermo_count=&relay_count=0",
+        "thermo_count=-1&relay_count=0", "thermo_count=4&relay_count=0", "thermo_count=99999&relay_count=0",
+        "thermo_count=0&relay_count=-1", "thermo_count=0&relay_count=255", "thermo_count=0&relay_count=99",
+        "thermo_count=nan&relay_count=0", "thermo_count=0%00&relay_count=0", "thermo_count=%00&relay_count=0",
+        "thermo_count=1e0&relay_count=0", "thermo_count=0&relay_count=0&max_simultaneous_relays=-1",
+        "thermo_count=0&relay_count=0&max_simultaneous_relays=99",
+        "thermo_count=0&relay_count=0&max_simultaneous_relays=%00",
+        "thermo_count=0&relay_count=0&max_simultaneous_relays=99999999999999999999",
+        "thermo_count=0&relay_count=0&continue_on_zone_trip=2",
+        "thermo_count=0&relay_count=0&continue_on_zone_trip=%00",
+        "thermo_count=0&relay_count=0&continue_on_zone_trip=true",
+        "thermo_count=0&relay_count=0&relay1_type=9", "thermo_count=0&relay_count=0&relay1_type=-1",
+        "thermo_count=0&relay_count=0&relay1_name=a%00b",
+        "thermo_count=0&relay_count=0&relay1_name=a%0Ab",
+        "%", "&&&&", "=", "thermo_count", "=thermo_count=0",
+    };
+    for (size_t k = 0; k < sizeof(bodies) / sizeof(bodies[0]); k++) {
+        char msg[200];
+        run_zones_post(bodies[k]);
+        snprintf(msg, sizeof(msg), "body \"%s\": answered 400 and never ok", bodies[k]);
+        TEST_CHECK(s_test_err_called && !s_test_ok_called, msg);
+    }
+}
+
+// Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
 // spec): zones_post_handler() used to call system_mode_gate_check() AFTER
 // ota_http_check_interlocks() -- which already refuses (409 "a profile is
 // running") for the exact same facts -- so the mode gate's own refusal body
@@ -1675,6 +1838,25 @@ static void test_zones_post_refused_while_async_job_busy(void)
               "refusal body must carry the busy discriminator marker");
 }
 
+static void test_zones_post_refused_while_rollback_pending(void)
+{
+    TEST_SECTION("zones_post_handler -- LOW-1 (review 10): refuses with 409 naming the pending rollback while a "
+                 "kept swap journal would re-import the pre-swap zones");
+    s_test_swap_zone_edits_at_risk = true;
+    g_probe_interlock_called = 0;
+    s_ceiling_writer_calls = 0;
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_ok_called = false;
+    uint32_t rev_before = s_zones_cfg_rev;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+    s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "review 12 INFO-5: refusal is HTTP 409");
+    TEST_CHECK(s_zones_cfg_rev == rev_before, "review 12 INFO-5: nothing was persisted (rev unchanged)");
+    TEST_CHECK(strstr(s_last_resp_body, "rollback is pending") != NULL, "refusal body names the pending rollback");
+    TEST_CHECK(!s_test_ok_called, "must not report success");
+    TEST_CHECK(s_ceiling_writer_calls == 0, "nothing reached the Pico ceiling write");
+}
+
 static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(void)
 {
     TEST_SECTION("zones_post_handler -- max_simultaneous_relays trailing garbage rejected (FIX 2, inline strtol site 1)");
@@ -1717,6 +1899,111 @@ static void test_zones_post_accepts_clean_minimal_body(void)
     TEST_CHECK(s_test_ok_called, "a clean submission must report success");
     TEST_CHECK(s_zones.cfg.safety_tc_type == 7, "submitted safety_tc_type=3 must be ignored -- the live value (7) "
               "must survive, since the ESP no longer writes this field");
+}
+
+// e7c98209 strict form parsing: a PRESENT-but-empty or over-long optional key is a 400, never
+// "treated as omitted". Omitted keys stay accepted. The sentinels below prove a rejected POST
+// touched nothing (s_zones.cfg and relay types).
+#define STRICT_BASE "thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY
+
+static void strict_zones_seed(void)
+{
+    s_zones.cfg.max_simultaneous_relays = 3;
+    s_zones.cfg.continue_on_zone_trip = 1;
+    s_zones.cfg.pc_link_abort_silence_ms = 1234.0f;
+    s_relay_names.cfg.types[0] = 2;
+}
+
+static void strict_zones_expect_400_untouched(const char *body, const char *what)
+{
+    strict_zones_seed();
+    run_zones_post(body);
+    TEST_CHECK(s_test_err_called, what);
+    TEST_CHECK(!s_test_ok_called, "a rejected strict-parse POST must not report success");
+    TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 3 && s_zones.cfg.continue_on_zone_trip == 1 &&
+                   s_zones.cfg.pc_link_abort_silence_ms == 1234.0f && s_relay_names.cfg.types[0] == 2,
+               "a rejected strict-parse POST must leave the stored config untouched");
+}
+
+static void test_zones_post_strict_optional_keys(void)
+{
+    TEST_SECTION("zones_post_handler -- present-but-empty optional keys are 400 and change nothing");
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=", "empty max_simultaneous_relays -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=", "empty continue_on_zone_trip -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=abc", "garbage pc_link_abort_silence_ms -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&relay1_type=", "empty relay1_type -> 400");
+
+    TEST_SECTION("zones_post_handler -- over-long optional keys are 400 and change nothing");
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=123456789", "over-long max_simultaneous_relays -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=1111", "over-long continue_on_zone_trip -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=1234567890123456", "over-long pc_link_abort_silence_ms -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&relay1_type=12345678", "over-long relay1_type -> 400");
+    /* -2 from an all-digit over-long value or an embedded %00: the handler must
+     * never strtol()/strcmp() whatever prefix decode left in the buffer. */
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=00000000", "over-long all-zero max_simultaneous_relays -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=0%00", "max_simultaneous_relays=0%00 -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=1%00", "continue_on_zone_trip=1%00 -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=0%00", "continue_on_zone_trip=0%00 -> 400");
+
+    TEST_SECTION("zones_post_handler -- valid optional keys are accepted and applied");
+    strict_zones_seed();
+    run_zones_post(STRICT_BASE "&max_simultaneous_relays=2&continue_on_zone_trip=0&pc_link_abort_silence_ms=500&relay1_type=3");
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "all-valid optional keys must be accepted");
+    TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 2, "max_simultaneous_relays applied");
+    TEST_CHECK(s_zones.cfg.continue_on_zone_trip == 0, "continue_on_zone_trip applied");
+    TEST_CHECK(s_zones.cfg.pc_link_abort_silence_ms == 500.0f, "pc_link_abort_silence_ms applied");
+    TEST_CHECK(s_relay_names.cfg.types[0] == 3, "relay1_type applied");
+
+    TEST_SECTION("zones_post_handler -- omitted optional keys are accepted; pc_link and relay type preserve, "
+                 "max_simultaneous_relays/continue_on_zone_trip fall to their documented 0 default");
+    strict_zones_seed();
+    run_zones_post(STRICT_BASE);
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "omitting every optional key must be accepted");
+    TEST_CHECK(s_zones.cfg.pc_link_abort_silence_ms == 1234.0f, "omitted pc_link_abort_silence_ms preserves the stored value");
+    TEST_CHECK(s_relay_names.cfg.types[0] == 2, "omitted relay1_type preserves the stored type");
+    TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 0 && s_zones.cfg.continue_on_zone_trip == 0,
+               "omitted max_simultaneous_relays/continue_on_zone_trip take the documented 0 default");
+}
+
+#define ONE_ZONE_BLANK_BODY     "thermo_count=1&relay_count=2&" MINIMAL_TIMING_PROFILE_BODY "&"     "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"     "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"     "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&z0_timingprofile=0&"     "z0_settings_source=255"
+
+static void test_zones_post_blank_guard_fields_and_pc_link(void)
+{
+    static const char *const keys[] = {"wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate",
+                                       "runawaymargin", "driftperiod", "debounce", "frozenwindow", "xzone"};
+    TEST_SECTION("zones_post_handler -- blank guard fields/xzone keep the stored value; omitted keeps it too; garbage is 400");
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        char body[1600];
+        snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=", keys[k]);
+        strict_zones_seed();
+        zone_cfg_t *z = &s_zones.cfg.zones[0];
+        float *fields[9] = {&z->guard_wrong_dir_window_s, &z->guard_wrong_dir_rate_c_per_min, &z->guard_off_settle_s,
+                            &z->guard_runaway_rate_c_per_min, &z->guard_runaway_margin_c, &z->guard_drift_period_s,
+                            &z->guard_sensor_fault_debounce_ticks, &z->guard_frozen_window_s, &z->cross_zone_max_delta_c};
+        /* Distinct seed per field (review BENCHFX4 MED-1): a cross-wired omit copy must be visible. */
+        for (size_t f = 0; f < 9; f++) *fields[f] = 9.0f + 0.25f * (float)f;
+        run_zones_post(body);
+        if (s_test_err_called) printf("  err: %s\n", s_test_err_msg);
+        TEST_CHECK(!s_test_err_called && s_test_ok_called, keys[k]);
+        for (size_t f = 0; f < 9; f++) {
+            const float want = 9.0f + 0.25f * (float)f;
+            if (*fields[f] != want) printf("  field %s (index %u) = %g, want %g\n", keys[f], (unsigned)f, (double)*fields[f], (double)want);
+            if (f == k) {
+                TEST_CHECK(*fields[f] == want, "blank guard/xzone preserves its OWN stored value (never default/disable)");
+            } else {
+                TEST_CHECK(*fields[f] == want, "omitted guard/xzone keeps its OWN stored value (review 11 MED-3: never disables a guard)");
+            }
+        }
+        snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=abc", keys[k]);
+        strict_zones_seed();
+        run_zones_post(body);
+        TEST_CHECK(s_test_err_called && !s_test_ok_called, "garbage guard/xzone value -> 400");
+    }
+    TEST_SECTION("zones_post_handler -- blank pc_link_abort_silence_ms keeps the stored value");
+    strict_zones_seed();
+    run_zones_post(STRICT_BASE "&pc_link_abort_silence_ms=");
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "blank pc_link accepted");
+    TEST_CHECK(s_zones.cfg.pc_link_abort_silence_ms == 1234.0f, "blank pc_link preserves stored value");
 }
 
 // A single per-zone body block, shared by the whole-page cross-zone cycle
@@ -1774,6 +2061,11 @@ static uint8_t test_aux_provider(void)
     return s_test_aux_mask;
 }
 
+static void test_ceiling_cache_follows_write(float value)
+{
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, value, true);
+}
+
 static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(void)
 {
     TEST_SECTION("POST /api/zones -- a concurrent writer bumping the config generation between the "
@@ -1791,10 +2083,15 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     uint32_t gen_before = s_config_generation;
     zones_cfg_t before = s_zones.cfg;
     s_ceiling_writer_calls = 0;
-    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs (unknown Pico ceiling -> always raises) */
+    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs */
+    /* The Pico ceiling starts in sync with the live max (100) and follows every confirmed write. */
+    test_cfg_rows_reset();
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, 100.0f, true);
+    s_ceiling_writer_on_write = test_ceiling_cache_follows_write;
     s_ceiling_writer_bumps_generation = 1;
     run_zones_post(body);
     s_ceiling_writer_bumps_generation = 0;
+    s_ceiling_writer_on_write = NULL;
     s_hw_safety = NULL;
     TEST_CHECK(s_ceiling_writer_calls >= 1, "test setup: the ceiling write ran (the blocking window)");
     TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "lost-update answered 409");
@@ -1802,6 +2099,208 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched by the refused submit");
     TEST_CHECK(s_config_generation == gen_before + 1, "only the concurrent writer's bump advanced the generation");
     TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+    /* Gap 3 (HOST_TEST_GAP_AUDIT_2026-10-09.md): the raise to 1300 must be undone, to exactly the
+     * live max -- never left wider (divergence forces relays off), never tighter (owner rule). */
+    TEST_CHECK(s_ceiling_writer_calls == 2, "the 409 wrote the Pico ceiling a second time (the restore)");
+    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 100.0, 1e-6, "restore targets exactly the live zone max");
+    float pico_after = 0.0f;
+    TEST_CHECK(safety_ceiling_sync_get_current_pico_ceiling(&pico_after), "Pico ceiling known after the 409");
+    TEST_CHECK_NEAR(pico_after, 100.0, 1e-6, "Pico ceiling back in sync with the unchanged zone max after the 409");
+    test_cfg_rows_reset();
+}
+
+static void test_zones_post_expected_generation(void)
+{
+    TEST_SECTION("POST /api/zones -- optional expected_generation: stale -> 409 and nothing written; "
+                 "current or absent -> commits; garbage -> 400 (WEB_UI_JS_AUDIT M-1)");
+    seed_two_zone_pid_baseline();
+    char body[1400];
+    zones_cfg_t before = s_zones.cfg;
+    uint32_t gen = s_config_generation;
+
+    snprintf(body, sizeof(body), "%s&expected_generation=%lu", TWO_ZONE_MINIMAL_BODY("255", "255"),
+             (unsigned long)(gen + 1u));
+    run_zones_post(body);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "stale expected_generation answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_stale") != NULL, "409 names zones_config_stale");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "stale submit wrote nothing");
+    TEST_CHECK(s_config_generation == gen, "stale submit did not bump the generation");
+
+    snprintf(body, sizeof(body), "%s&expected_generation=abc", TWO_ZONE_MINIMAL_BODY("255", "255"));
+    run_zones_post(body);
+    TEST_CHECK(s_test_err_called, "non-numeric expected_generation refused");
+    TEST_CHECK(s_config_generation == gen, "garbage token wrote nothing");
+
+    snprintf(body, sizeof(body), "%s&expected_generation=%lu", TWO_ZONE_MINIMAL_BODY("255", "255"),
+             (unsigned long)gen);
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "matching expected_generation commits");
+    TEST_CHECK(s_config_generation == gen + 1u, "matching submit bumped the generation");
+
+    /* The same (now old) token again is stale. */
+    run_zones_post(body);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "re-using the consumed token answered 409");
+
+    /* Absent = old behaviour. */
+    run_zones_post(TWO_ZONE_MINIMAL_BODY("255", "255"));
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "absent expected_generation keeps the old behaviour");
+}
+
+static esp_err_t zh_failing_cfg_write_fn(const char *rel_path, const void *data, size_t len);
+
+/* persfx MED-2 (second half): a fault latched WITHOUT the undecided flag must survive a POST whose save fails;
+ * the fault is cleared only by a save that persisted. */
+static void test_zones_post_failed_save_keeps_load_fault(void)
+{
+    TEST_SECTION("POST /api/zones -- a failed save does not clear the latched load fault (persfx MED-2)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: fault only", true);
+    s_zones_cfg_undecided = false; /* fault latched, boot otherwise decided */
+    zones_config_cfg_fs_set_write_fn(zh_failing_cfg_write_fn);
+    run_zones_post(body);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(strncmp(s_test_last_status, "200", 3) != 0, "the POST reported the failed save");
+    TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault stays latched after a failed save");
+    zones_config_load_fault_reset_for_test();
+    s_zones_config_valid = true;
+}
+
+/* persfx MED-2: on an undecided boot (stored config unreadable) a POST must NOT commit to RAM, mark the config
+ * valid or clear the load fault -- that would lift the firing refusal while every save stays refused. */
+static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
+{
+    TEST_SECTION("POST /api/zones -- an undecided boot refuses 409, commits nothing, keeps the load fault latched "
+                 "and the config invalid (persfx MED-2)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    s_zones_config_valid = false;
+    uint32_t gen_before = s_config_generation;
+    s_zones.cfg.zones[0].max_temp_c = 100.0f; /* the body's max is higher, so a raise WOULD be needed */
+    s_zones.cfg.zones[1].max_temp_c = 100.0f;
+    zones_cfg_t before = s_zones.cfg;
+    int writes_before = s_ceiling_writer_calls;
+    /* Review web7 LOW-7: make the raise REAL (a link, and a Pico ceiling cache in sync with the live max of 100),
+     * so removing the early-out at zones_http_post.c lets the Pico write happen and fails this test. */
+    s_hw_safety = (SafetyLinkClass *)1;
+    test_cfg_rows_reset();
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, 100.0f, true);
+    s_ceiling_writer_on_write = test_ceiling_cache_follows_write;
+    run_zones_post(body);
+    s_ceiling_writer_on_write = NULL;
+    s_hw_safety = NULL;
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(s_ceiling_writer_calls == writes_before,
+               "persfx3 LOW-1: no Pico ceiling write at all for a POST that can never commit");
+    TEST_CHECK(strstr(s_last_resp_body, "force_healthy") != NULL && strstr(s_last_resp_body, "scope kiln") != NULL,
+               "persfx3 LOW-2: the 409 names the recovery routes");
+    TEST_CHECK(strstr(s_last_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL &&
+                   strstr(s_last_resp_body, "ERASES ALL cfg-stored settings") != NULL,
+               "PROFILESFX9 LOW-2: the 409 gives the ?force_healthy=1 spelling, the reboot and the erase warning");
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided POST answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "refusal names the cause");
+    TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault is still latched");
+    TEST_CHECK(!s_zones_config_valid, "the config is still not marked valid (firing stays refused)");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched");
+    TEST_CHECK(s_config_generation == gen_before, "generation not bumped");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+    zones_config_load_fault_reset_for_test();
+    s_zones_config_valid = true;
+}
+
+/* persfx3 LOW-5: the narrow setters must refuse -- and leave RAM alone -- while the stored config is undecided. */
+static void test_narrow_setters_refuse_while_undecided(void)
+{
+    TEST_SECTION("zones narrow setters -- refuse and change no RAM while the config is undecided (persfx3 LOW-5)");
+    seed_two_zone_pid_baseline();
+    zones_config_load_fault_reset_for_test();
+    float ramp_before = s_zones.cfg.zones[0].max_ramp_c_per_hr;
+    float kp_before = s_zones.cfg.zones[0].pid_kp;
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    TEST_CHECK(!zones_config_set_max_ramp(0, ramp_before + 7.0f), "set_max_ramp refused while undecided");
+    TEST_CHECK(!zones_config_set_pid(0, kp_before + 1.0f, 0.1f, 0.1f), "set_pid refused while undecided");
+    float coil_before = s_zones.cfg.zones[0].coil_power_w;
+    float cal_before = s_zones.cfg.zones[0].cal_offset_c;
+    bool at_before = s_zones.cfg.zones[0].adaptive_tune_enabled;
+    TEST_CHECK(!zones_config_set_coil_power_w(0, coil_before + 100.0f), "set_coil_power_w refused while undecided");
+    TEST_CHECK(!zones_config_set_coil_power_w_no_save(0, coil_before + 100.0f), "set_coil_power_w_no_save refused");
+    TEST_CHECK(!zones_config_set_cal_offset(0, cal_before + 1.0f), "set_cal_offset refused while undecided");
+    TEST_CHECK(!zones_config_set_cal_offset_no_save(0, cal_before + 1.0f), "set_cal_offset_no_save refused");
+    TEST_CHECK(!zones_config_set_adaptive_tune_enabled(0, !at_before), "set_adaptive_tune_enabled refused");
+    TEST_CHECK(!zones_config_set_adaptive_tune_enabled_no_save(0, !at_before), "set_adaptive_tune_enabled_no_save refused");
+    TEST_CHECK(!zones_config_set_max_ramp_no_save(0, ramp_before + 7.0f), "set_max_ramp_no_save refused");
+    TEST_CHECK(s_zones.cfg.zones[0].coil_power_w == coil_before, "coil_power RAM unchanged");
+    TEST_CHECK(s_zones.cfg.zones[0].cal_offset_c == cal_before, "cal_offset RAM unchanged");
+    TEST_CHECK(s_zones.cfg.zones[0].adaptive_tune_enabled == at_before, "adaptive_tune RAM unchanged");
+    TEST_CHECK(s_zones.cfg.zones[0].max_ramp_c_per_hr == ramp_before, "max_ramp RAM unchanged");
+    TEST_CHECK(s_zones.cfg.zones[0].pid_kp == kp_before, "pid RAM unchanged");
+    zones_config_load_fault_reset_for_test();
+    s_zones_cfg_undecided = false;
+    TEST_CHECK(zones_config_set_max_ramp(0, ramp_before + 7.0f), "and accepted once decided again");
+    s_zones_config_valid = true;
+}
+
+/* HTTP audit E1 finding 1: a firing or autotune that starts DURING the slow Pico ceiling raise
+ * (after the entry mode gate passed) must not get the config committed under it: the commit
+ * re-reads the heat claim under zones_cfg_lock(), refuses 409 and restores the Pico ceiling. */
+static int s_run_start_kind = 0; /* 1 = profile, 2 = autotune */
+static void test_ceiling_write_starts_a_run(float value)
+{
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, value, true);
+    if (s_run_start_kind == 1) {
+        s_test_profile_status.state = PROFILE_EXEC_RUNNING;
+    } else if (s_run_start_kind == 2) {
+        s_test_autotune_active = true;
+    }
+}
+
+static void zones_post_run_start_in_ceiling_window_case(int kind, const char *what)
+{
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    seed_two_zone_pid_baseline();
+    s_zones.cfg.zones[0].max_temp_c = 100.0f; /* below the body's max, so the commit path raises the Pico ceiling */
+    s_zones.cfg.zones[1].max_temp_c = 100.0f;
+    uint32_t gen_before = s_config_generation;
+    zones_cfg_t before = s_zones.cfg;
+    s_ceiling_writer_calls = 0;
+    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs */
+    test_cfg_rows_reset();
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, 100.0f, true);
+    s_run_start_kind = kind;
+    s_ceiling_writer_on_write = test_ceiling_write_starts_a_run;
+    run_zones_post(body);
+    s_ceiling_writer_on_write = NULL;
+    s_run_start_kind = 0;
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_autotune_active = false;
+    s_hw_safety = NULL;
+    TEST_CHECK(s_ceiling_writer_calls >= 1, what);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "a run started during the ceiling raise: 409");
+    TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
+               "refusal carries the mode gate's discriminator marker");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched (no commit)");
+    TEST_CHECK(s_config_generation == gen_before, "generation not bumped (no commit)");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+    TEST_CHECK(s_ceiling_writer_calls == 2, "the 409 wrote the Pico ceiling a second time (the restore)");
+    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 100.0, 1e-6, "restore targets exactly the live zone max");
+    float pico_after = 0.0f;
+    TEST_CHECK(safety_ceiling_sync_get_current_pico_ceiling(&pico_after), "Pico ceiling known after the 409");
+    TEST_CHECK_NEAR(pico_after, 100.0, 1e-6, "Pico ceiling back in sync with the unchanged zone max");
+    test_cfg_rows_reset();
+}
+
+static void test_zones_post_refuses_run_started_during_ceiling_raise(void)
+{
+    TEST_SECTION("POST /api/zones -- a firing or autotune started during the ceiling raise (after the "
+                 "entry gate) makes the commit refuse 409, commit nothing and restore the Pico ceiling "
+                 "(HTTP audit E1 finding 1)");
+    zones_post_run_start_in_ceiling_window_case(1, "test setup: the ceiling write ran (profile start window)");
+    zones_post_run_start_in_ceiling_window_case(2, "test setup: the ceiling write ran (autotune start window)");
+    seed_two_zone_pid_baseline();
 }
 
 static void test_zones_cfg_lock_covers_commit_and_setters(void)
@@ -1817,10 +2316,17 @@ static void test_zones_cfg_lock_covers_commit_and_setters(void)
     (void)nvs_save();
     uint32_t save_acq = s_zones_cfg_lock_acquires - s0;
     TEST_CHECK(save_acq >= 1, "nvs_save takes the zones lock to snapshot");
+    /* relay_names_save() snapshots s_relay_names under the same lock too
+     * (CFG_STORE_SAVE_RACE audit MED-1). */
+    s0 = s_zones_cfg_lock_acquires;
+    (void)relay_names_save();
+    uint32_t names_acq = s_zones_cfg_lock_acquires - s0;
+    TEST_CHECK(names_acq == 1, "relay_names_save takes the zones lock once to snapshot");
     uint32_t a0 = s_zones_cfg_lock_acquires;
     run_zones_post(body);
     TEST_CHECK(s_test_ok_called && !s_test_err_called, "submit commits");
-    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq, "the successful commit took the lock once, plus its save's snapshot");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq + names_acq,
+               "the successful commit took the lock once, plus its two saves' snapshots");
 
     a0 = s_zones_cfg_lock_acquires;
     TEST_CHECK(zones_config_set_max_ramp_no_save(0, 100.0f), "setter succeeds");
@@ -1890,6 +2396,31 @@ static void test_zones_pid_post_refused_while_profile_running(void)
     TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd must be untouched by a refused submit");
 }
 
+/* PROFILESFX10 LOW-3: the narrow PID writer answers the zones 409 (with the recovery routes), not a bare 500, when
+ * the stored zones config was unreadable at boot. */
+static void test_zones_pid_post_undecided_is_409_with_remedy(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- undecided zones config answers 409 zones_config_undecided, gains unchanged (PROFILESFX10 LOW-3)");
+    seed_two_zone_pid_baseline();
+    float kp_before = 0.0f, ki_before = 0.0f, kd_before = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp_before, &ki_before, &kd_before), "baseline gains readable");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided PID POST answered 409, not 500");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "body names the cause");
+    TEST_CHECK(strstr(s_last_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL, "body names the recovery route");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL, "no success reported");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "gains still readable");
+    TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp untouched");
+    TEST_CHECK_NEAR(ki, ki_before, 1e-9, "ki untouched");
+    TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd untouched");
+    zones_config_load_fault_reset_for_test();
+    s_zones_cfg_undecided = false;
+    s_zones_config_valid = true;
+}
+
 static void test_zones_pid_post_refused_while_autotune_running(void)
 {
     TEST_SECTION("POST /api/zones/pid -- REFUSED by system_mode_gate while autotune reports active");
@@ -1905,6 +2436,82 @@ static void test_zones_pid_post_refused_while_autotune_running(void)
     TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp must be untouched by a refused submit");
 }
 
+// Dev review 9 L2: the heat-claim re-check lives INSIDE the setters (under zones_cfg_lock), so a
+// writer that passed its own earlier gate still cannot write once a run has claimed heat. MUST GO RED
+// if zones_config_run_claimed_locked() stops being consulted by the PID/model setters.
+static void test_zones_setters_refuse_busy_running_inside_the_lock(void)
+{
+    TEST_SECTION("zones_config_set_pid/model_checked -- BUSY_RUNNING from inside the setter when a run holds the claim");
+    seed_two_zone_pid_baseline();
+    float kp0 = 0.0f, ki0 = 0.0f, kd0 = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp0, &ki0, &kd0), "baseline readable");
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) s_test_profile_status.state = PROFILE_EXEC_RUNNING; else s_test_autotune_active = true;
+        TEST_CHECK(zones_config_set_pid_checked(0, 0.5f, 0.001f, 0.9f) == ZONES_SET_BUSY_RUNNING,
+                   "set_pid_checked must report BUSY_RUNNING while a run holds the claim");
+        TEST_CHECK(zones_config_set_pid_no_save_checked(0, 0.5f, 0.001f, 0.9f) == ZONES_SET_BUSY_RUNNING,
+                   "set_pid_no_save_checked must report BUSY_RUNNING");
+        TEST_CHECK(zones_config_set_model_checked(0, 10.0f, 100.0f, 5.0f) == ZONES_SET_BUSY_RUNNING,
+                   "set_model_checked must report BUSY_RUNNING");
+        TEST_CHECK(zones_config_set_model_no_save_checked(0, 10.0f, 100.0f, 5.0f) == ZONES_SET_BUSY_RUNNING,
+                   "set_model_no_save_checked must report BUSY_RUNNING");
+        TEST_CHECK(!zones_config_set_pid(0, 0.5f, 0.001f, 0.9f), "the bool wrapper must refuse too");
+        s_test_profile_status.state = PROFILE_EXEC_IDLE;
+        s_test_autotune_active = false;
+    }
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "readable after refusals");
+    TEST_CHECK_NEAR(kp, kp0, 1e-9, "a BUSY refusal must leave kp untouched");
+    TEST_CHECK_NEAR(ki, ki0, 1e-9, "a BUSY refusal must leave ki untouched");
+    TEST_CHECK(zones_config_set_pid_checked(0, 0.5f, 0.001f, 0.9f) == ZONES_SET_OK,
+               "positive control: idle write succeeds");
+}
+
+// Dev review 9 fix review F1/F3/F5. Real setters. MUST GO RED if the combined setter stops writing
+// model+gains in one section / consulting the claim, or if the F5 writers stop consulting it.
+static void test_zones_fix_review9_atomic_pair_and_claim_gated_writers(void)
+{
+    TEST_SECTION("zones_config_set_model_and_pid_checked -- atomic pair, stale-prior detection; F5 writers refuse mid-run");
+    seed_two_zone_pid_baseline();
+    TEST_CHECK(zones_config_set_model_and_pid_checked(0, 11.0f, 111.0f, 6.0f, 0.4f, 0.002f, 0.7f, NULL) == ZONES_SET_OK,
+               "idle combined write succeeds");
+    float k = 0, t = 0, d = 0, kp = 0, ki = 0, kd = 0;
+    TEST_CHECK(zones_config_get_model(0, &k, &t, &d) && zones_config_get_pid(0, &kp, &ki, &kd), "readable");
+    TEST_CHECK_NEAR(k, 11.0, 1e-6, "model landed");
+    TEST_CHECK_NEAR(kp, 0.4, 1e-6, "gains landed with the model");
+    // mid-pair BUSY: a claim held at the call -> NEITHER model nor gains change (no mixed state).
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) s_test_profile_status.state = PROFILE_EXEC_RUNNING; else s_test_autotune_active = true;
+        TEST_CHECK(zones_config_set_model_and_pid_checked(0, 22.0f, 222.0f, 9.0f, 0.9f, 0.009f, 0.9f, NULL) ==
+                       ZONES_SET_BUSY_RUNNING, "combined write BUSY while a run holds the claim");
+        TEST_CHECK(!zones_config_set_coupling_cell_if_idle(0, 1, 0.3f, 50.0f, 5.0f), "F5: cell write refuses mid-run");
+        TEST_CHECK(!zones_config_set_autotune_baseline_k_dc_no_save(0, 5.0f), "F5: baseline write refuses mid-run");
+        TEST_CHECK(!zones_config_set_coupling_diag_k_dc_no_save(0, 5.0f), "F5: coupling_diag write refuses mid-run");
+        TEST_CHECK(!zones_config_set_model_fit_context_no_save(0, 500.0f, 20.0f), "F5: fit context refuses mid-run");
+        zones_cfg_t blob;
+        memcpy(&blob, &s_zones.cfg, sizeof(blob));
+        blob.crc32 = zones_config_json_compute_crc(&blob);
+        char reason[128] = "";
+        TEST_CHECK(!zones_config_import_blob(&blob, sizeof(blob), reason, sizeof(reason)) &&
+                       strstr(reason, "run is active") != NULL,
+                   "F5: kiln_cfg import_blob refuses mid-run with the run-active reason");
+        s_test_profile_status.state = PROFILE_EXEC_IDLE;
+        s_test_autotune_active = false;
+    }
+    TEST_CHECK(zones_config_get_model(0, &k, &t, &d) && zones_config_get_pid(0, &kp, &ki, &kd), "readable");
+    TEST_CHECK_NEAR(k, 11.0, 1e-6, "BUSY left the model untouched (no mixed pair)");
+    TEST_CHECK_NEAR(kp, 0.4, 1e-6, "BUSY left the gains untouched (no mixed pair)");
+    // stale prior: another writer changed the gains after the planner's snapshot.
+    const float expect[3] = {0.4f, 0.002f, 0.7f};
+    TEST_CHECK(zones_config_set_pid_checked(0, 0.5f, 0.003f, 0.8f) == ZONES_SET_OK, "external writer");
+    TEST_CHECK(zones_config_set_model_and_pid_checked(0, 33.0f, 333.0f, 7.0f, 0.6f, 0.004f, 0.9f, expect) ==
+                   ZONES_SET_STALE_PRIOR, "gains changed since plan -> STALE_PRIOR");
+    TEST_CHECK(zones_config_get_model(0, &k, &t, &d), "readable");
+    TEST_CHECK_NEAR(k, 11.0, 1e-6, "STALE_PRIOR wrote nothing (model unchanged)");
+    // idle positive controls for the F5 writers.
+    TEST_CHECK(zones_config_set_coupling_cell_if_idle(0, 1, 0.3f, 50.0f, 5.0f), "idle cell write succeeds");
+}
+
 static void test_zones_pid_post_accepts_while_idle(void)
 {
     TEST_SECTION("POST /api/zones/pid -- positive control: still accepted while nothing is running");
@@ -1917,6 +2524,51 @@ static void test_zones_pid_post_accepts_while_idle(void)
     TEST_CHECK_NEAR(kp, 0.0318, 1e-6, "kp must be applied exactly");
     TEST_CHECK_NEAR(ki, 0.00012, 1e-6, "ki must be applied exactly");
     TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
+}
+
+static void test_zones_post_refused_while_restore_in_flight(void)
+{
+    TEST_SECTION("zones_post_handler -- review 14 LOW-3: refuses with 409 while a backup restore is in flight, "
+                 "writes nothing, and works again afterwards");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_backup_restore_in_flight = true;
+    g_probe_interlock_called = 0;
+    s_ceiling_writer_calls = 0;
+    s_test_ok_called = false;
+    uint32_t rev_before = s_zones_cfg_rev;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+    s_test_backup_restore_in_flight = false;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "refusal is HTTP 409");
+    TEST_CHECK(s_zones_cfg_rev == rev_before, "nothing was persisted (rev unchanged)");
+    TEST_CHECK(strstr(s_last_resp_body, "restore or configuration change") != NULL, "body names the restore");
+    TEST_CHECK(!s_test_ok_called, "must not report success");
+    TEST_CHECK(s_ceiling_writer_calls == 0, "nothing reached the Pico ceiling write");
+}
+
+static void test_zones_pid_post_refused_while_rollback_pending(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- review 12 LOW-1: 409 and no write while a rollback journal is kept");
+    seed_two_zone_pid_baseline();
+    float kp0 = 0.0f, ki0 = 0.0f, kd0 = 0.0f;
+    (void)zones_config_get_pid(0, &kp0, &ki0, &kd0);
+    s_test_swap_zone_edits_at_risk = true;
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "pid post answered 409");
+    TEST_CHECK(!s_test_ok_called, "pid post not reported ok");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    (void)zones_config_get_pid(0, &kp, &ki, &kd);
+    TEST_CHECK_NEAR(kp, kp0, 1e-9, "kp unchanged");
+}
+
+static void test_zones_pid_post_refuses_embedded_nul(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- %00 escape and raw NUL are refused (audit L3/A5)");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=1%002&kp=0.03&ki=0.0001&kd=0.8");
+    TEST_CHECK(s_test_err_called && !s_test_ok_called, "%00 in the body must be refused");
+    run_zones_pid_post("zone=0&kp=0.03%00&ki=0.0001&kd=0.8");
+    TEST_CHECK(s_test_err_called && !s_test_ok_called, "%00 in a gain must be refused");
 }
 
 static void test_zones_pid_post_bumps_generation(void)
@@ -2168,6 +2820,32 @@ static void test_post_whole_page_cross_zone_legal_chain_accepted(void)
     TEST_CHECK(zones_config_get_settings_source(0, SRC_GROUP_LIMITS, &s0) && s0 == 1, "zone 0's link committed as 1");
     TEST_CHECK(zones_config_get_settings_source(1, SRC_GROUP_LIMITS, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zone 1's link committed as Custom");
+}
+
+extern size_t persist_scratch_test_fail_size;
+extern int persist_scratch_test_fail_nth;
+extern int persist_scratch_test_seen;
+
+// The settings_source cycle-probe copy failing to allocate is a server fault: 503 with the shared
+// ZONES_HTTP_ERR_OOM text through httpd_resp_send_custom_err(), never a 400 naming a bad field.
+static void test_post_probe_oom_is_503(void)
+{
+    TEST_SECTION("zones_post_handler -- cycle-probe scratch OOM answers 503 'out of memory', not 400");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    persist_scratch_test_fail_size = sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT;
+    persist_scratch_test_seen = 0;
+    persist_scratch_test_fail_nth = 1;
+    run_zones_post(TWO_ZONE_MINIMAL_BODY("1", "255"));
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0, "probe OOM is a 503");
+    TEST_CHECK(!s_test_err_called, "and not a 400 through httpd_resp_send_err");
+    TEST_CHECK(strstr(s_last_resp_body, ZONES_HTTP_ERR_OOM) != NULL, "body carries the out-of-memory text");
 }
 
 // ---------------------------------------------------------------------------
@@ -2679,7 +3357,7 @@ static void test_nvs_load_from_newer_than_firmware_is_found_but_not_valid(void)
     nvs_test_clear();
 }
 
-// RELEASE_HARDENING_PLAN.md sec 5 (2026-09-17): the ONLY thing profile_executor_run()'s
+// RELEASE_HARDENING.md sec 5 (2026-09-17): the ONLY thing profile_executor_run()'s
 // quarantine gate, dashboard_http.c and ui_page_home_refresh.c actually consult is
 // zones_config_get_load_fault() -- not found/valid. Every test above this point drives
 // the REAL nvs_load_from()/zones_config_json_decode_blob() with a real staged blob
@@ -2757,7 +3435,32 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
     memcpy(blob_before, &src, sizeof(src));
 
     s_zones_config_valid = true; // deliberately wrong, so a no-op bug can't accidentally read as a pass
-    (void)zones_http_start(); // returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
+    {
+        /* Review web7 LOW-4: the generation token is seeded from the boot RNG, never a fixed count. */
+        const uint32_t seeds[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
+                                   0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
+        fake_sysinfo_script_random_sequence(seeds, 8);
+    }
+    {
+        /* REVIEW_WEBGENFX H3b: a RNG word of 0 must still give a NONZERO generation (the `| 1`). */
+        const uint32_t zero_seed[1] = {0u};
+        fake_sysinfo_script_random_sequence(zero_seed, 1);
+        (void)zones_http_start();
+        const uint32_t gen_zero = zones_config_generation();
+        const uint32_t one_seed[1] = {1u};
+        fake_sysinfo_script_random_sequence(one_seed, 1);
+        (void)zones_http_start();
+        /* seeds 0 and 1 both map to 1 through `| 1u`; without it they differ by one (startup may bump after the seed) */
+        TEST_CHECK(gen_zero != 0u && gen_zero == zones_config_generation(),
+                   "zero RNG seed gives the same nonzero zones generation as seed 1");
+        const uint32_t seeds2[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
+                                    0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
+        fake_sysinfo_script_random_sequence(seeds2, 8);
+    }
+    (void)zones_http_start();
+    TEST_CHECK((uint32_t)(zones_config_generation() - ((0x2a5c1e76u & 0x3fffffffu) | 1u)) < 64u,
+               "zones generation is seeded from hal_sysinfo_random_u32() at start");
+    fake_sysinfo_script_random_sequence(NULL, 0); // returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
                               // NVS load/migration logic below has already run -- exactly what's under test.
 
     TEST_CHECK(!s_zones_config_valid, "a refused newer-version blob must leave the config NOT valid for "
@@ -2984,6 +3687,15 @@ static void test_cfg_fs_refusal_helper(void)
     TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0, "mounted persist failure is a 500");
     TEST_CHECK(strstr(s_last_resp_body, "could not be saved to flash") != NULL, "500 body names the cause");
 
+    /* LOW-5: adopted-but-not-persisted is distinguishable from not adopted. */
+    test_post_hooks_reset();
+    (void)cfg_fs_http_persist_failed_adopted(&req, true);
+    TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0, "adopted failure is a 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"adopted\":true") != NULL, "adopted:true reported");
+    test_post_hooks_reset();
+    (void)cfg_fs_http_persist_failed_adopted(&req, false);
+    TEST_CHECK(strstr(s_last_resp_body, "\"adopted\":false") != NULL, "adopted:false reported");
+
     cfg_fs_deinit();
     test_post_hooks_reset();
     TEST_CHECK(cfg_fs_http_refuse_if_unmounted(&req), "unmounted cfg must be refused");
@@ -3070,7 +3782,7 @@ static void test_nvs_load_from_bad_crc_is_rejected(void)
     nvs_test_clear();
 }
 
-// RELEASE_HARDENING_PLAN.md sec 5 (2026-09-17): UNREADABLE half of the same gap closed
+// RELEASE_HARDENING.md sec 5 (2026-09-17): UNREADABLE half of the same gap closed
 // by test_nvs_load_from_newer_than_firmware_latches_real_load_fault() above -- a
 // corrupt (bad-CRC) current-version blob must ALSO latch the real
 // zones_config_get_load_fault() signal (kind == UNREADABLE), since that is what a real
@@ -3146,6 +3858,136 @@ static void test_nvs_load_from_failed_validation_is_rejected(void)
     nvs_test_clear();
 }
 
+/* Save mutex (dev review 5 L5): nvs_save()'s rev read, cfg write and rev bump run under the
+ * save mutex. The host semaphore stub is single-threaded, so this proves ownership at each
+ * seam (g_test_stub_lock_depth > 0) -- the rev read (observed through the first
+ * zones_cfg_unlock() hook after it) and the file write -- and that consecutive saves get
+ * distinct, increasing revs; it does not exercise a real race. */
+static int s_zm_depth_at_write;
+static int s_zm_min_depth_at_unlock;
+static uint32_t s_zm_revs[4];
+static unsigned s_zm_writes;
+static esp_err_t zm_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    if (s_zm_writes == 0 || g_test_stub_lock_depth < s_zm_depth_at_write) {
+        s_zm_depth_at_write = g_test_stub_lock_depth;
+    }
+    s_zm_writes++;
+    (void)rel_path; (void)data; (void)len;
+    return ESP_OK;
+}
+static void zm_unlock_hook(void)
+{
+    if (g_test_stub_lock_depth < s_zm_min_depth_at_unlock) {
+        s_zm_min_depth_at_unlock = g_test_stub_lock_depth;
+    }
+}
+static void test_nvs_save_runs_under_save_mutex_with_distinct_revs(void)
+{
+    TEST_SECTION("nvs_save -- rev read and cfg write run under the save mutex; revs are distinct");
+    nvs_test_enable(true);
+    s_zm_min_depth_at_unlock = 99;
+    s_zm_depth_at_write = 99;
+    s_zm_writes = 0;
+    zones_config_cfg_fs_set_write_fn(zm_write_fn);
+    s_zones_cfg_unlock_test_hook = zm_unlock_hook;
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(nvs_save() == ESP_OK, "save ok");
+        s_zm_revs[i] = s_zones_cfg_rev;
+    }
+    s_zones_cfg_unlock_test_hook = NULL;
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_zm_writes == 3, "three file writes");
+    TEST_CHECK(s_zm_min_depth_at_unlock >= 1, "rev read (zones_cfg_unlock after it) ran with the save mutex held");
+    TEST_CHECK(s_zm_depth_at_write >= 1, "the cfg file write ran with the save mutex held");
+    TEST_CHECK(s_zm_revs[1] == s_zm_revs[0] + 1 && s_zm_revs[2] == s_zm_revs[1] + 1, "revs distinct and increasing");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "mutex released after the saves");
+    nvs_test_enable(false);
+}
+
+/* Save mutex vs. flash worker (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
+ * the zones save mutex reserves the flash worker before it is taken and
+ * releases it after it is given, so no worker job can be running -- and
+ * blocked on this mutex -- while the holder waits on the worker for its cfg
+ * write. MED-1: the relay-name and zone-normal setters edit RAM only inside
+ * that section, so RAM still holds the old value when the section opens. */
+static void reset_relay_names(void);
+static char s_ssp_name_at_enter[RELAY_NAME_MAX_LEN + 1];
+static float s_ssp_normal_at_enter;
+static void ssp_capture_zones_ram(void)
+{
+    memcpy(s_ssp_name_at_enter, s_relay_names.cfg.names[2], sizeof(s_ssp_name_at_enter));
+    s_ssp_normal_at_enter = s_zone_normals.cfg.normal_current_a[0];
+}
+static bool s_zrf_mark = false;
+static bool zrf_hook(void) { return s_zrf_mark; }
+static void test_zones_saves_refuse_under_reset_mark(void)
+{
+    TEST_SECTION("zones saves -- nvs_save, relay names and zone normals refuse under the save lock while the reset mark is set");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    pref_cfg_fs_set_reset_refuse_hook(zrf_hook);
+    s_zrf_mark = true;
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "nvs_save refuses");
+    TEST_CHECK(relay_names_save() == ESP_ERR_INVALID_STATE, "relay_names_save refuses");
+    TEST_CHECK(!zone_normals_set(0, 7.5f), "zone_normals_set refuses (save refused)");
+    s_zrf_mark = false;
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save works again once the mark clears");
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_save_refuses_while_rollback_pending(void)
+{
+    TEST_SECTION("nvs_save -- review 12 LOW-1: the shared gate refuses every zones writer while a rollback journal is kept");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    uint32_t rev_before = s_zones_cfg_rev;
+    s_test_swap_zone_edits_at_risk = true;
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "nvs_save refuses while edits are at risk");
+    TEST_CHECK(s_zones_cfg_rev == rev_before, "refused save persisted nothing (rev unchanged)");
+    s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save works once the journal is clear");
+    TEST_CHECK(s_zones_cfg_rev != rev_before, "the allowed save bumped the rev");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zones_saves_run_in_save_section(void)
+{
+    TEST_SECTION("zones saves -- worker reserved around the save mutex; setters edit RAM inside it (MED-1)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    ssp_install();
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save ok");
+    TEST_CHECK(ssp_shape_ok(0), "nvs_save: reservation taken before the mutex and released after it");
+    ssp_uninstall();
+
+    reset_relay_names();
+    ssp_install();
+    g_ssp.on_enter = ssp_capture_zones_ram;
+    TEST_CHECK(zones_config_set_relay_name(3, "Kiln vent"), "relay name setter ok");
+    TEST_CHECK(ssp_shape_ok(1), "relay name setter: well-formed section, every cfg write inside it");
+    TEST_CHECK(g_ssp.enters == 1, "relay name setter: one section");
+    TEST_CHECK(s_ssp_name_at_enter[0] == '\0', "relay name setter: RAM untouched until the section is open");
+    ssp_uninstall();
+
+    s_zone_normals.cfg.normal_current_a[0] = 1.0f;
+    ssp_install();
+    g_ssp.on_enter = ssp_capture_zones_ram;
+    TEST_CHECK(zone_normals_set(0, 7.5f), "zone_normals_set ok");
+    TEST_CHECK(ssp_shape_ok(1), "zone_normals_set: well-formed section, every cfg write inside it");
+    TEST_CHECK(g_ssp.enters == 1, "zone_normals_set: one section");
+    TEST_CHECK(s_ssp_normal_at_enter == 1.0f, "zone_normals_set: RAM untouched until the section is open");
+    TEST_CHECK(s_zone_normals.cfg.normal_current_a[0] == 7.5f, "zone_normals_set: RAM updated");
+    ssp_uninstall();
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // Round-trip: nvs_save() then nvs_load() (the real save/load pair, not just
 // nvs_load_from() in isolation) must hand back every field identical,
 // including the newly-added crc32-stamping behavior itself.
@@ -3199,6 +4041,20 @@ static void test_nvs_save_dispatches_the_kiln_config_autosave(void)
     TEST_CHECK(g_stub_autosave_called, "the auto-save hook must still have been attempted");
 
     g_stub_autosave_result = true;
+    g_stub_autosave_called = false;
+
+    // On the flash worker (a SET_ZONE_PID/MODEL or AUTOTUNE ACCEPT job) the
+    // autosave runs inline, never re-dispatched, and still carries the
+    // calling task's identity.
+    g_stub_on_flash_worker = true;
+    g_stub_flash_worker_dispatches = 0;
+    g_stub_autosave_dispatcher = NULL;
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save() on the flash worker succeeds");
+    TEST_CHECK(g_stub_autosave_called, "on the worker the autosave still runs");
+    TEST_CHECK(g_stub_flash_worker_dispatches == 0, "on the worker the autosave is inline, not dispatched");
+    TEST_CHECK(g_stub_autosave_dispatcher == (void *)xTaskGetCurrentTaskHandle(),
+              "inline autosave carries the calling task's handle");
+    g_stub_on_flash_worker = false;
     g_stub_autosave_called = false;
 }
 
@@ -4457,7 +5313,7 @@ static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
     nvs_test_clear();
 }
 
-// RELEASE_HARDENING_PLAN.md blocker 7's "migration test that runs every
+// RELEASE_HARDENING.md blocker 7's "migration test that runs every
 // historical schema version forward" -- confirmed genuinely missing by
 // docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md: every
 // existing migration test above proves one hop (or, in the v1->v16 chain
@@ -5809,7 +6665,7 @@ static void test_post_relay_type_optional_range_and_preserve(void)
               "omitting z0_relaytype preserves the currently-stored value (Contactor), not a silent reset to SSR");
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/min_on_s/
+/* docs/ON_OFF_ZONE.md step 6: zone_type/failsafe_state/hyst_c/min_on_s/
  * min_off_s -- same optional/range-checked/omit-preserves shape as
  * z0_relaytype above, this is the first pass that lets a POST touch these
  * five fields at all (step 1 only added storage). */
@@ -5817,7 +6673,7 @@ static void test_post_on_off_fields_optional_range_and_preserve(void)
 {
     TEST_SECTION("parse_zone_fields -- z0_zonetype/z0_failsafe/z0_hystc/z0_minons/z0_minoffs: "
                  "accepted in range, out-of-range refused, omitted preserves the stored value "
-                 "(ON_OFF_ZONE_PLAN.md step 6)");
+                 "(ON_OFF_ZONE.md step 6)");
 
     char body_ok[700];
     snprintf(body_ok, sizeof(body_ok),
@@ -5904,6 +6760,68 @@ static void test_post_on_off_fields_optional_range_and_preserve(void)
     TEST_CHECK(out.zone_type == 1 && out.failsafe_state == 1 && out.hyst_c == 3.0f &&
               out.min_on_s == 60 && out.min_off_s == 120,
               "omitting the on/off fields preserves every stored value, not a silent reset to HEATER/OFF/0");
+
+    /* Omitted hyst_c on a HEATER zone (zone_type 0) with a non-zero stored value still preserves it
+     * (review BENCHFX4 LOW-1): it must not depend on the current zone being on/off. */
+    zone_cfg_t current_heater = make_stored_zone();
+    current_heater.zone_type = 0;
+    current_heater.hyst_c = 3.5f;
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_omit, 0, 1, 4, 1, &current_heater, &out, &err_reason);
+    TEST_CHECK(ok, "a HEATER-zone body omitting hyst_c must be accepted");
+    TEST_CHECK(out.hyst_c == 3.5f, "omitted hyst_c on a HEATER zone preserves the stored value");
+}
+
+/* Review BENCHFX5 MED-1: five float fields POST /api/zones preserves on an omitted key had no
+ * host test. Seed each with a distinct nonzero value, omit the key, assert it survives, for
+ * HEATER (zone_type 0) and ON_OFF (1). A present-but-blank key is NOT an omit for these fields
+ * (field_present is true, the float parse then fails): it must be refused, never reset. */
+static void test_post_omitting_five_float_fields_preserves_stored_values(void)
+{
+    TEST_SECTION("parse_zone_fields -- approachratecap/errorband/rateband/progressband/coilpower: "
+                 "omitted preserves stored value (HEATER and ON_OFF), blank is refused (BENCHFX5 MED-1)");
+    static const char *const keys[] = {"approachratecap", "errorband", "rateband", "progressband", "coilpower"};
+    static const float seeds[] = {123.5f, 17.25f, 0.75f, 4.5f, 2750.0f};
+    const char *base =
+        "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+        "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+        "z0_timingprofile=0";
+    for (uint8_t zt = 0; zt <= 1; zt++) {
+        zone_cfg_t current = make_stored_zone();
+        current.zone_type = zt;
+        current.approach_rate_cap_c_per_hr = seeds[0];
+        current.error_band_c = seeds[1];
+        current.rate_band_c_per_s = seeds[2];
+        current.progress_band_c = seeds[3];
+        current.coil_power_w = seeds[4];
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(base, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a body omitting all five float fields must be accepted");
+        TEST_CHECK(out.approach_rate_cap_c_per_hr == seeds[0], "omitted approachratecap preserves the stored value");
+        TEST_CHECK(out.error_band_c == seeds[1], "omitted errorband preserves the stored value");
+        TEST_CHECK(out.rate_band_c_per_s == seeds[2], "omitted rateband preserves the stored value");
+        TEST_CHECK(out.progress_band_c == seeds[3], "omitted progressband preserves the stored value");
+        TEST_CHECK(out.coil_power_w == seeds[4], "omitted coilpower preserves the stored value");
+        /* A posted value must win over the stored one (guards a reset placed after the parse). */
+        char body[700];
+        snprintf(body, sizeof(body), "%s&z0_approachratecap=50&z0_errorband=9&z0_rateband=0.5&z0_progressband=2&z0_coilpower=1000", base);
+        memset(&out, 0, sizeof(out));
+        ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok && out.approach_rate_cap_c_per_hr == 50.0f && out.error_band_c == 9.0f &&
+                   out.rate_band_c_per_s == 0.5f && out.progress_band_c == 2.0f && out.coil_power_w == 1000.0f,
+                   "posted values for the five fields are stored verbatim");
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+            snprintf(body, sizeof(body), "%s&z0_%s=", base, keys[k]);
+            memset(&out, 0, sizeof(out));
+            err_reason = "unset";
+            ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+            TEST_CHECK(!ok, "a present-but-blank value is refused, not treated as omit");
+        }
+    }
 }
 
 /* One clean body with only the field-under-test varied, mirroring
@@ -6778,6 +7696,39 @@ static void test_get_fuzzy_model_valid_single_sourced_past_thermo_count(void)
 // max length, and asserts the actual produced length stays under json_cap
 // -- so a future field addition that finally exhausts the buffer fails
 // loudly here instead of silently truncating a live board's GET response.
+// BENCHFX3 INFO-1: cal_offset_c/max_ramp/sanity_rate/max_temp_c/min_temp_c
+// used to print at %.3f/%.2f/%.3f/%.1f/%.1f, so a GET-merge-POST re-post rounded
+// guard thresholds and a sanity_rate < 0.0005 printed 0.000 (then defaulted).
+// Pin that the printed value parses back to the exact float.
+static void test_zones_get_round_trip_precision_fields(void)
+{
+    TEST_SECTION("GET /api/zones prints cal_offset/ramp/sanity/max/min lossless (%.9g)");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    zone_cfg_t *z = &s_zones.cfg.zones[0];
+    z->cal_offset_c = 0.100000024f;
+    z->max_ramp_c_per_hr = 123.400024f;
+    z->sanity_rate_c_per_min = 0.000100027195f;
+    z->max_temp_c = 1000.00006f;
+    z->min_temp_c = -12.3000145f;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    TEST_CHECK(zones_get_handler(&req) == ESP_OK, "GET ok");
+    const struct { const char *key; float want; } f[] = {
+        {"\"cal_offset_c\":", 0.100000024f}, {"\"max_ramp_c_per_hr\":", 123.400024f},
+        {"\"sanity_rate_c_per_min\":", 0.000100027195f}, {"\"max_temp_c\":", 1000.00006f},
+        {"\"min_temp_c\":", -12.3000145f}};
+    for (size_t k = 0; k < sizeof(f) / sizeof(f[0]); k++) {
+        const char *at = strstr(s_last_resp_body, f[k].key);
+        TEST_CHECK(at != NULL, "key present");
+        if (at != NULL) {
+            float got = strtof(at + strlen(f[k].key), NULL);
+            TEST_CHECK(got == f[k].want, f[k].key);
+        }
+    }
+}
+
 static void test_zones_get_handler_max_width_response_fits_json_cap(void)
 {
     TEST_SECTION("zones_get_handler -- every zone/profile/relay field at its documented max width "
@@ -6818,7 +7769,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->name[ZONE_NAME_MAX_LEN] = '\0';
         z->relay_mask = 255;
         z->thermo_mask = 255;
-        z->cal_offset_c = ZONE_CAL_OFFSET_MAX_C;
+        z->cal_offset_c = -1.23456793e-5f; /* %.9g-widest, see pid_kp below */
         /* pid_kp/ki/kd, coupling_c%u and coupling_diag_k_dc render at "%.9g"
          * (2026-09-28), where the MAX bound is NOT the widest value: 1000.0f
          * renders as "1000" (4 chars) but any in-range value below 1e-4 with
@@ -6830,11 +7781,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->pid_kp = 1.17549435e-38f;
         z->pid_ki = 1.17549435e-38f;
         z->pid_kd = 1.17549435e-38f;
-        z->max_ramp_c_per_hr = ZONE_MAX_RAMP_C_PER_HR_MAX;
-        z->sanity_rate_c_per_min = ZONE_SANITY_RATE_MAX_C_PER_MIN;
+        z->max_ramp_c_per_hr = -1.23456793e-5f; /* %.9g-widest */
+        z->sanity_rate_c_per_min = -1.23456793e-5f;
         z->control_mode = 255;
-        z->max_temp_c = ZONE_MAX_TEMP_C_MAX;
-        z->min_temp_c = ZONE_MIN_TEMP_C_MAX;
+        z->max_temp_c = -1.23456793e-5f;
+        z->min_temp_c = -1.23456793e-5f;
         z->heater_window_ms = ZONE_HEATER_WINDOW_MS_MAX;
         z->heater_min_on_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
         z->heater_min_off_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
@@ -6896,7 +7847,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->tuning_rise_inf_c = ZONE_MAX_TEMP_C_MAX;
         z->tuning_seq = 0xFFFFFFFFu;
         z->adaptive_tune_enabled = 255;
-        /* docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23):
+        /* docs/ON_OFF_ZONE.md step 6 (ZONES_CFG_VERSION 22->23):
          * zone_type/failsafe_state render as small integers/booleans
          * ("false" is the wider literal, same reasoning as the tuning_*
          * booleans above), hyst_c/min_on_s/min_off_s at their documented
@@ -6950,7 +7901,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
      * which recovered headroom to 854 bytes. `fuzzy_model_valid` (GAP 2,
      * docs/audits/observability_gaps_closed_2026-09-14.md) then spent 75 of
      * those bytes (25 bytes/zone x MAX31856_CHANNEL_COUNT=3 for
-     * `"fuzzy_model_valid":true,`), leaving 779 bytes, confirmed by this
+     * `"fuzzy_model_valid":true,`), leaving 475 bytes (re-measured 2026-10-12; the 779 figure was stale), confirmed by this
      * test. The buffer must still NOT simply be enlarged (this repo has two
      * documented panics from oversized httpd-worker stack locals and a
      * standing rule against growing httpd buffers) -- read the plan and the
@@ -6960,7 +7911,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
     snprintf(headroom_msg, sizeof(headroom_msg),
              "max-width GET /api/zones must fit inside json_cap without hitting the "
              "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; "
-             "measured headroom after fuzzy_model_valid (2026-09-14) was 779 bytes; this "
+             "measured headroom after fuzzy_model_valid (2026-09-14) was 475 bytes (re-measured 2026-10-12); this "
              "attempt %s). "
              "Do NOT enlarge json_cap (two documented httpd-worker-stack-local panics + a "
              "standing rule against growing httpd buffers) -- see "
@@ -7286,7 +8237,7 @@ static void test_coupling_row_whole_setter_round_trip_and_bounds(void)
     nvs_test_clear();
 }
 
-// docs/ON_OFF_ZONE_PLAN.md sec 1 "belt and braces": an on/off zone's
+// docs/ON_OFF_ZONE.md sec 1 "belt and braces": an on/off zone's
 // coupling row AND column must both read zero, at every read, regardless of
 // what is actually stored -- and a caller may not write a nonzero cell
 // against an on/off zone's row or column either.
@@ -9330,7 +10281,7 @@ static void test_nvs_load_from_v21_blob_defaults_progress_band_c_to_default(void
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md step 1 (ZONES_CFG_VERSION 22->23): zone_type/
+// docs/ON_OFF_ZONE.md step 1 (ZONES_CFG_VERSION 22->23): zone_type/
 // failsafe_state/hyst_c/min_on_s/min_off_s, tail-appended after
 // progress_band_c. Same shape as the progress_band_c tests just above.
 
@@ -9390,7 +10341,7 @@ static void test_zone_type_accessor_get_set_and_range(void)
 // Fail-safe default OFF: a zero-initialized zone_cfg_t (fresh save, partial
 // form, a migrated blob) must never report zone_type == ON_OFF or
 // failsafe_state == ON. This is the non-negotiable from docs/
-// ON_OFF_ZONE_PLAN.md sec 5 -- checked directly against the real struct
+// ON_OFF_ZONE.md sec 5 -- checked directly against the real struct
 // layout, not a mirror.
 static void test_zero_initialized_zone_cfg_is_heater_and_failsafe_off(void)
 {
@@ -9776,7 +10727,7 @@ static void test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc(void)
     TEST_CHECK(out.thermo_count == 0, "a refused blob leaves *out zeroed, never a half-migrated struct");
 }
 
-// docs/ON_OFF_ZONE_PLAN.md sec 1/sec 2 predicates.
+// docs/ON_OFF_ZONE.md sec 1/sec 2 predicates.
 static void test_zone_is_on_off_and_zone_needs_ceiling(void)
 {
     TEST_SECTION("zone_is_on_off()/zone_needs_ceiling() -- the predicates every guard/ramp-lock/"
@@ -10211,7 +11162,14 @@ static void test_relay_name_get_set_round_trip(void)
     nvs_test_clear();
     reset_relay_names();
 
+    uint32_t gen_before_name = zones_config_generation();
     TEST_CHECK(zones_config_set_relay_name(3, "Vent fan"), "set on an in-range relay must succeed");
+    TEST_CHECK(zones_config_generation() != gen_before_name,
+               "review web7 MED/LOW-2: a relay-name write moves the zones config generation");
+    uint32_t gen_before_type = zones_config_generation();
+    TEST_CHECK(zones_config_set_relay_device_type(3, RELAY_DEVICE_TYPE_FAN), "set a relay type");
+    TEST_CHECK(zones_config_generation() != gen_before_type,
+               "review web7 MED/LOW-2: a relay-type write moves the zones config generation");
     char out[RELAY_NAME_MAX_LEN + 1];
     TEST_CHECK(zones_config_get_relay_name(3, out, sizeof(out)), "get on an in-range relay must succeed");
     TEST_CHECK(strcmp(out, "Vent fan") == 0, "the exact string set must come back out");
@@ -10869,6 +11827,9 @@ static void test_zone_sweep_check_refusal_each_reason_fires(void)
     TEST_CHECK(strcmp(zone_sweep_refusal_str(ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT),
                        "a backup restore is in progress; wait for it to finish before starting") == 0,
               "ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT has its own reason string");
+    TEST_CHECK(strcmp(zone_sweep_refusal_str(ZONE_SWEEP_REFUSE_FACTORY_RESET),
+                       "a factory reset is in progress -- the controller reboots when it finishes") == 0,
+              "ZONE_SWEEP_REFUSE_FACTORY_RESET has its own reason string");
 }
 
 static void test_zone_sweep_ceiling_hit(void)
@@ -11525,7 +12486,7 @@ static void test_zone_sweep_derive_ct_channel_refuses_nan(void)
 }
 
 // ---------------------------------------------------------------------------
-// CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md,
+// CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION.md,
 // "Testing"). These exercise zone_sweep_verify_ct_attribution(), the
 // three-state verdict, which is a DIFFERENT decision from
 // zone_sweep_derive_ct_channel() above: that one answers "did something
@@ -11554,7 +12515,7 @@ static zone_ct_verify_in_t ctv_base(void)
 
 
 // ---- the PERSISTED verdict and its configuration fingerprint --------------
-// docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, storage section + case 7.
+// docs/CT_ATTRIBUTION_VERIFICATION.md, storage section + case 7.
 //
 // The fingerprint is the single expression of the verdict<->configuration
 // contract (CLAUDE.md's "reset one side of a pair" class). A verdict that
@@ -11798,9 +12759,8 @@ static void test_ct_store_legacy_nvs_migrates(void)
     TEST_CHECK(ct_verify_store_start() == ESP_OK, "ct mig: start()");
     ct_verify_blob_t out;
     memset(&out, 0, sizeof(out));
-    TEST_CHECK(ct_verify_store_get(&out) && memcmp(&out, &legacy, sizeof(out)) == 0,
-               "ct mig: the legacy NVS verdict is read as the fallback");
-    TEST_CHECK(ct_file_exists(), "ct mig: and was migrated into the cfg file");
+    TEST_CHECK(!ct_verify_store_get(&out), "ct mig: persfx3 MED-3: the frozen legacy NVS verdict is NOT adopted");
+    TEST_CHECK(!ct_file_exists(), "ct mig: and was NOT migrated into a cfg file");
     TEST_CHECK(ct_nvs_has_verdict(), "ct mig: the NVS copy is left in place");
     fake_kv_reset_all();
 }
@@ -13975,6 +14935,78 @@ static void test_zones_current_sweep_start_restore_in_flight_refused_during_refe
     s_test_backup_restore_in_flight = false;
 }
 
+// HTTP audit L37 follow-up (MED-1), sweep side: a factory reset that sets its in-flight mark after the
+// sweep's early checks but before its post-claim re-read is caught there. The sweep refuses with its
+// own reason, hands the claim back, and never marks itself active.
+static void test_zones_current_sweep_start_refused_when_factory_reset_in_flight(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_reset_in_flight = false;
+    s_test_reset_mark_set_at_sweep_claim = true;
+
+    zone_sweep_refusal_t r = zones_current_sweep_start();
+    s_test_reset_mark_set_at_sweep_claim = false;
+    s_test_reset_in_flight = false;
+
+    TEST_CHECK(r == ZONE_SWEEP_REFUSE_FACTORY_RESET,
+              "a reset mark set after the claim refuses the sweep at the post-claim re-read");
+    TEST_CHECK(!s_sweep.active, "a sweep refused for a factory reset is never left active");
+    TEST_CHECK(s_sweep.task == NULL, "a refused start never spawns the sweep task");
+    TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 1, "the claim was taken before the re-read");
+    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 1, "...and handed back on the refusal");
+
+    // GREEN: identical setup with no reset -- the refusal above was the reset check.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK, "with no reset the identical setup starts");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
+// HTTP audit L37 follow-up (MED-2): zones_config_set_coupling_cell() refuses while a factory reset is in
+// flight and leaves the RAM cell untouched, so no later save writes it back over erased storage.
+static void test_zones_config_set_coupling_cell_refused_during_factory_reset(void)
+{
+    TEST_SECTION("zones_config_set_coupling_cell() -- refused during a factory reset, RAM untouched");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.zones[0].coupling_coeff[1] = 0.25f;
+    s_zones.cfg.zones[0].coupling_tau_s[1] = 100.0f;
+    s_zones.cfg.zones[0].coupling_dead_time_s[1] = 10.0f;
+
+    s_test_reset_in_flight = true;
+    bool ok = zones_config_set_coupling_cell(0, 1, 0.5f, 200.0f, 20.0f);
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "the setter refuses while the reset mark is set");
+    TEST_CHECK(s_zones.cfg.zones[0].coupling_coeff[1] == 0.25f &&
+                   s_zones.cfg.zones[0].coupling_tau_s[1] == 100.0f &&
+                   s_zones.cfg.zones[0].coupling_dead_time_s[1] == 10.0f,
+              "the RAM cell is unchanged by the refused call");
+
+    // GREEN: with the mark clear the same call writes the RAM cell (the save result does not matter here).
+    (void)zones_config_set_coupling_cell(0, 1, 0.5f, 200.0f, 20.0f);
+    TEST_CHECK(s_zones.cfg.zones[0].coupling_coeff[1] == 0.5f,
+              "with no reset in flight the same call updates the RAM cell");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
 // ---------------------------------------------------------------------------
 // 2026-09-10 opus review, "the Pico-ceiling invariant is enforced at one
 // door only": zones_post_handler's guard_raise()/apply_lower() calls
@@ -15990,6 +17022,36 @@ static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
     nvs_test_clear();
 }
 
+/* L2 (UNCHECKED_PERSIST_RESULT_AUDIT): a failed ESP-side save of the CT
+ * provenance records must surface as esp_persist_failed, not clean success. */
+static void test_sweep_esp_persist_failure_is_surfaced(void)
+{
+    TEST_SECTION("sweep: failed ESP-side provenance saves set esp_persist_failed");
+    zfa_seed();
+    s_sweep.esp_persist_failed = false;
+    zone_sweep_task_record_normal(NULL, 0, 5.0f);
+    TEST_CHECK(!s_sweep.esp_persist_failed, "a successful save leaves the flag clear");
+
+    s_zfa_cfg_fail_writes = 1000;
+    pref_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    zone_sweep_task_record_normal(NULL, 0, 6.0f);
+    TEST_CHECK(s_sweep.esp_persist_failed, "a failed zone_normals_set sets the flag");
+
+    s_sweep.esp_persist_failed = false;
+    TEST_CHECK(!zone_ct_map_clear(), "ct map clear reports the failed save");
+    TEST_CHECK(!zone_k_ct_clear(), "k_ct clear reports the failed save");
+    TEST_CHECK(!zone_ct_map_set(0, 1), "ct map set reports the failed save");
+    pref_cfg_fs_reset_write_fn_for_test();
+    s_zfa_cfg_fail_writes = 0;
+    zone_sweep_status_t st;
+    memset(&st, 0, sizeof(st));
+    s_sweep.esp_persist_failed = true;
+    zones_current_sweep_get_status(&st);
+    TEST_CHECK(st.esp_persist_failed, "the status snapshot carries the flag");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 /* The zone-to-aux conversion's final read-back (zone_aux_convert_http.c's
  * op_verify_persisted()) calls zones_config_persisted_equals_ram(). Saves are
  * cfg-file-only since the dual-write close, so it must re-read the FILE: an
@@ -16061,12 +17123,17 @@ static void test_zone_restore_refuses_on_aux_conflict(void)
 
 void run_test_zones_http(void)
 {
+    test_zone_name_control_chars_refused();
+    test_parse_float_field_rejects_leading_space_and_hex();
+    test_fuzz_zone_fields_hostile_values();
+    test_fuzz_zones_post_toplevel_hostile();
     // cfg is the only save target now, so every handler test that commits a
     // config needs it mounted: a save with cfg unmounted is refused (503).
     zh_cfg_remount_fresh();
     test_zone_free_for_aux();
     test_zone_restore_refuses_on_aux_conflict();
     test_zone_free_for_aux_nvs_failure_restores_ram();
+    test_sweep_esp_persist_failure_is_surfaced();
     test_zones_persisted_equals_ram_reads_the_cfg_file();
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
@@ -16084,14 +17151,21 @@ void run_test_zones_http(void)
     test_zones_post_max_simultaneous_relays_rejects_trailing_garbage();
     test_zones_post_safety_tc_type_is_ignored_even_when_garbage();
     test_zones_post_accepts_clean_minimal_body();
+    test_zones_post_strict_optional_keys();
+    test_zones_post_blank_guard_fields_and_pc_link();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
+    test_post_probe_oom_is_503();
     test_post_zone0_follows_zone1_accepted();
 
     test_zones_pid_post_refused_while_profile_running();
     test_zones_pid_post_refused_while_autotune_running();
+    test_zones_pid_post_undecided_is_409_with_remedy();
+    test_zones_setters_refuse_busy_running_inside_the_lock();
+    test_zones_fix_review9_atomic_pair_and_claim_gated_writers();
     test_zones_pid_post_accepts_while_idle();
     test_zones_post_refused_by_mode_gate_before_interlock();
+    test_zones_pid_post_refuses_embedded_nul();
     test_zones_pid_post_bumps_generation();
     test_zones_pid_post_rejects_kp_over_bound();
     test_zones_pid_post_rejects_negative_ki();
@@ -16131,6 +17205,8 @@ void run_test_zones_http(void)
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
     test_nvs_save_dispatches_the_kiln_config_autosave();
+    test_zones_saves_run_in_save_section();
+    test_nvs_save_runs_under_save_mutex_with_distinct_revs();
     test_nvs_load_from_v1_blob_upconverts_fields_correctly();
     test_nvs_load_from_v2_blob_upconverts_fields_correctly();
     test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly();
@@ -16157,6 +17233,7 @@ void run_test_zones_http(void)
     test_post_on_off_fields_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
+    test_post_omitting_five_float_fields_preserves_stored_values();
     test_post_omitting_model_fields_preserves_them();
     test_post_new_fields_present_but_unparseable_are_refused();
     test_post_coupling_diagonal_must_be_zero();
@@ -16171,6 +17248,7 @@ void run_test_zones_http(void)
     test_get_emits_fuzzy_model_valid();
     test_get_fuzzy_model_valid_single_sourced_past_thermo_count();
     test_get_and_diag_emit_matching_generation();
+    test_zones_get_round_trip_precision_fields();
     test_zones_get_handler_max_width_response_fits_json_cap();
     test_zones_diag_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();
@@ -16375,6 +17453,11 @@ void run_test_zones_http(void)
     test_zones_current_sweep_start_restore_in_flight_refused();
     test_zones_current_sweep_start_restore_in_flight_refused_early();
     test_zones_current_sweep_start_restore_in_flight_refused_during_refetch();
+    test_zones_current_sweep_start_refused_when_factory_reset_in_flight();
+    test_zones_saves_refuse_under_reset_mark();
+    test_nvs_save_refuses_while_rollback_pending();
+    test_zones_pid_post_refused_while_rollback_pending();
+    test_zones_config_set_coupling_cell_refused_during_factory_reset();
 
     test_reconcile_on_link_up_null_link_is_a_noop();
     test_reconcile_on_link_up_invalid_config_is_a_noop();
@@ -16402,6 +17485,13 @@ void run_test_zones_http(void)
     test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
+    test_zones_post_expected_generation();
+    test_zones_post_refused_while_load_undecided_keeps_fault();
+    test_narrow_setters_refuse_while_undecided();
+    test_zones_post_failed_save_keeps_load_fault();
+    test_zones_post_refuses_run_started_during_ceiling_raise();
+    test_zones_post_refused_while_rollback_pending();
+    test_zones_post_refused_while_restore_in_flight();
     test_zones_post_refused_while_async_job_busy();
 }
 
@@ -16409,6 +17499,7 @@ void run_test_zones_http(void)
  * file's header comment and build_host_tests.ps1's $cmd2). Declared here
  * rather than in a shared header since nothing else needs it. */
 extern void run_test_zones_config_cfg_fs(void);
+extern void run_test_cfgfs_pref_validate(void);
 
 /* test_relay_names_cfg_fs.c -- same convention, item 3's cfg_fs dual-write
  * bridge tests. */
@@ -16427,6 +17518,7 @@ int main(void)
 {
     run_test_zones_http();
     run_test_zones_config_cfg_fs();
+    run_test_cfgfs_pref_validate();
     run_test_relay_names_cfg_fs();
     run_test_zone_normals_cfg_fs();
     run_test_zones_blob_golden();

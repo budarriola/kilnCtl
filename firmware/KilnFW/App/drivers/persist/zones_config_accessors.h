@@ -85,6 +85,16 @@ extern "C" {
  * fit can ever collide with it. */
 #define ZONE_MODEL_FIT_TEMP_UNKNOWN (-273.15f)
 
+/* Shared by zones_config_set_model_fit_context_no_save() and backup import
+ * pass 1: sentinel always legal, else finite and in (-50, 1300) degC. */
+static inline bool zones_config_model_fit_temp_valid(float v)
+{
+    if (v == ZONE_MODEL_FIT_TEMP_UNKNOWN) {
+        return true;
+    }
+    return isfinite(v) && v > -50.0f && v < 1300.0f;
+}
+
 /* Every bound below moved out of zones_http.c (2026-08-21, backup-widening
  * pass) for the identical reason ZONE_MODEL_K_MAX/ZONE_MODEL_TIME_MAX_S moved
  * here first: backup_http.c's import validation pass must reject an
@@ -465,6 +475,18 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr);
  * zone_mask checks. */
 uint8_t zones_config_get_relay_count(void);
 
+/* Backup restore onto an UNCONFIGURED board (owner decision 2026-10-09): sets thermo_count and
+ * relay_count in RAM only (no save -- the caller's batch persists once, and restores its snapshot on
+ * a mid-batch failure). Accepted ONLY while the live thermo_count is 0 and the counts are in range
+ * (thermo 1..MAX31856_CHANNEL_COUNT, relay 0..KILN_IO_RELAY_COUNT); a configured board is never
+ * re-shaped through this path (false, nothing changed). The zones settings page's whole-page POST is
+ * the other writer of these two fields. */
+bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count);
+
+/* max_temp_c stored in zone slot zone_index regardless of thermo_count (0 for an out-of-range
+ * index). Lets a restore compute the ceiling a freshly enabled slot would take on. */
+float zones_config_peek_slot_max_temp_c(uint8_t zone_index);
+
 /* TODO.md 6A.5 load-staggering: board-wide cap on relays energized at once
  * (0 = unlimited, the default). Global, not per-zone -- enforced by
  * profile_executor.c against every active zone's commanded relay state in
@@ -539,7 +561,7 @@ bool zones_config_is_valid(void);
  * into a trustworthy zones_cfg_t -- either because the blob's own version is
  * NEWER than ZONES_CFG_VERSION (a rollback past a schema bump, or newer
  * firmware than this build), or because it is OLDER than this firmware can
- * migrate forward (docs/CONFIG_MIGRATION_CHAIN_PLAN.md's one-step-at-a-time
+ * migrate forward (docs/CONFIG_MIGRATION_CHAIN.md's one-step-at-a-time
  * policy: a future build carrying only the N-1->N step cannot consume a
  * blob more than one step behind). Never cleared by a later in-RAM event --
  * like recovery_mode, this is fixed for the boot; only a fresh boot (after a
@@ -558,6 +580,8 @@ typedef struct {
     uint8_t on_disk_version;   /* the blob's own claimed version byte */
     uint8_t fw_version;        /* ZONES_CFG_VERSION at the moment this was captured */
     char reason[96];           /* zones_config_json_decode_blob()'s own *err_reason, copied */
+    bool file_rejected;        /* the fault is a rejected zones.json (reason starts "cfg file: "), not an NVS blob */
+    bool bad_copy_failed;      /* file_rejected, and no zones.json.bad copy of the rejected bytes exists (review 11 LOW-2) */
 } zones_cfg_load_fault_t;
 
 /* Returns the latched fault (see the type's own comment above). Always
@@ -565,6 +589,10 @@ typedef struct {
  * zeroed with occurred==false and the return value is false. Cheap RAM read,
  * safe from any task including the LVGL/httpd stacks. */
 bool zones_config_get_load_fault(zones_cfg_load_fault_t *out);
+
+/* Clears the latched load fault. Called after a successful POST /api/zones committed a trusted
+ * config (review 11 LOW-3), and when a legacy copy is adopted after the latch. */
+void zones_config_load_fault_clear(void);
 
 /* M13 ("every fault says what was detected and what to do", ROADMAP.md,
  * standing rule): the single-migration-step hazard fix (2026-09-16,
@@ -770,8 +798,35 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
  * discipline as the form-submit path, just for a single field group instead
  * of the whole page. */
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd);
+/* true while this boot could not decide the stored zones config (every save is refused until a clean reload).
+ * Also declared in zones_http_internal.h; HTTP writers use it to pick the zones-store remedy over a bare 500. */
+bool zones_config_is_undecided(void);
 
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd);
+
+/* Distinct outcome of the PID/model setters. BUSY_RUNNING: a profile or autotune run holds the
+ * heat claim (re-read inside the zones_cfg_lock section, nothing written); callers map it to
+ * their existing 409/mode-gate refusal. SAVE_FAILED: RAM changed, persist failed. */
+typedef enum {
+    ZONES_SET_OK = 0,
+    ZONES_SET_REJECTED,     /* bad zone or out-of-range value, nothing written */
+    ZONES_SET_BUSY_RUNNING, /* run claim held, nothing written */
+    ZONES_SET_SAVE_FAILED,  /* RAM updated, persist failed */
+    ZONES_SET_STALE_PRIOR   /* expected prior gains no longer live, nothing written */
+} zones_set_result_t;
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd);
+/* Model + gains in one lock section, one claim check (all-or-nothing). expect_prior_pid (nullable,
+ * {kp,ki,kd}) makes the live-gains-unchanged check atomic with the write -> ZONES_SET_STALE_PRIOR. */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid);
+/* Adaptive tuner's coupling-cell write: refuses (false) while a profile/autotune claim is held. */
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s);
+zones_set_result_t zones_config_set_pid_no_save_checked(uint8_t zone_index, float kp, float ki, float kd);
+zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
+zones_set_result_t zones_config_set_model_no_save_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s);
 
 /* The one definition of "this PID gain changed", shared by
  * zones_config_set_pid()/_no_save() (which clear zone_cfg_t::tuning_valid on a
@@ -953,6 +1008,15 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
 
 bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuning_quality_t *q);
 
+/* Shared enum/finite check used by the no_save setter and backup import pass 1. */
+static inline bool zones_config_tuning_quality_fields_valid(unsigned method, unsigned rule, float baseline_c,
+                                                            float step_ambient_c, float raw_rise_c,
+                                                            float rise_inf_c)
+{
+    return isfinite(baseline_c) && isfinite(step_ambient_c) && isfinite(raw_rise_c) && isfinite(rise_inf_c) &&
+           method <= 1 && rule <= 3;
+}
+
 /* Sets zone_cfg_t::tuning_valid back to 1 WITHOUT touching any other tuning_*
  * field or tuning_seq. Only for undoing zones_config_set_pid_no_save()'s
  * invalidation (which happens only when a gain changed beyond
@@ -1015,7 +1079,7 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
 
 /* RAW sibling of the getter above: same bounds and shape, but skips the
  * on/off row/column zeroing zones_config_get_coupling() applies (docs/
- * ON_OFF_ZONE_PLAN.md sec 1). backup_export.c uses this one so a currently
+ * ON_OFF_ZONE.md sec 1). backup_export.c uses this one so a currently
  * on/off zone's previously-measured coupling cells round-trip through a
  * backup instead of being read back as 0.0 and re-committed as a real,
  * permanent zero on import -- see the .c file's own comment (bench A4,
@@ -1231,7 +1295,7 @@ bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
 
 bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode_t mode);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 1: "is this zone a heat source at all" --
+/* docs/ON_OFF_ZONE.md sec 1: "is this zone a heat source at all" --
  * deliberately NOT a zone_control_mode_t value (see that plan section for
  * why overloading mode would be wrong). ZONE_TYPE_HEATER == 0 is the
  * migration default for every existing zone (ZONES_CFG_VERSION 22->23) and
@@ -1253,7 +1317,7 @@ bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type);
 
 bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 1's "one rule governs everything" predicate:
+/* docs/ON_OFF_ZONE.md sec 1's "one rule governs everything" predicate:
  * true iff `zone_index` is a valid, configured ZONE_TYPE_ON_OFF zone. False
  * (never true) for an out-of-range index -- callers that already validate
  * zone_index elsewhere get the same "no such zone, so no such on/off zone"
@@ -1270,7 +1334,7 @@ bool zone_is_on_off(uint8_t zone_index);
  * (fail-closed: an unreadable zone is still supervised as a heater). */
 bool zone_is_monitor_only(uint8_t zone_index);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate: a HEATER
+/* docs/ON_OFF_ZONE.md sec 2's zone_needs_ceiling(zi) predicate: a HEATER
  * zone always needs a max_temp_c ceiling (the existing, unchanged "0 means
  * uncommissioned, refuse to start" rule); a ZONE_TYPE_ON_OFF zone needs one
  * only if it actually has a thermocouple assigned (thermo_mask != 0) -- an
@@ -1283,7 +1347,7 @@ bool zone_is_monitor_only(uint8_t zone_index);
  * check. */
 bool zone_needs_ceiling(uint8_t zone_index);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 5's per-zone fail-safe state: 0 = OFF
+/* docs/ON_OFF_ZONE.md sec 5's per-zone fail-safe state: 0 = OFF
  * (migration/zero-init default), nonzero = ON. First real reader is
  * on_off_trigger_decide.h's precedence levels 1-3 (control/
  * on_off_trigger_report.c). Fail-closed convention: an out-of-range
@@ -1307,7 +1371,7 @@ bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state);
 
 bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3's temperature hysteresis: stored value 0
+/* docs/ON_OFF_ZONE.md sec 3's temperature hysteresis: stored value 0
  * means "not configured" and the caller substitutes the plan's 2.0 C
  * default -- same "0 substituted with a firmware default" convention
  * thermal_guard_cfg_t's fields already use, so a fresh/migrated zone reads
@@ -1329,7 +1393,7 @@ bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c);
 
 bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3's minimum on/off dwell: stored 0 means
+/* docs/ON_OFF_ZONE.md sec 3's minimum on/off dwell: stored 0 means
  * "not configured", substituted with the plan's 30 s default. Out-of-range
  * zone_index: returns false, *out_s left at the 30 s default -- same
  * reasoning as zones_config_get_hyst_c() above (the safe default is the
@@ -1604,6 +1668,14 @@ bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_d
  * operator edits) and harmless in principle, since != is the only test. */
 uint32_t zones_config_generation(void);
 
+/* True when the generation now differs from gen_snapshot. Reads it UNDER zones_cfg_lock(), so the
+ * answer is serialized against POST /api/zones' commit critical section (heat-claim re-check, struct
+ * copy, generation bump). A run starter (profile executor, autotune) snapshots the generation before
+ * its config reads, publishes its heat claim, then calls this and refuses on true: either the POST's
+ * commit-time re-check sees the claim and refuses 409, or this sees the commit's bump (HTTP audit E1
+ * finding 1). Spinlock only, never blocks, safe under the starter's own module mutex. */
+bool zones_config_changed_since(uint32_t gen_snapshot);
+
 /* Applies this zone's cal_offset_c to a raw reading -- the "applied in
  * firmware" half of TODO.md section 3's calibration item, at last wired to
  * an actual consumer. Returns raw_c unchanged if zone_index is out of range
@@ -1714,6 +1786,11 @@ bool zones_config_export_blob(void *out, size_t out_cap);
  * non-zero-length) is filled with a specific, human-readable refusal reason,
  * and nothing was changed. */
 bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap);
+
+/* The reason zones_config_import_blob() reports when it refused ONLY because a profile or autotune run holds the
+ * claim. The blob itself was not judged invalid, so a caller that would otherwise treat a refusal as "bad data"
+ * (boot restore clearing the active id) must compare against this and keep its state (review 15 LOW-1). */
+#include "zones_import_reasons.h" /* ZONES_IMPORT_REASON_RUN_CLAIMED */
 
 /* ---- Canonical (padding-free) serialization -- H1, docs/audits/
  * kiln_profiles_robustness_2026-09-14.md ------------------------------------
@@ -1848,6 +1925,9 @@ typedef enum {
      * here when another of those already holds it (it would otherwise
      * interleave staged writes with the sweep's own). */
     ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY,
+    /* A factory reset is in flight (relay_authority_reset_in_flight()): read after the sweep claim is
+     * published, so the reset's late check and this start cannot both proceed. */
+    ZONE_SWEEP_REFUSE_FACTORY_RESET,
 } zone_sweep_refusal_t;
 
 /* Human-readable reason for a zone_sweep_refusal_t -- used by the HTTP
@@ -1947,6 +2027,8 @@ typedef struct {
      * i_normal_reason is "" only when nothing needs saying, same convention
      * as ct_map_reason/k_ct_reason above. */
     uint8_t i_normal_pushed_mask;
+    /* L2: an ESP-side save of the CT provenance records failed this run. */
+    bool    esp_persist_failed;
     char    i_normal_reason[96];
     /* opus review finding (MEDIUM), CT_COMMISSIONING_PLAN.md step 3 summed
      * topology: zone_sweep_summed_normal_a() refuses (rather than clamping

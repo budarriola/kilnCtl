@@ -1,6 +1,6 @@
 # Spare-relay on/off ("aux outputs") -- plan
 
-Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half `d6559fac`, backup half 2026-10-06) landed; WP-8 docs half landed 2026-10-06 (bench session pending). The ON_OFF-zone-to-aux convert and the monitor-only freed zone (sec 10) landed 2026-10-06, host-tested only. WP-5 still owes a browser/bench check. Pending work only.
+Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half `d6559fac`, backup half 2026-10-06) landed; WP-8 landed (docs 2026-10-06; bench steps 2/3/4/6/7 PASS 2026-10-06, BENCH_TEST_LOG). The ON_OFF-zone-to-aux convert and the monitor-only freed zone (sec 10) landed 2026-10-06, host-tested only. WP-5 still owes a browser/bench check. Pending work only.
 
 Owner requirement 2026-10-04 (overturns D1 of
 `docs/audits/on_off_zone_decisions_2026-09-14.md`): "we have 4 relays, the 4th
@@ -10,8 +10,8 @@ fan, water feed) must bind any relay that no heating zone uses, WITHOUT
 consuming one of the 3 thermocouple-backed zone slots.
 
 Background read: `docs/audits/on_off_spare_relay_binding_2026-09-14.md`
-(why widening zones[] is L), `docs/ON_OFF_ZONE_PLAN.md` (the evaluator and
-rules this plan reuses), `docs/CONFIG_MIGRATION_CHAIN_PLAN.md`,
+(why widening zones[] is L), `docs/ON_OFF_ZONE.md` (the evaluator and
+rules this plan reuses), `docs/CONFIG_MIGRATION_CHAIN.md`,
 `docs/CONFIG_FILESYSTEM.md`.
 
 ## 1. Design in one page
@@ -93,7 +93,7 @@ zones' `relay_mask`, including zones that are disabled or typed ON_OFF
 (an ON_OFF zone keeps its relay; moving it to aux is the sec 10 flow, not an
 implicit overlap).
 
-Enforcement points, each refuses with HTTP 400 naming the relay and the
+Enforcement points, each refuses (HTTP 409 for an ownership conflict) naming the relay and the
 other owner (never silently masks):
 
 1. Aux write (`POST` aux fields, sec 7): enabling relay N is refused if N is
@@ -176,7 +176,7 @@ conditional on ESP config.
   runs on it; the zones' guards are untouched. Aux never relaxes
   `max_temp_c`.
 - Load cap: aux counts toward `max_simultaneous_relays` (coil/supply current,
-  same reasoning as ON_OFF_ZONE_PLAN sec 6) and is the LAST victim after
+  same reasoning as ON_OFF_ZONE sec 6) and is the LAST victim after
   heaters. Run start refuses if heaters' needs plus aux count make the cap
   structurally unsatisfiable (extend the existing on/off count check).
 - Executor stray-relay check (`profile_executor_relay_io.c` ~line 1027:
@@ -211,7 +211,7 @@ Executor (`control/profile_executor.c`, `profile_executor_relay_io.c`):
 
 1. New `s_exec.aux[KILN_IO_RELAY_COUNT]`: `on_off_trigger_state_t`,
    `actuated_on`, `held_s`. Reset in `profile_executor_run()` exactly where
-   zone on/off state resets (a resume re-zeros, per ON_OFF_ZONE_PLAN sec 5;
+   zone on/off state resets (a resume re-zeros, per ON_OFF_ZONE sec 5;
    never persist quasi_dwell).
 2. After the zone loop each tick, `for each enabled aux`: resolve rule ->
    build `on_off_trigger_input_t` (shared builder extracted from the zone
@@ -349,12 +349,16 @@ ZERO new routes:
   zone/aux double owner). Tests: `test_backup_import.c`
   (`test_aux_outputs_*`).
 - Migration chain: the new store is governed by
-  `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` from its first release. v1 has no
+  `docs/CONFIG_MIGRATION_CHAIN.md` from its first release. v1 has no
   step (nothing older). Add a row to that plan's 0.1 governed-store table and
   the mechanical enforcement in its sec 5 (version symbol
   `AUX_OUTPUTS_CFG_VERSION`). Reader refuses newer-than-known (quarantine
   semantics, not defaults). Rollback to older firmware: the key is unknown to
-  it and is ignored; aux relays then simply do nothing, with no zone impact.
+  it and is ignored; aux relays then simply do nothing. A zone already
+  converted to aux is NOT unaffected: the old firmware runs it as an ordinary
+  HEATER with an empty relay mask (PID and guards 1-4, nothing to heat it, so
+  likely a heat-rise trip). Fails safe; retype the zone back before rolling
+  back (aux review F6, hazard text in `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`).
   An aux relay left energised by a rollback is impossible: no run, no owner,
   relays drop on boot.
 - Kiln packages (`kiln_cfg_store`): NOT included in v1 (would force a
@@ -423,6 +427,8 @@ every heater-only site reads that, never `relay_mask == 0` itself:
 
 Existing ON_OFF zones keep working unchanged until the operator converts.
 
+**Known coverage loss (aux review F5, 2026-10-09):** a converted (monitor-only) zone is excluded from guard 8 as a peer (`peer_is_on_off = zone_guard_exempt`, `thermal_guard.c`), so on a 2-zone kiln with one zone converted guard 8 has no peer and is inert. Guards 1-4 still run on the remaining heater. Accepted; a one-way wider-delta peer is not built.
+
 ## 11. Host tests (all host-only; no board)
 
 - `test_aux_outputs_store.c` (new): defaults on all-zero blob, CRC reject,
@@ -463,8 +469,9 @@ jig on relay 4 terminals; the bench cannot validate anything kiln-scale.
 4. Verify by `io_read`/relay shadow (primary) that relay 4 toggles with the
    rule and honours min on/off; verify with CT only if a real load is wired
    through a CT channel (record which channel; otherwise CT is N/A, say so).
-5. Conflict: try enabling aux on relay 1 -> expect 400; try zone relay_mask
-   containing relay 4 -> expect 400.
+5. Conflict: try enabling aux on relay 1 -> expect 409 (conflict; the bench saw
+   409, which matches the owner mode-gate/conflict rule, field-validation errors stay 400); try zone
+   relay_mask containing relay 4 -> expect 409.
 6. Safety: with relay 4 on, inject a Pico trip by the existing
    sanctioned bench trip path (not the E-stop jumper) -> relay 4 drops;
    clear per procedure (trip_mask is `1 << (trip_reason - 1)`).
@@ -564,10 +571,10 @@ earlier one merges.
   server module, `control_set_aux_output`, `control_set_aux_manual`, `control_convert_onoff_zone_to_aux`,
   CLAUDE.md/MCP_SERVERS.md count. Owns those. Backup edits after WP-2's
   `backup_import.c` hooks merge.
-- **WP-8 Docs half DONE 2026-10-06; bench session (sec 12) still pending.** Original scope: `docs/SAFETY_CASE.md` rows (aux relay: no welded
+- **WP-8 DONE (docs 2026-10-06; bench steps 2/3/4/6/7 PASS 2026-10-06, BENCH_TEST_LOG; never run on a board: step 5 zone-relay_mask-contains-4 refusal, zone-guard-trip-keeps-R4, the convert).** Original scope: `docs/SAFETY_CASE.md` rows (aux relay: no welded
   detection; aux not behind K4 wiring note; no guard change),
-  `docs/ON_OFF_ZONE_PLAN.md` cross-link, `docs/CONFIG_FILESYSTEM.md`,
-  `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` governed-store row, `ROADMAP.md` row
+  `docs/ON_OFF_ZONE.md` cross-link, `docs/CONFIG_FILESYSTEM.md`,
+  `docs/CONFIG_MIGRATION_CHAIN.md` governed-store row, `ROADMAP.md` row
   (mark D1 overturned, link here), supersede note on the two 2026-09-14
   audits, bench session sec 12. Owns those docs.
 - **WP-9 ESP strips aux relay bits from the masks sent to the Pico (S, ESP only). DONE 2026-10-04.**

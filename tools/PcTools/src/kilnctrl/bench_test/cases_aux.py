@@ -64,7 +64,7 @@ def _gate(ctx: dict, heat: bool) -> Optional[CaseResult]:
         return CaseResult(Verdict.SKIP, reason=SKIP_TAINTED)
     if not _confirmed(ctx):
         return CaseResult(Verdict.SKIP, reason=f"{CONFIRM_ENV}=1 not set (aux cases write board config)")
-    if heat and not ctx.get("allow_heat"):
+    if heat and ctx.get("allow_heat") is not True:
         return CaseResult(Verdict.SKIP, reason="allow_heat=False")
     return None
 
@@ -439,32 +439,190 @@ def _case_ax_c02(ctx: dict) -> CaseResult:
     return CaseResult(Verdict.PASS, observed=obs)
 
 
+def _default_zone_mask_fns(ctx: dict):
+    """Build (post_fn, restore_fn) over control_set_zone_relay_mask: pick the first zone GET
+    /api/zones reports, post its current mask | relay 4's bit, and restore the original on an
+    accepted write. Returns None when the zones cannot be read."""
+    from .. import zones_http_client as zhc
+    from ..mcp_server_aux import _resolve_host
+    from ..mcp_server_control import _zone_collateral_diff  # defined here; not exported on the srv facade
+    srv = _srv(ctx)
+    try:
+        host = _resolve_host(ctx.get("host"))
+        snapshot = zhc.get_zones(host)  # whole-page baseline (the one GET): the restore puts back EVERY field
+        zones = snapshot.get("zones") or []
+        z = next(z for z in zones if "index" in z and isinstance(z.get("relay_mask"), int))
+    except Exception:  # noqa: BLE001
+        return None
+    zone, orig = z["index"], z["relay_mask"]
+    bad = orig | (1 << (AUX_RELAY - 1))
+
+    def post():
+        out = str(srv.control_set_zone_relay_mask(zone=zone, relay_mask=bad, confirm=True))
+        m = re.search(r"refused by firmware \(HTTP (\d+)\)", out)
+        if m:
+            return int(m.group(1)), out
+        return (200 if out.startswith("ok") else None), out
+
+    def restore():
+        """Re-POST the pre-write GET snapshot (relay_mask and any collateral field the first write
+        changed) under the CURRENT generation, then judge by a read-back that nothing differs from
+        that snapshot. A POST error does not skip the read-back: error + matching read-back counts as
+        restored (the error is noted in restore.detail)."""
+        restore.detail = ""
+        err = None
+        phase = "restore POST"
+        try:
+            # Every commit bumps the generation, so the snapshot's expected_generation is stale by now
+            # (409 zones_config_stale, nothing written): take the live one just before the POST.
+            phase = "restore live GET (no POST was sent)"
+            live = zhc.get_zones(host)
+            phase = "restore POST"
+            gen = live.get("generation")
+            if gen is not None and (not isinstance(gen, int) or isinstance(gen, bool)):
+                restore.detail = f"live GET generation {gen!r} is not an int: posted without expected_generation; "
+                base = {k: v for k, v in snapshot.items() if k != "generation"}
+            elif gen is None:
+                # Older firmware without the lost-update token: post without one (INFO-2).
+                restore.detail = "live GET has no generation (older firmware): posted without expected_generation; "
+                base = {k: v for k, v in snapshot.items() if k != "generation"}
+            else:
+                base = dict(snapshot, generation=gen)
+            body = zhc.build_post_body(base, {})
+            # omit-preserved fields stay out of the body so the firmware keeps them bit-exact (MED-1)
+            zhc.post_zones(host, zhc.strip_omit_preserved(body))
+        except Exception as e:  # noqa: BLE001
+            err = e
+        err_note = f"{phase} error ({str(err)[:80]}); " if err is not None else ""
+        try:
+            after = zhc.get_zones(host)
+            ok = not _zone_collateral_diff(snapshot, after, zone, set())
+        except Exception as e2:  # noqa: BLE001
+            restore.detail += f"{err_note}read-back GET failed ({str(e2)[:80]})"
+            return False
+        if err is not None:
+            restore.detail += f"{phase} error ({str(err)[:80]}), read-back " + ("matches" if ok else "differs")
+        return ok
+
+    restore.detail = ""
+
+    return post, restore
+
+
+AUX_OWNER_TEXT = ("a zone relay_mask claims a relay an aux (spare-relay) output already owns -- "
+                  "disable that aux output first")  # zones_http_post.c:663
+#: 409 error keys zones_http_post.c sends AFTER the aux check (the guard let the mask through).
+POST_AUX_409_KEYS = ("safety_ceiling_raise_failed", "zones_config_changed_concurrently", "zones_config_undecided")
+#: Body texts zones_http_post.c sends AFTER the commit (cfg_fs_http_persist_failed_for): the mask is
+#: already live in RAM. A bare "out of memory" is also sent before the check, so it is not listed.
+POST_COMMIT_SAVE_FAIL_TEXTS = ("store_unreadable_at_boot", "could not be saved to flash",
+                               "settings storage (cfg) not mounted")
+POSSIBLY_APPLIED_PREFIX = "refused: POST /api/zones refused:"
+
+
+def _fw_detail(text: str) -> str:
+    """The firmware response body inside the tool line: drop the leading 'refused by firmware
+    (HTTP n): ' and the trailing '(host=...)' suffix."""
+    t = re.sub(r"^refused by firmware \(HTTP \d+\):\s*", "", text.strip())
+    return re.sub(r"\s*\(host=[^)]*\)\s*$", "", t).strip()
+
+
+def _try_restore(rfn) -> bool:
+    try:
+        return bool(rfn()) if rfn is not None else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def c03_teardown_hook(ctx: dict) -> None:
+    """Runner teardown: one more attempt at AX-C03's restore; loud if it still fails."""
+    rfn = ctx.pop("_c03_restore_fn", None)
+    if rfn is None:
+        return
+    if not _try_restore(rfn):
+        ctx["_tainted"] = True
+        detail = getattr(rfn, "detail", "") or ""
+        raise RuntimeError("AX-C03 zone config restore NOT confirmed after teardown retry"
+                           + (f" ({detail})" if detail else ""))
+
+
 def _case_ax_c03(ctx: dict) -> CaseResult:
-    """Plan step 5b: a zone relay_mask containing relay 4 is refused (400).
-    No narrow relay_mask writer exists, so the write is injected via
-    ``ctx["aux_zone_mask_post_fn"]() -> (status, body)`` and SKIPs without it.
-    An accepted write is undone via optional ``ctx["aux_zone_mask_restore_fn"]()`` and
-    always taints the run."""
+    """Plan step 5b: a zone relay_mask containing relay 4 is refused (409,
+    aux-ownership text).
+    Uses the narrow control_set_zone_relay_mask tool on the first zone; the write can be
+    injected via ``ctx["aux_zone_mask_post_fn"]() -> (status, body)``. An accepted write is
+    undone (the original mask is restored) and always taints the run. Any other outcome is never PASS."""
     skip = _gate(ctx, heat=False)
     if skip:
         return skip
+    r4 = _aux_state(ctx).get("relays", {}).get(AUX_RELAY)
+    if not r4 or not r4.get("enabled") or r4.get("conflicted"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason="relay 4 is not an enabled aux output (AX-C01 state not held); "
+                          "no write attempted")
     fn = ctx.get("aux_zone_mask_post_fn")
     if fn is None:
-        return CaseResult(Verdict.SKIP, reason="no zone relay_mask writer injected (no narrow tool exists)")
-    status, _body = fn()
-    if status == 400:
-        return CaseResult(Verdict.PASS, observed={"status": status})
-    restored = None
-    if status is not None and 200 <= status < 300:
+        pair = _default_zone_mask_fns(ctx)
+        if pair is None:
+            return CaseResult(Verdict.SKIP, reason="could not read a zone relay_mask from GET /api/zones")
+        fn = pair[0]
+        ctx.setdefault("aux_zone_mask_restore_fn", pair[1])
+    status, body = fn()
+    text = str(body)
+    if any(t in text for t in POST_COMMIT_SAVE_FAIL_TEXTS):
+        # Committed to RAM, then the save failed: the guard let the mask through. Taint, restore, FAIL.
         ctx["_tainted"] = True
         rfn = ctx.get("aux_zone_mask_restore_fn")
-        try:
-            restored = bool(rfn()) if rfn is not None else False
-        except Exception:  # noqa: BLE001
-            restored = False
-    return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 400"
-                      + ("" if restored is None else f"; original mask restore {'ok' if restored else 'NOT confirmed'}"
-                         " -- run tainted"), observed={"status": status, "restored": restored})
+        restored = _try_restore(rfn)
+        if not restored and rfn is not None:
+            ctx["_c03_restore_fn"] = rfn
+            ctx.setdefault("teardown_hooks", [])
+            if c03_teardown_hook not in ctx["teardown_hooks"]:
+                ctx["teardown_hooks"].append(c03_teardown_hook)
+        return CaseResult(Verdict.FAIL, reason="firmware let the mask past the aux check and answered a save/storage refusal "
+                          "(post-commit save failure, or the cfg-unmounted 503 sent before any save): "
+                          f"{_fw_detail(text)[:100]}; original mask restore {'ok' if restored else 'NOT confirmed'} "
+                          f"{getattr(rfn, 'detail', '') or ''} -- run tainted", observed={"status": status, "restored": restored})
+    if status == 409:
+        detail = _fw_detail(text)
+        # PASS only on the owner text itself (zones_http_post.c:663), matched against the response
+        # body, never the tool's "(host=...)" suffix.
+        if detail == AUX_OWNER_TEXT:
+            return CaseResult(Verdict.PASS, observed={"status": status})
+        # A 409 AFTER the aux check proves the guard let the mask through: FAIL. Every other 409
+        # (mode gate, backup/config change in flight, kiln-config rollback pending, OTA interlock,
+        # stale generation) is sent BEFORE the aux check and says nothing about it.
+        if any(k in detail for k in POST_AUX_409_KEYS):
+            return CaseResult(Verdict.FAIL, reason=f"firmware accepted the mask past the aux check, then 409: {detail[:120]}",
+                              observed={"status": status})
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"409 from a gate before the aux check, not the aux guard: {detail[:120]}",
+                          observed={"status": status})
+    if status is not None and 400 <= status < 500:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"refused for an unrelated reason (HTTP {status}), "
+                          f"expected 409 aux-owned: {text[:120]}", observed={"status": status})
+    # "refused: POST /api/zones refused: <body>" is a 2xx with a non-ok body: possibly applied.
+    pre_post = (status is None and not text.startswith(POSSIBLY_APPLIED_PREFIX)
+                and text.startswith(("refused:", "DRY RUN", "error: GET", "error: could not build")))
+    if pre_post:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"no firmware verdict (status {status}): {text[:120]}",
+                          observed={"status": status})
+    # Accepted (2xx) or possibly applied (FAILED read-back/collateral, re-fetch failed,
+    # transport error after the POST): taint and try to put the original mask back.
+    ctx["_tainted"] = True
+    rfn = ctx.get("aux_zone_mask_restore_fn")
+    restored = _try_restore(rfn)
+    if not restored and rfn is not None:
+        ctx["_c03_restore_fn"] = rfn
+        ctx.setdefault("teardown_hooks", [])
+        if c03_teardown_hook not in ctx["teardown_hooks"]:
+            ctx["teardown_hooks"].append(c03_teardown_hook)
+    rdetail = getattr(rfn, "detail", "") or ""
+    note = (f"; original mask restore {'ok' if restored else 'NOT confirmed'}"
+            + (f" ({rdetail})" if rdetail else "") + " -- run tainted")
+    if status is not None and 200 <= status < 300:
+        return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 409"
+                          + note, observed={"status": status, "restored": restored})
+    return CaseResult(Verdict.INCONCLUSIVE, reason=f"write possibly applied, outcome unverified: {text[:100]}" + note,
+                      observed={"status": status, "restored": restored})
 
 
 def _case_ax_t01(ctx: dict) -> CaseResult:

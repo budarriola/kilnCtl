@@ -6,10 +6,12 @@
 // NULL pointers) get as much attention as the happy path, and each hostile
 // case additionally proves `*out` was left completely untouched.
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
 #include "../src/tasks/link_frame.h"
+#include "../src/tasks/trip_seq.h"
 #include "../src/snapshots.h"
 
 static void pack_u32_le(uint8_t *out, uint32_t v)
@@ -343,6 +345,54 @@ static void test_versions_compatible(void)
 // link_task_send_diag()'s single-bit degraded trip_mask approximation so
 // link_task_handle_clear_trip()'s mismatch check (link_task.c) uses the
 // exact same mapping DIAG frames report. TODO.md Phase 7's CLEAR_TRIP item.
+static void test_next_trip_seq(void)
+{
+    TEST_SECTION("F4: trip_seq_next -- wraps 255 -> 1, never back to 0 (0 = no trip yet)");
+    TEST_CHECK(trip_seq_next(0u) == 1u, "first trip -> 1");
+    TEST_CHECK(trip_seq_next(1u) == 2u, "1 -> 2");
+    TEST_CHECK(trip_seq_next(254u) == 255u, "254 -> 255");
+    TEST_CHECK(trip_seq_next(255u) == 1u, "255 wraps to 1, not 0");
+    uint8_t s = 0u;
+    bool hit_zero = false;
+    for (int i = 0; i < 1000; i++) {
+        s = trip_seq_next(s);
+        if (s == 0u) hit_zero = true;
+    }
+    TEST_CHECK(!hit_zero, "1000 trips never produce seq 0");
+}
+
+static void test_trip_event_publish_barrier(void)
+{
+    TEST_SECTION("F5: safety_core.c publishes the trip fields with a release barrier before the seq, and acquires after reading it -- source-text scan");
+    static const char *const cands[] = {"../src/tasks/safety_core.c", "src/tasks/safety_core.c",
+                                         "firmware/SaftyFW/src/tasks/safety_core.c"};
+    char *text = test_read_source_anchored(__FILE__, "../src/tasks/safety_core.c", cands, 3);
+    TEST_CHECK(text != NULL, "safety_core.c readable");
+    if (text) {
+        /* CRLF-tolerant: distance checks, not exact whitespace. */
+        const char *w = strstr(text, "s_trip_seq = trip_seq_next(s_trip_seq)");
+        const char *dw = NULL;
+        for (const char *q = text; w && (q = strstr(q, "HAL_DMB();")) != NULL && q < w; q++) {
+            dw = q;
+        }
+        TEST_CHECK(w != NULL && dw != NULL && (size_t)(w - dw) < 40u, "writer: HAL_DMB() immediately before the seq bump");
+        /* LOW-6: the reader is a real seqlock -- generation read, acquire barrier, the seq and
+         * fields, barrier, generation re-read, retry on odd/moved. */
+        const char *g1 = strstr(text, "uint32_t g1 = s_trip_gen;");
+        const char *dg = g1 ? strstr(g1, "HAL_DMB();") : NULL;
+        TEST_CHECK(g1 != NULL && dg != NULL && (size_t)(dg - g1) < 40u, "reader: HAL_DMB() right after reading the generation");
+        const char *rs = g1 ? strstr(g1, "seq = s_trip_seq;") : NULL;
+        const char *g2 = rs ? strstr(rs, "uint32_t g2 = s_trip_gen;") : NULL;
+        const char *db = rs ? strstr(rs, "HAL_DMB();") : NULL;
+        TEST_CHECK(rs != NULL && g2 != NULL && db != NULL && db < g2, "reader: seq and fields read, barrier, then the generation re-read");
+        TEST_CHECK(g2 != NULL && strstr(g2, "(g1 & 1u) == 0u && g1 == g2") != NULL, "reader: retries unless the generation was even and unchanged");
+        const char *wg1 = strstr(text, "s_trip_gen++;");
+        const char *wg2 = wg1 ? strstr(wg1 + 1, "s_trip_gen++;") : NULL;
+        TEST_CHECK(wg1 != NULL && wg2 != NULL && wg1 < w && wg2 > w, "writer: generation odd before, seq bumped inside the odd window, even again after");
+        free(text);
+    }
+}
+
 static void test_trip_mask_for_reason(void)
 {
     TEST_SECTION("link_frame_trip_mask_for_reason -- single-bit mapping");
@@ -359,6 +409,61 @@ static void test_trip_mask_for_reason(void)
                 "SAFETY_TRIP_BORROWED_STALE (14) -> bit 13, still within a u16");
 }
 
+// kilnlink audit 2026-10-09 L1: only an ESP -> Pico frame refreshes S6b's
+// liveness; the Pico's own frames looped back (src SAFETY, dst ESP) must not.
+static void test_counts_for_liveness(void)
+{
+    TEST_SECTION("link_frame_counts_for_liveness -- only ESP->Pico frames refresh S6b (audit L1)");
+    TEST_CHECK(link_frame_counts_for_liveness(LINK_FRAME_DEVICE_ESP, LINK_FRAME_DEVICE_SAFETY),
+               "ESP (0) -> SAFETY (2): counts");
+    TEST_CHECK(!link_frame_counts_for_liveness(LINK_FRAME_DEVICE_SAFETY, LINK_FRAME_DEVICE_ESP),
+               "our own frame echoed back (SAFETY -> ESP): does NOT count");
+    TEST_CHECK(!link_frame_counts_for_liveness(LINK_FRAME_DEVICE_SAFETY, LINK_FRAME_DEVICE_SAFETY),
+               "SAFETY -> SAFETY: does NOT count");
+    TEST_CHECK(!link_frame_counts_for_liveness(LINK_FRAME_DEVICE_ESP, LINK_FRAME_DEVICE_ESP),
+               "ESP -> ESP (not addressed to us): does NOT count");
+    TEST_CHECK(!link_frame_counts_for_liveness(1u, LINK_FRAME_DEVICE_SAFETY),
+               "HOST (1) -> SAFETY: does NOT count (only the ESP is our peer)");
+    TEST_CHECK(LINK_FRAME_DEVICE_ESP == 0u && LINK_FRAME_DEVICE_SAFETY == 2u,
+               "device ids match the frozen wire contract (LINK_PROTOCOL.md section 3)");
+}
+
+static const char *LINK_TASK_CANDIDATES_L1[] = {
+    "../src/tasks/link_task.c",
+    "src/tasks/link_task.c",
+    "firmware/SaftyFW/src/tasks/link_task.c",
+};
+
+// Wiring half of audit L1: the pure predicate above proves nothing unless
+// link_task_handle_raw_frame() actually gates the S6b liveness refresh on it.
+static void test_liveness_refresh_is_gated_in_link_task(void)
+{
+    TEST_SECTION("link_task.c gates the S6b liveness refresh on link_frame_counts_for_liveness() (audit L1)");
+    char *text = test_read_source_anchored(__FILE__, LINK_TASK_CANDIDATES_L1[0], LINK_TASK_CANDIDATES_L1,
+                                           sizeof(LINK_TASK_CANDIDATES_L1) / sizeof(LINK_TASK_CANDIDATES_L1[0]));
+    if (!text) {
+        TEST_CHECK(false, "could not locate src/tasks/link_task.c -- update the candidate paths");
+        return;
+    }
+    const char *refresh = strstr(text, "s_last_valid_frame_tick = xTaskGetTickCount();");
+    TEST_CHECK(refresh != NULL, "the liveness refresh statement exists (sanity: the scan is not chasing a rename)");
+    if (refresh) {
+        TEST_CHECK(strstr(refresh + 1, "s_last_valid_frame_tick = xTaskGetTickCount();") == NULL,
+                   "exactly one liveness refresh site");
+        // The gate must sit in the ~600 bytes immediately before the refresh,
+        // i.e. in the same function, with an early return.
+        const char *window = (refresh - text > 600) ? refresh - 600 : text;
+        const char *gate = strstr(window, "if (!link_frame_counts_for_liveness(frame.src_device, frame.dst_device)) {");
+        TEST_CHECK(gate != NULL && gate < refresh,
+                   "link_frame_counts_for_liveness() gate immediately precedes the refresh");
+        if (gate != NULL && gate < refresh) {
+            const char *ret = strstr(gate, "return;");
+            TEST_CHECK(ret != NULL && ret < refresh, "the gate returns before refreshing liveness");
+        }
+    }
+    free(text);
+}
+
 // Host tests for link_frame_decide_clear_trip() -- extracted from
 // link_task_handle_clear_trip() (this session's guard-test-matrix pass,
 // commit 9a6d3e9 flagged this as a gap; the refuse checks themselves were
@@ -370,25 +475,25 @@ static void test_decide_clear_trip(void)
 {
     TEST_SECTION("link_frame_decide_clear_trip -- accept/refuse decision");
 
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
                "nothing tripped, wire mask 0 -> REFUSE_NOTHING_TRIPPED");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0x0001u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0x0001u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
                "nothing tripped even with a nonzero wire mask -> still REFUSE_NOTHING_TRIPPED "
                "(checked before the mask comparison)");
 
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0002u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0002u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
                "tripped OVERTEMP (mask 0x0001), wire sends 0x0002 -> REFUSE_MASK_MISMATCH");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
                "tripped OVERTEMP, wire sends 0 (stale clear queued before this trip) -> "
                "REFUSE_MASK_MISMATCH");
 
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0001u) == LINK_CLEAR_TRIP_ACCEPT,
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0001u, false, 0u) == LINK_CLEAR_TRIP_ACCEPT,
                "tripped OVERTEMP, wire mask matches exactly -> ACCEPT");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_ESTOP, (uint16_t)(1u << 7)) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_ESTOP, (uint16_t)(1u << 7), false, 0u) ==
                    LINK_CLEAR_TRIP_ACCEPT,
                "tripped ESTOP, wire mask matches exactly -> ACCEPT");
 
@@ -400,14 +505,51 @@ static void test_decide_clear_trip(void)
      * even with a wire_trip_mask that matches S9's own mask exactly, proving
      * this is not reachable through the ACCEPT path by any mask coincidence. */
     TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE,
-                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE)) ==
+                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE), false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
                "tripped INEFFECTIVE (S9), wire mask matches exactly -> still REFUSE_INEFFECTIVE, "
                "never ACCEPT");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE, 0u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE, 0u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
                "tripped INEFFECTIVE (S9), wire mask 0 -> REFUSE_INEFFECTIVE, not REFUSE_MASK_MISMATCH "
                "(checked before the mask comparison, same ordering as NOTHING_TRIPPED)");
+
+    /* kilnlink audit 2026-10-09 M4: occurrence binding at the wire layer. */
+    const uint16_t s6a_mask = link_frame_trip_mask_for_reason(SAFETY_TRIP_MAIN_FAULT);
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 17u) ==
+                   LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED,
+               "M4: legacy 3-byte clear from a protocol 17 peer -> REFUSE_SEQ_REQUIRED");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 200u) ==
+                   LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED,
+               "M4: legacy clear from any newer peer -> REFUSE_SEQ_REQUIRED");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, true, 17u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: bound 4-byte clear from a protocol 17 peer, mask matches -> ACCEPT "
+               "(seq value is checked at dequeue)");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 16u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: legacy clear from a protocol 16 peer -> ACCEPT (unchanged)");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 0u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: legacy clear before any ANNOUNCE (peer 0) -> ACCEPT, keeps the boot-time "
+               "S6a clear working");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, true, 0u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: bound clear before any ANNOUNCE -> ACCEPT");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, 0x0001u, false, 17u) ==
+                   LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
+               "M4: mask mismatch still reported as MASK_MISMATCH, checked before seq-required");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u, false, 17u) ==
+                   LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
+               "M4: nothing tripped still wins over seq-required");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE,
+                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE),
+                                             true, 17u) == LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
+               "M4: S9 stays unclearable even with a bound frame");
+
+    TEST_CHECK(!link_frame_trip_seq_supported(0u), "trip_seq not sent before ANNOUNCE (peer 0)");
+    TEST_CHECK(!link_frame_trip_seq_supported(16u), "trip_seq not sent to a protocol 16 peer");
+    TEST_CHECK(link_frame_trip_seq_supported(17u), "trip_seq sent to a protocol 17 peer");
 }
 
 // --- link_frame_ceiling_is_active (SET_FIRING_CEILING bounds check) --------
@@ -716,8 +858,12 @@ void run_test_link_frame(void)
     test_hostile_inputs();
     test_nan_survives();
     test_versions_compatible();
+    test_next_trip_seq();
+    test_trip_event_publish_barrier();
     test_trip_mask_for_reason();
     test_decide_clear_trip();
+    test_counts_for_liveness();
+    test_liveness_refresh_is_gated_in_link_task();
     test_ceiling_is_active();
     test_clock_epoch_plausible();
     test_apply_set_config_changed_type_preserves_rest();

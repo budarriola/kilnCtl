@@ -96,6 +96,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_err.h"
 
@@ -175,6 +176,14 @@ wifi_prov_mode_t wifi_prov_get_mode(void);
  * already having saved credentials is provisioned and must still require a
  * session; only the true zero-credential state opens these routes. */
 bool wifi_prov_is_unprovisioned(void);
+
+/* F4: NULL if ip/netmask/gateway form a valid static config, else the specific
+ * rule that failed (for the HTTP 400 body). */
+const char *wifi_prov_static_ip_config_problem(const char *ip, const char *netmask, const char *gateway);
+
+/* F3: non-NULL (a recovery hint) when the saved-networks record exists but is
+ * unreadable/newer and add/forget are refused; NULL otherwise. */
+const char *wifi_prov_saved_nets_recovery_hint(void);
 
 /* NULL-terminated. There is no longer one canonical "the" saved network --
  * this now returns the active/most-recently-attempted SSID (the one
@@ -503,6 +512,65 @@ static inline void wifi_prov_status_redact_field(bool may_disclose, const char *
     } else {
         snprintf(out, out_cap, "null");
     }
+}
+
+/* GET /status body (REVIEW_LD01_WWFIX LOW-5). Pure so a host test can render it with every escaped field at its
+ * maximum length (wifi_provision_http.c cannot be host-compiled). Every string is already JSON-escaped /
+ * quoted / null by the caller; this only lays them out. Worst case measured by test_wifi_prov_status_disclosure.c
+ * is ~830 B with saved-networks refused; the cap leaves margin and the test asserts it. Returns snprintf's
+ * value: >= cap means truncated (the handler must not send a truncated body as if it were valid JSON). */
+#define WIFI_PROV_STATUS_JSON_CAP 1024
+typedef struct {
+    const char *mode, *state, *ssid_field, *sta_ip_field, *ap_ssid_escaped, *ap_password_escaped;
+    const char *ip_mode, *static_ip_field, *static_netmask_field, *static_gateway_field;
+    const char *static_dns_field, *static_dns2_field;
+    bool sta_connected, ap_password_known, ap_password_set, ap_pending_teardown;
+    int sta_rssi;
+    unsigned ap_clients;
+    const char *recovery_hint; /* NULL when the saved-networks record is not refused */
+} wifi_prov_status_json_in_t;
+
+static inline int wifi_prov_status_json_format(char *buf, size_t cap, const wifi_prov_status_json_in_t *in)
+{
+    return snprintf(buf, cap,
+                    "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
+                    "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
+                    "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
+                    "\"static_netmask\":%s,\"static_gateway\":%s,"
+                    "\"static_dns\":%s,\"static_dns2\":%s,"
+                    "\"ap_password_known\":%s,\"ap_password_set\":%s,"
+                    "\"ap_pending_teardown\":%s,\"saved_nets_refused\":%s%s%s%s}",
+                    in->mode, in->state, in->ssid_field, in->sta_connected ? "true" : "false", in->sta_ip_field,
+                    in->ap_ssid_escaped, in->ap_password_escaped, in->sta_rssi, in->ap_clients, in->ip_mode,
+                    in->static_ip_field, in->static_netmask_field, in->static_gateway_field,
+                    in->static_dns_field, in->static_dns2_field, in->ap_password_known ? "true" : "false",
+                    in->ap_password_set ? "true" : "false", in->ap_pending_teardown ? "true" : "false",
+                    in->recovery_hint ? "true" : "false", in->recovery_hint ? ",\"recovery_hint\":\"" : "",
+                    in->recovery_hint ? in->recovery_hint : "", in->recovery_hint ? "\"" : "");
+}
+
+/* /api/wifi/status: the AP password is shown only to a request that arrived
+ * on the AP interface (on_ap). Pure so a host test can pin the gate; the
+ * handler (wifi_provision_http.c) cannot be host-compiled. */
+static inline const char *wifi_prov_status_ap_password_view(bool on_ap, const char *password)
+{
+    return (on_ap && password) ? password : "";
+}
+
+/* AP identity argument validators shared by the setters and by /provision,
+ * which must validate BOTH ap_ssid and ap_password before applying either.
+ * Length-counted, so an embedded NUL is refused rather than truncated. */
+static inline bool wifi_prov_ap_ssid_arg_valid(const char *ssid, size_t len)
+{
+    return ssid && len >= 1 && len <= WIFI_PROV_SSID_MAX_LEN && memchr(ssid, '\0', len) == NULL;
+}
+
+static inline bool wifi_prov_ap_password_arg_valid(const char *password, size_t len)
+{
+    if (!password || len > WIFI_PROV_PASSWORD_MAX_LEN || (len > 0 && len < 8)) {
+        return false;
+    }
+    return len == 0 || memchr(password, '\0', len) == NULL;
 }
 
 #ifdef __cplusplus

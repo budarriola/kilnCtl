@@ -24,7 +24,7 @@
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_is_pending() -- kiln_cfg_store_autosave_from_live()'s
                              * swap-pending seam, review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM */
 #include "kiln_io_owner.h"
-#include "pico_auto_update_boot.h" /* docs/PICO_AUTO_UPDATE_PLAN.md G3 -- the boot-time
+#include "pico_auto_update_boot.h" /* docs/PICO_AUTO_UPDATE.md G3 -- the boot-time
                                       * safety-processor firmware check started below */
 #include "profile_executor.h"
 #include "autotune_engine.h"
@@ -105,6 +105,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     } else if (ctx->boot_fault_sources != 0) {
         /* First moment the accumulated bring-up failures can actually reach
          * the safety processor. */
+        if ((ctx->boot_fault_sources & SAFETY_FAULT_SRC_APP) != 0u) profile_executor_note_external_app_hold();
         esp_err_t err = safety_link_set_fault_source(&ctx->safety, ctx->boot_fault_sources, true);
         if (err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "could not assert boot fault sources 0x%02X: %s",

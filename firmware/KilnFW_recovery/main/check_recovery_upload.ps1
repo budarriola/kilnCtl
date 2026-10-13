@@ -110,14 +110,19 @@ try {
         -Replacement "RECOVERY_UPLOAD_CHUNK) {" -Tag "floor"
     # recv timeouts: retry budget, and the reset on progress.
     Test-Mutant -Needle "++timeouts > RECV_TIMEOUT_RETRIES" -Replacement "++timeouts > 100" -Tag "retrybudget"
+    # Overall upload deadline (slow-drip).
+    Test-Mutant -Needle "if (esp_timer_get_time() > deadline_us) {" -Replacement "if (0) {" -Tag "deadline"
     Test-Mutant -Needle "timeouts = 0;<NL>        got += (size_t)n;" -Replacement "got += (size_t)n;" -Tag "noreset"
     # Short body.
     # (the mutant pretends the short read was complete; a bare "ignore the check" would loop forever)
     Test-Mutant -Needle "if (got < want) {" -Replacement "got = want;<NL>        if (0) {" -Tag "shortmid"
     Test-Mutant -Needle "if (got < first) {" -Replacement "if (got < first && first == 0xFFFFFFFFu) {" -Tag "shortfirst"
     # Abort on failure.
-    Test-Mutant -Needle "sink->abort(sink->ctx);<NL>            *http_status = 400;" `
-        -Replacement "*http_status = 400;" -Tag "abortmid"
+    Test-Mutant -Needle "sink->abort(sink->ctx);<NL>            *http_status = too_slow ? 504 : 400;" `
+        -Replacement "*http_status = too_slow ? 504 : 400;" -Tag "abortmid"
+    # Deadline reported as too slow, not as a lost connection.
+    Test-Mutant -Needle "*too_slow = true; // distinct from a lost connection" `
+        -Replacement "(void)0; // distinct from a lost connection" -Tag "tooslow"
     Test-Mutant -Needle "sink->abort(sink->ctx);<NL>            *http_status = 500;" `
         -Replacement "*http_status = 500;" -Tag "abortwrite"
     # ESP sink: esp_ota_end failure must be reported, handle released exactly once.
@@ -135,6 +140,17 @@ try {
     Test-Mutant -Needle 'httpd_resp_set_hdr(req, "Connection", "close");' `
         -Replacement 'httpd_resp_set_hdr(req, "Connection", "keep-alive");' -Tag "connclose"
     Test-Mutant -Needle 'case 413: status = "413 Payload Too Large"; break;' -Replacement "" -Tag "status413"
+
+    # recovery_http.c read_body_exact (Pico push): only the overall deadline may set too_slow (504);
+    # the no-progress stall must report a lost connection (400), like read_exact above.
+    $rh = Get-Content (Join-Path $here "recovery_http.c") -Raw
+    if ($rh -match '(?s)static size_t read_body_exact\(.*?\r?\n}\r?\n') { $fn = $Matches[0] } else { throw "read_body_exact not found in recovery_http.c -- update this check." }
+    if (([regex]::Matches($fn, '\*too_slow = true')).Count -ne 1) {
+        throw "read_body_exact must set too_slow only for the overall deadline, not the no-progress stall."
+    }
+    if ($fn -notmatch '(?s)esp_timer_get_time\(\) > deadline_us\) \{\s*\*too_slow = true') {
+        throw "read_body_exact: the overall-deadline branch must be the one that sets too_slow."
+    }
 
     Write-Host "check_recovery_upload: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0

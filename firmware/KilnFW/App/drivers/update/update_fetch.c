@@ -60,7 +60,7 @@ static const char *TAG = "update_fetch";
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
-#define FETCH_WR_TIMEOUT_MS 30000u           // bounded wait for one flash-writer op (64 KiB erase+write is well under 1 s)
+// FETCH_WR_TIMEOUT_MS (bounded wait for one flash-writer op) lives in update_fetch.h: the host-test fake keys on it.
 // The request buffer: a signed release-assets URL carries a JWT query, so the GET line alone can be
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
@@ -368,7 +368,7 @@ static void wr_task(void *arg)
             break;
         case WR_WRITE: c->res = update_stage_upload_write(st, c->data, c->len); break;
         case WR_FINISH: c->res = update_stage_upload_finish(st); break;
-        case WR_ABORT: update_stage_upload_abort(st); break;
+        case WR_ABORT: update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB); break;
         case WR_EXIT:
             s_c->wr_task = NULL;
             xSemaphoreGive(s_c->wr_done);
@@ -386,7 +386,10 @@ static void wr_task(void *arg)
             // a valid stage behind: undo a late finish (clear) or begin/write (abort). The abort is scoped
             // to the fetch's own upload (review 5 L3) so it cannot kill a newer hand upload.
             if (c->cmd == WR_FINISH && c->res == UPDATE_STAGE_OK) {
-                (void)update_stage_clear(st);
+                int clr = (int)update_stage_clear(st);
+                if (clr != (int)UPDATE_STAGE_OK) {
+                    ESP_LOGW(TAG, "abandoned fetch: late-finish stage clear failed (%d) -- a valid staged image remains", clr);
+                }
             } else if (c->cmd == WR_BEGIN || c->cmd == WR_WRITE) {
                 update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB);
             }
@@ -433,15 +436,18 @@ fail:
 static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t len, uint32_t total,
                                   const char *semver, const char *commit)
 {
+    if (s_c->wr_wedged) {
+        // Before touching the command block: an abandoned writer op still owns it and reads wr.cmd after it
+        // returns to pick its undo (abort vs clear). Overwriting it here (the job's final WR_ABORT) made the
+        // late op skip its cleanup and leave the stage UPLOADING.
+        return UPDATE_STAGE_ERR_FLASH;
+    }
     s_c->wr.cmd = cmd;
     s_c->wr.data = data;
     s_c->wr.len = len;
     s_c->wr.total = total;
     s_c->wr.semver = semver;
     s_c->wr.commit = commit;
-    if (s_c->wr_wedged) {
-        return UPDATE_STAGE_ERR_FLASH;
-    }
     portENTER_CRITICAL(&s_wr_mux);
     update_wr_arb_issue(&s_c->wr_arb);
     portEXIT_CRITICAL(&s_wr_mux);
@@ -458,7 +464,17 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
             return UPDATE_STAGE_ERR_FLASH;
         }
         // Review 5 L1: the writer finished in the same instant; its give is (about to be) posted.
-        (void)xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000));
+        if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
+            s_c->wr_wedged = true;
+            ESP_LOGE(TAG, "flash writer op %d: completion give missing after finishing in the timeout instant", (int)cmd);
+            // No flash access here (the writer may still own the scratch): say from the op alone whether
+            // an installable stage can exist. Only a completed WR_FINISH leaves a verified, installable stage.
+            ESP_LOGW(TAG, "wedge after op %d: %s", (int)cmd,
+                     cmd == WR_FINISH ? "the finish had completed -- a verified stage MAY remain installable (check /api/update/status)"
+                                      : "no finish had completed -- no verified stage is installable from this fetch");
+            return UPDATE_STAGE_ERR_FLASH;
+        }
     }
     return s_c->wr.res;
 }
@@ -831,6 +847,10 @@ static void fetch_task(void *arg)
 {
     (void)arg;
     const job_params_t p = s_c->params;
+    // Only buffers THIS job may have handed to the writer are abandoned on a wedge. A job that starts with the
+    // writer already wedged never reaches it (wr_start refuses), so its buffers are freed like any other job's;
+    // otherwise every check/download after a wedge leaked another 2 KiB of internal RAM until reboot.
+    const bool wedged_at_start = s_c->wr_wedged;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     // The stager scratch is internal on purpose (MED-1); one 2 KiB block per job, in the admission budget.
@@ -852,9 +872,12 @@ static void fetch_task(void *arg)
         wr_stop();
     }
     if (s_c->wr_wedged) {
-        // The writer may still be reading these; abandon them (a reboot recovers) rather than race it.
-        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
         err = "writer_wedged_reboot_required";
+    }
+    if (s_c->wr_wedged && !wedged_at_start) {
+        // This job's writer op timed out and may still be reading these; abandon them (a reboot recovers)
+        // rather than race it.
+        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
     } else {
         heap_caps_free(scratch);
         heap_caps_free(body);
@@ -1042,46 +1065,61 @@ static const char *state_name(fetch_state_t s)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    char a[320];
-    char b[768];
-    char rp[UPDATE_REPO_MAX + 48];
-    char repo_now[UPDATE_REPO_MAX];
-    char running[UPDATE_VERSION_STR_MAX];
-    char reason[FETCH_JSON_REASON_MAX];
+    /* HEAP, not stack (httpd 8 KB stack, "httpd stack blob class"): the JSON
+     * pieces and copies together are well over 1 KB. One allocation, freed on
+     * every return path. */
+    typedef struct {
+        char a[320];
+        char b[768];
+        char rp[UPDATE_REPO_MAX + 48];
+        char repo_now[UPDATE_REPO_MAX];
+        char running[UPDATE_VERSION_STR_MAX];
+        char reason[FETCH_JSON_REASON_MAX];
+    } status_bufs_t;
+    status_bufs_t *bf = heap_caps_malloc(sizeof(*bf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (bf == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     st_lock();
     const job_status_t *s = &s_c->st;
-    snprintf(a, sizeof(a),
+    snprintf(bf->a, sizeof(bf->a),
              "{\"ok\":true,\"state\":\"%s\",\"kind\":\"%s\",\"stage\":\"%s\",\"error\":\"%s\","
              "\"http_status\":%d,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
              state_name(s->state), s->kind == KIND_CHECK ? "check" : "download", s->stage ? s->stage : "",
              s->error ? s->error : "", s->http_status, (unsigned)s->done, (unsigned)s->total,
              s_c->busy ? "true" : "false");
-    json_safe_copy(repo_now, sizeof(repo_now), s->repo);
-    json_safe_copy(running, sizeof(running), s->running);
-    json_safe_copy(reason, sizeof(reason), s->reason);
-    snprintf(b, sizeof(b),
+    json_safe_copy(bf->repo_now, sizeof(bf->repo_now), s->repo);
+    json_safe_copy(bf->running, sizeof(bf->running), s->running);
+    json_safe_copy(bf->reason, sizeof(bf->reason), s->reason);
+    snprintf(bf->b, sizeof(bf->b),
              "\"tag\":\"%s\",\"prerelease\":%s,\"app_size\":%u,\"running\":\"%s\",\"commit\":\"%s\","
              "\"sha256\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\",\"allowed\":%s,"
              "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s}",
-             s->tag, s->prerelease ? "true" : "false", (unsigned)s->app_size, running, s->commit, s->sha256,
-             s->verdict ? s->verdict : "", reason, s->allowed ? "true" : "false",
+             s->tag, s->prerelease ? "true" : "false", (unsigned)s->app_size, bf->running, s->commit, s->sha256,
+             s->verdict ? s->verdict : "", bf->reason, s->allowed ? "true" : "false",
              s->needs_typed_confirm ? "true" : "false", s->zones_cfg_lower ? "true" : "false");
     st_unlock();
     // Before any job has run the repo is the configured setting.
-    if (repo_now[0] == '\0') {
+    if (bf->repo_now[0] == '\0') {
         char cur[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
         if (update_settings_repo_copy(cur, sizeof(cur))) {
-            json_safe_copy(repo_now, sizeof(repo_now), cur);
+            json_safe_copy(bf->repo_now, sizeof(bf->repo_now), cur);
         }
     }
-    snprintf(rp, sizeof(rp), "\"repo\":\"%s\",", repo_now);
+    snprintf(bf->rp, sizeof(bf->rp), "\"repo\":\"%s\",", bf->repo_now);
     httpd_resp_set_type(req, "application/json");
-    if (httpd_resp_send_chunk(req, a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
-        httpd_resp_send_chunk(req, rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
-        httpd_resp_send_chunk(req, b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
-        return ESP_FAIL;
+    esp_err_t rc;
+    if (httpd_resp_send_chunk(req, bf->a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, bf->rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, bf->b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+        rc = ESP_FAIL;
+    } else {
+        rc = httpd_resp_send_chunk(req, NULL, 0);
     }
-    return httpd_resp_send_chunk(req, NULL, 0);
+    heap_caps_free(bf);
+    return rc;
 }
 
 static bool fetch_busy_probe(void)

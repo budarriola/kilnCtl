@@ -7,6 +7,10 @@
 // host[:port] must equal the Host header's (host case-insensitive, missing port
 // = 80). Origin absent -> Referer's scheme://host[:port] gets the same compare.
 // Both absent -> allowed (MCP tools, curl and the LCD send neither).
+// Separately (F4) the Host itself must be an IP literal, localhost, or a name whose first
+// label is the board's hostname AND the rest is empty, "local", or one of a fixed list of
+// non-public LAN suffixes (lan, home, localdomain, home.arpa, internal, intranet, private).
+// Any other suffix is refused: kilnctl.<attacker domain> rebound to the LAN IP must fail.
 #ifndef KILNCTL_HTTP_ORIGIN_CHECK_H
 #define KILNCTL_HTTP_ORIGIN_CHECK_H
 
@@ -137,6 +141,10 @@ static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_
         overlong = true;
     } else if (n > 0 && get_fn(c, "Origin", origin, sizeof(origin)) == 0) {
         o = origin;
+    } else if (n == 0 && get_fn(c, "Origin", origin, sizeof(origin)) == 0) {
+        /* A present-but-empty Origin (len 0 looks like "absent" to the length probe) is a
+         * refusal, never a fall-through to the Referer/absent allow (HTTP input audit L35). */
+        overlong = true;
     }
     if (o == NULL && !overlong) {
         n = len_fn(c, "Referer");
@@ -158,6 +166,155 @@ static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_
         }
     }
     return http_origin_is_cross_origin(o, r, h, overlong);
+}
+
+// ---- F4 (WEB_UI_XSS_AUDIT_2026-10-09): Host allow-list against DNS rebinding ----
+// A rebinding page carries its own attacker hostname in BOTH Origin and Host, so the
+// Origin==Host compare above passes. Refusing any Host that is not one of the board's
+// own names closes it: an attacker needs a DNS name, an IP literal is never theirs.
+// Allowed: IPv4 literal (a.b.c.d, optional :port), bracketed IPv6 literal,
+// "localhost", and (when mdns_name != NULL) "<name>", "<name>.local" or "<name>.<sfx>"
+// where sfx is in a fixed list of non-public home/LAN suffixes (lan, home, localdomain,
+// home.arpa, internal, intranet, private); case-insensitive, optional port, optional single
+// trailing dot. NOT "any suffix": an attacker can register kilnctl.<their domain> and
+// rebind it to the board's LAN IP, so a public TLD or unlisted multi-label suffix is
+// refused. Other names stay refused. Missing Host -> allowed
+// (HTTP/1.0 non-browser clients; a browser always sends one).
+static inline bool http_origin_host_is_ipv4_literal_(const char *h) {
+    int dots = 0, digits = 0;
+    for (const char *p = h; *p != '\0'; p++) {
+        if (*p == '.') {
+            if (digits == 0 || digits > 3) {
+                return false;
+            }
+            dots++;
+            digits = 0;
+        } else if (*p >= '0' && *p <= '9') {
+            digits++;
+        } else {
+            return false;
+        }
+    }
+    return dots == 3 && digits >= 1 && digits <= 3;
+}
+
+// host: lower-cased bare host as produced by http_origin_parse_authority_.
+static inline bool http_origin_host_name_allowed(const char *host, const char *mdns_name) {
+    if (host == NULL) {
+        return true;
+    }
+    http_origin_hp_t hp;
+    if (!http_origin_parse_authority_(host, &hp)) {
+        return false;
+    }
+    size_t hl = strlen(hp.host);
+    if (hp.host[0] == '[') {
+        // Bracketed IPv6 literal: only hex digits, colons and dots (IPv4-mapped) inside.
+        if (hl < 3 || hp.host[hl - 1] != ']') {
+            return false;
+        }
+        for (size_t i = 1; i + 1 < hl; i++) {
+            char ch = hp.host[i];
+            bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || ch == ':' || ch == '.';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (hl > 0 && hp.host[hl - 1] == '.') {
+        hp.host[--hl] = '\0'; // one trailing dot (FQDN form), for every non-bracketed form
+    }
+    if (http_origin_host_is_ipv4_literal_(hp.host) || strcmp(hp.host, "localhost") == 0) {
+        return true;
+    }
+    if (mdns_name != NULL && mdns_name[0] != '\0') {
+        size_t n = strlen(mdns_name);
+        if (n <= hl && (hp.host[n] == '\0' || hp.host[n] == '.')) {
+            for (size_t i = 0; i < n; i++) {
+                if (http_origin_lc_(mdns_name[i]) != hp.host[i]) {
+                    return false;
+                }
+            }
+            if (hp.host[n] == '\0') {
+                return true;
+            }
+            static const char *const k_sfx[] = {"local", "lan", "home", "localdomain",
+                                                "home.arpa", "internal", "intranet", "private"};
+            for (size_t k = 0; k < sizeof(k_sfx) / sizeof(k_sfx[0]); k++) {
+                if (strcmp(hp.host + n + 1, k_sfx[k]) == 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Header glue: true = REFUSE (Host present and not one of the board's names).
+static inline bool http_origin_request_host_refused(void *c, http_origin_hdr_len_fn len_fn,
+                                                    http_origin_hdr_str_fn get_fn,
+                                                    const char *mdns_name) {
+    char host[HTTP_ORIGIN_HDR_BUF];
+    size_t n = len_fn(c, "Host");
+    if (n == 0) {
+        return false;
+    }
+    if (n >= sizeof(host) || get_fn(c, "Host", host, sizeof(host)) != 0) {
+        return true;
+    }
+    return !http_origin_host_name_allowed(host, mdns_name);
+}
+
+// ---- Captive-portal redirect target ----
+// The 302 must be ABSOLUTE to the SoftAP IP: a relative "/" keeps the OS probe's Host
+// (captive.apple.com), under which every POST would then fail the Host allow-list.
+// ip4_nbo: esp_ip4_addr_t.addr (first octet in the low byte). Writes "http://a.b.c.d/";
+// returns false (buf = "/") when the address is 0 or buf is too small.
+static inline bool http_captive_location(char *buf, size_t cap, unsigned ip4_nbo) {
+    if (cap < 2) {
+        return false;
+    }
+    buf[0] = '/';
+    buf[1] = '\0';
+    if (ip4_nbo == 0 || cap < 24) {
+        return false;
+    }
+    size_t o = 0;
+    const char *pre = "http://";
+    for (size_t i = 0; pre[i] != '\0'; i++) {
+        buf[o++] = pre[i];
+    }
+    for (int k = 0; k < 4; k++) {
+        char t[3];
+        int n = 0;
+        unsigned x = (ip4_nbo >> (8 * k)) & 0xffu;
+        do {
+            t[n++] = (char)('0' + x % 10u);
+            x /= 10u;
+        } while (x != 0);
+        while (n > 0) {
+            buf[o++] = t[--n];
+        }
+        buf[o++] = (k < 3) ? '.' : '/';
+    }
+    buf[o] = '\0';
+    return true;
+}
+
+// Request-aware wrapper: the absolute SoftAP URL only for a request that arrived on the
+// SoftAP side. A LAN/STA request keeps the relative "/" (the AP IP is unreachable from the
+// LAN). On the AP with no readable netif IP (ip4_nbo 0) it falls back to the well-known
+// default 192.168.4.1. Returns true when the result is absolute.
+static inline bool http_captive_location_for_request(char *buf, size_t cap, bool on_ap, unsigned ip4_nbo) {
+    if (!on_ap) {
+        if (cap >= 2) {
+            buf[0] = '/';
+            buf[1] = '\0';
+        }
+        return false;
+    }
+    return http_captive_location(buf, cap, ip4_nbo != 0 ? ip4_nbo : 0x0104a8c0u);
 }
 
 #ifdef __cplusplus

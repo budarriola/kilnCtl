@@ -15,6 +15,7 @@
 // kiln_cfg_http.c for two other files carrying their own static copy of the
 // same helper for the same reason).
 
+#include "../common/json_escape_ctl.h"
 #include "backup_http.h"
 #include "backup_http_internal.h"
 
@@ -40,6 +41,7 @@
                                  * docs/audits for the field-by-field enumeration */
 #include "zones_http_internal.h" /* zone_normals_set()/zones_config_get_normal_current()
                                    * -- CT normals, the owner's own named example */
+#include "cfg_fs.h"
 #include "relay_cycles.h" /* top-level "relay_cycles" wear counters */
 #include "aux_outputs_cfg.h" /* top-level "aux_outputs" array (spare-relay on/off outputs) */
 #include "display_power_cfg.h" /* top-level "display_power" object */
@@ -163,17 +165,7 @@ static void backup_stream_printf(backup_stream_t *s, const char *fmt, ...)
  * profile name came from a POST body at some point, so it's untrusted-ish. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* httpd-stack-budget fix (2026-09-09, check_httpd_task_stack_budget RED at
@@ -249,6 +241,25 @@ static BACKUP_EXPORT_NOINLINE void backup_export_aux_outputs(backup_stream_t *s)
  * board that wrote them. Wear history the operator cannot regenerate, so it is exported (the kiln
  * factory reset erases it). Import is raise-only (relay_cycles_restore_all's monotonic guard) and
  * refuses a backup whose hw_relays differs. Optional key, no BACKUP_FORMAT_VERSION bump: absent = no-op. */
+/* persfx LOW-5: stores the boot could not read (cfg file unreadable / zones undecided) hold FROZEN or default
+ * values in RAM, so this export's values for them may be stale. Name them so a restore is not trusted blindly.
+ * Emitted only when non-empty; import ignores unknown top-level keys. */
+static BACKUP_EXPORT_NOINLINE void backup_export_degraded_stores(backup_stream_t *s)
+{
+    int n = cfg_fs_degraded_count();
+    if (n <= 0) {
+        return;
+    }
+    backup_stream_printf(s, ",\"stale_or_unknown_stores\":[");
+    for (int i = 0; i < n && i < 8; i++) {
+        char name[48];
+        if (cfg_fs_degraded_name(i, name, sizeof(name))) {
+            backup_stream_printf(s, "%s\"%s\"", i == 0 ? "" : ",", name);
+        }
+    }
+    backup_stream_printf(s, "]");
+}
+
 static BACKUP_EXPORT_NOINLINE void backup_export_relay_cycles(backup_stream_t *s)
 {
     uint32_t c[RELAY_CYCLES_COUNT];
@@ -340,7 +351,9 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
      * the default. */
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"kilnctl_backup.json\"");
 
-    backup_stream_printf(&s, "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"profiles\":[", BACKUP_FORMAT_VERSION);
+    backup_stream_printf(&s, "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":%u,\"relay_count\":%u,\"profiles\":[",
+                         BACKUP_FORMAT_VERSION, (unsigned)zones_config_get_thermo_count(),
+                         (unsigned)zones_config_get_relay_count());
 
     bool first_profile = true;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
@@ -462,7 +475,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_fuzzy_strength_pct(zi, &fuzzy_strength_pct);
             /* zones_config_get_coupling_raw(), not zones_config_get_coupling():
              * the latter zeroes any row/column touching an on/off zone
-             * (docs/ON_OFF_ZONE_PLAN.md sec 1's belt-and-braces control-loop
+             * (docs/ON_OFF_ZONE.md sec 1's belt-and-braces control-loop
              * guard) -- reading through it here exported 0.0 for a
              * currently on/off zone's real, previously-measured coupling
              * cells, and a later import then committed that 0.0 as the new
@@ -892,6 +905,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
     }
     backup_export_aux_outputs(&s);
     backup_export_relay_cycles(&s);
+    backup_export_degraded_stores(&s);
     backup_export_prefs(&s);
     backup_stream_printf(&s, "}");
 

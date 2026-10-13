@@ -256,6 +256,8 @@ def validate_image(bin_path: str, target: partition_table.PartitionEntry) -> Rec
 _UNREADABLE_MARKERS = ("could not be read", "could not be confirmed", "no diag received yet")
 #: ota_interlock.c's link-down reason (result OTA_INTERLOCK_REFUSED_NEEDS_ACK).
 LINK_DOWN_INTERLOCK_REASON = "safety link is down"
+#: mcp_server_ota_matrix._read_armed_latch_conditions()'s latched-trip line.
+LATCHED_TRIP_REASON_PREFIX = "a safety trip is latched"
 LINK_DOWN_NOTE = (
     "allow_link_down=True: the safety link was down; the OTA interlock short-circuits at "
     "link-down, so its heater-commanded and over-temperature checks were NOT run. Live reads "
@@ -327,6 +329,15 @@ def board_state_refusals(preflight, armed_conditions_fn, allow_link_down: bool =
             unreadable.append(f"{prefix}its conditions could not be read: {exc}")
         else:
             for r in extra:
+                if (link_down_mode and preflight.safety_armed is not True
+                        and r.startswith(LATCHED_TRIP_REASON_PREFIX)):
+                    # A latched trip is the SAFE state (heat de-energized), and a dead link is
+                    # normally accompanied by one (S6b / dual-reset S6a) that clear_trip cannot
+                    # clear without the link -- refusing would block the very recovery path
+                    # allow_link_down exists for. Cached value: a note, never a hazard.
+                    if notes is not None:
+                        notes.append(f"{prefix}{r} (cached; a latched trip is the safe state, not a flash blocker)")
+                    continue
                 (unreadable if _is_unreadable_reason(r) else hazards).append(prefix + r)
     if link_down_mode and notes is not None:
         notes.append(LINK_DOWN_NOTE)

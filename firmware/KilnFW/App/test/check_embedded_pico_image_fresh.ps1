@@ -2,7 +2,7 @@
 # the KilnFW application build embeds are a matched, current pair, not a
 # stale or mismatched one.
 #
-# BACKGROUND (docs/PICO_AUTO_UPDATE_PLAN.md, 2026-09-20 owner decision): the
+# BACKGROUND (docs/PICO_AUTO_UPDATE.md, 2026-09-20 owner decision): the
 # KilnFW application now EMBED_FILES two SaftyFW slot images
 # (firmware/SaftyFW/build/SaftyFW_slotA.bin / SaftyFW_slotB.bin, produced by
 # check_00_saftyfw_target_build.ps1 via objcopy from the slot-linked ELFs)
@@ -22,7 +22,7 @@
 #      firmware/SaftyFW, firmware/CommonFW, firmware/hwAbstraction/pico,
 #      firmware/hwAbstraction/common and firmware/hwAbstraction/interface
 #      (the same pathspec SaftyFW's own build stamps with, NOT plain `git
-#      rev-parse --short HEAD` -- see docs/PICO_AUTO_UPDATE_PLAN.md sec 13) --
+#      rev-parse --short HEAD` -- see docs/PICO_AUTO_UPDATE.md sec 13) --
 #      UNLESS the record's `dirty` flag is set, in which case this step is
 #      skipped and the check reports WARN instead of PASS (a deliberately
 #      dirty local build is not a staleness bug, but it is worth flagging

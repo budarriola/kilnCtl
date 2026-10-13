@@ -22,7 +22,7 @@ from kilnctrl.coordinated_gpio_test import (
 
 
 def _ok_preflight() -> GpioTestPreflight:
-    return GpioTestPreflight(
+    return GpioTestPreflight(autotune_active=False, 
         safety_armed=False,
         profile_running_or_paused=False,
         profile_state_name="idle",
@@ -156,7 +156,7 @@ def test_step_b_mismatch_is_reported_as_failed_not_swallowed():
 
 def test_refuses_when_safety_armed():
     boards = FakeBoards()
-    preflight = GpioTestPreflight(
+    preflight = GpioTestPreflight(autotune_active=False, 
         safety_armed=True,  # ARMED -- must refuse
         profile_running_or_paused=False,
         profile_state_name="idle",
@@ -215,7 +215,7 @@ def test_lazy_refusal_never_builds_the_client():
     every refusal leaks one. run_coordinated_gpio_test_lazy must check
     preflight/confirm FIRST and never call the builder at all on a refusal."""
     boards = FakeBoards()
-    armed_preflight = GpioTestPreflight(
+    armed_preflight = GpioTestPreflight(autotune_active=False, 
         safety_armed=True,  # ARMED -- must refuse
         profile_running_or_paused=False,
         profile_state_name="idle",
@@ -277,7 +277,7 @@ def test_second_preflight_read_refusal_still_closes_client():
     profile running/paused, and resetting a processor in that state would
     abort a firing and trip S6a -- a refusal must be inert on the boards."""
     boards = FakeBoards()
-    armed_preflight = GpioTestPreflight(
+    armed_preflight = GpioTestPreflight(autotune_active=False, 
         safety_armed=True,
         profile_running_or_paused=False,
         profile_state_name="idle",
@@ -298,7 +298,7 @@ def test_second_preflight_read_refusal_still_closes_client():
 
 def test_unknown_preflight_state_refuses_fail_safe():
     boards = FakeBoards()
-    preflight = GpioTestPreflight(
+    preflight = GpioTestPreflight(autotune_active=False, 
         safety_armed=None,  # could not be determined
         profile_running_or_paused=False,
         profile_state_name="idle",
@@ -310,3 +310,12 @@ def test_unknown_preflight_state_refuses_fail_safe():
 
     assert result.refused
     assert not boards.halted
+
+
+def test_autotune_active_or_unread_refuses():
+    import dataclasses
+    ok = _ok_preflight()
+    assert dataclasses.replace(ok, autotune_active=False).refusal_reasons() == []
+    for val in (True, None):
+        reasons = dataclasses.replace(ok, autotune_active=val).refusal_reasons()
+        assert any("autotune" in r for r in reasons)

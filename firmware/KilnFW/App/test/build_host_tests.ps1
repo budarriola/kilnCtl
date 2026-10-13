@@ -26,7 +26,7 @@
 # name, build command (test source names) or, for "main", source list matches
 # the regex (e.g. -Only test_update_stage). Selected ones are printed; a regex
 # matching none is an error. Absent = full run, behavior unchanged.
-param([string]$OutDir = "", [string]$Only = "")
+param([string]$OutDir = "", [string]$Only = "", [int]$TestTimeoutSec = 300)
 $ErrorActionPreference = "Stop"
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
@@ -41,7 +41,9 @@ $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 . (Join-Path $PSScriptRoot "../../../../tools/build_lock.ps1")
+. (Join-Path $PSScriptRoot "../../../../tools/host_test_exec.ps1")
 . (Join-Path $PSScriptRoot "../../../../tools/build_gate.ps1")
+. (Join-Path $PSScriptRoot "../../../../tools/host_test_verdict.ps1")
 $buildLockName = "kilnfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
 # vcvarsall runs ONCE (outside any gate slot); the slot is then taken only around each cl invocation (Invoke-KilnGatedCmd).
 Import-KilnVcvarsEnv -Vcvars $vcvars
@@ -88,6 +90,7 @@ try {
         (Join-Path $testDir "test_ota_interlock.c"),
         (Join-Path $testDir "test_heat_interlock.c"),
         (Join-Path $testDir "test_heat_enable.c"),
+        (Join-Path $testDir "test_safety_cfg_persist_verdict.c"),
         (Join-Path $testDir "test_thermo_combine.c"),
         (Join-Path $testDir "test_profile_feasibility.c"),
         (Join-Path $testDir "test_profile_plan_curve.c"),
@@ -113,7 +116,7 @@ try {
         (Join-Path $testDir "test_firing_shadow.c"),
         (Join-Path $testDir "test_safety_cfg_store.c"),
         (Join-Path $testDir "test_boot_guard.c"),
-        # docs/PICO_AUTO_UPDATE_PLAN.md -- pure decision logic (header-only,
+        # docs/PICO_AUTO_UPDATE.md -- pure decision logic (header-only,
         # no I/O) and the persisted per-pair attempt-budget counter
         # (#includes pico_update_attempts.c directly, same convention as
         # test_boot_guard.c immediately above; no fake-body collision, so it
@@ -152,8 +155,10 @@ try {
         (Join-Path $testDir "test_ramp_assist_cfg.c"),
         (Join-Path $testDir "test_ui_page_home_graph.c"),
         (Join-Path $testDir "test_ui_page_home_rail.c"),
+        (Join-Path $testDir "test_ui_profile_builder_segment_logic.c"),
         (Join-Path $testDir "test_ui_profile_list_order.c"),
         (Join-Path $testDir "test_ui_page_safety_logic.c"),
+        (Join-Path $testDir "test_ui_page_network_secret.c"),
         # UI_PLAN.md 6.3 -- the LCD Temperature page's safety-relay label text.
         (Join-Path $testDir "test_ui_page_temperature_safety.c"),
         (Join-Path $testDir "test_ui_page_profile_picker_format.c"),
@@ -267,8 +272,11 @@ try {
         (Join-Path $driversDir "control/profile_feasibility.c"),
         (Join-Path $driversDir "ui/ui_page_home_graph.c"),
         (Join-Path $driversDir "ui/ui_page_home_rail.c"),
+        (Join-Path $driversDir "ui/ui_unit_entry.c"),
+        (Join-Path $driversDir "ui/ui_profile_builder_segment_logic.c"),
         (Join-Path $driversDir "ui/ui_profile_list_order.c"),
         (Join-Path $driversDir "ui/ui_page_safety_logic.c"),
+        (Join-Path $driversDir "ui/ui_page_network_secret.c"),
         (Join-Path $driversDir "ui/ui_page_temperature_safety.c"),
         (Join-Path $driversDir "ui/ui_page_profile_picker_format.c"),
         (Join-Path $driversDir "hw/max31856_codec.c"),
@@ -298,7 +306,8 @@ try {
         (Join-Path $driversDir "persist/cfg_fs_format_gate.c"),
         (Join-Path $driversDir "persist/cfg_fs_status.c"),
         (Join-Path $driversDir "persist/pref_cfg_fs.c"),
-        # kiln config slots filesystem move (docs/FILESYSTEM_USER_DATA_PLAN.md
+        (Join-Path $driversDir "persist/cfg_save_barrier.c"),
+        # kiln config slots filesystem move (docs/FILESYSTEM_USER_DATA.md
         # section 5) -- kiln_cfg_store.c (#included directly by
         # test_kiln_cfg_store.c above) now calls into
         # kiln_cfg_store_cfg_fs.c's whole-document read-through/dual-write
@@ -386,7 +395,7 @@ try {
         (Join-Path $driversDir "control/firing_score.c"),
         (Join-Path $driversDir "control/firing_compare.c"),
         (Join-Path $driversDir "safety/safety_ceiling_policy.c"),
-        # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+        # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
         # gate-slices-2/4/5, 2026-09-25): backup_import.c (#included via
         # test_backup_import.c above) now calls system_mode_gate_check()/
         # system_mode_gate_http_send_refusal() -- link both real, pure,
@@ -505,6 +514,9 @@ try {
     $script:builtExes = @()
     $script:buildFailures = @()
     $script:failedExes = @()
+    # Compile-only signals built outside Invoke-HostTestExe: NOT one of the $totalExpected
+    # executables, so kept out of -BuildFailures (Built+BuildFailures must equal Expected exactly).
+    $script:auxBuildFailures = @()
     $script:onlySelected = @()
 
     # Parallel compile, serial run. KILNCTL_HOST_BUILD_JOBS (default 4; 1 = the
@@ -544,8 +556,7 @@ try {
         New-Item -ItemType Directory -Force -Path $script:hostScratchCwd | Out-Null
         Push-Location $script:hostScratchCwd
         try {
-            & $ExePath
-            $exeExit = $LASTEXITCODE
+            $exeExit = Invoke-HostTestProcess -Name $Name -ExePath $ExePath -TimeoutSec $TestTimeoutSec
         } finally {
             Pop-Location
         }
@@ -646,7 +657,7 @@ try {
     $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
     $exe2ObjDir = Join-Path $outDir "zones_obj\"
     if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
-    # test_zones_config_cfg_fs.c (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+    # test_zones_config_cfg_fs.c (docs/FILESYSTEM_USER_DATA.md section 5
     # step 5, zones-config-move task): a separate TU in this same executable
     # exercising zones_config_cfg_fs.c's read-through/dual-write policy
     # through the REAL nvs_load()/nvs_save() (defined in
@@ -656,10 +667,13 @@ try {
     # separate .c files (like zones_config_json.c below), not textually
     # included -- neither defines anything test_zones_http.c's #includes
     # already define, so there is no multiple-definition risk.
-    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_ZONES_UNLOCK_TEST_HOOK " +
+    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PROFILES_LOADED_TEST_HOOK /DKILNCTL_ZONES_UNLOCK_TEST_HOOK " +
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
+            # review web7 LOW-4: zones_http_start() seeds the generation through hal_sysinfo_random_u32().
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $testDir 'test_cfgfs_pref_validate.c')`" " +
             "`"$(Join-Path $testDir 'test_zone_normals_cfg_fs.c')`" " +
             # 2026-09-24: zones_current_sweep_engine.c (#included via
             # test_zones_http.c) now reads through the shared thermo_channels_
@@ -685,11 +699,12 @@ try {
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfgfs_file_validate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/kiln_scope_cfg_files.c')`" `"$(Join-Path $driversDir 'persist/profiles_scope_cfg_files.c')`" " +
             # 2026-10-04: zones_config_store.c's zone_normals_get_dualwrite_status()
             # calls cfg_fs_status_item_diverged() for the /api/cfgfs zone_normals row.
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
-            # docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: the CT attribution
+            # docs/CT_ATTRIBUTION_VERIFICATION.md: the CT attribution
             # verdict store. Linked as a plain .c (not #included) because it
             # depends only on hal_kv -- fake_kv.c below supplies that -- and
             # test_zones_http.c's fingerprint/round-trip tests drive it
@@ -732,13 +747,13 @@ try {
             # reasoning used everywhere else these four files travel together.
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`" " +
-            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
             # gate-slices-2/4/5, 2026-09-25): zones_http_post.c (#included
             # above) now calls system_mode_gate_check()/
             # system_mode_gate_http_send_refusal() -- link both real, pure,
             # no-ESP-IDF-dependency objects in, same convention as exe50's
             # own dedicated executable for the module's unit tests.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`" " +
             # docs/HTTP_POST_OWNER_MIGRATION.md A2 review fix (Opus,
             # 2026-09-25): zones_post_handler() (zones_http_post.c, #included
@@ -890,7 +905,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1: profile_executor.c (#included
+            # docs/LIVE_PROFILE_EDIT.md pass 1: profile_executor.c (#included
             # above) now calls profile_executor_live_pickup_check() from
             # reload_live_profile_if_changed(). Linked for REAL rather than
             # faked -- it is a small pure file (no hal_kv/FreeRTOS deps) and
@@ -905,7 +920,7 @@ try {
             # fakes of this same module's surface (live_profile.c itself is
             # tested for real by test_live_profile.c, its own executable).
             "`"$(Join-Path $driversDir 'control/profile_executor_live_pickup.c')`" " +
-            # ITER_TUNE_REDESIGN_PLAN.md step 8: profile_executor_firing_stats.c
+            # ITER_TUNE_REDESIGN.md step 8: profile_executor_firing_stats.c
             # (#included above via profile_executor.c's multi-#include block)
             # now calls firing_shadow_zone_tick()/firing_shadow_finish_firing() --
             # link the real module (already host-tested by test_firing_shadow.c,
@@ -915,7 +930,7 @@ try {
             "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
-            # Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6, 2026-09-27):
+            # Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6, 2026-09-27):
             # profile_executor_run.c now calls system_mode_gate_check() ahead
             # of readiness_gate_evaluate() -- link the real, pure module in
             # (already host-tested for real by test_system_mode_gate.c, its
@@ -942,7 +957,7 @@ try {
     Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
     # ---- test_profile_executor_store_link.c: store-plus-consumer link test ----
-    # docs/RELEASE_HARDENING_PLAN.md: test_profile_executor_prestart.c feeds the
+    # docs/RELEASE_HARDENING.md: test_profile_executor_prestart.c feeds the
     # real profile_executor_run() from a hand-built profiles_http_get() fake, so a
     # store-layout/executor-consumption mismatch could never fail there. This
     # executable #includes that file (its main() renamed, its profiles_http_get()/
@@ -964,7 +979,8 @@ try {
                  "`"$(Join-Path $driversDir 'http/profiles_edit_http.c')`" " +
                  "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
                  "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
-                 "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" ")
+                 "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" " +
+                 "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" ")
     # profiles_http.c includes <stdatomic.h> (s_convert_busy): MSVC needs this flag.
     if (-not $cmdSl.Contains('/experimental:c11atomics')) { $cmdSl = $cmdSl.Replace('/std:c11 ', '/std:c11 /experimental:c11atomics ') }
     # Guard: $cmdSl is a chain of string Replace()s over $cmd4. If a future edit to $cmd4
@@ -989,7 +1005,7 @@ try {
             "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            # Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6, 2026-09-27):
+            # Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6, 2026-09-27):
             # autotune_engine.c now calls system_mode_gate_check() ahead of
             # readiness_gate_evaluate() -- link the real, pure module in, same
             # reasoning as test_profile_executor_prestart.c's cmd4 above.
@@ -1025,7 +1041,7 @@ try {
     # header comment. Own executable so that stub, and this file's fake bodies
     # for zones_http.h/profile_feasibility.h/profiles_builtin.h, never collide
     # with any other test file's definitions of those same symbols.
-    # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 (user-profiles
+    # docs/FILESYSTEM_USER_DATA.md section 5 step 4 (user-profiles
     # filesystem move): profiles_http.c (#included directly above) now calls
     # into profiles_cfg_fs.c's per-slot read-through/dual-write bridge, so
     # this executable needs cfg_fs.c/profiles_cfg_fs.c linked in as plain
@@ -1042,7 +1058,7 @@ try {
     # <stdatomic.h> -- same MSVC requirement test_live_profile.c/
     # test_profile_executor_live_pickup.c already needed for the same reason
     # (see this file's own comment above them).
-    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
+    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PROFILES_LOADED_TEST_HOOK " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
@@ -1080,7 +1096,7 @@ try {
             # (test_profiles_http.c:444), the same fake the rest of the
             # executable already uses.
             "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
             # kiln_http_register() rewiring: profiles_http.c (#included
             # above) now calls it instead of httpd_register_uri_handler()
@@ -1111,7 +1127,7 @@ try {
     Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
 
     # ---- test_live_profile.c: its own separate executable ---------------------
-    # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1. Same "#includes the .c directly"
+    # docs/LIVE_PROFILE_EDIT.md pass 1. Same "#includes the .c directly"
     # reason as test_zones_http.c/test_profiles_http.c above -- it reaches
     # live_profile.c's persistence functions and profile_executor_live_pickup.c's
     # pure pickup check by #including both files directly, and needs the REAL
@@ -1142,13 +1158,13 @@ try {
             "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "live_profile" -ExePath $exeLp -BuildCmd $cmdLp
 
     # ---- test_profiles_live_http.c: its own separate executable ---------------
-    # docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 (section 10/11 HTTP surface). Same
+    # docs/LIVE_PROFILE_EDIT.md pass 2 (section 10/11 HTTP surface). Same
     # "#includes the .c directly" reason as test_live_profile.c above -- it
     # reaches profiles_live_http.c's `static` handlers directly, and links the
     # REAL live_profile.c (in turn needing the real host hal_kv backend,
@@ -1165,7 +1181,7 @@ try {
             "/Fo:`"$plhObjDir\\`" /Fe:`"$exePlh`" `"$(Join-Path $testDir 'test_profiles_live_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "profiles_live_http" -ExePath $exePlh -BuildCmd $cmdPlh
@@ -1184,7 +1200,7 @@ try {
             "/Fo:`"$efaObjDir\\`" /Fe:`"$exeEfa`" `"$(Join-Path $testDir 'test_ui_edit_firing_apply.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "ui_edit_firing_apply" -ExePath $exeEfa -BuildCmd $cmdEfa
@@ -1214,7 +1230,7 @@ try {
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
-            # PICO_AUTO_UPDATE_PLAN.md G1: ota_http_pico.c (#included into
+            # PICO_AUTO_UPDATE.md G1: ota_http_pico.c (#included into
             # test_ota_http.c above) now records what it staged, so a later
             # boot can re-use the image. Linked in for REAL rather than faked,
             # same rationale as ota_record.c beside it -- it is a plain
@@ -1247,14 +1263,14 @@ try {
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
-            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
             # gate-slices-2/4/5, 2026-09-25): factory_reset.c (#included
             # above) now calls system_mode_gate_check()/
             # system_mode_gate_http_send_refusal() -- link both real, pure,
             # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
             # itself is faked in test_ota_http.c, same convention as its other
             # profile_executor/autotune_engine fakes.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
     # WEB_AUTH_PLAN.md section 2b: ota_http.c now calls
     # http_auth_policy_web_enabled() (http_auth_policy_iface.c) directly, and
@@ -1286,7 +1302,64 @@ try {
     # definition per executable; ota_http.c's own HMAC use already supplies
     # one in this executable (test_ota_http.c), so no new definition is added.
 
+    $cmd8 += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
+
+    # ---- test_ota_http_refusals.c: campaign 9b. #includes test_ota_http.c (and so every OTA handler .c and its
+    # fakes) and adds refusal/failure-mapping tests, so it links exactly the same objects as the ota_http exe. ----
+    $exe8b = Join-Path $outDir "kilnctl_host_tests_ota_http_refusals.exe"
+    $otaObjDirB = Join-Path $outDir "ota_refusals"
+    New-Item -ItemType Directory -Force -Path $otaObjDirB | Out-Null
+    $cmd8b = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$otaObjDirB\\`" /Fe:`"$exe8b`" " +
+            "`"$(Join-Path $testDir 'test_ota_http_refusals.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
+            # PICO_AUTO_UPDATE.md G1: ota_http_pico.c (#included into
+            # test_ota_http.c above) now records what it staged, so a later
+            # boot can re-use the image. Linked in for REAL rather than faked,
+            # same rationale as ota_record.c beside it -- it is a plain
+            # hal_kv_* record store and fake_kv.c below already supplies its
+            # backing store.
+            "`"$(Join-Path $driversDir 'persist/pico_image_manifest.c')`" " +
+            "`"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
+            "`"$(Join-Path $driversDir 'http/ota_esp_image_header.c')`" " +
+            # Owner decision 2026-09-20: ota_http_pico.c's ota_pico_do_stage()
+            # now calls pico_img_stage_begin/write_chunk/finish() (shared with
+            # net/pico_auto_update_boot.c's embedded-image writer) instead of
+            # its own inline erase/write/manifest logic -- linked in for real,
+            # same rationale as pico_image_manifest.c/ota_image_crc.c beside it.
+            "`"$(Join-Path $driversDir 'net/pico_img_stage.c')`" " +
+            # KilnFW TODO.md 9.4: ota_pico_do_stage() now re-scans the image it
+            # just staged via pico_image_source_describe(), to learn the image's
+            # OWN declared link protocol version. Linked in for real, same
+            # rationale as pico_img_stage.c/ota_image_crc.c above: it is a pure
+            # scanner over the fake pico_img partition test_ota_http.c already
+            # supplies, and a stub would hide the real symbol this executable
+            # has to keep linkable.
+            "`"$(Join-Path $driversDir 'net/pico_image_source.c')`" " +
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\saftyfw_image_identity.c')`" " +
+            "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
+            # gate-slices-2/4/5, 2026-09-25): factory_reset.c (#included
+            # above) now calls system_mode_gate_check()/
+            # system_mode_gate_http_send_refusal() -- link both real, pure,
+            # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
+            # itself is faked in test_ota_http.c, same convention as its other
+            # profile_executor/autotune_engine fakes.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+    Invoke-HostTestExe -Name "ota_http_refusals" -ExePath $exe8b -BuildCmd $cmd8b
+
 
     # ---- test_dashboard_status_http.c: its own NINTH, separate executable ----
     # 2026-09-17 audit finding 7 follow-up: GET /api/status (ROUTE_TIER_OPEN,
@@ -1333,7 +1406,7 @@ try {
     Invoke-HostTestExe -Name "dashboard_status_http" -ExePath $exe9 -BuildCmd $cmd9
 
     # ---- test_ota_pico_relay.c: its own, separate executable -----------------
-    # docs/PICO_AUTO_UPDATE_PLAN.md used to flag this gap: "ota_pico_relay.c's
+    # docs/PICO_AUTO_UPDATE.md used to flag this gap: "ota_pico_relay.c's
     # own state machine has no host test today (only its terminal-state
     # recognition is exercised indirectly)." relay_task_fn() is `static` with
     # no other seam into it, so this file #includes ota_pico_relay.c directly
@@ -1379,6 +1452,13 @@ try {
 
     Invoke-HostTestExe -Name "uart_protocol_link_delegate" -ExePath $exe9 -BuildCmd $cmd9
 
+    # REBOOTFX7 LOW-2: same TU with a 10 ms tick period, running only the uart_proto_message_init() rx_ms units test.
+    $exe9t = Join-Path $outDir "kilnctl_host_tests_uart_protocol_tick10.exe"
+    $linkObjDirT = Join-Path $outDir "link_tick10"
+    New-Item -ItemType Directory -Force -Path $linkObjDirT | Out-Null
+    $cmd9t = $cmd9.Replace("/Fo:`"$linkObjDir\\`"", "/Fo:`"$linkObjDirT\\`"").Replace("/Fe:`"$exe9`"", "/Fe:`"$exe9t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    Invoke-HostTestExe -Name "uart_protocol_tick10" -ExePath $exe9t -BuildCmd $cmd9t
+
     # ---- test_board_temps.c: its own TENTH, separate executable --------------
     # Same reason as test_zones_http.c above: it #includes board_temps.c
     # directly to reach board_temps_get() (the pure half of that file, no other
@@ -1417,10 +1497,10 @@ try {
             "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
             "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             # kiln_io_owner.c's relay writes feed relay_off_tracker (on/off min_off_s hold).
             "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
-    # docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1):
+    # docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1):
     # kiln_io_owner.c's relay_on_blocked() now calls system_mode_gate_
     # blocks_relay(), which calls the real system_mode_gate_check() -- linked
     # here for the same reason every other real dependency of kiln_io_owner.c
@@ -1436,7 +1516,53 @@ try {
     # only, no size change), and this executable #includes kiln_io_owner.c
     # directly.
 
+    $cmd11 += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "kiln_io_owner" -ExePath $exe11 -BuildCmd $cmd11
+
+    # ---- test_kiln_io_sx_fake.c: real kiln_io.c + real SX1509.c over a fake I2C chip
+    # (host-test coverage campaign 7). Own executable: it defines the i2c_master_* fakes.
+    $exeKsx = Join-Path $outDir "kilnctl_host_tests_kiln_io_sx_fake.exe"
+    $ksxObjDir = Join-Path $outDir "ksx"
+    New-Item -ItemType Directory -Force -Path $ksxObjDir | Out-Null
+    $cmdKsx = "cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_SX1509_I2C_ADDR=0x3E " +
+            "/Fo:`"$ksxObjDir\\`" /Fe:`"$exeKsx`" " +
+            "`"$(Join-Path $testDir 'test_kiln_io_sx_fake.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
+            "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+    Invoke-HostTestExe -Name "kiln_io_sx_fake" -ExePath $exeKsx -BuildCmd $cmdKsx
+
+    # ---- test_dashboard_http_relay.c: dashboard_set_relay() mapping + dashboard_http_get_safety_trip() (R2-E)
+    $exeDhr = Join-Path $outDir "kilnctl_host_tests_dashboard_http_relay.exe"
+    $dhrObjDir = Join-Path $outDir "dhr"
+    New-Item -ItemType Directory -Force -Path $dhrObjDir | Out-Null
+    $cmdDhr = "cl /I`"$(Join-Path $testDir 'stubs_dashboard_http_relay')`" /I`"$(Join-Path $testDir 'stubs_dashboard_status')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dhrObjDir\\`" /Fe:`"$exeDhr`" " +
+            "`"$(Join-Path $testDir 'test_dashboard_http_relay.c')`" `"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "dashboard_http_relay" -ExePath $exeDhr -BuildCmd $cmdDhr
+
+    # ---- test_dashboard_settings_http.c: unit_pref + safety log_level POST handlers (R3-C)
+    $exeDsh = Join-Path $outDir "kilnctl_host_tests_dashboard_settings_http.exe"
+    $dshObjDir = Join-Path $outDir "dsh"
+    New-Item -ItemType Directory -Force -Path $dshObjDir | Out-Null
+    $cmdDsh = "cl /I`"$(Join-Path $testDir 'stubs_dashboard_http_relay')`" /I`"$(Join-Path $testDir 'stubs_dashboard_status')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dshObjDir\\`" /Fe:`"$exeDsh`" `"$(Join-Path $testDir 'test_dashboard_settings_http.c')`""
+    $cmdDsh += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # no real cfg_fs.c in this exe (cfg_fs_degraded_*)
+    Invoke-HostTestExe -Name "dashboard_settings_http" -ExePath $exeDsh -BuildCmd $cmdDsh
+
+    # ---- test_kiln_io_owner_sx_dispatch.c: owner_task() relay/SX_RESET dispatch over the fake chip (R2-A)
+    $exeKod = Join-Path $outDir "kilnctl_host_tests_kiln_io_owner_sx_dispatch.exe"
+    $kodObjDir = Join-Path $outDir "kod"
+    New-Item -ItemType Directory -Force -Path $kodObjDir | Out-Null
+    $cmdKod = "cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_SX1509_I2C_ADDR=0x3E " +
+            "/Fo:`"$kodObjDir\\`" /Fe:`"$exeKod`" " +
+            "`"$(Join-Path $testDir 'test_kiln_io_owner_sx_dispatch.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
+            "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
+            "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
+    $cmdKod += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
+    Invoke-HostTestExe -Name "kiln_io_owner_sx_dispatch" -ExePath $exeKod -BuildCmd $cmdKod
 
     # ---- test_safety_trip_words.c: its own TWELFTH, separate executable ------
     # Header-only (safety_trip_words.h is static inline, no .c) -- see the test
@@ -1507,7 +1633,7 @@ try {
                  "kilnlink_apply_config_volatile.c", "kilnlink_ceiling.c",
                  "kilnlink_clear_trip.c", "kilnlink_commit_config.c", "kilnlink_commit_config_rejected.c",
                  "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
-                 "kilnlink_get_param.c",
+                 "kilnlink_get_param.c", "kilnlink_test_trip.c", "kilnlink_test_trip_result.c",
                  "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_reboot.c",
                  "kilnlink_reboot_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
                  "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
@@ -1536,6 +1662,14 @@ try {
     # on by this file's tests).
 
     Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
+
+    # REBOOTFX5 LOW-1: the same TU again with a 10 ms tick period, running only the tick-vs-ms DIAG age test.
+    # The stub's period is 1, so no other executable can tell a tick count from a millisecond count.
+    $exe14t = Join-Path $outDir "kilnctl_host_tests_safety_link_tick10.exe"
+    $slObjDirT = Join-Path $outDir "sl_tick10"
+    New-Item -ItemType Directory -Force -Path $slObjDirT | Out-Null
+    $cmd14t = $cmd14.Replace("/Fo:`"$slObjDir\\`"", "/Fo:`"$slObjDirT\\`"").Replace("/Fe:`"$exe14`"", "/Fe:`"$exe14t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    Invoke-HostTestExe -Name "safety_link_tick10" -ExePath $exe14t -BuildCmd $cmd14t
 
     # ---- test_dashboard_json.c: its own FIFTEENTH, separate executable --------
     # Opus review round 3, blocker 1: dashboard_http.c's /api/control handler was
@@ -1665,7 +1799,7 @@ try {
     # calls flash_worker_wait_default() before its migrate-on-load
     # pref_cfg_fs_resolve() write (same boot-ordering fix as adaptive_tune.c's
     # exe17, hardware verification 3e226f28).
-    # relay_cycles cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
+    # relay_cycles cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA.md
     # section 5 step 6): relay_cycles.c (#included directly by test_relay_cycles.c
     # above) now also calls into pref_cfg_fs.c, which needs cfg_fs.c's real
     # mount/write-atomic/read/delete against a temp directory -- same convention
@@ -1785,7 +1919,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`""
     # cfg_fs.c/pref_cfg_fs.c/cfg_fs_status.c: the hidden-mask file dual-write
-    # (docs/FILESYSTEM_USER_DATA_PLAN.md item 6) goes through pref_cfg_fs.
+    # (docs/FILESYSTEM_USER_DATA.md item 6) goes through pref_cfg_fs.
     # fake_kv.c/hal_status.c added HW_ABSTRACTION.md Phase 3 item 3 (nvs.h ->
     # hal_kv.h migration): profiles_builtin.c's hidden-mask persistence now calls
     # hal_kv_get_u32()/hal_kv_set_u32()/hal_kv_init_partition() instead of
@@ -1800,7 +1934,7 @@ try {
     Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
 
     # ---- test_kiln_cfg_http.c: its own 24th, separate executable --------------
-    # Closes a docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice-4 known test gap:
+    # Closes a docs/SYSTEM_MODE_GATE.md section 3.6 slice-4 known test gap:
     # kiln_cfg_http.c's apply_post_handler() (POST /api/kiln_configs/apply) had
     # NO host-test coverage of any kind before this -- its refusal order (404
     # nonexistent id, then the system_mode_gate, then the OTA interlock, then
@@ -1816,13 +1950,45 @@ try {
     New-Item -ItemType Directory -Force -Path $kcfgObjDir | Out-Null
     $cmd24kcfg = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$kcfgObjDir\\`" /Fe:`"$exe24kcfg`" `"$(Join-Path $testDir 'test_kiln_cfg_http.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
+    $cmd24kcfg += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
 
+    # ---- test_cfg_fs_format_http.c: cfg_fs_format_http.c format_confirm gate (round 3, R3-A)
+    $exeCff = Join-Path $outDir "kilnctl_host_tests_cfg_fs_format_http.exe"
+    $cffObjDir = Join-Path $outDir "cff"
+    New-Item -ItemType Directory -Force -Path $cffObjDir | Out-Null
+    $cmdCff = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$cffObjDir\\`" /Fe:`"$exeCff`" `"$(Join-Path $testDir 'test_cfg_fs_format_http.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`""
+    Invoke-HostTestExe -Name "cfg_fs_format_http" -ExePath $exeCff -BuildCmd $cmdCff
+
+    # ---- test_setup_progress_http.c: setup_progress_http.c GET/POST handlers (round 3, R3-B)
+    $exeSph = Join-Path $outDir "kilnctl_host_tests_setup_progress_http.exe"
+    $sphObjDir = Join-Path $outDir "sph"
+    New-Item -ItemType Directory -Force -Path $sphObjDir | Out-Null
+    $cmdSph = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$sphObjDir\\`" /Fe:`"$exeSph`" `"$(Join-Path $testDir 'test_setup_progress_http.c')`""
+    $cmdSph += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # no real cfg_fs.c in this exe (cfg_fs_degraded_*)
+    Invoke-HostTestExe -Name "setup_progress_http" -ExePath $exeSph -BuildCmd $cmdSph
+
+    # ---- test_diagnostics_http.c: its own separate executable ------------------
+    # docs/audits/HOST_TEST_COVERAGE_GAPS_2026-10-09.md campaign 9: #includes
+    # diagnostics_http.c directly (static handlers, no other seam) and fakes
+    # its whole dependency surface.
+    $exeDiag = Join-Path $outDir "kilnctl_host_tests_diagnostics_http.exe"
+    $diagObjDir = Join-Path $outDir "diaghttp"
+    New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
+    $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`""
+
+    $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
+    Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
     # ---- test_adaptive_tune_http_gate.c: its own separate executable ----------
-    # Task 1a (docs/SYSTEM_MODE_GATE_PLAN.md known gap): adaptive_tune_http.c's
+    # Task 1a (docs/SYSTEM_MODE_GATE.md known gap): adaptive_tune_http.c's
     # enable_post_handler()/revert_post_handler() system_mode_gate wiring
     # (owner decision 2026-09-25, narrowed same day: enable only gates
     # enabled=true, never enabled=false; revert has no such carve-out) was
@@ -1838,9 +2004,10 @@ try {
     New-Item -ItemType Directory -Force -Path $atGateObjDir | Out-Null
     $cmdAtGate = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$atGateObjDir\\`" /Fe:`"$exeAtGate`" `"$(Join-Path $testDir 'test_adaptive_tune_http_gate.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
+    $cmdAtGate += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "adaptive_tune_http_gate" -ExePath $exeAtGate -BuildCmd $cmdAtGate
 
     # ---- test_uart_bridge_ext_control_gate.c: its own separate executable -----
@@ -1865,6 +2032,61 @@ try {
             "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
 
     Invoke-HostTestExe -Name "uart_bridge_ext_control_gate" -ExePath $exeUartBridgeControlGate -BuildCmd $cmdUartBridgeControlGate
+
+    # ---- test_uart_bridge_thermo_gate.c: THERMO UART writers refused during a run ----
+    # (review 12 Part B). Header-only gate helper + real system_mode_gate.c.
+    $exeUartBridgeThermoGate = Join-Path $outDir "kilnctl_host_tests_uart_bridge_thermo_gate.exe"
+    $uartBridgeThermoGateObjDir = Join-Path $outDir "uartbridgethermogate"
+    New-Item -ItemType Directory -Force -Path $uartBridgeThermoGateObjDir | Out-Null
+    $cmdUartBridgeThermoGate = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeThermoGateObjDir\\`" /Fe:`"$exeUartBridgeThermoGate`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_thermo_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_thermo_gate" -ExePath $exeUartBridgeThermoGate -BuildCmd $cmdUartBridgeThermoGate
+
+    # ---- test_uart_bridge_core.c: bridge guards, codecs, reply_reject, link watchdog (campaign 10) ----
+    $exeUartBridgeCore = Join-Path $outDir "kilnctl_host_tests_uart_bridge_core.exe"
+    $uartBridgeCoreObjDir = Join-Path $outDir "uartbridgecore"
+    New-Item -ItemType Directory -Force -Path $uartBridgeCoreObjDir | Out-Null
+    $cmdUartBridgeCore = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeCoreObjDir\\`" /Fe:`"$exeUartBridgeCore`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_core.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_core" -ExePath $exeUartBridgeCore -BuildCmd $cmdUartBridgeCore
+    # ---- test_persist_campaign10.c: backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store ----
+    $exeC10 = Join-Path $outDir "kilnctl_host_tests_persist_campaign10.exe"
+    $c10ObjDir = Join-Path $outDir "persistcampaign10"
+    New-Item -ItemType Directory -Force -Path $c10ObjDir | Out-Null
+    $cmdC10 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
+            "/Fo:`"$c10ObjDir\\`" /Fe:`"$exeC10`" " +
+            "`"$(Join-Path $testDir 'test_persist_campaign10.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/backup_json.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/touch_cal_store.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/ct_verify_store.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "persist_campaign10" -ExePath $exeC10 -BuildCmd $cmdC10
+
+    # ---- test_uart_bridge_ext_worker.c: its own separate executable ----------
+    # #includes uart_bridge_ext.c directly (static bx_worker_iteration() and
+    # the save-section hooks have no other seam) with fake FreeRTOS primitives
+    # (recursive mutex with owner/depth/counters, one-slot queue, a done
+    # semaphore that runs one worker pass) to pin the flash-worker save-section
+    # reservation: reservation before the worker starts, reserve/release
+    # balance, recursive give counts, the timeout path giving nothing back, and
+    # a posted job delayed not dropped while reserved
+    # (docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md follow-ups).
+    $exeUartBridgeWorker = Join-Path $outDir "kilnctl_host_tests_uart_bridge_ext_worker.exe"
+    $uartBridgeWorkerObjDir = Join-Path $outDir "uartbridgeworker"
+    New-Item -ItemType Directory -Force -Path $uartBridgeWorkerObjDir | Out-Null
+    $cmdUartBridgeWorker = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeWorkerObjDir\\`" /Fe:`"$exeUartBridgeWorker`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_ext_worker.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_ext_worker" -ExePath $exeUartBridgeWorker -BuildCmd $cmdUartBridgeWorker
 
     # ---- test_ft6336u.c: its own 24th, separate executable --------------------
     # HAL Phase 1b (docs/HW_ABSTRACTION.md): FT6336U.c was rewritten to go
@@ -2038,8 +2260,22 @@ try {
 
     Invoke-HostTestExe -Name "link_watchdog" -ExePath $exe30 -BuildCmd $cmd30
 
+    # ---- test_main_reset_fence.c: compiles the REAL main.c (REVIEW_DEVBREAKFX6 MED-1) ----
+    # app_main() is run with recording stubs for the bring-up phases and the four fence setters; the test
+    # asserts each hook was installed before the first phase. Defeats every dead-install shape regardless
+    # of syntax (tools/check_reset_fence_hooks.ps1 is only a text check).
+    $exeMrf = Join-Path $outDir "kilnctl_host_tests_main_reset_fence.exe"
+    $mrfObjDir = Join-Path $outDir "mrf"
+    New-Item -ItemType Directory -Force -Path $mrfObjDir | Out-Null
+    $cmdMrf = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$mrfObjDir\\`" /Fe:`"$exeMrf`" " +
+            "`"$(Join-Path $testDir 'test_main_reset_fence.c')`" " +
+            "`"$(Join-Path $driversDir 'owners/relay_authority.c')`""
+
+    Invoke-HostTestExe -Name "main_reset_fence" -ExePath $exeMrf -BuildCmd $cmdMrf
+
     # ---- test_time_sync.c: its own THIRTY-FIRST, separate executable ---------
-    # docs/FILESYSTEM_USER_DATA_PLAN.md item 14 (TZ) close-out: this file used
+    # docs/FILESYSTEM_USER_DATA.md item 14 (TZ) close-out: this file used
     # to live in the "main" executable's $sources list, testing only
     # time_sync_tz.c's pure validation logic -- time_sync.c itself was
     # untested because it pulls in esp_netif_sntp.h with no host stub
@@ -2111,8 +2347,25 @@ try {
 
     Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
 
+    # ---- test_cfg_fs_mount_state.c: cfg_fs_mount.c's FORMAT STATE MACHINE
+    # (round 2, R2-F, docs/audits/HOST_TEST_COVERAGE_GAPS_ROUND2_2026-10-10.md).
+    # #includes cfg_fs_mount.c itself so the static scan/auto-format/confirm
+    # helpers are reachable, links the REAL cfg_fs_format_gate.c, and scripts
+    # every littlefs/partition/FreeRTOS/flash-worker seam. Own executable for
+    # the same reason as cfg_fs_mount_reentrancy: it defines those seams.
+    $exeCms = Join-Path $outDir "kilnctl_host_tests_cfg_fs_mount_state.exe"
+    $cmsObjDir = Join-Path $outDir "cms"
+    New-Item -ItemType Directory -Force -Path $cmsObjDir | Out-Null
+    $cmdCms = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$cmsObjDir\\`" /Fe:`"$exeCms`" " +
+            "`"$(Join-Path $testDir 'test_cfg_fs_mount_state.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+
+    Invoke-HostTestExe -Name "cfg_fs_mount_state" -ExePath $exeCms -BuildCmd $cmdCms
+
     # ---- test_recovery_start_refusal.c retired 2026-09-27 (mode-gate slice
-    # 2, docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): its subject,
+    # 2, docs/SYSTEM_MODE_GATE.md section 3.6): its subject,
     # App/drivers/http/recovery_start_refusal.h, was deleted -- its two HTTP
     # call sites now go through system_mode_gate_check() instead
     # (dashboard_exec_http.c, dashboard_autotune_http.c), which shares its
@@ -2160,7 +2413,7 @@ try {
     # Found completely unwired 2026-09-10 (opus review): it has its own
     # main(), was never named in this script, and the only reference
     # anywhere in the tracked tree was a prose mention in
-    # docs/FILESYSTEM_PLAN.md. Own executable because it hand-declares
+    # docs/FILESYSTEM.md. Own executable because it hand-declares
     # uart_bridge_ext_flash_worker_started() itself (see the file's own
     # header comment) -- that would collide at link time with the real
     # uart_bridge.c body, or with exe17/exe19/exe20's own fakes of the same
@@ -2318,6 +2571,27 @@ try {
 
     Invoke-HostTestExe -Name "heat_owner_active_decide" -ExePath $exe42 -BuildCmd $cmd42
 
+    # ---- test_danger_mode.c: own executable (HOST_TEST_COVERAGE_GAPS campaign 6) ----
+    # #includes danger_mode.c directly with a fake tick clock; the real
+    # danger_mode.c cannot join exe14 (which links a fixed-false fake of it).
+    $exeDm = Join-Path $outDir "kilnctl_host_tests_danger_mode.exe"
+    $dmObjDir = Join-Path $outDir "dm"
+    New-Item -ItemType Directory -Force -Path $dmObjDir | Out-Null
+    $cmdDm = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dmObjDir\\`" /Fe:`"$exeDm`" `"$(Join-Path $testDir 'test_danger_mode.c')`""
+
+    Invoke-HostTestExe -Name "danger_mode" -ExePath $exeDm -BuildCmd $cmdDm
+
+    # ---- test_ct_leak_alarm_service.c: own executable (round 2, R2-1) ----
+    # #includes ct_leak_alarm_service.c + ct_leak_alarm.c directly with fakes.
+    $exeCls = Join-Path $outDir "kilnctl_host_tests_ct_leak_alarm_service.exe"
+    $clsObjDir = Join-Path $outDir "cls"
+    New-Item -ItemType Directory -Force -Path $clsObjDir | Out-Null
+    $cmdCls = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$clsObjDir\\`" /Fe:`"$exeCls`" `"$(Join-Path $testDir 'test_ct_leak_alarm_service.c')`""
+
+    Invoke-HostTestExe -Name "ct_leak_alarm_service" -ExePath $exeCls -BuildCmd $cmdCls
+
     # ---- test_web_auth_store.c: its own 43rd, separate executable ----------
     # docs/WEB_AUTH_PLAN.md sections 2/3/11 -- the credential storage
     # foundation. Own executable (not joined into the combined $sources
@@ -2397,6 +2671,90 @@ try {
 
     Invoke-HostTestExe -Name "web_auth_login_http" -ExePath $exe45 -BuildCmd $cmd45
 
+    # ---- test_auth_totp_http_fuzz.c: HTTP body fuzz part 3 (forgot/reset) ----
+    # auth_totp_http.c #include'd directly; real web_auth_store/totp_config/
+    # session table over fake_kv, counting fake password setter.
+    $exeTf = Join-Path $outDir "kilnctl_host_tests_auth_totp_http_fuzz.exe"
+    $atfObjDir = Join-Path $outDir "tf"
+    New-Item -ItemType Directory -Force -Path $atfObjDir | Out-Null
+    $cmdTf = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$atfObjDir\\`" /Fe:`"$exeTf`" `"$(Join-Path $testDir 'test_auth_totp_http_fuzz.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_session_iface.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'net/login_backoff.c')`" `"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
+            "`"$(Join-Path $driversDir 'http/login_ip_scope.c')`" `"$(Join-Path $driversDir 'net/totp.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/totp_config.c')`" `"$(Join-Path $driversDir 'http/totp_http_core.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "auth_totp_http_fuzz" -ExePath $exeTf -BuildCmd $cmdTf
+
+    # ---- test_aux_outputs_http_handlers.c: campaign 8 handler matrix ----
+    # Real aux_outputs_cfg/_http_core/_http #include'd; fake relay board.
+    $exeAh = Join-Path $outDir "kilnctl_host_tests_aux_outputs_http_handlers.exe"
+    $ahObjDir = Join-Path $outDir "ah"
+    New-Item -ItemType Directory -Force -Path $ahObjDir | Out-Null
+    $cmdAh = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$ahObjDir\\`" /Fe:`"$exeAh`" `"$(Join-Path $testDir 'test_aux_outputs_http_handlers.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "aux_outputs_http_handlers" -ExePath $exeAh -BuildCmd $cmdAh
+
+    # ---- test_dashboard_exec_http_handlers.c: campaign 8 profile start/stop/pause ----
+    $exeDe = Join-Path $outDir "kilnctl_host_tests_dashboard_exec_http_handlers.exe"
+    $deObjDir = Join-Path $outDir "de"
+    New-Item -ItemType Directory -Force -Path $deObjDir | Out-Null
+    $cmdDe = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$deObjDir\\`" /Fe:`"$exeDe`" `"$(Join-Path $testDir 'test_dashboard_exec_http_handlers.c')`" `"$(Join-Path $testDir 'test_dashboard_exec_http_link_stubs.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_exec_http_handlers" -ExePath $exeDe -BuildCmd $cmdDe
+
+    # ---- test_dashboard_autotune_http_handlers.c: campaign 8 autotune start/abort/accept ----
+    $exeDa = Join-Path $outDir "kilnctl_host_tests_dashboard_autotune_http_handlers.exe"
+    $daObjDir = Join-Path $outDir "da"
+    New-Item -ItemType Directory -Force -Path $daObjDir | Out-Null
+    $cmdDa = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$daObjDir\\`" /Fe:`"$exeDa`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_handlers.c')`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_link_stubs.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_autotune_http_handlers" -ExePath $exeDa -BuildCmd $cmdDa
+
+    # ---- test_dashboard_autotune_http_get_handlers.c (c78b): GET /api/autotune{,/matrix,/trace.csv} ----
+    $exeDg = Join-Path $outDir "kilnctl_host_tests_dashboard_autotune_http_get_handlers.exe"
+    $dgObjDir = Join-Path $outDir "dg"
+    New-Item -ItemType Directory -Force -Path $dgObjDir | Out-Null
+    $cmdDg = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dgObjDir\\`" /Fe:`"$exeDg`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_get_handlers.c')`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_get_link_stubs.c')`" " +
+            "`"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_autotune_http_get_handlers" -ExePath $exeDg -BuildCmd $cmdDg
+
+    # ---- test_zone_aux_convert_http.c (c78b): move_zone_to_aux adapter + real core ----
+    $exeZc = Join-Path $outDir "kilnctl_host_tests_zone_aux_convert_http.exe"
+    $zcObjDir = Join-Path $outDir "zc"
+    New-Item -ItemType Directory -Force -Path $zcObjDir | Out-Null
+    $cmdZc = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$zcObjDir\\`" /Fe:`"$exeZc`" `"$(Join-Path $testDir 'test_zone_aux_convert_http.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "zone_aux_convert_http" -ExePath $exeZc -BuildCmd $cmdZc
+
     # ---- test_readiness_crash_disclosure.c: its own 46th, separate
     # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 2:
     # GET /api/readiness's crash-report checklist item leaked
@@ -2462,7 +2820,7 @@ try {
     Invoke-HostTestExe -Name "wifi_prov_status_disclosure" -ExePath $exe47 -BuildCmd $cmd47
 
     # ---- test_log_store_mount.c: its own 48th AND 49th executables --------
-    # docs/FILESYSTEM_PLAN.md step 2. log_store_mount.c was "not part of any
+    # docs/FILESYSTEM.md step 2. log_store_mount.c was "not part of any
     # host test build" (its own header comment) -- stubs/esp_spiffs.h (new,
     # this change) plus the existing stubs/esp_littlefs.h close that gap.
     # Built TWICE from the SAME test source, once per CONFIG_KILNCTL_LOGS_
@@ -2493,7 +2851,7 @@ try {
     Invoke-HostTestExe -Name "log_store_mount_littlefs" -ExePath $exe49 -BuildCmd $cmd49
 
     # ---- test_system_mode_gate.c: its own FIFTIETH, separate executable.
-    # docs/SYSTEM_MODE_GATE_PLAN.md's Phase 6 gate (2026-09-25) -- a small,
+    # docs/SYSTEM_MODE_GATE.md's Phase 6 gate (2026-09-25) -- a small,
     # fully self-contained pure module (no ESP-IDF dependency at all, unlike
     # ota_interlock.c/readiness_gate.c which pull in more), so like exe35's
     # s8_rate_guard_estimate there is nothing here to fake and no fake to
@@ -2531,7 +2889,8 @@ try {
             "`"$(Join-Path $driversDir 'common/startup_faults.c')`" " +
             "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" "
 
     Invoke-HostTestExe -Name "wifi_prov" -ExePath $exe51 -BuildCmd $cmd51
 
@@ -2551,10 +2910,47 @@ try {
 
     Invoke-HostTestExe -Name "kiln_cfg_swap_worker" -ExePath $exeKcsw -BuildCmd $cmdKcsw
 
+    # ---- R2-9 / R2-10: thermo_owner and safety_link frame endian helpers ----
+    $exeTho = Join-Path $outDir "kilnctl_host_tests_thermo_owner.exe"
+    $thoObjDir = Join-Path $outDir "tho"
+    New-Item -ItemType Directory -Force -Path $thoObjDir | Out-Null
+    $cmdTho = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$thoObjDir\\`" /Fe:`"$exeTho`" `"$(Join-Path $testDir 'test_thermo_owner.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+    Invoke-HostTestExe -Name "thermo_owner" -ExePath $exeTho -BuildCmd $cmdTho
+
+    $exeSle = Join-Path $outDir "kilnctl_host_tests_safety_link_endian.exe"
+    $sleObjDir = Join-Path $outDir "sle"
+    New-Item -ItemType Directory -Force -Path $sleObjDir | Out-Null
+    $cmdSle = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$sleObjDir\\`" /Fe:`"$exeSle`" `"$(Join-Path $testDir 'test_safety_link_endian.c')`""
+    Invoke-HostTestExe -Name "safety_link_endian" -ExePath $exeSle -BuildCmd $cmdSle
+
+    $exeLl = Join-Path $outDir "kilnctl_host_tests_ui_lcd_lock.exe"
+    $llObjDir = Join-Path $outDir "ll"
+    New-Item -ItemType Directory -Force -Path $llObjDir | Out-Null
+    $cmdLl = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /Zc:preprocessor /I`"$(Join-Path $testDir 'stubs_lcd_lock')`" " +
+            "/Fo:`"$llObjDir\\`" /Fe:`"$exeLl`" `"$(Join-Path $testDir 'test_ui_lcd_lock.c')`" " +
+            "`"$(Join-Path $driversDir 'ui/lcd_auth_state.c')`" `"$(Join-Path $driversDir 'net/login_backoff.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+    Invoke-HostTestExe -Name "ui_lcd_lock" -ExePath $exeLl -BuildCmd $cmdLl
+
+    $exeWb = Join-Path $outDir "kilnctl_host_tests_security_backend_web_auth.exe"
+    $wbObjDir = Join-Path $outDir "wb"
+    New-Item -ItemType Directory -Force -Path $wbObjDir | Out-Null
+    $cmdWb = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$wbObjDir\\`" /Fe:`"$exeWb`" `"$(Join-Path $testDir 'test_security_backend_web_auth.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/security_backend_placeholder.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "security_backend_web_auth" -ExePath $exeWb -BuildCmd $cmdWb
+
     Complete-HostTestQueue
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
-    # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
+    # harnesses (ITER_TUNE_REDESIGN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
     # they feed, not a verdict. Until 2026-09-10 NEITHER had any build
     # recipe anywhere in the tree (confirmed by grep) -- both were edited by
@@ -2595,7 +2991,7 @@ try {
         Write-Host "sim_wide_temp_sweep: BUILD OK (data-generating harness, not run automatically -- see file header for usage)"
     }
 
-    # ---- sim_credibility_gate.exe: ITER_TUNE_REDESIGN_PLAN.md sec 6.5's
+    # ---- sim_credibility_gate.exe: ITER_TUNE_REDESIGN.md sec 6.5's
     # model credibility gate (docs/audits/sim_credibility_gate_real_cause_2026-09-10.md).
     # Not run through Invoke-HostTestExe and NOT counted in $totalExpected /
     # buildFailures / failedExes below -- two reasons, both deliberate:
@@ -2669,11 +3065,10 @@ try {
     # signal, printed loudly either way -- if pid.c/heater_output.c/
     # zone_coupling_solve.c/profile_executor_feedforward.c's signatures
     # drift, "BUILD FAILED" now appears in this script's output instead of
-    # nothing appearing at all), but never run it automatically and never
-    # let its build/run result affect this script's own exit code -- same
-    # non-gate posture as sim_iter_tune/sim_wide_temp_sweep above, for the
-    # same reason sim_credibility_gate's own gains-uncertain conclusions
-    # are informational rather than blocking.
+    # nothing appearing at all), but never run it automatically. Its run results are
+    # informational (same posture as sim_iter_tune/sim_wide_temp_sweep above),
+    # but a COMPILE break fails this script via $script:auxBuildFailures
+    # (see below).
     $exeClosedloop = Join-Path $outDir "kilnctl_sim_credibility_gate_closedloop.exe"
     $cmdClosedloop = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exeClosedloop`" `"$(Join-Path $testDir 'sim_credibility_gate_closedloop.c')`" " +
@@ -2695,10 +3090,10 @@ try {
         # that cannot fail" class this repo is eliminating. Its RESULTS stay
         # non-gating (it is still never run automatically, and no PASS/FAIL
         # verdict from it is ever consulted) -- only a compile break now
-        # fails this script, via the same $script:buildFailures list every
-        # other Invoke-HostTestExe-tracked source uses.
+        # fails this script, via $script:auxBuildFailures (kept out of
+        # $script:buildFailures so Built + BuildFailures == $totalExpected stays exact).
         Write-Host "BUILD FAILED: sim_credibility_gate_closedloop -- this DOES fail this script (compile-only signal; the file is still never run automatically and its results, when it does run, stay non-gating -- see file header)"
-        $script:buildFailures += "sim_credibility_gate_closedloop"
+        $script:auxBuildFailures += "sim_credibility_gate_closedloop"
     } else {
         Write-Host "sim_credibility_gate_closedloop: BUILD OK (not run automatically -- diagnostic with unresolved gains provenance, see file header; run by hand with the two capture paths as argv)"
     }
@@ -2847,7 +3242,7 @@ try {
     Invoke-HostTestExe -Name "fuzzy_nine_cell_probe" -ExePath $exeFuzzyCell -BuildCmd $cmdFuzzyCell
 
     # ---- test_iter_tune_http.c: its own 59th, separate executable ------------
-    # step 7 review, 2026-09-23 (docs/ITER_TUNE_REDESIGN_PLAN.md step 7), finding
+    # step 7 review, 2026-09-23 (docs/ITER_TUNE_REDESIGN.md step 7), finding
     # 2 + advisory A1: proves iter_tune_restore_post_handler() (POST
     # /api/iter_tune/restore_commissioned) (a) persists the RESTORED baseline
     # (not the stale pre-restore one) on a successful restore, (b) leaves the
@@ -2870,7 +3265,7 @@ try {
     $cmdIth = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$ithObjDir\\`" /Fe:`"$exeIth`" `"$(Join-Path $testDir 'test_iter_tune_http.c')`" " +
             "`"$(Join-Path $driversDir 'control/iter_tune.c')`" " +
-            # ITER_TUNE_REDESIGN_PLAN.md step 8: iter_tune_http.c's status
+            # ITER_TUNE_REDESIGN.md step 8: iter_tune_http.c's status
             # handler now calls firing_shadow_get_status() -- link the real
             # module (already host-tested by test_firing_shadow.c, its own
             # executable) plus its hal_kv dependency chain, same reasoning as
@@ -2879,18 +3274,19 @@ try {
             "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
-            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
             # gate-slice-3-followup, 2026-09-25): iter_tune_restore_post_
             # handler() now calls system_mode_gate_check()/system_mode_gate_
             # http_send_refusal() -- link both real, pure, leaf modules,
             # same as $cmd50/$cmd4's own fix.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
+    $cmdIth += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
 
     # ---- test_firing_compare_alloc.c: its own SEPARATE executable ---------
-    # ITER_TUNE_REDESIGN_PLAN.md step 8 review: firing_compare() now heap-
+    # ITER_TUNE_REDESIGN.md step 8 review: firing_compare() now heap-
     # allocates raw[]/norm[]/in_band[] (reachable from the profile_executor
     # task stack via firing_shadow_finish_firing()). This #includes
     # firing_compare.c with malloc/free redirected to counting fakes to prove
@@ -2921,7 +3317,74 @@ try {
 
     Invoke-HostTestExe -Name "recovery_switch" -ExePath $exeRsw -BuildCmd $cmdRsw
 
-    # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
+    # ---- test_http_body_recv.c: its own SEPARATE executable ------------------
+    # HTTP audit E2 #1: http_body_recv_full() loops httpd_req_recv() to
+    # content_len (bootstrap_password stored a truncated password on a split
+    # body). Header-only helper plus a recv stub; no other sources linked.
+    $exeHbr = Join-Path $outDir "kilnctl_host_tests_http_body_recv.exe"
+    $hbrObjDir = Join-Path $outDir "hbr"
+    New-Item -ItemType Directory -Force -Path $hbrObjDir | Out-Null
+    $cmdHbr = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$hbrObjDir\\`" /Fe:`"$exeHbr`" `"$(Join-Path $testDir 'test_http_body_recv.c')`""
+
+    Invoke-HostTestExe -Name "http_body_recv" -ExePath $exeHbr -BuildCmd $cmdHbr
+
+    # ---- test_http_form.c: its own SEPARATE executable -----------------------
+    # e7c98209 strict form parsing helpers (http_form.h only, header-only, no stubs).
+    $exeHfm = Join-Path $outDir "kilnctl_host_tests_http_form.exe"
+    $hfmObjDir = Join-Path $outDir "hfm"
+    New-Item -ItemType Directory -Force -Path $hfmObjDir | Out-Null
+    $cmdHfm = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$hfmObjDir\\`" /Fe:`"$exeHfm`" `"$(Join-Path $testDir 'test_http_form.c')`""
+
+    Invoke-HostTestExe -Name "http_form" -ExePath $exeHfm -BuildCmd $cmdHfm
+
+    # ---- test_update_fetch.c: its own SEPARATE executable --------------------
+    # Compiles the REAL update_fetch.c, update_http.c and update_stage.c (plus
+    # policy/release/url/heap helpers) against fakes for the HTTP client, psa
+    # sha256, FreeRTOS tasks (Windows threads), the stage partition, the update
+    # claim and httpd (stubs_update_fetch/ incl. fake_support.c). Private stub dir
+    # first: it overrides semphr/task/psa/esp_app_* headers.
+    $exeUf = Join-Path $outDir "kilnctl_host_tests_update_fetch.exe"
+    $ufObjDir = Join-Path $outDir "uf"
+    New-Item -ItemType Directory -Force -Path $ufObjDir | Out-Null
+    $ufStubDir = Join-Path $testDir "stubs_update_fetch"
+    $ufSrcs = @(
+        "test_update_fetch.c", "stubs_update_fetch/fake_support.c"
+    ) | ForEach-Object { "`"$(Join-Path $testDir $_)`"" }
+    $ufSrcs += @(
+        "update/update_fetch.c", "update/update_http.c", "update/update_stage.c", "update/update_policy.c",
+        "update/update_release.c", "update/update_url.c", "update/update_fetch_heap.c",
+        "update/update_stale_stage.c", "update/stage_header.c", "update/update_semver.c",
+        "http/ota_esp_image_header.c", "http/ota_image_crc.c", "http/ota_http_util.c", "safety/system_mode_gate.c"
+    ) | ForEach-Object { "`"$(Join-Path $driversDir $_)`"" }
+    $cmdUf = "cl /I`"$ufStubDir`" @`"$hostTestsRsp`" /std:c11 /FI`"$(Join-Path $ufStubDir 'shim.h')`" " +
+            "/Fo:`"$ufObjDir\\`" /Fe:`"$exeUf`" " + ($ufSrcs -join " ")
+
+    Invoke-HostTestExe -Name "update_fetch" -ExePath $exeUf -BuildCmd $cmdUf
+    # ---- test_update_http_refusals.c: campaign 9c. #includes test_update_fetch.c (so the REAL update_fetch.c /
+    # update_http.c / update_stage.c over the same fakes) and adds the REAL update_settings_http.c; gate-refusal
+    # and failure paths of every update_*_http handler. Same private stub dir / shim as update_fetch.
+    $exeUr = Join-Path $outDir "kilnctl_host_tests_update_http_refusals.exe"
+    $urObjDir = Join-Path $outDir "ur"
+    New-Item -ItemType Directory -Force -Path $urObjDir | Out-Null
+    $urSrcs = @(
+        "test_update_http_refusals.c", "stubs_update_fetch/fake_support.c"
+    ) | ForEach-Object { "`"$(Join-Path $testDir $_)`"" }
+    $urSrcs += @(
+        "update/update_fetch.c", "update/update_http.c", "update/update_stage.c", "update/update_policy.c",
+        "update/update_release.c", "update/update_url.c", "update/update_fetch_heap.c",
+        "update/update_stale_stage.c", "update/stage_header.c", "update/update_semver.c",
+        "update/update_settings_http.c",
+        "http/ota_esp_image_header.c", "http/ota_image_crc.c", "http/ota_http_util.c", "safety/system_mode_gate.c"
+    ) | ForEach-Object { "`"$(Join-Path $driversDir $_)`"" }
+    $cmdUr = "cl /I`"$ufStubDir`" @`"$hostTestsRsp`" /std:c11 /FI`"$(Join-Path $ufStubDir 'shim.h')`" " +
+            "/Fo:`"$urObjDir\\`" /Fe:`"$exeUr`" " + ($urSrcs -join " ")
+
+    $cmdUr += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
+    Invoke-HostTestExe -Name "update_http_refusals" -ExePath $exeUr -BuildCmd $cmdUr
+
+    # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
     # (linked as-is, same convention as sim_iter_tune above) so Bar 2's
@@ -3055,11 +3518,11 @@ try {
     # host-compiled directly (GCC-only asm blob externs; wifi_provision_http.c
     # also #includes <sys/socket.h> with no host stub), so each tests its
     # fix's pure formatter plus the real may_disclose gate composition.
-    # 54 -> 55: docs/LIVE_PROFILE_EDIT_PLAN.md pass 1 added
+    # 54 -> 55: docs/LIVE_PROFILE_EDIT.md pass 1 added
     # test_live_profile.c (55th) as its own Invoke-HostTestExe call --
     # live_profile.c's persistence functions and profile_executor_live_
     # pickup.c's pure pickup check, both untested until now.
-    # 55 -> 56: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 added
+    # 55 -> 56: docs/LIVE_PROFILE_EDIT.md pass 2 added
     # test_profiles_live_http.c (56th) as its own Invoke-HostTestExe call --
     # profiles_live_http.c's five HTTP handlers (status/fork/accept/decide/
     # page), untested until now.
@@ -3070,12 +3533,12 @@ try {
     # untested (see that file's own header comment).
     # 59 -> 60: added test_ota_pico_relay.c's own Invoke-HostTestExe call --
     # ota_pico_relay.c's relay state machine, untested until now
-    # (docs/PICO_AUTO_UPDATE_PLAN.md).
+    # (docs/PICO_AUTO_UPDATE.md).
     # 60 -> 61: added test_firing_compare_alloc.c's own Invoke-HostTestExe
     # call -- firing_compare()'s heap-allocation failure path
-    # (ITER_TUNE_REDESIGN_PLAN.md step 8 review).
+    # (ITER_TUNE_REDESIGN.md step 8 review).
     # 61 -> 62: added test_system_mode_gate.c's own Invoke-HostTestExe call --
-    # docs/SYSTEM_MODE_GATE_PLAN.md Phase 6's pure gate module (owner decisions
+    # docs/SYSTEM_MODE_GATE.md Phase 6's pure gate module (owner decisions
     # 2026-09-25).
     # 62 -> 61 (2026-09-27, mode-gate slice 2): retired test_recovery_start_
     # refusal.c's Invoke-HostTestExe call along with its subject header,
@@ -3085,11 +3548,11 @@ try {
     # 61 -> 62: added test_kiln_cfg_http.c's own Invoke-HostTestExe call --
     # kiln_cfg_http.c's apply_post_handler() refusal order (404, then the
     # system mode gate, then the OTA interlock, then http_async_job_busy()),
-    # a known test gap named in docs/SYSTEM_MODE_GATE_PLAN.md section 3.6
+    # a known test gap named in docs/SYSTEM_MODE_GATE.md section 3.6
     # slice 4, previously untested at the handler level.
     # 62 -> 63: added test_adaptive_tune_http_gate.c's own Invoke-HostTestExe
     # call -- adaptive_tune_http.c's enable_post_handler()/revert_post_handler()
-    # system_mode_gate wiring (Task 1a, docs/SYSTEM_MODE_GATE_PLAN.md known
+    # system_mode_gate wiring (Task 1a, docs/SYSTEM_MODE_GATE.md known
     # gap), previously untested at the handler level.
     # 63 -> 64: added test_uart_bridge_ext_control_gate.c's own Invoke-HostTestExe
     # call -- uart_bridge_ext_control.c's CONTROL task 8
@@ -3112,8 +3575,35 @@ try {
     # call (real profiles_http.c store feeding the real profile_executor_run()).
     # 68 -> 69: added test_recovery_switch.c's own Invoke-HostTestExe
     # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
+    # 69 -> 70: added test_http_body_recv.c (looped httpd_req_recv helper).
+    # 70 -> 71: added test_update_fetch.c (real update_fetch.c/update_http.c over fakes).
+    # 71 -> 72: added test_http_form.c (strict form parse helpers).
+    # 73 -> 74: added test_kiln_io_sx_fake.c (campaign 7).
+    # 72 -> 73: added test_uart_bridge_ext_worker.c's own Invoke-HostTestExe
+    # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
-    $totalExpected = 69
+    # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
+    # 75 -> 77: test_danger_mode.c (campaign 6) plus one exe an earlier landing did not count (origin/dev built 76 vs expected 75)
+    # 77 -> 78: test_diagnostics_http.c (campaign 9)
+    # 78 -> 80: test_aux_outputs_http_handlers.c, test_dashboard_exec_http_handlers.c (campaign 8)
+    # 80 -> 81: test_persist_campaign10.c (campaign 10)
+    # 81 -> 82: test_ota_http_refusals.c (campaign 9b)
+    # 82 -> 83: test_update_http_refusals.c (campaign 9c)
+    # 83 -> 84: test_uart_bridge_core.c (campaign 10)
+    # 84 -> 85: test_ct_leak_alarm_service.c (round 2, R2-1)
+    # 85 -> 86: test_dashboard_autotune_http_handlers.c (campaign 8 autotune)
+    # 86 -> 88: test_dashboard_autotune_http_get_handlers.c, test_zone_aux_convert_http.c (c78b)
+    # 88 -> 90: test_thermo_owner.c, test_safety_link_endian.c (round 2, R2-9/R2-10)
+    # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
+    # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
+    # 92 -> 93: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
+    # 93 -> 94: added test_dashboard_http_relay.c (round 2, R2-A)
+    # 94 -> 95: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
+    # 95 -> 98: test_cfg_fs_format_http.c, test_setup_progress_http.c, test_dashboard_settings_http.c (round 3)
+    # 98 -> 99: test_main_reset_fence.c (REVIEW_DEVBREAKFX6 MED-1)
+    # 99 -> 100: safety_link_tick10 (REBOOTFX5 LOW-1, 10 ms tick period build of test_safety_link_compile.c)
+    # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
+    $totalExpected = 101
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
@@ -3142,16 +3632,14 @@ try {
         foreach ($f in $script:failedExes) { Write-Host "  $f" }
     }
 
-    if ($script:buildFailures.Count -gt 0 -or $script:failedExes.Count -gt 0) {
-        exit 1
+    if ($script:auxBuildFailures.Count -gt 0) {
+        Write-Host "AUX BUILD FAILURES ($($script:auxBuildFailures.Count)) -- compile-only, not counted in Built/Expected:"
+        foreach ($f in $script:auxBuildFailures) { Write-Host "  $f" }
     }
-
-    if ($script:builtExes.Count -ne $totalExpected) {
-        Write-Host ("MISMATCH: $($script:builtExes.Count) executables built but $totalExpected were expected -- " +
-            "at least one was silently never attempted (not a build failure, not a run failure). Refusing to " +
-            "report success.")
-        exit 1
-    }
+    $verdict = Get-HostTestVerdict -Built $script:builtExes.Count -Expected $totalExpected -BuildFailures $script:buildFailures.Count -RunFailures $script:failedExes.Count
+    if ($verdict.Mismatch) { Write-Host $verdict.MismatchText }
+    if ($verdict.ExitCode -ne 0) { exit $verdict.ExitCode }
+    if ($script:auxBuildFailures.Count -gt 0) { exit 1 }
 
     Write-Host "all $totalExpected host test executables built and passed"
     exit 0

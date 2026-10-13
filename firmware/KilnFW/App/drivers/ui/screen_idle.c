@@ -186,7 +186,7 @@ static void screen_idle_refresh_inputs(screen_idle_t *idle)
 
     /* screen_idle_task's own stack is 6144 B (screen_idle_start()'s
      * xTaskCreatePinnedToCore below) -- heap-allocate rather than add a
-     * 1464-byte profile_exec_status_t stack local; only .state is read
+     * 1512-byte profile_exec_status_t stack local; only .state is read
      * below (for both RUNNING/PAUSED and FAULTED), which the narrow
      * profile_executor_get_active_id() accessor cannot report (it only
      * distinguishes RUNNING-or-PAUSED from everything else, collapsing

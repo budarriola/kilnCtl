@@ -22,7 +22,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, dashboard_http_client, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -114,7 +114,7 @@ FIXTURE_JTAG_SERIAL = serial_link.FIXTURE_JTAG_SERIAL
 # HISTORY (2026-09-17 fix): this used to write the app image to a HARDCODED
 # offset (APP_FLASH_OFFSET = 0x810000, the OLD dual-OTA-slot table's
 # `factory` partition), left deliberately unretargeted when the 2026-09-16
-# single-application-slot partitions.csv landed (docs/OTA_SINGLE_SLOT_PLAN.md
+# single-application-slot partitions.csv landed (docs/OTA_SINGLE_SLOT.md
 # step 3: `app`/ota_0 @0x210000/8 MiB, `recovery`/factory @0xA10000/1,966,080
 # B). That gap bit for real: the app image (~2,334,000 B) was written at
 # 0xa10000 -- `recovery`'s offset, reached via a separate, since-corrected
@@ -145,7 +145,7 @@ def _resolve_app_flash_target(kiln_fw_root: str) -> partition_table.PartitionEnt
     :class:`partition_table.PartitionEntry` the main application image
     (`KilnCtrl.bin`) must be flashed into -- the partition named
     `APP_PARTITION_NAME` ("app", the ota_0 slot introduced by the
-    2026-09-16 single-slot OTA redesign, docs/OTA_SINGLE_SLOT_PLAN.md).
+    2026-09-16 single-slot OTA redesign, docs/OTA_SINGLE_SLOT.md).
 
     Reading the CSV that ships alongside the binaries being flashed (rather
     than a fixed path, or the main tree's own copy) matters for the
@@ -322,7 +322,7 @@ def _check_app_flash_offset_matches_chip(
             f"own {chip_match.name!r} partition at 0x{chip_match.offset:x} instead. One side is "
             f"stale: either partitions.csv was retargeted ahead of a board that has not actually "
             f"been migrated yet, or this board's own table was migrated (see "
-            "docs/OTA_SINGLE_SLOT_PLAN.md) without a matching rebuild/reflash of partitions.csv. "
+            "docs/OTA_SINGLE_SLOT.md) without a matching rebuild/reflash of partitions.csv. "
             "Refusing rather than guessing which side is right -- confirm which side is actually "
             "stale with debug_check_partition_table(), fix that side, and only then pass "
             "allow_partition_offset_mismatch=True if you have concluded the write is intentional "
@@ -634,7 +634,7 @@ def _verify_flash_landed(
             f"flash_firmware() wrote the app image to the {app_partition_name!r} "
             "partition, but the bootloader fell back to recovery -- see "
             "CLAUDE.md's boot_guard recovery-mode notes and "
-            "docs/OTA_SINGLE_SLOT_PLAN.md for the blank/unset `otadata` gap "
+            "docs/OTA_SINGLE_SLOT.md for the blank/unset `otadata` gap "
             "this can indicate. ota_rollback_esp() does NOT fix this (it reverts "
             "between OTA images over the app's own HTTP API, which recovery does "
             "not run)."
@@ -688,7 +688,7 @@ def _verify_flash_landed(
             "refusing loudly here. A blank/erased `otadata` makes the bootloader "
             f"fall back to the factory-subtype partition ({running!r} here), not "
             f"{app_partition_name!r} -- this is a KNOWN GAP (docs/"
-            "OTA_SINGLE_SLOT_PLAN.md), not the stale-OTA-pointer case this "
+            "OTA_SINGLE_SLOT.md), not the stale-OTA-pointer case this "
             "message used to describe. ota_rollback_esp() does NOT fix this: it "
             "reverts a board that is ALREADY booting one OTA image back to a "
             "PREVIOUS one over its own HTTP API, and has no path to set an "
@@ -813,7 +813,7 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     probe taken just before the reset call, purely informational -- its
     failure never blocks or fails the reset itself, and is reported as
     "unknown" rather than silently dropped) alongside the reset call's own
-    verified-or-not after value -- RELEASE_HARDENING_PLAN.md blocker 6 calls
+    verified-or-not after value -- RELEASE_HARDENING.md blocker 6 calls
     for both, since a silent clear is not acceptable and a failed clear must
     be visible with enough context to judge it."""
     if not reset_boot_guard:
@@ -846,8 +846,9 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     before_persisted: object = None
     try:
         before_data = ota_http.get_boot_guard_status(resolved)
-        before_persisted = before_data.get("persisted_count")
-    except (ota_http.OtaHttpError, http_auth.HttpAuthError) as exc:
+        before_persisted = (before_data.get("persisted_count")
+                            if isinstance(before_data, dict) else _BOOT_GUARD_GET_FAILED)
+    except (ota_http.OtaHttpError, http_auth.HttpAuthError, OSError) as exc:
         before_persisted = _BOOT_GUARD_GET_FAILED
         _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
                                    "only, does not block the reset call): %s", exc)
@@ -863,11 +864,15 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
         # this is reported as a skip, never as a lost flash result.
         _srv._session_log.warning("flash_firmware: boot_guard_reset skipped, no admin session: %s", exc)
         return "boot_guard reset skipped: no admin session"
-    except ota_http.OtaHttpError as exc:
+    except (ota_http.OtaHttpError, OSError) as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
                 f"but the recovery-mode counter was NOT cleared by this flash (persisted counter "
                 f"before this attempt: {before_str}).")
+    if not isinstance(body, dict):
+        return (f"WARNING: boot_guard_reset answered with an unexpected non-object body ({body!r}) -- "
+                "the flash itself landed fine, but the recovery-mode counter was NOT confirmed "
+                f"cleared (persisted before={before_str}).")
     after_str = _fmt_persisted(body.get("persisted_count"))
     if body.get("ok"):
         return (f"boot_guard_reset: persisted counter cleared and verified "
@@ -982,7 +987,7 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
     """One-line note recording what the ESP application binary about to be
     flashed believes about its embedded Pico (SaftyFW) image(s), per the
     2026-09-20 owner decision that the ESP embeds both SaftyFW slot images
-    and auto-updates the Pico at boot (docs/PICO_AUTO_UPDATE_PLAN.md).
+    and auto-updates the Pico at boot (docs/PICO_AUTO_UPDATE.md).
 
     Read-only and best-effort: this NEVER changes flash behavior or blocks a
     flash -- it only appends a line to the provenance report so a flash's
@@ -1026,6 +1031,8 @@ def flash_firmware(
     allow_partition_offset_mismatch: bool = False,
     erase_partitions: Optional["list[str]"] = None,
     confirm_erase: bool = False,
+    confirm: bool = False,
+    allow_unreadable_board_state: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -1042,6 +1049,16 @@ def flash_firmware(
     the new app immediately. A pre-flight size check refuses, naming both
     byte counts, if `KilnCtrl.bin` is larger than that partition.
 
+    `confirm` must be exactly True (default False refuses before OpenOCD is
+    touched): a flash resets the main board, so a firing must never be in
+    progress. After the adapter check this also reads the live board state
+    (same read as `flash_recovery`, `_recovery_board_state_refusals`): a
+    running/paused profile, autotune, an energized relay or a latched trip
+    is a hazard no flag overrides; a safety-link-down state is waived (a
+    dual reflash and bring-up legitimately have it); state that merely
+    cannot be READ refuses unless `allow_unreadable_board_state=True`
+    (bring-up of a board whose HTTP/UART link is not up).
+
     Requires `idf.py build` to have already produced KilnFW/build/*.bin --
     this tool does not build, only flashes.
 
@@ -1051,7 +1068,7 @@ def flash_firmware(
     apart, so this pins OpenOCD's `adapter serial` to the main board's
     (MAIN_BOARD_JTAG_SERIAL) and refuses BEFORE calling OpenOCD at all if
     that serial isn't currently enumerated, naming whichever 303A:1001
-    serial(s) ARE seen instead. Flashing the fixture is `fixture_flash()`,
+    serial(s) ARE seen instead. Flashing the fixture is `fixture_flash()` (a Python helper in this module, NOT a registered MCP tool),
     pinned the same way to its own serial -- never this tool.
 
     Before flashing, refuses if KilnCtrl.bin looks stale relative to the
@@ -1203,7 +1220,7 @@ def flash_firmware(
     THAT, not a hardcoded constant (see `_resolve_app_flash_target()` --
     this used to be a hardcoded APP_FLASH_OFFSET, which is exactly what let
     a table redesign silently retarget the write into the wrong, undersized
-    partition; see docs/OTA_SINGLE_SLOT_PLAN.md). A hard size pre-flight
+    partition; see docs/OTA_SINGLE_SLOT.md). A hard size pre-flight
     check separately refuses, naming both byte counts, if `KilnCtrl.bin` is
     larger than that partition. Additionally, if the board is reachable
     right now, this tool reads the board's OWN live partition table
@@ -1274,6 +1291,10 @@ def flash_firmware(
         os.path.join(build_dir, "KilnCtrl.bin"),
     ]
     missing = [p for p in required if not os.path.isfile(p)]
+    empty = [p for p in required if p not in missing and os.path.getsize(p) <= 0]
+    if empty:
+        return ("error: refusing to flash -- empty (0 bytes) build output(s): "
+                + ", ".join(empty) + ". Rebuild with `build_kilnfw`.")
     if missing:
         override_note = " (kiln_fw_root override)" if kiln_fw_root else ""
         stale_publish_names = ("bootloader.bin", "partition_table" + os.sep + "partition-table.bin")
@@ -1296,7 +1317,7 @@ def flash_firmware(
         )
 
     # Resolve the write target from the actual partitions.csv for this tree
-    # (docs/OTA_SINGLE_SLOT_PLAN.md) rather than a hardcoded offset -- this is
+    # (docs/OTA_SINGLE_SLOT.md) rather than a hardcoded offset -- this is
     # exactly the class of bug that overflowed the `recovery` partition when
     # the table was redesigned out from under a hardcoded offset.
     try:
@@ -1327,7 +1348,7 @@ def flash_firmware(
     # get as far as checking whether the board is plugged in.
     erase_targets: "list[partition_table.PartitionEntry]" = []
     if erase_partitions:
-        if not confirm_erase:
+        if confirm_erase is not True:
             return (
                 "error: refusing to erase partition(s) " + ", ".join(erase_partitions) +
                 " without confirm_erase=True -- pass confirm_erase=True alongside "
@@ -1339,9 +1360,25 @@ def flash_firmware(
         except ValueError as exc:
             return f"error: {exc}"
 
+    if confirm is not True:
+        return (
+            "error: refusing to flash without confirm=True (exactly True) -- a flash "
+            "resets the main board and must never happen during a firing or autotune."
+        )
+
     adapter_refusal = _refuse_if_adapter_absent(MAIN_BOARD_JTAG_SERIAL, "main board (ESP32-S3)")
     if adapter_refusal:
         return adapter_refusal
+
+    hazards, unreadable, state_notes = _recovery_board_state_refusals(host, allow_link_down=True)
+    if hazards:
+        return ("error: refusing to flash -- observed hazard (no flag overrides this): "
+                + "; ".join(hazards))
+    if unreadable and allow_unreadable_board_state is not True:
+        return ("error: refusing to flash -- board state could not be read: "
+                + "; ".join(unreadable)
+                + ". Pass allow_unreadable_board_state=True only for bring-up of a board whose "
+                "HTTP/UART link is not up.")
 
     # M1 (2026-09-15 review): flash_provenance.json used to live at
     # <build_dir>/flash_provenance.json -- inside build/, exactly like the
@@ -1490,7 +1527,7 @@ def flash_firmware(
 
     def _post_flash(base_msg: str) -> str:
         base_msg = (
-            f"{base_msg}\n\n{provenance_note}\n\n"
+            f"{base_msg}\n\n" + "".join(f"NOTE: {n}\n" for n in state_notes) + f"{provenance_note}\n\n"
             "NOTE: this reset the ESP. If the Pico was also reset around the same "
             "time (a dual reflash), expect a correct S6a (mainFault) trip while the "
             "ESP's safety link handshake is still coming up -- see docs/audits/"
@@ -1970,7 +2007,16 @@ def fixture_flash(
             return f"error: {exc}"
         images.append((partition_table_bin, f"0x{fixture_partition_table_offset:x}"))
     if app_bin:
-        images.append((app_bin, "0x810000"))
+        # Resolved from the fixture's own partitions.csv, never a hardcoded
+        # offset: 0x810000 was the long-dead pre-single-slot `factory` slot
+        # and silently pointed elsewhere after the table redesign (same class
+        # as the flash_firmware() incident). No table = no guess.
+        try:
+            fixture_app_target = _resolve_app_flash_target(fixture_root)
+        except ValueError as exc:
+            return (f"error: cannot determine where to flash the fixture app image -- {exc}. "
+                    "Refusing to guess an offset.")
+        images.append((app_bin, f"0x{fixture_app_target.offset:x}"))
     if not images:
         return (
             "error: no image path given -- pass at least one of bootloader_bin, "
@@ -1986,6 +2032,10 @@ def fixture_flash(
     missing = [p for p, _off in images if not os.path.isfile(p)]
     if missing:
         return "error: missing build output(s): " + ", ".join(missing)
+    empty = [p for p, _off in images if os.path.getsize(p) <= 0]
+    if empty:
+        return ("error: refusing to flash -- empty (0 bytes) image(s): "
+                + ", ".join(empty) + ". Rebuild first.")
 
     adapter_refusal = _refuse_if_adapter_absent(FIXTURE_JTAG_SERIAL, "UnitTestFixture board")
     if adapter_refusal:
@@ -2075,7 +2125,8 @@ def debug_check_partition_table(host: Optional[str] = None, csv_path: Optional[s
 
 
 @_core._tool()
-def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -> str:
+def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None,
+                   dump_elf_sha: Optional[str] = None) -> str:
     """Finds the ELF that matches the ESP's CURRENTLY RUNNING firmware, so a
     coredump/panic backtrace can be symbolized against the right file instead
     of `build/KilnCtrl.elf` (whatever was built most recently -- confidently
@@ -2094,6 +2145,12 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     as every ota_*/adaptive_tune_* tool: explicit host, else STA IP, else the
     fallback AP address).
 
+    `dump_elf_sha` (crash_report's dump_elf_sha): the coredump's OWN app ELF
+    sha256 prefix. When given -- or when GET /api/crash_report at `host`
+    carries one and no `fw_build` was passed -- the ELF is looked up by that
+    sha first, since it identifies the image that actually crashed (a dump
+    flagged stale_image comes from another build than the running one).
+
     Fails LOUD with no match rather than falling back to KilnCtrl-latest.elf
     or the newest-by-mtime file -- either would silently reproduce the exact
     failure mode (confident wrong line numbers) this tool exists to prevent.
@@ -2108,6 +2165,22 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     use `find_crash_elf_for_coredump()` instead, which verifies against the
     coredump's own embedded SHA256 rather than trusting any externally
     reported build identity."""
+    sha_authoritative = dump_elf_sha is not None  # caller named the dump: no fallback to the running build
+    if dump_elf_sha is None and fw_build is None:
+        from .mcp_server_ota import _ota_resolve_host  # local import
+        try:
+            rec = dashboard_http_client.get_crash_report(_ota_resolve_host(host))
+            if isinstance(rec, dict) and rec.get("present") and rec.get("dump_elf_sha"):
+                dump_elf_sha = rec["dump_elf_sha"]
+                sha_authoritative = rec.get("stale_image") is True  # foreign dump: running build is no substitute
+        except Exception:  # noqa: BLE001 -- best effort; fall back to the running fw_build
+            pass
+    if dump_elf_sha:
+        spath, smessage = elf_archive.find_elf_by_sha_prefix(dump_elf_sha)
+        if spath is not None:
+            return smessage
+        if sha_authoritative:
+            return f"error: {smessage} (the dump's own image is not archived; the running build is NOT a substitute)"
     if fw_build is None:
         from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
         resolved = _ota_resolve_host(host)

@@ -5,7 +5,7 @@ backup_import.c/backup_http_internal.h's field vocabulary and version
 constants (see that module's own docstring for why: the PC-side converter
 must know the same shape firmware's backup format uses, but must not
 duplicate the ON-BOARD migration semantics CLAUDE.md/
-docs/CONFIG_MIGRATION_CHAIN_PLAN.md keep to one step). A hand-maintained
+docs/CONFIG_MIGRATION_CHAIN.md keep to one step). A hand-maintained
 second copy with no drift check is exactly the class of defect this repo's
 existing *_mirror_drift_check.py scripts (approach_rate_cap_mirror_drift_
 check.py, power_diag_flag_mirror_drift_check.py, ...) exist to catch --
@@ -83,10 +83,20 @@ NON_ZONE_STRUCTURAL_KEYS = {"kind", "version", "profiles", "zones", "id", "segme
                             # Top-level additive blocks (relay_cycles, backup_export_prefs()) and
                             # their nested sub-keys. Not zone data: cfg_convert.py carries the
                             # top-level ones verbatim via ADDITIVE_TOP_LEVEL_KEYS.
-                            "relay_cycles", "hw_relays", "c", "unit", "ramp_assist", "display_power",
+                            "relay_cycles", "stale_or_unknown_stores", "hw_relays", "ramp_assist", "display_power",
                             "brightness_percent", "timeout_setting", "keep_on_while_firing",
-                            "display_on_error", "hidden_builtin_profiles", "tz", "relay_names",
-                            "type"}
+                            "display_on_error", "hidden_builtin_profiles", "tz", "relay_names"}
+
+# Generic key names that are legitimate ONLY inside one export function (sweep INFO-3). Exempting them
+# globally would silently skip a future zone field of the same name; scoped, a zone key "type"/"unit"/"c"
+# emitted from any other function is still compared against cfg_convert.py. Key -> enclosing function(s).
+SCOPED_NON_ZONE_KEYS = {
+    "c": ("backup_export_relay_cycles",),
+    "unit": ("backup_export_prefs",),
+    "type": ("backup_export_prefs",),
+}
+# Top-level definitions only (column 0, not indented): calls inside `if (...) {` must not match.
+FUNC_DEF_RE = re.compile(r'^(?!\s|#)[^\n;{}]*?\b(\w+)\(\s*[^;{}]*\)\s*\{', re.MULTILINE)
 
 
 def strip_comments(text: str) -> str:
@@ -102,11 +112,22 @@ def collapse_indexed(key: str) -> str:
     return key
 
 
+def _enclosing_function(text: str, pos: int) -> str:
+    name = ""
+    for m in FUNC_DEF_RE.finditer(text, 0, pos):
+        name = m.group(1)
+    return name
+
+
 def extract_export_zone_keys(text: str) -> set:
     keys = set()
-    for call in STREAM_PRINTF_CALL_RE.findall(text):
-        for m in JSON_KEY_RE.finditer(call):
-            keys.add(m.group(1))
+    for m_call in STREAM_PRINTF_CALL_RE.finditer(text):
+        func = _enclosing_function(text, m_call.start())
+        for m in JSON_KEY_RE.finditer(m_call.group(1)):
+            k = m.group(1)
+            if func in SCOPED_NON_ZONE_KEYS.get(k, ()):
+                continue
+            keys.add(k)
     keys -= NON_ZONE_STRUCTURAL_KEYS
     return {collapse_indexed(k) for k in keys}
 
@@ -154,6 +175,37 @@ def extract_tool_known_keys(text: str) -> set:
     return {collapse_indexed(k) for k in keys}
 
 
+def selftest_scoping() -> list:
+    """Fixture proof of the per-function scoping (sweepfx INFO-2): a generic key such as "type"
+    is exempt only inside its SCOPED_NON_ZONE_KEYS function. Reverting to a global exemption makes
+    the zone-scope "type" below vanish and this returns a failure, so the real-tree run (where no
+    zone printf emits those keys today) can no longer pass vacuously."""
+    fixture = r'''
+static void backup_export_prefs(backup_stream_t *s)
+{
+    backup_stream_printf(s, "{\"unit\":%d,\"type\":%d}", 1, 2);
+}
+static void backup_export_relay_cycles(backup_stream_t *s)
+{
+    backup_stream_printf(s, "{\"c\":%d}", 1);
+}
+static void zone_writer(backup_stream_t *s)
+{
+    backup_stream_printf(s, "{\"type\":%d,\"c\":%d,\"unit\":%d}", 1, 2, 3);
+}
+'''
+    got = extract_export_zone_keys(fixture)
+    problems = []
+    for k in ("type", "c", "unit"):
+        if k not in got:
+            problems.append(f"scoping self-test: zone-scope key {k!r} was exempted outside its "
+                            "SCOPED_NON_ZONE_KEYS function (global exemption regression)")
+    only_prefs = extract_export_zone_keys(fixture.split("static void backup_export_relay_cycles")[0])
+    if only_prefs:
+        problems.append(f"scoping self-test: keys inside backup_export_prefs were not exempt: {sorted(only_prefs)}")
+    return problems
+
+
 def main() -> int:
     repo_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[4]
 
@@ -176,7 +228,7 @@ def main() -> int:
 
     fw_defines = extract_defines(header_text)
     tool_consts = extract_tool_constants(tool_text)
-    failures = []
+    failures = list(selftest_scoping())
 
     for name in ("BACKUP_FORMAT_VERSION", "BACKUP_FORMAT_VERSION_MIN"):
         if name not in fw_defines:

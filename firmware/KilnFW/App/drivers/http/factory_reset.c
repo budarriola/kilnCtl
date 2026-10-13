@@ -16,6 +16,7 @@
                             * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
 #include "legacy_default_nvs.h" /* legacy pre-split copies in the default nvs partition */
 #include "kiln_scope_cfg_files.h" /* kiln_scope_cfg_files_delete() -- "kiln" scope cfg cleanup */
+#include "crash_report.h" /* crash_report_clear() -- "kiln"/"all" scopes drop the old crash */
 #include "profiles_scope_cfg_files.h" /* profiles_scope_cfg_files_delete() -- "profiles" scope cfg cleanup */
 #include "hal_esp_common.h"
 #include "hal_kv.h"
@@ -30,7 +31,10 @@
 #include "profile_executor.h" /* firing_stats_cache_invalidate_all() -- see the erase loop in
                                 * execute_scope_job() below */
 #include "profiles_builtin.h"
+#include "cfg_save_barrier.h" /* persist_reset_barrier() -- see execute_scope() */
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
+#include "profiles_http.h" /* profiles_http_convert_busy() -- reset_other_writer_refuses() */
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- reset_other_writer_refuses() */
 #include "system_mode_gate.h" /* SYS_ACTION_FACTORY_RESET -- owner decision Q3, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
 #include "wifi_provision_http.h"
@@ -94,7 +98,7 @@ typedef struct {
      * an accident of storage layout, and re-syncs the RAM copy. */
     bool restore_builtin_profiles;
 
-    /* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+    /* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA.md section 5
      * step 1, "The reset section of the webpage should format when
      * reseting"): "all" is the one scope that also erases and reformats the
      * `cfg` LittleFS partition -- the same partition zones_config_cfg_fs.c/
@@ -127,6 +131,13 @@ typedef struct {
     bool erase_legacy_default_kiln;
     bool erase_legacy_default_profiles;
     bool erase_legacy_default_wifi; /* default partition "wifi_cfg" namespace */
+
+    /* "kiln" and "all": acknowledge the crash record and erase the stored
+     * coredump (crash_report_clear(), the same function POST
+     * /api/crash_report/clear runs), so a pre-reset crash is not re-reported
+     * after the reset (docs/audits/KILN_NVS_LOSS_2026-10-09.md). The record
+     * lives in kiln_nvs. "wifi" and "profiles" must NOT erase it. */
+    bool clear_crash_report;
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -135,10 +146,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false, false, false, false, false, false, true },
-    { "kiln", kKilnOnly, false, false, true, false, true, false, false },
-    { "profiles", kProfilesOnly, true, false, false, true, false, true, false },
-    { "all", kAll, true, true, false, false, true, true, true },
+    { "wifi", kWifiOnly, false, false, false, false, false, false, true, false },
+    { "kiln", kKilnOnly, false, false, true, false, true, false, false, true },
+    { "profiles", kProfilesOnly, true, false, false, true, false, true, false, false },
+    { "all", kAll, true, true, false, false, true, true, true, true },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -199,8 +210,8 @@ static void log_net80211_key_count(const char *when)
  * than the caller's -- see uart_bridge_ext_run_on_flash_worker()'s doc
  * comment (flash_worker.h). This path is reachable both from an HTTP POST
  * (httpd_worker, 8192 B stack, comfortable) and from the UART SYSTEM task's
- * SYSTEM_CMD_FACTORY_RESET (system_uart_bridge, 3072 B, reporting only 884 B
- * / 28.8% free at idle -- get_stack_margin()). nvs_flash_erase_partition()'s
+ * SYSTEM_CMD_FACTORY_RESET (system_uart_bridge, 4096 B since 2026-10-09; its
+ * deepest measured path is 3216 B -- check_system_uart_bridge_stack_budget.py). nvs_flash_erase_partition()'s
  * own depth has never been exercised on that task by the idle-board soak
  * (this route is destructive and not something a soak test triggers), so its
  * true peak on that stack is unmeasured; dispatching it onto the worker's
@@ -219,6 +230,9 @@ static void execute_scope_job(void *arg)
     const reset_scope_t *scope = ctx->scope;
     esp_err_t first_err = ESP_OK;
 
+    /* The mark is set by now and every other cfg writer is refused; this task is the one exception
+     * (profiles_builtin_restore_all() below saves through the fenced path). */
+    relay_authority_reset_job_enter();
     ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
 
     /* Before the erase, not after: nvs_flash_erase_partition() de-initializes
@@ -270,6 +284,24 @@ static void execute_scope_job(void *arg)
             ESP_LOGE(TAG, "legacy default-partition wifi erase failed: %s", esp_err_to_name(lerr));
             if (first_err == ESP_OK) {
                 first_err = lerr;
+            }
+        }
+    }
+
+    /* clear_crash_report: runs on the flash worker, and BEFORE the partition
+     * erase loop below (review 14 LOW-7): hal_kv_erase_partition() de-initializes
+     * kiln_nvs on the real backend, so a crash_report_clear() after it fails its
+     * hal_kv_open() ("not initialized") and logs a misleading warning for every
+     * kiln/all reset. Run first, the record erase works and the partition erase
+     * then removes whatever is left; crash_report_clear()
+     * detects that and does its flash work inline. A failure FAILS the reset
+     * like the cfg mirror deletes above. */
+    if (scope->clear_crash_report) {
+        esp_err_t cerr = crash_report_clear();
+        if (cerr != ESP_OK) {
+            ESP_LOGE(TAG, "crash_report_clear() failed during factory reset: %s", esp_err_to_name(cerr));
+            if (first_err == ESP_OK) {
+                first_err = cerr;
             }
         }
     }
@@ -372,7 +404,7 @@ static void execute_scope_job(void *arg)
      * inline instead of dispatching again -- calling it from here, rather
      * than from execute_scope() before dispatch, is what makes that
      * same-worker fast path apply. This IS the explicit operator action the
-     * mount-failure contract requires (docs/FILESYSTEM_USER_DATA_PLAN.md
+     * mount-failure contract requires (docs/FILESYSTEM_USER_DATA.md
      * section 3 point 4) -- clicking "Factory default" already carries the
      * same confirm-dialog the danger-zone buttons all require
      * (settings_page.html's kcConfirm()), so this never goes through the
@@ -416,12 +448,108 @@ static void execute_scope_job(void *arg)
         }
     }
 
+    relay_authority_reset_job_exit();
     ctx->err = first_err;
 }
 
-static esp_err_t execute_scope(const reset_scope_t *scope)
+void factory_reset_reboot_fallback(void)
+{
+    /* Same short delay reboot_task() uses, so a reply the caller already queued has a chance to leave
+     * first. Called on the caller's own task: no allocation, nothing touches flash. */
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGE(TAG, "factory_reset: rebooting inline (the reboot task could not be created)");
+    hal_wdt_reboot(); /* never returns on the real backend; the host fake returns (fake_wdt.c) */
+}
+
+/* The two other storage writers a reset must not run under, beyond the firing/autotune run facts the
+ * system mode gate covers (HTTP audit L37 follow-up, MED-1/MED-2):
+ *  - the zone current sweep holds the sweep heat claim and writes zone normals when it finishes. Its
+ *    start publishes that claim, THEN reads relay_authority_reset_in_flight() and refuses (releasing the
+ *    claim); this side sets the mark, THEN reads relay_authority_heat_sweep_active(). Same leaf
+ *    spinlock, so at least one side refuses.
+ *  - a backup restore (backup_import_restore_in_flight()) is mid-way through writing every store.
+ * Returns true with reason filled (when given) if either is active. */
+static bool reset_other_writer_refuses(char *reason, size_t reason_cap)
+{
+    const char *why = NULL;
+    if (relay_authority_heat_sweep_active()) {
+        why = "refused -- a zone current sweep is running; stop it or wait for it to finish";
+    } else if (backup_import_restore_in_flight()) {
+        why = "refused -- a backup restore is in progress; wait for it to finish";
+    } else if (profiles_http_convert_busy()) {
+        why = "refused -- a zone-to-aux conversion is running; wait for it to finish";
+    }
+    if (why != NULL && reason != NULL && reason_cap > 0) {
+        snprintf(reason, reason_cap, "%s", why);
+    }
+    return why != NULL;
+}
+
+/* Late system-mode-gate look, taken AFTER relay_authority_reset_in_flight_begin(): the entry checks in
+ * reset_post_handler()/factory_reset_execute() run before the body read and the flash-worker dispatch,
+ * so a firing or autotune could start in between and have its storage erased under it. The starters
+ * publish their heat claim and then read the reset mark (relay_authority.h); this side sets the mark and
+ * then reads the heat claim, both under relay_authority's leaf spinlock, so at least one side refuses.
+ * Returns true (with mode_reason filled, when given) if the gate refuses. */
+static bool reset_mode_gate_refuses(char *mode_reason, size_t mode_reason_cap)
+{
+    sys_mode_snapshot_t mode_snap = { 0 };
+    relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+    char reason[SYSTEM_MODE_GATE_REASON_MAX];
+    reason[0] = '\0';
+    bool refused = system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, reason, sizeof(reason));
+    if (refused) {
+        if (mode_reason && mode_reason_cap > 0) {
+            snprintf(mode_reason, mode_reason_cap, "%s", reason);
+        }
+        return true;
+    }
+    return reset_other_writer_refuses(mode_reason, mode_reason_cap);
+}
+
+/* Returns FACTORY_RESET_ERR_MODE_GATE_REFUSED (mode_reason filled, nothing erased, reset mark cleared)
+ * if a firing, autotune run or zone current sweep holds a heat claim, or a backup restore is in flight,
+ * once the reset mark is set. Returns FACTORY_RESET_ERR_REBOOT_FAILED if the erase ran but the reboot
+ * task could not be created: the caller must report that and call factory_reset_reboot_fallback(). */
+static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, size_t mode_reason_cap)
 {
     execute_scope_job_ctx_t ctx = { .scope = scope, .err = ESP_FAIL };
+
+    /* Mark first, then re-check: see reset_mode_gate_refuses(). From here on a run start refuses with
+     * "factory reset in progress" until this mark is cleared (only on a path where nothing was erased)
+     * or the board reboots. */
+    bool erases_kiln_nvs = false;
+    for (const char *const *p = scope->partitions; p && *p; p++) {
+        if (strcmp(*p, KILN_NVS_PARTITION) == 0) {
+            erases_kiln_nvs = true;
+        }
+    }
+    /* Flag and mark in one step, refused while another reset is in flight (fwlow16 L2): a second reset could
+     * otherwise overwrite the first one's kiln_nvs fence during the ~500 ms before its reboot. */
+    if (!relay_authority_reset_try_begin(erases_kiln_nvs)) {
+        if (mode_reason && mode_reason_cap > 0) {
+            snprintf(mode_reason, mode_reason_cap, "refused -- a factory reset is already in progress");
+        }
+        ESP_LOGW(TAG, "factory_reset: refused -- another reset is already in flight");
+        return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
+    }
+    if (reset_mode_gate_refuses(mode_reason, mode_reason_cap)) {
+        relay_authority_reset_in_flight_end();
+        ESP_LOGW(TAG, "factory_reset: refused at dispatch -- a run, sweep or restore started meanwhile");
+        return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
+    }
+
+    /* WRITER BARRIER (HTTP audit L37 follow-up): the erase below takes no writer's save lock, so a cfg
+     * writer that passed its own mark check just before the mark was set could still save after the
+     * erase. With the mark set, take and give every registered save lock once: a writer already inside
+     * finishes first, a later one sees the mark under its lock and refuses (pref_cfg_fs.h "WRITER
+     * FENCE"). Lock order: we hold no lock here and take them one at a time, never nested; the flash
+     * worker is not entered until the barrier is done (a writer holding a lock may need it for its
+     * commit, so the barrier must not run on the worker -- skipped if we already are, where no other
+     * worker job can be mid-commit and the per-writer refusals alone apply). */
+    if (!uart_bridge_ext_is_on_flash_worker()) {
+        persist_reset_barrier();
+    }
 
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): neither known caller
      * (the HTTP handler below, or the UART SYSTEM bridge task) is expected
@@ -435,6 +563,7 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
         if (submit_err != ESP_OK) {
             ESP_LOGE(TAG, "factory_reset: could not dispatch erase to flash worker: %s",
                      esp_err_to_name(submit_err));
+            relay_authority_reset_in_flight_end(); /* the job never ran: nothing was erased */
             return submit_err;
         }
     }
@@ -448,7 +577,11 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
         /* No reboot means the RAM state (revs included) would keep running
          * against just-erased storage and rewrite pre-reset data. Fail loud. */
         ESP_LOGE(TAG, "factory_reset: could not create the reboot task -- reset NOT complete");
-        return ESP_ERR_NO_MEM;
+        /* The reset mark deliberately stays set: storage is already erased, so no run may start
+         * against it before the reboot. A distinct error (not ESP_ERR_NO_MEM, which the erase itself
+         * could also return) so both callers can say "storage erased, reboot failed" and then reboot
+         * inline via factory_reset_reboot_fallback() after sending their reply. */
+        return FACTORY_RESET_ERR_REBOOT_FAILED;
     }
     return ctx.err;
 }
@@ -459,7 +592,7 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse outright while a firing or autotune run
      * is active, PAUSED included -- same unconditional rule reset_post_handler()
      * (HTTP) already enforces above via execute_scope() directly. This
@@ -479,9 +612,16 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
             ESP_LOGW(TAG, "factory_reset_execute: refused by system mode gate: %s", mode_reason);
             return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
         }
+        /* The HTTP entry refuses a running sweep through ota_http_check_interlocks(); this UART entry
+         * has no interlock call, so it checks the sweep (and a restore) itself. execute_scope()'s late
+         * check repeats this after the mark is set. */
+        if (reset_other_writer_refuses(mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(TAG, "factory_reset_execute: %s", mode_reason);
+            return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
+        }
     }
 
-    return execute_scope(&kScopes[(size_t)scope]);
+    return execute_scope(&kScopes[(size_t)scope], NULL, 0);
 }
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
@@ -501,7 +641,7 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
-    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse outright while a firing or autotune run
      * is active, PAUSED included -- no ack, no override, unconditional. This
      * is a distinct 409 from the OTA interlock's own 428/409 check just
@@ -588,14 +728,31 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGW(TAG, "factory_reset from %s: authenticated, scope '%s' accepted", ip, scope->name);
-    esp_err_t first_err = execute_scope(scope);
+    char late_reason[SYSTEM_MODE_GATE_REASON_MAX];
+    late_reason[0] = '\0';
+    esp_err_t first_err = execute_scope(scope, late_reason, sizeof(late_reason));
 
+    if (first_err == FACTORY_RESET_ERR_MODE_GATE_REFUSED) {
+        /* A run, sweep or restore started after the entry check above; nothing was erased. */
+        ESP_LOGW(TAG, "factory_reset from %s: refused by system mode gate at dispatch: %s", ip, late_reason);
+        return system_mode_gate_http_send_refusal(req, late_reason);
+    }
+    if (first_err == FACTORY_RESET_ERR_REBOOT_FAILED) {
+        /* The erase ran but the reboot task could not be created. RAM still holds pre-reset state that
+         * would be written back over the erased storage, so reboot inline after the reply leaves. */
+        ESP_LOGE(TAG, "factory_reset from %s: storage erased, reboot task failed -- rebooting inline", ip);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "storage erased, reboot failed -- power-cycle now");
+        factory_reset_reboot_fallback();
+        return ESP_OK;
+    }
     if (first_err != ESP_OK) {
         /* Best-effort is not good enough here: an operator who asked for a
          * wipe and silently got a partial one (e.g. "all" that only erased
          * two of three partitions) needs to know, not just see a reboot and
-         * assume it worked. execute_scope() already scheduled the reboot
-         * regardless. */
+         * assume it worked. The reboot is scheduled only once the erase was
+         * dispatched: a flash-worker dispatch failure returns here with
+         * nothing erased and no reboot scheduled. */
         char msg[64];
         snprintf(msg, sizeof(msg), "erase failed for one or more partitions: %s", esp_err_to_name(first_err));
         httpd_resp_set_status(req, "500 Internal Server Error");

@@ -118,11 +118,18 @@ static void system_bridge_task(void *arg)
                      * already happened), making "nothing erased" a lie on
                      * that overlap -- see factory_reset.h's doc comment on
                      * FACTORY_RESET_ERR_MODE_GATE_REFUSED. */
-                    ESP_LOGW(TAG, "system: FACTORY_RESET scope %u refused by system mode gate -- "
-                                  "a firing or autotune run is active, nothing erased",
+                    ESP_LOGW(TAG, "system: FACTORY_RESET scope %u refused -- a firing, autotune run, "
+                                  "zone current sweep or backup restore is active, or another factory reset is "
+                                  "already in progress; nothing erased",
                              msg->payload[1]);
+                } else if (err == FACTORY_RESET_ERR_REBOOT_FAILED) {
+                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u: storage erased, reboot failed -- "
+                                  "power-cycle now (rebooting inline)",
+                             msg->payload[1]);
+                    factory_reset_reboot_fallback();
                 } else if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u erase failed: %s -- rebooting anyway",
+                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u failed: %s -- a reboot follows only if the "
+                                  "erase was dispatched",
                              msg->payload[1], esp_err_to_name(err));
                 } else {
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u requested by host -- erasing and rebooting",
@@ -148,7 +155,11 @@ static void system_bridge_task(void *arg)
                     break;
                 }
                 bool disabled = msg->payload[1] != 0;
-                watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
+                esp_err_t perr = watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
+                if (perr != ESP_OK) {
+                    ESP_LOGW(TAG, "system: SET_WATCHDOG_PANIC_DISABLED did not persist: %s (setting lost at reboot)",
+                             esp_err_to_name(perr));
+                }
                 break;
             }
             case SYSTEM_CMD_SET_TELEMETRY_ENABLED: {
@@ -197,15 +208,16 @@ esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *ow
      * pointer past this function returning, and reads through it fresh on
      * every report (see stack_margin.h), so it must outlive the call. */
     static TaskHandle_t s_system_bridge_task_handle;
-    BaseType_t created = xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", 3072, &ctx, 5,
+    BaseType_t created = xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", 4096, &ctx, 5,
                                                   &s_system_bridge_task_handle, tskNO_AFFINITY);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_SYSTEM);
         return ESP_ERR_NO_MEM;
     }
-    /* TODO.md section 13: internal-only (plain xTaskCreatePinnedToCore(), no
-     * MALLOC_CAP_SPIRAM) -- one of the six candidate stacks left unresized
-     * pending a real uxTaskGetStackHighWaterMark() reading. */
-    stack_margin_register("system_uart_bridge", &s_system_bridge_task_handle, 3072);
+    /* Internal-only (plain xTaskCreatePinnedToCore(), no MALLOC_CAP_SPIRAM).
+     * 4096 B, sized from a measured deepest path (3216 B, see
+     * check_system_uart_bridge_stack_budget.py); the create literal and this
+     * one are cross-checked by check_stack_margin_registration.ps1. */
+    stack_margin_register("system_uart_bridge", &s_system_bridge_task_handle, 4096);
     return ESP_OK;
 }

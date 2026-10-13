@@ -113,6 +113,19 @@ bool safety_ceiling_sync_get_current_pico_ceiling(float *out_value);
  * (no fabricated ceiling from a zeroed default config). */
 void safety_ceiling_sync_reconcile_on_link_up(SafetyLinkClass *link);
 
+/* The Pico ceiling the CURRENT zone maxima require, by the same policy
+ * (safety_ceiling_policy_target_c()) and the same zone read that
+ * safety_ceiling_sync_reconcile_on_link_up() uses. Returns false, leaving
+ * *out_c untouched, when zones_config_is_valid() is false or no zone has a
+ * positive max_temp_c (target unknown). No wire I/O, no lock. Callers that
+ * restore an older ceiling (kiln_cfg_swap.c's rollback paths) write
+ * max(old ceiling, this) so a zone-max raise that landed after their
+ * snapshot is never undercut -- the owner's "Pico ceiling same as or looser
+ * than the zone maxima" rule. The unlocked zone read is racy by design: a
+ * zones POST mid-commit may not be seen, and the reconcile that follows
+ * (link-up or the zones POST's own sync) is the second pass. */
+bool safety_ceiling_sync_required_ceiling_c(float *out_c);
+
 /* 2026-09-22 (opus review, advisory adopted): identical contract to
  * safety_ceiling_sync_reconcile_on_link_up() above, except it takes this
  * file's internal reconcile lock NON-BLOCKING and simply skips the tick

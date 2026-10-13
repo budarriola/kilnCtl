@@ -11,7 +11,9 @@
 #include "esp_log.h"
 
 #include "cfg_fs_status.h"
+#include "cfg_save_lock.h"
 #include "hal_kv.h"
+#include "hal_sysinfo.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
 #include "persist_scratch.h"
@@ -81,6 +83,12 @@ typedef struct {
  * here is exactly the kind of cross-task counter this codebase already uses
  * _Atomic for (see wifi_provision_http.c's s_httpd_open_sockets). */
 static _Atomic uint32_t s_live_profile_generation;
+
+/* A1 (REVIEW_WEB4_TESTS): the web request (profiles_live_http.c) and the LCD task (ui_edit_firing_apply.c) both
+ * write the working copy. This lock makes "generation check + verified save + generation bump" one section
+ * (live_profile_save_working_if_gen) and serialises clear's bump with it. The generation is RAM-only: it restarts
+ * from a random seed on reboot (live_profile_start), so a client holding a pre-reboot value almost never matches. */
+static cfg_save_lock_t s_live_save_lock = CFG_SAVE_LOCK_INIT;
 
 /* ---- pure: record encode/decode ------------------------------------------ */
 
@@ -481,10 +489,16 @@ bool live_profile_load_record(live_edit_record_t *out)
     uint8_t buf[sizeof(live_edit_persisted_t)];
     size_t len = 0;
     uint32_t rev = 0;
-    if (pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, buf, sizeof(buf), &len, &rev)) {
+    esp_err_t lerr = pref_cfg_fs_load_var_checked(LIVE_PROFILE_RECORD_FILE_PATH, buf, sizeof(buf), &len, &rev);
+    if (lerr == ESP_OK) {
         /* A file that is present is final: a wrong-version/short record is
          * discarded, never papered over by the older legacy NVS copy. */
         return live_edit_record_decode(buf, len, out);
+    }
+    if (lerr != ESP_ERR_NOT_FOUND) {
+        /* K10-09b: the file could not be read (alloc/I/O) -- its state is unknown, so the older legacy
+         * NVS copy must not stand in for it. */
+        return false;
     }
     len = sizeof(buf);
     if (nvs_legacy_get(NVS_KEY_LIVE_RECORD, buf, &len, NULL) != HAL_OK) {
@@ -493,7 +507,7 @@ bool live_profile_load_record(live_edit_record_t *out)
     return live_edit_record_decode(buf, len, out);
 }
 
-bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
+static bool live_profile_save_working_locked(const profile_t *p, char *err, size_t err_cap)
 {
     if (caller_stack_is_external()) {
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
@@ -528,6 +542,31 @@ bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
     }
     atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
+}
+
+bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    bool ok = live_profile_save_working_locked(p, err, err_cap);
+    cfg_save_lock_give(&s_live_save_lock);
+    return ok;
+}
+
+live_save_result_t live_profile_save_working_if_gen(const profile_t *p, bool check_gen, uint32_t expected_gen,
+                                                    uint32_t *out_gen, char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    live_save_result_t r;
+    if (check_gen && atomic_load(&s_live_profile_generation) != expected_gen) {
+        r = LIVE_SAVE_STALE;
+    } else if (live_profile_save_working_locked(p, err, err_cap)) {
+        if (out_gen) *out_gen = atomic_load(&s_live_profile_generation); /* produced by THIS save, still under the lock */
+        r = LIVE_SAVE_OK;
+    } else {
+        r = LIVE_SAVE_FAILED;
+    }
+    cfg_save_lock_give(&s_live_save_lock);
+    return r;
 }
 
 /* Pass-3 review fix (2026-09-19): internal tri-state core shared by
@@ -571,7 +610,14 @@ static load_working_outcome_t load_working_internal(profile_t *out, const char *
     }
     size_t len = 0;
     uint32_t rev = 0;
-    if (!pref_cfg_fs_load_var(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev)) {
+    esp_err_t lerr = pref_cfg_fs_load_var_checked(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev);
+    if (lerr != ESP_OK && lerr != ESP_ERR_NOT_FOUND) {
+        /* K10-09b: unreadable file (alloc/I/O), not an absent one: do not fall back to the older legacy copy. */
+        free(buf);
+        if (out_reason) *out_reason = "cfg file unreadable";
+        return LOAD_WORKING_TRANSIENT;
+    }
+    if (lerr != ESP_OK) {
         /* No cfg file: the legacy NVS copy (pre-2026-10-07 builds) is the
          * fallback. */
         bool opened = false;
@@ -669,9 +715,15 @@ bool live_profile_has_pending_for_origin(uint8_t origin_id)
     return live_profile_load_record(&rec) && rec.pending && rec.origin_id == origin_id;
 }
 
-bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
-                        profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap)
+static bool live_profile_fork_locked(uint8_t origin_id, bool origin_is_builtin, const char *origin_name,
+                                     const profile_t *origin, profile_t *out_working, live_edit_record_t *out_record,
+                                     uint32_t *out_gen, bool *out_forked, char *err, size_t err_cap);
+
+bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
+                           profile_t *out_working, live_edit_record_t *out_record, uint32_t *out_gen,
+                           bool *out_forked, char *err, size_t err_cap)
 {
+    if (out_forked) *out_forked = false;
     if (!origin || !out_working) {
         if (err) snprintf(err, err_cap, "internal error: missing origin profile");
         return false;
@@ -686,6 +738,20 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
      * handed to a NEW firing of a DIFFERENT profile as if it were that new
      * firing's own edit -- refuse instead, so the stale record's prompt is
      * what the operator sees, not a fork silently masquerading as one. */
+    /* REVIEW_WEBFX7 LOW-4: the pending check, the origin save and the record write are one section under the
+     * live save lock, so a web edit landing between them cannot be overwritten by the origin copy. Only
+     * kv / pref_cfg_fs reads and writes happen inside (cfg_save_lock.h allows that). */
+    cfg_save_lock_take(&s_live_save_lock);
+    bool fork_ok = live_profile_fork_locked(origin_id, origin_is_builtin, origin_name, origin, out_working,
+                                            out_record, out_gen, out_forked, err, err_cap);
+    cfg_save_lock_give(&s_live_save_lock);
+    return fork_ok;
+}
+
+static bool live_profile_fork_locked(uint8_t origin_id, bool origin_is_builtin, const char *origin_name,
+                                     const profile_t *origin, profile_t *out_working, live_edit_record_t *out_record,
+                                     uint32_t *out_gen, bool *out_forked, char *err, size_t err_cap)
+{
     live_edit_record_t existing;
     if (live_profile_load_record(&existing) && existing.pending) {
         if (existing.origin_id != origin_id) {
@@ -702,12 +768,17 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
             return false;
         }
         if (out_record) *out_record = existing;
+        /* out_gen deliberately untouched (see live_profile.h): the caller keeps the generation it holds. */
         return true;
     }
 
-    if (!live_profile_save_working(origin, err, err_cap)) {
+    /* The generation THIS save produced is captured under the save lock; callers that go on to a
+     * compare-and-save (LCD Apply) must use it, never a fresh unlocked read. */
+    uint32_t own_gen = 0;
+    if (!live_profile_save_working_locked(origin, err, err_cap)) {
         return false;
     }
+    own_gen = atomic_load(&s_live_profile_generation);
 
     live_edit_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -725,10 +796,56 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
 
     *out_working = *origin;
     if (out_record) *out_record = rec;
+    if (out_gen) *out_gen = own_gen;
+    if (out_forked) *out_forked = true;
     return true;
 }
 
+bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
+                       profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap)
+{
+    return live_profile_fork_gen(origin_id, origin_is_builtin, origin_name, origin, out_working, out_record, NULL,
+                                 NULL, err, err_cap);
+}
+
+static bool live_profile_clear_locked(char *err, size_t err_cap);
+
+/* REVIEW_WEBFX4 LOW-2: the whole clear (erase + read-back + bump) runs under the live save lock, so a concurrent
+ * save cannot recreate the working file between the erase and the bump. */
 bool live_profile_clear(char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    bool ok = live_profile_clear_locked(err, err_cap);
+    cfg_save_lock_give(&s_live_save_lock);
+    return ok;
+}
+
+/* REVIEW_WEBFX7 MED-1: working copy and generation read as one pair under the save lock. */
+bool live_profile_load_working_gen(profile_t *out, uint32_t *gen)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    bool ok = live_profile_load_working(out);
+    if (gen) *gen = atomic_load(&s_live_profile_generation);
+    cfg_save_lock_give(&s_live_save_lock);
+    return ok;
+}
+
+/* Clears only if the generation still equals expected. On mismatch (an edit landed meanwhile) returns
+ * LIVE_CLEAR_STALE and leaves the working copy and pending record untouched. */
+live_clear_result_t live_profile_clear_if_gen(uint32_t expected, char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    live_clear_result_t r;
+    if (atomic_load(&s_live_profile_generation) != expected) {
+        r = LIVE_CLEAR_STALE;
+    } else {
+        r = live_profile_clear_locked(err, err_cap) ? LIVE_CLEAR_OK : LIVE_CLEAR_FAILED;
+    }
+    cfg_save_lock_give(&s_live_save_lock);
+    return r;
+}
+
+static bool live_profile_clear_locked(char *err, size_t err_cap)
 {
     /* Legacy NVS copy first: if the file removal below were to fail or be
      * interrupted, the fallback must not be able to resurrect the edit. */
@@ -779,10 +896,16 @@ bool live_profile_clear(char *err, size_t err_cap)
  * keys stay as a read fallback until live_profile_clear() erases them. */
 void live_profile_start(void)
 {
+    /* REVIEW_WEBFX4 LOW-1: the generation is RAM-only; a random boot seed keeps a pre-reboot client's value from
+     * matching a post-reboot save. profile_executor_run.c seeds its baseline from gen-1, which still works. */
+    atomic_store(&s_live_profile_generation, hal_sysinfo_random_u32() & 0x3fffffffu);
     uint8_t rbuf[sizeof(live_edit_persisted_t)];
     size_t rlen = 0;
     uint32_t rev = 0;
-    if (!pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, rbuf, sizeof(rbuf), &rlen, &rev)) {
+    /* K10-09b: migrate the legacy NVS copy only when the file is genuinely ABSENT; an unreadable file may
+     * hold newer data and must not be overwritten by the older legacy copy. */
+    if (pref_cfg_fs_load_var_checked(LIVE_PROFILE_RECORD_FILE_PATH, rbuf, sizeof(rbuf), &rlen, &rev) ==
+        ESP_ERR_NOT_FOUND) {
         rlen = sizeof(rbuf);
         live_edit_record_t tmp;
         if (nvs_legacy_get(NVS_KEY_LIVE_RECORD, rbuf, &rlen, NULL) == HAL_OK && live_edit_record_decode(rbuf, rlen, &tmp)) {
@@ -796,7 +919,8 @@ void live_profile_start(void)
         return;
     }
     size_t len = 0;
-    if (!pref_cfg_fs_load_var(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev)) {
+    if (pref_cfg_fs_load_var_checked(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev) ==
+        ESP_ERR_NOT_FOUND) {
         len = PROFILE_BLOB_MAX_SIZE;
         profile_t tmp;
         const char *reason = "";

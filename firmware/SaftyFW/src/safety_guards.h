@@ -84,8 +84,9 @@ extern "C" {
 /* Verbatim from ARCHITECTURE.md section 9. Do not renumber -- once this
  * ships, a trip code is a wire value that ends up in logs and screenshots,
  * and renumbering it later silently reinterprets every historical record.
- * 4 and 11 are reserved gaps (S4 and S10 are WARN-only, never produce a
- * trip code) and are kept here so the enum stays byte-for-byte the one the
+ * 11 is a reserved gap (S10 is WARN-only, never produces a trip code). 4 is
+ * SAFETY_TRIP_TEST (admin test trip); S4 is WARN-only and has no trip code of
+ * its own. Both are kept here so the enum stays byte-for-byte the one the
  * doc defines, even though this phase only ever assigns five of these
  * values. */
 typedef enum {
@@ -93,7 +94,8 @@ typedef enum {
     SAFETY_TRIP_OVERTEMP        = 1,  /* S1  -- implemented */
     SAFETY_TRIP_OVER_SETPOINT   = 2,  /* S2  -- implemented */
     SAFETY_TRIP_LOAD_STUCK_ON   = 3,  /* S3  -- implemented */
-    /* 4 reserved: S4 is WARN-only */
+    SAFETY_TRIP_TEST            = 4,  /* admin-only test trip (SAFETY_CMD_TEST_TRIP 0x2E, docs/TEST_TRIP_PLAN.md);
+                                       * takes the S4 gap, mask 0x0008. S4 itself stays WARN-only. */
     SAFETY_TRIP_SENSOR_INVALID  = 5,  /* S5  -- implemented, after blind_grace_s */
     SAFETY_TRIP_MAIN_FAULT      = 6,  /* S6a -- implemented */
     SAFETY_TRIP_LINK_DEAD       = 7,  /* S6b -- implemented */
@@ -332,6 +334,9 @@ typedef struct {
     bool     tc_valid;
     float    tc_c;         /* NaN when !tc_valid */
     float    cj_c;         /* NaN when !tc_valid */
+    bool     cj_invalid;   /* true when the cold junction reading is not valid (thermo_snapshot_t.cj_valid
+                            * false). Inverted sense so a zero-initialised input means "valid". Guard
+                            * review F4: S12 treats this (or a NaN cj_c) as unknown, never as a pass. */
     uint8_t  fault_bits;   /* SAFETY_THERMO_FAULT_* bits, SR register */
     bool     spi_failed;
 
@@ -621,6 +626,12 @@ typedef struct {
      * alongside S6a/S7, rather than gated on context_valid. */
     bool config_integrity_trip;
 
+    /* Admin test trip request (SAFETY_CMD_TEST_TRIP 0x2E, docs/TEST_TRIP_PLAN.md).
+     * True for exactly one tick (safety_core drains a depth-1 queue into it).
+     * Latches SAFETY_TRIP_TEST at the END of the not-tripped path, so a real
+     * guard firing the same tick wins the reason. Ignored while tripped. */
+    bool test_trip_requested;
+
     float dt_s;
 } safety_guard_input_t;
 
@@ -671,6 +682,14 @@ typedef struct {
     float   s8_window_start_c;
     float   s8_window_elapsed_s;
     uint8_t s8_over_rate_streak;
+    /* Post-trip fresh rate measurement for the S8 clear check (review saftyfx6 F2). */
+    bool    s8_post_active;
+    uint8_t s8_post_windows_done; /* 0,1,2 (saturating): completed full post windows */
+    float   s8_post_win_s;        /* post window length latched+clamped at trip */
+    float   s8_post_prev_rate_c_per_min;
+    float   s8_post_start_c;
+    float   s8_post_elapsed_s;
+    float   s8_post_last_rate_c_per_min;
 
     /* S2: sustained-over-setpoint timer. */
     float s2_over_elapsed_s;
@@ -813,7 +832,22 @@ typedef enum {
     SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,   // safety_guards_try_clear() retripped
     SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED, // is_tripped was already false
                                                         // by the time the request was dequeued
+    SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE, // bound request named an older trip_seq
+                                                        // than the latched one (audit M4)
 } safety_clear_trip_outcome_t;
+
+// kilnlink audit 2026-10-09 M4: does a queued CLEAR_TRIP request belong to
+// the trip occurrence latched right now? `bound` is true iff the request came
+// from a 4-byte (protocol >= 17) frame carrying `wire_trip_seq`;
+// `current_trip_seq` is safety_core's own s_trip_seq at dequeue. An unbound
+// (legacy) request carries no occurrence and matches anything, exactly as
+// before protocol 17 -- link_frame_decide_clear_trip() is what refuses an
+// unbound frame from a peer new enough to bind it. A bound request matches
+// only an equal seq: a trip that latched after the ESP last read DIAG bumps
+// the seq, so a stale or duplicated clear for the earlier occurrence (same
+// reason, same mask) is refused instead of clearing the new one.
+bool safety_guards_clear_trip_occurrence_matches(bool bound, uint8_t wire_trip_seq,
+                                                  uint8_t current_trip_seq);
 
 // Pure 3-way classification of a queued CLEAR_TRIP request's result, given
 // the two facts safety_core_task already has in hand right after it dequeues
@@ -825,7 +859,15 @@ typedef enum {
 // link_frame_decide_clear_trip()'s two-way one, and just as worth pinning
 // down with a test as that one was (see CommonFW's/this project's "every new
 // check must be proven capable of failing" standard).
+//
+// kilnlink audit 2026-10-09 M4 added `occurrence_matches`
+// (safety_guards_clear_trip_occurrence_matches()): a request for an older
+// occurrence than the latched one resolves to REFUSED_STALE_OCCURRENCE and
+// the caller must not run safety_guards_try_clear() for it at all;
+// `try_clear_result` is ignored in that case. NOTHING_LATCHED still wins
+// when no trip is latched.
 safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tripped,
+                                                                      bool occurrence_matches,
                                                                       bool try_clear_result);
 
 // Best-effort "what number decided this trip" for CommonFW/docs/LINK_PROTOCOL.md
@@ -862,9 +904,10 @@ float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guar
 //
 // Bit numbering: for every guard that already has a safety_trip_t code, the
 // bit is (that code - 1), i.e. the exact same numbering link_frame_trip_mask_
-// for_reason() uses for trip_mask -- S4/S10's codes are reserved gaps (4 and
-// 11) specifically so a WARN-only guard has a slot here without colliding
-// with any TRIP guard's bit. S14 and S15 (both added after safety_trip_t was
+// for_reason() uses for trip_mask -- S4/S10's slots (4 and 11) were reserved so a
+// WARN-only guard has a bit here without colliding with any TRIP guard's bit.
+// NOTE bit 3 (0x0008) means S4 in warn_mask but TEST (SAFETY_TRIP_TEST) in
+// trip_mask: the two masks are different fields, read each with its own table. S14 and S15 (both added after safety_trip_t was
 // written, CT_COMMISSIONING_PLAN.md) were never given a reserved trip code at
 // all -- codes 15/16 went to CONFIG_CORRUPT/SELF_TEST, unrelated future
 // guards -- so they take bits 14/15 directly: both bits have been 0 on every

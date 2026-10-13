@@ -124,7 +124,22 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
 // is not retried here; same fire-and-forget contract as every other
 // non-ACKed command in this protocol, and link_task_handle_clear_trip()
 // logs the drop.
-bool safety_core_request_clear_trip(void);
+//
+// kilnlink audit 2026-10-09 M4: `bound`/`trip_seq` carry the 4-byte
+// CLEAR_TRIP's occurrence (protocol >= 17). safety_core_task compares it to
+// its own s_trip_seq at dequeue, on the task that bumps that seq, and refuses
+// a mismatch as REFUSED_STALE_OCCURRENCE without running try_clear. An
+// unbound request (legacy 3-byte frame, peer < 17 or before ANNOUNCE) is
+// resolved exactly as before.
+bool safety_core_request_clear_trip(bool bound, uint8_t trip_seq);
+
+// TEST_TRIP (docs/TEST_TRIP_PLAN.md section 4.2): ask safety_core to latch
+// SAFETY_TRIP_TEST on its next tick. link_task has ALREADY validated the
+// request (link_frame_decide_test_trip()); this is a 0-tick enqueue into a
+// depth-1 queue. false = queue missing or a request is already pending. It can
+// only cause a trip; the guard evaluation is safety_guards_tick()'s, and a
+// real guard firing the same tick keeps the reason.
+bool safety_core_request_test_trip(void);
 
 // Outcome of the most recently PROCESSED CLEAR_TRIP request (see
 // safety_core_get_clear_trip_stats() below) -- NONE until at least one has

@@ -1,4 +1,4 @@
-// Host tests for firing_shadow.c (docs/ITER_TUNE_REDESIGN_PLAN.md step 8,
+// Host tests for firing_shadow.c (docs/ITER_TUNE_REDESIGN.md step 8,
 // "shadow mode"). Proves: the shadow hook runs at firing end and scores
 // what it saw, it NEVER changes a gain (structurally -- this module has no
 // gain-write API at all, and neither iter_tune_store_blob_t nor any zone

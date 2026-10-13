@@ -592,28 +592,35 @@ static void test_broadened_field_divergence_detected(void)
 // suffix_len - 1`) was unpinned -- the review named this explicitly ("a
 // future edit to kArmedSuffix or to sizeof(s_standing_warning_reason)
 // would not be caught").
-static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
+static void test_armed_refusal_appends_suffix_to_longest_first_diff_reason(void)
 {
     TEST_SECTION("2026-09-16 item H regression pin: an ARMED refusal's suffix is appended IN FULL "
-                 "even when the underlying reason must be truncated to make room");
+                 "on the longest first-difference reason this seam can produce (the clamp itself is tested directly in test_config_divergence.c)");
     test_reset_all();
     safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
     safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
 
     // Ceiling agrees -- only the broadened/extra field diverges, same shape
-    // as test_broadened_field_divergence_detected() above, but with the
-    // ESP/Pico values chosen so format_first_field_difference()'s "%.2f"
-    // rendering of each side (config_divergence.c) is tens of characters
-    // long on its own (a huge float prints its full integer part), which is
-    // enough by itself -- with the fixed field name -- to push the
-    // formatted "config divergence: <name> ESP=<v> Pico=<v>" reason past
-    // this file's `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91
-    // bytes), forcing the truncation branch this test exists to pin.
+    // as test_broadened_field_divergence_detected() above, with the longest
+    // possible "%.9g" values on both sides.
+    //
+    // 2026-10-12 (REVIEW_ZPRECFX5 LOW-1): this used to push the reason past
+    // `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91 bytes) with the
+    // ~44-char "%.2f" rendering of FLT_MAX. With "%.9g" the worst case through
+    // THIS seam is 19 + 23 (longest name extra_names holds) + 5 + 15 + 6 + 15
+    // = 83 chars, under 91, so the head_len truncation clamp can no longer be
+    // reached from here: the version-mismatch / unknown-field reasons that are
+    // long enough are only produced when the two identities differ in
+    // format_version or an ESP field is unknown, neither of which this seam
+    // can create (ESP extra fields are always known and the version is a
+    // shared constant; +-0 is canonicalised, REVIEW_ZPRECFX6 LOW-A). The clamp is defensive here and is unit-tested directly; this test pins
+    // the guarantee that is reachable: the suffix is appended IN FULL at the
+    // tail of the longest reason this seam can produce.
     s_zone_max_temp_c[0] = 80.0f;
     fake_pico_ceiling_set(80.0f);
 
     s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
-    s_expected_fields[0].value = 3.4028235e38f; /* near FLT_MAX -- "%.2f" is ~44 chars */
+    s_expected_fields[0].value = 3.4028235e38f; /* near FLT_MAX -- "%.9g" is 14 chars */
     s_expected_field_count = 1;
     fake_pico_extra_set(-3.4028235e38f);
 
@@ -631,7 +638,7 @@ static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
     size_t suffix_len = sizeof(kArmedSuffix) - 1u;
     TEST_CHECK(reason_len < sizeof(reason), "reason never overflows its own buffer");
     TEST_CHECK(reason_len >= suffix_len && strcmp(reason + (reason_len - suffix_len), kArmedSuffix) == 0,
-               "the ARMED suffix survives IN FULL at the tail even though the reason had to be truncated "
+               "the ARMED suffix survives IN FULL at the tail on the longest first-difference reason "
                "to make room for it -- this is the exact guarantee item H's fix claims and the negative "
                "test below disproves for the old snprintf-tail-truncation shape");
 
@@ -935,7 +942,7 @@ int main(void)
     test_latch_clears_when_sides_agree();
     test_target_known_exclusion();
     test_broadened_field_divergence_detected();
-    test_armed_refusal_appends_suffix_and_truncates_long_reason();
+    test_armed_refusal_appends_suffix_to_longest_first_diff_reason();
     test_tc_type_revert_divergence_detected();
     test_stale_cache_does_not_hide_a_revert();
     test_divergence_during_backup_restore();

@@ -838,6 +838,7 @@ during development will be driven by an agent:
       without noticing is firing on default gains. Check `GET
       /api/zones/config` (or `kiln_call(name="control_get_zones")`) reads back
       the expected gains before heating after any rollback.
+      **Aux hazard (aux review F6, 2026-10-09)**: rolling back to firmware that predates spare-relay aux outputs leaves stored aux rules (targets 8..11) silently inert, and a zone converted to aux runs as an ordinary HEATER with an empty relay mask. It gets PID and guards 1-4 but nothing can heat it, so it likely trips a heat-rise guard (fails safe, but confusing). Re-check zones and profiles after any rollback across the aux change.
 - [x] Every push tool's board-reported result (including refusals) is
       returned verbatim to the caller. **Not yet true**: neither tool
       computes or logs a local SHA-256 of the image before sending — the doc
@@ -930,7 +931,7 @@ application image answers `409 Conflict` ("single-slot design ... recovery
 image") when `esp_ota_get_next_update_partition()` is the running `app`
 partition itself -- the single-slot table has no spare slot, so an ESP image is
 pushed through the recovery image's route instead (`recovery_enter`;
-`docs/OTA_SINGLE_SLOT_PLAN.md`). Every early refusal on both `POST /api/ota/esp`
+`docs/OTA_SINGLE_SLOT.md`). Every early refusal on both `POST /api/ota/esp`
 and `POST /api/ota/pico` (interlock 409/428, update-in-progress 409, size/magic/
 chip checks, staging failures, a failed transfer) now sends its response and
 then drains the unread body itself (`ota_http_refusal_drain()`: 4 KB reads into

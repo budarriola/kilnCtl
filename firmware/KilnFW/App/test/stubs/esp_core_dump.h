@@ -40,6 +40,7 @@ typedef struct {
     char exc_task[16];
     uint32_t exc_pc;
     esp_core_dump_bt_info_t exc_bt_info;
+    uint8_t app_elf_sha256[67];
     esp_core_dump_summary_extra_info_t ex_info;
 } esp_core_dump_summary_t;
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cfgfs_nvs_only_drift_check.py -- catches the exact drift a 2026-09-08 audit
 found live: cfg_fs_status.c's `/api/cfgfs` response hand-lists which
-docs/FILESYSTEM_USER_DATA_PLAN.md items are still NVS-only (`nvs_only`) vs.
+docs/FILESYSTEM_USER_DATA.md items are still NVS-only (`nvs_only`) vs.
 permanently NVS-by-design (`nvs_permanent`), and nothing forced that list to
 be revisited when a new `*_cfg_fs.c` bridge module landed and moved an item
 off it (that is exactly how `prefs`/`profiles` went stale in the list while
@@ -42,7 +42,7 @@ from pathlib import Path
 # One entry per persist/*_cfg_fs.c file that exists TODAY and is already
 # accounted for by cfg_fs_status.c's dual_write/nvs_only/nvs_permanent
 # handling. Adding a new bridge file is a deliberate migration step (per
-# docs/FILESYSTEM_USER_DATA_PLAN.md section 5) -- add its module prefix here
+# docs/FILESYSTEM_USER_DATA.md section 5) -- add its module prefix here
 # in the SAME commit that updates cfg_fs_status.c, not before.
 EXPECTED_BRIDGE_MODULES = {
     "kiln_cfg_store",  # item 8: named kiln config slots
@@ -88,7 +88,7 @@ def main() -> int:
         for m in unexpected:
             print(f"  New bridge file found: persist/{m}_cfg_fs.c")
         print("  This module is not in EXPECTED_BRIDGE_MODULES (cfgfs_nvs_only_drift_check.py).")
-        print("  That almost certainly means a docs/FILESYSTEM_USER_DATA_PLAN.md MOVE item just")
+        print("  That almost certainly means a docs/FILESYSTEM_USER_DATA.md MOVE item just")
         print("  gained file-backing and cfg_fs_status.c's nvs_only array now lists an item that")
         print("  is actually file-backed (the exact 2026-09-08 audit finding). Fix in one commit:")
         print("    1. Update cfg_fs_status.c's nvs_only/nvs_permanent arrays to match reality.")

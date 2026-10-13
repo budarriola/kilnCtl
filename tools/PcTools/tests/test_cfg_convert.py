@@ -313,3 +313,13 @@ def test_additive_top_level_prefs_pass_through():
             assert out[k] == v, (k, target)
     out, _report = cfg_convert.convert(dict(base), 4)
     assert not any(k in out for k in extra)
+
+
+def test_topology_keys_kept_at_v7_dropped_below():
+    doc = {"kind": "kilnctl_backup", "version": 7, "profiles": [], "zones": [],
+           "thermo_count": 3, "relay_count": 4}
+    out, _ = cfg_convert.convert(doc, 7)
+    assert out["thermo_count"] == 3 and out["relay_count"] == 4
+    out, report = cfg_convert.convert(doc, 6)
+    assert "thermo_count" not in out and "relay_count" not in out
+    assert any(o.field == "thermo_count" and o.outcome == "dropped" for o in report.outcomes)

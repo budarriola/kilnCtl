@@ -1,12 +1,12 @@
 """full_board_backup.py -- complete pre-partition-change backup of live board state.
 
-Context: docs/FILESYSTEM_PLAN.md / docs/FILESYSTEM_USER_DATA_PLAN.md stage a
+Context: docs/FILESYSTEM.md / docs/FILESYSTEM_USER_DATA.md stage a
 partition-table change (a new `cfg` LittleFS partition, append-only into the
 free tail). A partition-table change means an `otadata` erase + bootloader
 reflash, and any partition whose OFFSET moves loses its data outright. The
 most expensive data on this board to regenerate is the tuned PID gains and
 coupling matrix (multi-hour bench runs) -- see the zones config inventory
-item (#1) in FILESYSTEM_USER_DATA_PLAN.md.
+item (#1) in FILESYSTEM_USER_DATA.md.
 
 The existing GET /api/backup/export (backup_http.c) covers zones config
 (PID/model/coupling/guards/limits) and user fire profiles -- but NOT:
@@ -94,12 +94,12 @@ GET_ENDPOINTS = [
     ("/api/profiles/builtin", "hidden built-in profiles mask", False),
     ("/api/crash_report", "unacknowledged crash report at backup time (diagnostic, not restorable)", False),
     ("/api/partitions", "running partition table snapshot at backup time (diagnostic)", False),
-    # docs/FILESYSTEM_PLAN.md "Add filesystem coverage to the backup": the
+    # docs/FILESYSTEM.md "Add filesystem coverage to the backup": the
     # `cfg` LittleFS partition's own file list -- this is the SAME listing
     # surface the firmware already exposes for observability
     # (cfg_fs_status.c / diagnostics_http.c's cfgfs_status_get_handler()), not
     # a parallel one invented here. Not required: an unformatted/unmounted
-    # `cfg` partition (true on every board today, per docs/FILESYSTEM_PLAN.md)
+    # `cfg` partition (true on every board today, per docs/FILESYSTEM.md)
     # answers mounted:false with an empty file list, which is expected, not a
     # failure -- see the cfgfs-specific handling in main() below, which
     # reports this plainly rather than folding it into ok/fail counts.
@@ -236,16 +236,26 @@ def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry
     if dry_run:
         return True, f"validated {len(decoded)} cfg file(s), dry run -- nothing written", decoded
 
+    refused: list = []
     for name, raw in decoded.items():
         url = f"http://{host}/api/cfgfs/file?name={urllib.parse.quote(name)}"
+        # Always raw=1: files with no firmware validator need it, and for the
+        # rest the firmware enforces its validator regardless (raw=1 never waives it).
+        url += "&raw=1"
         req = urllib.request.Request(url, data=raw, method="POST")
         try:
             with http_auth.urlopen(req, timeout=timeout) as resp:
                 resp.read()
         except http_auth.HttpAuthError as e:
             return False, f"cfg file '{name}': authentication failed after {list(decoded).index(name)} prior file(s) already written: {e}", decoded
+        except urllib.error.HTTPError as e:
+            # Firmware refused this one file (e.g. 400 validator): record it and keep going.
+            refused.append(f"{name} (HTTP {e.code})")
         except (urllib.error.URLError, OSError) as e:
             return False, f"cfg file '{name}': POST failed after {list(decoded).index(name)} prior file(s) already written: {e}", decoded
+    if refused:
+        return False, (f"{len(decoded) - len(refused)} of {len(decoded)} cfg file(s) restored; "
+                       f"firmware refused: {', '.join(refused)}"), decoded
     return True, f"restored {len(decoded)} cfg file(s)", decoded
 
 
@@ -826,7 +836,7 @@ def main() -> int:
         print(f"kiln config slots: exported {len(archive['kiln_config_exports'])}/{len(slot_ids)}"
               + (f", {kiln_cfg_export_errors} error(s)" if kiln_cfg_export_errors else ""))
 
-    # docs/FILESYSTEM_PLAN.md "Add filesystem coverage to the backup": pull
+    # docs/FILESYSTEM.md "Add filesystem coverage to the backup": pull
     # every listed cfg-filesystem file's raw bytes so a restore can rebuild
     # filesystem state, not just NVS/HTTP-endpoint state. Reported separately
     # from ok_count/fail_count above (not required) -- an unformatted/

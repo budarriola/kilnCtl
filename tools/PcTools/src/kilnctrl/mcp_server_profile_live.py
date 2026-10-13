@@ -1,12 +1,12 @@
 """Live profile edit tools -- wraps profiles_live_http.c's five-route HTTP
-surface (docs/LIVE_PROFILE_EDIT_PLAN.md section 10) over
+surface (docs/LIVE_PROFILE_EDIT.md section 10) over
 profile_live_http_client.py. See that client module's docstring for the full
 wire contract; this module is a thin MCP layer over it: host resolution,
 confirm-gating on writes, and echoing the board's own response text.
 
-NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/response
-parsing are unit-tested with mocked HTTP only (see
-tools/PcTools/tests/test_profile_live_http_client.py).
+Request construction/response parsing are unit-tested with mocked HTTP
+(tools/PcTools/tests/test_profile_live_http_client.py). Each write tool reads
+the live status back afterwards and says so in its reply.
 """
 from __future__ import annotations
 
@@ -33,6 +33,41 @@ def _profile_live_resolve_host(host: Optional[str]) -> str:
     return "192.168.4.1"
 
 
+def _live_result(obj: object, resolved: str, expect: str, name: Optional[str] = None,
+                zone_mask: Optional[int] = None, nsegs: Optional[int] = None) -> str:
+    """Result line for a live write: "ok -" only when the read-back verified,
+    else "FAILED -" (the write already happened, so say state is unverified)."""
+    suffix = _live_readback(resolved, expect, name, zone_mask, nsegs)
+    prefix = "ok" if suffix.endswith("read-back OK") else "FAILED"
+    return f"{prefix} - {obj} (host={resolved}){suffix}"
+
+
+def _live_readback(resolved: str, expect: str, name: Optional[str] = None,
+                   zone_mask: Optional[int] = None, nsegs: Optional[int] = None) -> str:
+    """GET the live status (and content for edit) after a write and compare.
+    Returns a suffix: "; read-back OK", or a FAILED / UNVERIFIED note."""
+    try:
+        st = profile_live_http.get_live_status(resolved)
+        if expect == "edit":
+            body = profile_live_http.get_live_content(resolved)
+    except Exception as exc:  # noqa: BLE001 - the write already happened
+        return f"; read-back UNVERIFIED ({type(exc).__name__}: {exc})"
+    if not isinstance(st, dict):
+        return "; read-back UNVERIFIED (status was not an object)"
+    if expect == "fork":
+        ok = bool(st.get("active")) and st.get("working_id", -1) not in (-1, None)
+    elif expect == "edit":
+        ok = isinstance(body, dict) and body.get("name") == name
+        if ok and zone_mask is not None:
+            ok = body.get("zone_mask") == zone_mask
+        if ok and nsegs is not None:
+            segs = body.get("segments")
+            ok = isinstance(segs, list) and len(segs) == nsegs
+    else:  # decide: the pending working copy is resolved
+        ok = not st.get("pending_decision") and st.get("working_id") == -1
+    return "; read-back OK" if ok else f"; FAILED read-back: live status {st!r} does not show the {expect} took effect"
+
+
 @_core._tool()
 def profile_live_get(content: bool = False, host: Optional[str] = None) -> str:
     """GET /api/profile/live -- the live-edit status object, or (with
@@ -40,10 +75,11 @@ def profile_live_get(content: bool = False, host: Optional[str] = None) -> str:
     full profile body (name/zone_mask/segments).
 
     Status fields: active, origin_id, origin_is_builtin, working_id (-1 if
-    no working copy exists yet), editable_from_segment, pending_decision,
+    no working copy exists yet), generation (bumps on every working-copy
+    save/fork/discard; pass it back to profile_live_edit/decide), editable_from_segment, pending_decision,
     and last_refusal (null, or {"generation","result","message"} -- the
     board's own live-edit-generation-tagged refusal record; there is no
-    other generation counter exposed on this surface).
+    separate from the top-level working-copy generation).
 
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
@@ -76,7 +112,7 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return "error: refused -- confirm=True is required. This forks the running profile into a new working copy."
     resolved = _profile_live_resolve_host(host)
     try:
@@ -85,12 +121,12 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved})"
+    return _live_result(obj, resolved, 'fork')
 
 
 @_core._tool()
 def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool = False,
-                       host: Optional[str] = None) -> str:
+                       host: Optional[str] = None, generation: Optional[int] = None) -> str:
     """POST /api/profile/live -- saves a candidate profile body into the
     working slot (validated HARD, then window-checked against the running
     profile before being accepted).
@@ -120,26 +156,32 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
     Requires confirm=True: on confirm=False, no request is sent to the
     board at all.
 
+    `generation`: the "generation" from profile_live_get(). When given, the
+    board refuses (409 "changed elsewhere") if the working copy changed since
+    that read, instead of last-writer-wins. When omitted the board accepts the
+    write unconditionally (compatible with callers that did not read first);
+    pass it whenever you read the copy before editing.
+
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return "error: refused -- confirm=True is required. This overwrites the working copy's content."
     resolved = _profile_live_resolve_host(host)
     try:
-        obj = profile_live_http.edit_live(resolved, name, zone_mask, segments)
+        obj = profile_live_http.edit_live(resolved, name, zone_mask, segments, generation=generation)
     except ValueError as exc:
         return f"error: {exc}"
     except profile_live_http.ProfileLiveHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved})"
+    return _live_result(obj, resolved, 'edit', name, zone_mask, len(segments))
 
 
 @_core._tool()
 def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool = False,
-                         host: Optional[str] = None) -> str:
+                         host: Optional[str] = None, generation: Optional[int] = None) -> str:
     """POST /api/profile/live/decide -- resolves a pending working copy.
 
     `action`: one of
@@ -151,6 +193,13 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
                      builtin profile (builtins are never overwritable).
 
     Refused (409, any action) if there is no pending working copy at all.
+    A 409 or 500 body that carries "saved":true,"id":N is NOT "nothing
+    decided": the slot WAS saved, but the working copy was edited during the
+    save (409) or could not be cleared (500). Do not retry save_as with a new
+    name (that makes a duplicate slot); re-read with profile_live_get.
+
+    `generation`: from profile_live_get(); when given, a mismatch is refused
+    409 "changed elsewhere" (nothing decided). Omitted = unconditional (compat).
 
     Requires confirm=True: on confirm=False, no request is sent to the
     board at all -- this is true for EVERY action here, including
@@ -160,7 +209,7 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return (f"error: refused -- confirm=True is required for action={action!r}. "
                  "This resolves (and may discard) the pending working copy.")
     if action not in ("discard", "save_as", "overwrite"):
@@ -170,16 +219,21 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
     resolved = _profile_live_resolve_host(host)
     try:
         if action == "discard":
-            obj = profile_live_http.decide_live_discard(resolved)
+            obj = profile_live_http.decide_live_discard(resolved, generation=generation)
         elif action == "save_as":
-            obj = profile_live_http.decide_live_save_as(resolved, name)
+            obj = profile_live_http.decide_live_save_as(resolved, name, generation=generation)
         else:
-            obj = profile_live_http.decide_live_overwrite(resolved)
+            obj = profile_live_http.decide_live_overwrite(resolved, generation=generation)
     except profile_live_http.ProfileLiveHttpError as exc:
+        if getattr(exc, "saved", False):
+            slot = f"slot {exc.saved_id}" if exc.saved_id is not None else "a slot (id not reported)"
+            return (f"SAVED to {slot}, but the decide did not finish: {exc.detail} (HTTP {exc.status}). "
+                    f"The profile exists; do not retry save_as (duplicate). Re-read with profile_live_get "
+                    f"(host={resolved})")
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved})"
+    return _live_result(obj, resolved, 'decide')
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

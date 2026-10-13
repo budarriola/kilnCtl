@@ -32,6 +32,7 @@ static inline const char *safety_trip_words_short(uint8_t reason)
     case 1:  return "S1 over-temp limit";
     case 2:  return "S2 over setpoint";
     case 3:  return "S3 relay stuck on";
+    case 4:  return "TEST trip (admin)";
     case 5:  return "S5 TC invalid/missing";
     case 6:  return "S6a main ctrl fault";
     case 7:  return "S6b link dead";
@@ -64,6 +65,7 @@ static inline const char *safety_trip_words_cause(uint8_t reason)
     case 1:  return "Chamber temperature exceeded the absolute over-temp limit";
     case 2:  return "Chamber stayed above setpoint longer than the over-setpoint window allows";
     case 3:  return "Relay/contactor read ON while the safety processor commanded it OFF";
+    case 4:  return "An administrator triggered a test trip from the web or a tool. No guard detected a fault.";
     case 5:  return "Safety thermocouple reading invalid past its grace period -- most often "
                      "no probe is connected to the safety processor (open circuit); can also "
                      "be a wiring fault or damaged probe";
@@ -240,6 +242,7 @@ static inline const char *safety_trip_words_remedy(uint8_t reason)
     case 1:  return "Let the kiln cool below the limit, then press Clear Trip.";
     case 2:  return "Let the chamber return under setpoint, then press Clear Trip.";
     case 3:  return "De-energize the relay/contactor and confirm it opens, then press Clear Trip.";
+    case 4:  return "Clear the trip from the Safety page when the test is done.";
     case 5:  return "Connect a working thermocouple to the safety processor (or check its "
                      "wiring if one is already attached), then press Clear Trip.";
     case 6:  return "Resolve the fault source named below, then press Clear Trip.";

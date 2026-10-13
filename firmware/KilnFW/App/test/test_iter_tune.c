@@ -1,4 +1,4 @@
-// test_iter_tune.c -- ITER_TUNE_REDESIGN_PLAN.md steps 1, 2 and 5:
+// test_iter_tune.c -- ITER_TUNE_REDESIGN.md steps 1, 2 and 5:
 // firing_score.c (per-segment tracking scoring), firing_compare.c
 // (matched-pair comparator + accept rule) and the rewritten iter_tune.c
 // decision core. Pure host tests, no ESP-IDF stubs needed.

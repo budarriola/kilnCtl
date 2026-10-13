@@ -688,6 +688,16 @@ tripped (K4 de-energized) for  trip_verify_s
 Default `trip_verify_s` = **10 s** (comfortably past the 1 s peak-hold decay and
 any contactor drop-out delay).
 
+S9 needs **no ESP context** (guard review 2026-10-09 F3): it reasons about the
+Pico's own de-energize command, so it runs with `context_valid == false`. The
+related hardening from the same review: a volatile config install while heat is possible
+refuses any trip-relevant field change not on a short allowlist (fail-closed, F1), `INJECT_TC` is
+refused while ARMED or energized (deliberately stricter than the heat-possible signal), `tc_offset_c` is bounded to +/-50 C (F2), S12
+treats an unknown cold junction as a hold-and-warn, never a pass or a clearable
+trip (F4), non-finite CONTEXT floats make a zone ineligible (F5), an S5 bad read
+no longer suspends S3/S4/S13/S14/S15 (F6), and the S6b reboot grace expires once
+so the 32-bit tick wrap cannot re-arm it (F7).
+
 **This is the single most valuable guard after S1, and it costs nothing to
 build** — the sensors are already there. `SAFETY_MODEL.md` §7 lists "welded line
 contactor" as an unclosable gap, because no firmware on this board can open a
@@ -973,6 +983,8 @@ The rules governing it are short and absolute:
 **A trip latches.** `SAFETY_CMD_REQUEST_ENABLE` from the ESP is refused while
 latched — it is advisory and the Pico's interlocks always win, which
 `firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
+
+**Admin test trip (kilnlink 18).** `TEST_TRIP` (0x2E) latches `SAFETY_TRIP_TEST` (4, mask 0x0008) through the real latch path so the trip chain can be exercised unattended. It can only cause a trip: it never clears, masks or blinds one, a real guard firing the same tick keeps the reason, it is refused while already tripped or updating, limited to one per 10 s, and the resulting trip cannot be cleared before `trip_verify_s` has passed with K4 reported open. `CLEAR_TRIP` is bound to the Pico boot_id (F6): see ARCHITECTURE section 9.
 
 **Clearing requires a deliberate operator act**: `SAFETY_CMD_CLEAR_TRIP` (0x0A)
 over the link. **Correction, 2026-08-27 audit:** an earlier version of this

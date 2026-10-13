@@ -1,4 +1,4 @@
-# check_boot_guard_reset_reachability.ps1 -- RELEASE_HARDENING_PLAN.md
+# check_boot_guard_reset_reachability.ps1 -- RELEASE_HARDENING.md
 # section 6 / docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md.
 #
 # boot_guard_reset_counter() is a deliberate, externally-triggered clear of

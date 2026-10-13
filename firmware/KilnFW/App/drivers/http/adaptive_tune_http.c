@@ -157,14 +157,20 @@ static esp_err_t enable_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone and enabled fields required");
         return ESP_OK;
     }
-    int zone = atoi(zone_val);
-    bool enabled = (atoi(en_val) != 0);
+    long zone_l = -1;
+    if (!http_form_parse_long(zone_val, zone_len, 0, MAX31856_CHANNEL_COUNT - 1, &zone_l) ||
+        !http_form_is_bool01(en_val, en_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range or enabled not 0/1");
+        return ESP_OK;
+    }
+    int zone = (int)zone_l;
+    bool enabled = (en_val[0] == '1');
     if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
         return ESP_OK;
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): this is the operator's own external toggle of
      * adaptive tune (zones_config_set_adaptive_tune_enabled(), reached via
      * adaptive_tune_set_enabled() below) -- refuse it while a firing or
@@ -228,13 +234,18 @@ static esp_err_t revert_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone field required");
         return ESP_OK;
     }
-    int zone = atoi(zone_val);
+    long zone_l = -1;
+    if (!http_form_parse_long(zone_val, zone_len, 0, MAX31856_CHANNEL_COUNT - 1, &zone_l)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
+        return ESP_OK;
+    }
+    int zone = (int)zone_l;
     if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
         return ESP_OK;
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): revert is a live zones_config write
      * (adaptive_tune_revert() -> zones_config_set_*(), per this handler's own
      * header comment) -- refuse it while a firing or autotune run is active,
@@ -256,6 +267,10 @@ static esp_err_t revert_post_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     if (r == ADAPTIVE_TUNE_REVERT_OK) {
         return httpd_resp_sendstr(req, "{\"ok\":true}");
+    }
+    if (r == ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE) {
+        // F3: a run claimed heat after the entry gate; same 409 refusal as the gate above.
+        return system_mode_gate_http_send_refusal(req, reason);
     }
     char resp[192];
     snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", reason);

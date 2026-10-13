@@ -430,7 +430,7 @@ is a bench visit to every board.
       block, with `watchdog_task_checkin()` immediately before AND after each
       block (never during — nothing can run during the erase itself).
 - [x] **Slot-linkage plausibility checked before the metadata flip** (2026-09-20,
-      owner decision, `docs/PICO_AUTO_UPDATE_PLAN.md`) — `jump_to_app()`
+      owner decision, `docs/PICO_AUTO_UPDATE.md`) — `jump_to_app()`
       (`bootloader/main.c`) trusts the active slot's vector table
       unconditionally (loads SP/reset vector from that slot's own flash and
       jumps, no plausibility check), and CRC verification alone cannot catch

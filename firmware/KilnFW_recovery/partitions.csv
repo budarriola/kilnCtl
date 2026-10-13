@@ -2,7 +2,7 @@
 # real board. On hardware this image is written raw, by flash_firmware(),
 # into the `recovery` row of firmware/KilnFW/partitions.csv (offset
 # 0xA10000, size 0x1E0000, subtype factory) -- see
-# docs/OTA_SINGLE_SLOT_PLAN.md section 1/7. ESP-IDF resolves esp_ota_ops
+# docs/OTA_SINGLE_SLOT.md section 1/7. ESP-IDF resolves esp_ota_ops
 # partition lookups against whatever table is actually written to flash at
 # runtime, not against the table this project happened to build with, so
 # this file only has to be internally consistent for THIS project's own

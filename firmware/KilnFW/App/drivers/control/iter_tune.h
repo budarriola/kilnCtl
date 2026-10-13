@@ -1,5 +1,5 @@
 #pragma once
-// iter_tune.h -- ITER_TUNE_REDESIGN_PLAN.md step 5: the redesigned
+// iter_tune.h -- ITER_TUNE_REDESIGN.md step 5: the redesigned
 // iterative-tuning decision core.
 //
 // WHAT CHANGED, AND WHY THE OLD CORE IS GONE RATHER THAN KEPT ALONGSIDE.

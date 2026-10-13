@@ -683,7 +683,7 @@ def judge_nav_menu(nav_js_text: Optional[str], href_count: Optional[int], expect
     "auto-expands the current group" half of the case.
 
     ``expected_count`` bumped 15 -> 16 2026-09-21: `e3de6122`
-    (LIVE_PROFILE_EDIT_PLAN.md) added `/live_profile` ("Edit running
+    (LIVE_PROFILE_EDIT.md) added `/live_profile` ("Edit running
     firing") to nav.js's menu after this case's 15 was set, which turned it
     red against a healthy, correctly-updated board -- same "count went
     stale the moment new content landed" class WEB-X-03's own docstring
@@ -1788,7 +1788,10 @@ def judge_pause_resume(paused_state: str, duties_while_paused: "list[float]", fi
     return CaseResult(Verdict.PASS, observed={"paused_state": paused_state, "final_state": final_state})
 
 
-def judge_stop(state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool) -> CaseResult:
+def judge_stop(
+    state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool, ack_reason: str = "",
+    card_clear: Optional[bool] = None,
+) -> CaseResult:
     """HP-05: stop leaves RUNNING, zeroes duties and relays, and the last-run
     card can be acknowledged."""
     if state_after_stop == "running":
@@ -1801,9 +1804,34 @@ def judge_stop(state_after_stop: str, duties: "list[float]", relays: "list[bool]
         return CaseResult(
             Verdict.FAIL, reason="a relay is still commanded on after stop", observed={"relays": relays}
         )
-    if not acked:
+    # run_state_acknowledge() only acknowledges the BOOT record (a previous
+    # boot's firing). A firing started and stopped within this boot leaves no
+    # such record, so the firmware answers "no previous-run record to
+    # acknowledge": the card is already clear, which is the outcome HP-05
+    # wants. Any other refusal is a real failure.
+    # The refusal text is identical for "no boot record" and "already
+    # acknowledged", so it proves nothing alone: `card_clear` is the read-back
+    # of GET /api/profile_exec `last_run.present` == false after the ack, and
+    # the "already clear" acceptance needs it. This catches a stale or
+    # unacknowledged record only: a run_state lock failure also reports
+    # present:false (run_state_get_boot_record() returns false when
+    # ensure_lock() fails), so HP-05 cannot detect that case.
+    already_clear = (not acked) and "no previous-run record" in (ack_reason or "")
+    if already_clear and card_clear is None:
         return CaseResult(
-            Verdict.FAIL, reason="profiles_ack_last_run() did not clear the last-run card", observed={"acked": acked}
+            Verdict.INCONCLUSIVE,
+            reason="ack refused with 'no previous-run record' but the last-run card could not be read back",
+            observed={"acked": acked, "ack_reason": ack_reason},
+        )
+    if already_clear and card_clear is False:
+        return CaseResult(
+            Verdict.FAIL, reason="ack refused 'no previous-run record' yet GET /api/profile_exec still shows a last_run card",
+            observed={"acked": acked, "ack_reason": ack_reason, "card_clear": card_clear},
+        )
+    if not acked and not already_clear:
+        return CaseResult(
+            Verdict.FAIL, reason="profiles_ack_last_run() did not clear the last-run card",
+            observed={"acked": acked, "ack_reason": ack_reason},
         )
     return CaseResult(Verdict.PASS, observed={"state": state_after_stop, "duties": duties, "relays": relays})
 
@@ -2125,7 +2153,7 @@ def judge_ota_self_push_refused(
 ) -> CaseResult:
     """OT-E01: the APPLICATION image runs from the only OTA slot, so
     POST /api/ota/esp must be refused (single-slot design,
-    docs/OTA_SINGLE_SLOT_PLAN.md). `refusal_form` is what the client saw:
+    docs/OTA_SINGLE_SLOT.md). `refusal_form` is what the client saw:
 
       http_409          -- HTTP 409 observed (the normal form); status_code
                            must be 409; elapsed_s is informational below a 120 s ceiling.

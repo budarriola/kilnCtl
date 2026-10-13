@@ -1,5 +1,5 @@
 // cfg_fs -- foundation storage module for the `cfg` LittleFS partition
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 3/5, step 1-2). Provides
+// (docs/FILESYSTEM_USER_DATA.md section 3/5, step 1-2). Provides
 // mount/unmount, read-to-buffer, atomic write, delete, exists, and list --
 // the primitives every later user-data migration step (zones, profiles,
 // kiln-config slots, prefs, ...) builds on. This file does NOT itself move
@@ -13,7 +13,7 @@
 // routing writes through the flash worker -- lives in cfg_fs_mount.c/.h,
 // which this file's tests never link.
 //
-// MOUNT POLICY (docs/FILESYSTEM_USER_DATA_PLAN.md "mount-failure contract",
+// MOUNT POLICY (docs/FILESYSTEM_USER_DATA.md "mount-failure contract",
 // non-negotiable, mirrors log_store's "degrade, don't wedge" discipline but
 // with the OPPOSITE format-on-failure choice):
 //   - format_if_mount_failed = FALSE on the device side (cfg_fs_mount.c).
@@ -29,7 +29,7 @@
 //     for boot_guard_is_recovery_mode(); the device glue in cfg_fs_mount.c
 //     is the only place that reads the real boot_guard state).
 //
-// ATOMICITY (docs/FILESYSTEM_USER_DATA_PLAN.md section 3, "one helper, no
+// ATOMICITY (docs/FILESYSTEM_USER_DATA.md section 3, "one helper, no
 // exceptions"): cfg_fs_write_atomic() writes to `<base>/.tmp/<name>`, fsyncs
 // it, then renames it onto the final path. An interrupted write leaves
 // either the old file (rename never happened) or the new one (rename
@@ -145,6 +145,31 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists);
  * (nothing is copied into `buf` in that case -- no silent truncation). */
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len);
 
+/* Test-only fault injection: the next `count` cfg_fs_read() calls whose rel_path equals `rel_path`
+ * (NULL = any path) return `err` instead of reading. count 0 clears it. Lets host tests produce a
+ * transient I/O error (ESP_FAIL), which a real temp directory cannot. No on-device caller. */
+/* persfx MED-1: stores whose saved state could not be decided this boot (cfg file unreadable / zones undecided).
+ * Their saves are refused until reboot; this registry makes that visible (GET /api/cfgfs "degraded", and the
+ * HTTP save refusal answers 409 instead of a generic 500). `name` is copied (<= 47 chars). Thread-safe. */
+void cfg_fs_degraded_set(const char *name, bool degraded);
+int cfg_fs_degraded_count(void);
+/* Copies the idx-th degraded name (0-based) into out; false when idx >= count. */
+bool cfg_fs_degraded_name(int idx, char *out, size_t cap);
+/* persfx3 MED-2: true iff `name` itself is registered degraded (per-store decision for the HTTP 409). */
+bool cfg_fs_degraded_is(const char *name);
+void cfg_fs_degraded_clear_for_test(void);
+/* FIRELOWFX3 LOW-5: runtime conditions that are NOT a boot-unreadable store (no save is refused by them, they can be
+ * set at any time and clear on a later success): listed in GET /api/cfgfs "conditions" only, never in "degraded"
+ * and never in the backup stale_or_unknown_stores list. Thread-safe; at most 8 names. */
+void cfg_fs_condition_set(const char *name, bool active);
+int cfg_fs_condition_count(void);
+bool cfg_fs_condition_name(int idx, char *out, size_t cap);
+bool cfg_fs_condition_is(const char *name);
+
+#ifndef ESP_PLATFORM /* host builds only */
+void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int count);
+#endif
+
 /* Atomic write: `<base>/.tmp/<flattened rel_path>` written+fsynced, then
  * renamed onto `<base>/<rel_path>`. On any failure before the rename, the
  * temp file is removed and the ORIGINAL file at `rel_path` (if any) is left
@@ -164,6 +189,11 @@ esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_l
  * persist" and falls back / logs a warning, so this needed no caller-side
  * changes to take effect. */
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len);
+
+/* Factory-reset writer fence: while the predicate returns true, cfg_fs_write_atomic() returns
+ * ESP_ERR_INVALID_STATE without touching the filesystem. main.c installs
+ * relay_authority_reset_refuses_writer(); NULL (host, recovery image) refuses nothing. */
+void cfg_fs_set_write_refuse_hook(bool (*fn)(void));
 
 esp_err_t cfg_fs_delete(const char *rel_path);
 

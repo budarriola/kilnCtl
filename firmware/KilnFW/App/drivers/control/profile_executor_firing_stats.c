@@ -24,14 +24,14 @@
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
 #include "nvs_key_check.h"
 #include "zones_config_accessors.h" /* zone_is_on_off() -- on/off zones have no target_c and no
-                                      * meaningful IAE; skip them here, see ON_OFF_ZONE_PLAN.md
+                                      * meaningful IAE; skip them here, see ON_OFF_ZONE.md
                                       * sec 1 "Firing stats / IAE" row */
-#include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA.md
                                      section 5 item 7 */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- firing_stats_get_dualwrite_status() below */
 #include "profiles_builtin.h" /* g_builtin_profile_count/PROFILE_BUILTIN_ID_BASE -- last-run cache sizing/indexing */
 #include <assert.h>
-#include "firing_shadow.h" /* ITER_TUNE_REDESIGN_PLAN.md step 8, "shadow mode" -- scores every
+#include "firing_shadow.h" /* ITER_TUNE_REDESIGN.md step 8, "shadow mode" -- scores every
                              * firing and writes only its own compact verdict-summary NVS
                              * namespace; never writes a gain, never calls iter_tune_*. */
 
@@ -104,7 +104,7 @@ void firing_stats_zone_tick(zone_runtime_t *z, float target_c, bool dwelling, ui
 {
     z->fs_duration_s += (uint32_t)(dt_s + 0.5f);
 
-    /* Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): fed every tick of
+    /* Shadow mode (ITER_TUNE_REDESIGN.md step 8): fed every tick of
      * every zone, valid or not -- firing_shadow_zone_tick() itself skips an
      * invalid sample, same exclusion rule as this function's own
      * fs_excluded_sample_count path just below. zone_index is recovered
@@ -445,7 +445,7 @@ static void firing_stats_build_record(profile_firing_run_record_t *rec)
         // An on/off zone has no target_c, no PID and no meaningful IAE --
         // report it as inactive here so no thermal-model statistic is ever
         // derived from it downstream (adaptive_tune, comparators). See
-        // ON_OFF_ZONE_PLAN.md sec 1 "Firing stats / IAE" row.
+        // ON_OFF_ZONE.md sec 1 "Firing stats / IAE" row.
         zr->active = z->active && !zone_is_on_off(zi) && !z->monitor_only;
         if (!zr->active) continue;
         firing_stats_snapshot(z, span, &zr->stats);
@@ -549,7 +549,7 @@ static bool nvs_only_load(uint8_t profile_id, profile_firing_history_blob_t *out
     return false;
 }
 
-/* cfg-filesystem read-through wrapper (docs/FILESYSTEM_USER_DATA_PLAN.md
+/* cfg-filesystem read-through wrapper (docs/FILESYSTEM_USER_DATA.md
  * section 5 item 7, "firing stats / history") -- public entry point,
  * unchanged signature/contract (requirement 2: existing callers keep
  * working unchanged). Loads the NVS side exactly as before via
@@ -604,7 +604,7 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
 
 /* GET /api/cfgfs dual-write picture for the firing_stats_cfg_fs.c bridge --
  * 2026-09-08, moving this item's reporting out of cfg_fs_status.c's stale
- * "nvs_only" hardcoded list (docs/FILESYSTEM_USER_DATA_PLAN.md item 7,
+ * "nvs_only" hardcoded list (docs/FILESYSTEM_USER_DATA.md item 7,
  * landed in 762bb29e). This bridge is keyed per PROFILE ID, unlike every
  * other item this endpoint already reports one row for -- there is no
  * fixed, enumerable set of ids (a profile can be any user slot 0..
@@ -784,7 +784,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
         return;
     }
 
-    /* Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): finishes this firing's
+    /* Shadow mode (ITER_TUNE_REDESIGN.md step 8): finishes this firing's
      * in-progress score set, compares it against the previous finished
      * firing (RAM only), and persists a compact verdict-summary NVS blob of
      * its own -- relies on the caller_stack_is_external() guard just above
@@ -807,7 +807,15 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
                  (unsigned)rec->profile_id, (unsigned)sizeof(*blob));
         return;
     }
-    firing_stats_load(rec->profile_id, blob); /* empty blob on any failure -- still safe to prepend into */
+    /* False means malloc failure or an unreadable/corrupt record (absent is
+     * true + empty). Prepending into the zeroed blob would replace the whole
+     * history ring with one entry (audit L3): skip the write instead. */
+    if (!firing_stats_load(rec->profile_id, blob)) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): existing history unreadable -- this run's history was not saved",
+                 (unsigned)rec->profile_id);
+        free(blob);
+        return;
+    }
 
     uint8_t keep = (blob->count < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH)
                        ? blob->count

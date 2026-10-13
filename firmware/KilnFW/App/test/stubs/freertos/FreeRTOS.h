@@ -34,6 +34,8 @@ typedef unsigned int UBaseType_t;
  * encodes) -- never actually reached with a non-zero xTaskGetTickCount()
  * by any host test (that stub always returns 0), so the value only matters
  * for the code to compile. */
+#ifndef portTICK_PERIOD_MS /* REBOOTFX5 LOW-1: a test build may -D this (e.g. 10u) to tell ticks from ms */
 #define portTICK_PERIOD_MS 1u
+#endif
 
 #endif // TEST_STUB_FREERTOS_H

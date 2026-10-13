@@ -1,6 +1,6 @@
 // ui_page_edit_firing -- LCD page for editing the CURRENTLY RUNNING/PAUSED
 // firing, the LCD equivalent of the web's /live_profile page
-// (docs/LIVE_PROFILE_EDIT_PLAN.md) and its "Edit firing" button (d484e51a).
+// (docs/LIVE_PROFILE_EDIT.md) and its "Edit firing" button (d484e51a).
 //
 // Owner request 2026-09-28: "Can you make a simple screen for the lcd that
 // also allows modifying the current firing like the web does." This is

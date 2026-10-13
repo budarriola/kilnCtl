@@ -4,7 +4,7 @@
 // off a socket) and net/pico_auto_update_boot.c's embedded-image writer
 // (the whole image already sits in flash-mapped .rodata, no streaming
 // needed). Factored out so the erase-then-write-then-verified-manifest
-// sequence exists in exactly one place, per docs/PICO_AUTO_UPDATE_PLAN.md's
+// sequence exists in exactly one place, per docs/PICO_AUTO_UPDATE.md's
 // task 3 instruction not to duplicate it.
 //
 // CONTRACT, mirrored from ota_http_pico.c's prior in-line version:
@@ -47,6 +47,8 @@ typedef struct {
     uint32_t crc;
     size_t   written;
     size_t   total_len;
+    size_t   erase_len; /* bytes to erase; the erase is deferred to the first write_chunk (audit L26) */
+    bool     erased;
 } pico_img_stage_ctx_t;
 
 /* Review finding D5: pico_img_stage_begin()'s distinct failure shapes, for a

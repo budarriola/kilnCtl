@@ -211,9 +211,12 @@ uint32_t safety_elapsed_ms(TickType_t since)
 {
     /* Unsigned tick subtraction, so the 32-bit tick counter's eventual wrap
      * (~497 days at the default 100 Hz) produces the right delta rather than
-     * a nonsense one. */
+     * a nonsense one. The millisecond product is computed in 64 bit and
+     * saturates: 2^32 ms is only 49.7 days, so a 32-bit multiply would wrap
+     * (SAFETYFX10 MED-1) and make a very old age read as a fresh one. */
     TickType_t delta = xTaskGetTickCount() - since;
-    return (uint32_t)delta * portTICK_PERIOD_MS;
+    uint64_t ms = (uint64_t)delta * (uint64_t)portTICK_PERIOD_MS;
+    return ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
 }
 
 /* See safety_link.h's doc comment on safety_link_await_poll_fn/
@@ -303,10 +306,24 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
     if (!link || !safety_lock(link)) {
         return;
     }
+    /* The clear keys on !safety_link_up_locked() alone. That window scales with poll_period_ms *
+     * SAFETY_LINK_UP_PERIODS BY DESIGN (review LOW-5: a slow poll keeps the boot id through one missed
+     * reply), so the fixed SAFETY_LINK_STALE_MS (1500 ms) bound is deliberately NOT applied here: any
+     * second stale test with a bound derived from the same period was redundant with !up (review 14 LOW-6). */
     if (!safety_link_up_locked(link)) {
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;
+        /* Firing audit 2 MED-1: the DIAG uptime baseline is deliberately KEPT across a link-down. A real
+         * Pico reboot almost always spans a link-down, and the 8-bit boot_id repeats 1 boot in 256, so the
+         * first DIAG after relink must still be able to flag an uptime regression. A long outage in which
+         * the Pico kept running is on schedule against baseline + ESP elapsed time
+         * (safety_pico_uptime_behind_expected(), wrap-safe), so a long outage is not a reboot, while a
+         * reboot whose old boot was older than ~2 s is caught however long the outage. A false positive is
+         * a spurious reboot count (nuisance hold/pause when the last boot cause or DIAG was fatal). */
+        link->reboot_noted_by_uptime = false; /* in doubt, count: a later boot_id change counts again */
+        link->diag_reannounce_count = 0u;
+        link->diag_reannounce_last_ms = 0u;
     }
     safety_unlock(link);
 }
@@ -685,6 +702,39 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
      * out to) until trip_event_ever_received is true. */
     out->trip_event_age_ms =
         out->trip_event_ever_received ? safety_elapsed_ms(link->trip_event_tick) : 0u;
+    out->diag_frame_age_ms = out->diag_ever_received ? (uint32_t)(uart_proto_rx_stamp_ms(xTaskGetTickCount()) - link->diag_tick) : 0u;
+    /* REBOOTFX7 LOW-1: the raw 32-bit ms difference wraps after 2^32 ms (49.7 days) with the link up and no DIAG,
+     * which would read a 49.7-day-old DIAG as fresh. Latch staleness once seen (cleared only by the next DIAG
+     * apply) and never report a fresh age while latched: fail closed. */
+    if (out->diag_ever_received) {
+        if (out->diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS) {
+            link->diag_stale_latched = true;
+        }
+        if (link->diag_stale_latched && out->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS) {
+            out->diag_frame_age_ms = UINT32_MAX;
+        }
+    }
+    safety_unlock(link);
+    return ESP_OK;
+}
+
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
+                                     uint32_t *out_diag_applied)
+{
+    if (!link || !out_ever_received || !out_flags) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    *out_ever_received = link->cached.diag_ever_received;
+    *out_flags = link->cached.diag_flags;
+    if (out_diag_applied) {
+        *out_diag_applied = link->stats.diag_applied;
+    }
     safety_unlock(link);
     return ESP_OK;
 }

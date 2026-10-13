@@ -6,6 +6,9 @@
 #define HTTP_FORM_H
 
 #include <ctype.h>
+#include <errno.h>
+#include <math.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,13 +21,26 @@ extern "C" {
  * application/x-www-form-urlencoded. Returns the decoded length (< out_cap)
  * on success, or -1 if the decoded value would not fit -- the caller must
  * treat that as a rejected request, not a truncated one, since silently
- * truncating e.g. a password is worse than refusing it. */
+ * truncating e.g. a password is worse than refusing it.
+ *
+ * On every -1 path out is left as the empty string (out[0] == '\0' when
+ * out_cap > 0), never an unterminated or truncated prefix. Several callers
+ * test http_form_find_field() != -1 (or >= 0) and then strtol()/strcmp() the
+ * buffer, so a -2 (too long, or %00) must leave nothing there to parse:
+ * "max_simultaneous_relays=00000000" used to strtol past the written bytes,
+ * and terminating the prefix instead would let "1%00" read as "1". */
 static inline int http_form_url_decode(const char *src, size_t src_len, char *out, size_t out_cap)
 {
     size_t o = 0;
+    if (out_cap == 0) {
+        return -1; /* no room even for the NUL: write nothing (F1) */
+    }
     for (size_t i = 0; i < src_len; i++) {
         char c = src[i];
         if (o + 1 >= out_cap) {
+            if (out_cap > 0) {
+                out[0] = '\0';
+            }
             return -1;
         }
         if (c == '+') {
@@ -32,14 +48,80 @@ static inline int http_form_url_decode(const char *src, size_t src_len, char *ou
         } else if (c == '%' && i + 2 < src_len && isxdigit((unsigned char)src[i + 1]) &&
                    isxdigit((unsigned char)src[i + 2])) {
             char hex[3] = { src[i + 1], src[i + 2], '\0' };
-            out[o++] = (char)strtol(hex, NULL, 16);
+            char dec = (char)strtol(hex, NULL, 16);
+            if (dec == '\0') {
+                out[0] = '\0'; /* o + 1 < out_cap here, so out_cap > 0 */
+                return -1; /* %00: embedded NUL would truncate the value silently */
+            }
+            out[o++] = dec;
             i += 2;
+        } else if (c == '%') {
+            /* HTTP fuzz F8f: "%", "%zz", "%0" -- an invalid percent escape is a malformed request, not a literal. */
+            out[0] = '\0'; /* o + 1 < out_cap here, so out_cap > 0 */
+            return -1;
         } else {
             out[o++] = c;
         }
     }
     out[o] = '\0';
     return (int)o;
+}
+
+/* F5 (WEB_UI_XSS_AUDIT_2026-10-09): true when the first len decoded bytes of v hold
+ * a control byte (< 0x20, which includes a %00 NUL) or DEL (0x7f). Name writers
+ * refuse such values with 400 so they cannot be stored and re-emitted. */
+static inline bool http_form_value_has_ctl(const char *v, int len)
+{
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)v[i];
+        if (c < 0x20 || c == 0x7f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Strict integer parse of a decoded form value (v, len == strlen): whole string
+ * consumed, no sign/space garbage, errno clean, within [lo, hi]. */
+static inline bool http_form_parse_long(const char *v, int len, long lo, long hi, long *out)
+{
+    if (!v || len <= 0 || (int)strlen(v) != len || isspace((unsigned char)v[0])) {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    long r = strtol(v, &end, 10);
+    if (end != v + len || errno != 0 || r < lo || r > hi) {
+        return false;
+    }
+    *out = r;
+    return true;
+}
+
+/* True only for exactly "0" or "1". */
+static inline bool http_form_is_bool01(const char *v, int len)
+{
+    return v && len == 1 && (v[0] == '0' || v[0] == '1');
+}
+
+/* Strict finite float parse, same contract as http_form_parse_long. */
+static inline bool http_form_parse_float(const char *v, int len, float *out)
+{
+    if (!v || len <= 0 || (int)strlen(v) != len || isspace((unsigned char)v[0])) {
+        return false;
+    }
+    /* F2: strtof accepts C99 hex floats (0x1p3); parse_long refuses 0x, so do the same. */
+    if (strpbrk(v, "xX") != NULL) {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    float r = strtof(v, &end);
+    if (end != v + len || errno != 0 || !isfinite(r)) {
+        return false;
+    }
+    *out = r;
+    return true;
 }
 
 /* Finds "key=" as a whole &-delimited field in body and decodes its value

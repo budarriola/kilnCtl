@@ -45,7 +45,7 @@ extern bool profiles_validate_candidate(const profile_t *candidate, int mode, ch
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
-#include "dualwrite_window.h" /* FILESYSTEM_PLAN.md dual-write window: note a completed firing
+#include "dualwrite_window.h" /* FILESYSTEM.md dual-write window: note a completed firing
                                 * that ran with cfg_fs live, toward the "one complete firing run
                                 * file-backed" exit criterion -- see the two call sites below */
 #include "cfg_fs.h" /* cfg_fs_is_available() -- gates the note above on the filesystem
@@ -410,7 +410,7 @@ static bool live_pickup_validate_hard(void *ctx, const profile_t *candidate, cha
     return profiles_validate_candidate(candidate, (int)PROFILE_VALIDATE_HARD_LOCAL, NULL, 0, err_msg, err_cap);
 }
 
-/* docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section 3/7: same one-counter-per-
+/* docs/LIVE_PROFILE_EDIT.md pass 1, section 3/7: same one-counter-per-
  * tick poll shape as reload_config_if_changed() just above, called
  * immediately alongside it for the same "every edit lands at one known
  * point in the tick" reason. Only RUNNING adopts a swap (plan section 3) --
@@ -685,6 +685,19 @@ static void profile_executor_account_relay_starvation(zone_runtime_t *z, float d
 
 /* ---- control task ----------------------------------------------------------- */
 
+/* Accumulate one tick's measured dt into a whole-second counter without
+ * per-tick rounding loss: the sub-second remainder carries in *rem_ms
+ * (firing review 2026-10-09 item 3; the old (uint32_t)(dt_s + 0.5f) per tick
+ * let a 0.4 s tick add 0 and a 0.6 s tick add 1, drifting elapsed time and so
+ * dwell/rule timing). NaN/negative/absurd dt adds nothing. */
+static void exec_elapsed_accumulate(uint32_t *seconds, uint16_t *rem_ms, float dt_s)
+{
+    if (!(dt_s > 0.0f) || dt_s > 3600.0f) return;
+    uint32_t ms = (uint32_t)(dt_s * 1000.0f + 0.5f) + (uint32_t)*rem_ms;
+    *seconds += ms / 1000u;
+    *rem_ms = (uint16_t)(ms % 1000u);
+}
+
 void executor_task_entry(void *arg)
 {
     (void)arg;
@@ -728,13 +741,19 @@ void executor_task_entry(void *arg)
         if (s_exec.safety) {
             safety_link_status_t pre_st;
             if (safety_link_get_status(s_exec.safety, &pre_st) == ESP_OK) {
-                pre_lock_pico_tripped = pre_st.diag_ever_received &&
-                                        !safety_link_is_stale(pre_st.age_ms, SAFETY_LINK_STALE_MS) &&
-                                        pre_st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+                pre_lock_pico_tripped = relay_authority_pico_tripped(&pre_st);
             }
         }
 
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+        /* F5HOLDERFX4 LOW-2: re-sample after the (unbounded) lock wait and OR it in, so a trip that landed while
+         * waiting is seen by aux_fault_drop, io_seg_start_pico and aux_tick_pico this tick. */
+        if (s_exec.safety) {
+            safety_link_status_t post_st;
+            if (safety_link_get_status(s_exec.safety, &post_st) == ESP_OK) {
+                pre_lock_pico_tripped = pre_lock_pico_tripped || relay_authority_pico_tripped(&post_st);
+            }
+        }
         TickType_t now = xTaskGetTickCount();
         s_exec.last_tick_tick = now; /* guard 9 -- updated every iteration regardless of run state */
 
@@ -751,6 +770,7 @@ void executor_task_entry(void *arg)
              * Never while PAUSED (a pause holds aux at its last state while no fault is asserted -- see profile_executor_aux_fault_drop()) and a
              * no-op once the write has landed, so it cannot fight a later
              * manual toggle. */
+            zone_off_pending_retry();
             if (s_exec.aux_off_pending && s_exec.state != PROFILE_EXEC_PAUSED) {
                 force_aux_relays_off();
             }
@@ -827,12 +847,15 @@ void executor_task_entry(void *arg)
          * remaining_s estimate quietly falls behind), only excluded while
          * PAUSED, since this whole block is skipped then. See
          * profile_exec_status_t.total_elapsed_s. */
-        s_exec.total_elapsed_s += (uint32_t)(dt_s + 0.5f);
+        exec_elapsed_accumulate(&s_exec.total_elapsed_s, &s_exec.total_elapsed_rem_ms, dt_s);
 
         /* TODO relay/IO segments: tick every active NON-BLOCKING segment's
          * own hold timer, independent of whichever ramp/dwell segment is
          * current below -- see io_segs_tick()'s doc comment. */
         io_segs_tick(dt_s);
+
+        /* Review-2 MEDIUM-1: retry pending OFF bits for relays this run does not own. */
+        zone_off_pending_retry_running(now);
 
         /* --- Read every physical channel (raw), then combine per zone
          * (TODO.md 10.8) into that zone's control temperature ------------
@@ -850,7 +873,7 @@ void executor_task_entry(void *arg)
         const float *ch_raw_c = pre_lock_snap.raw_c;
         const bool *ch_sensor_ok = pre_lock_snap.ok;
         float raw_c[MAX31856_CHANNEL_COUNT];    /* per ZONE: this zone's combined raw reading */
-        bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE_PLAN.md sec 1 --
+        bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE.md sec 1 --
                                                     * snapshotted once per tick, same "one consistent
                                                     * picture" reasoning as raw_c/sensor_ok, and handed to
                                                     * thermal_guard_tick() both as this zone's own
@@ -922,7 +945,7 @@ void executor_task_entry(void *arg)
         uint8_t lagging = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
-            /* docs/ON_OFF_ZONE_PLAN.md sec 1: an on/off zone has no actual_c
+            /* docs/ON_OFF_ZONE.md sec 1: an on/off zone has no actual_c
              * obligation to a shared setpoint -- leaving it in this loop
              * would let a zone sitting at ambient (or with no thermocouple
              * at all) freeze the whole firing's ramp forever. Hard
@@ -1029,7 +1052,7 @@ void executor_task_entry(void *arg)
              * dwelling/segment_elapsed_s (the ZONE_RAMP machine's own state)
              * are deliberately left untouched here. */
             if (!s_exec.io_segs[s_exec.segment_index].active) {
-                io_seg_start(s_exec.segment_index, seg); /* first tick this segment is current */
+                io_seg_start_pico(s_exec.segment_index, seg, pre_lock_pico_tripped); /* first tick this segment is current */
             }
             bool ready_to_advance;
             if (seg->io_blocking) {
@@ -1041,7 +1064,7 @@ void executor_task_entry(void *arg)
                  * ZONE_RAMP dwell does) rather than the per-segment
                  * remaining_s a non-blocking segment uses, since a blocking
                  * segment's timer IS the schedule's timer. */
-                s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+                exec_elapsed_accumulate(&s_exec.segment_elapsed_s, &s_exec.segment_elapsed_rem_ms, dt_s);
                 ready_to_advance = s_exec.segment_elapsed_s >= seg->dwell_min * 60u;
             } else {
                 /* "Runs WITH the next segment": advance on the very same tick
@@ -1061,6 +1084,7 @@ void executor_task_entry(void *arg)
                 }
                 s_exec.segment_index++;
                 s_exec.segment_elapsed_s = 0;
+                s_exec.segment_elapsed_rem_ms = 0;
                 segment_changed = true;
                 if (s_exec.segment_index >= s_exec.profile.segment_count) {
                     exec_enter_terminal_state(PROFILE_EXEC_DONE);
@@ -1075,7 +1099,7 @@ void executor_task_entry(void *arg)
                     xSemaphoreGive(s_exec.lock);
                     run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
                     if (cfg_fs_is_available()) {
-                        /* FILESYSTEM_PLAN.md dual-write window: this run reached a genuine
+                        /* FILESYSTEM.md dual-write window: this run reached a genuine
                          * completion with cfg_fs live -- counts toward the exit criterion's
                          * "one complete firing run file-backed" leg. Sticky/idempotent. */
                         dualwrite_window_note_firing_complete();
@@ -1085,7 +1109,7 @@ void executor_task_entry(void *arg)
                 seg = &s_exec.profile.segments[s_exec.segment_index];
             }
         } else if (lock_ok || stretched_this_tick) {
-            s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+            exec_elapsed_accumulate(&s_exec.segment_elapsed_s, &s_exec.segment_elapsed_rem_ms, dt_s);
             if (!s_exec.dwelling) {
                 float new_target;
                 if (seg->ramp_c_per_hr <= 0.0f) {
@@ -1120,6 +1144,7 @@ void executor_task_entry(void *arg)
                 if (s_exec.target_c == seg->target_c) {
                     s_exec.dwelling = true;
                     s_exec.segment_elapsed_s = 0;
+                s_exec.segment_elapsed_rem_ms = 0;
                     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit spend, at
                      * the single point this shared schedule actually enters
                      * a dwell. Resets every active zone's banked dwell_
@@ -1204,7 +1229,7 @@ void executor_task_entry(void *arg)
                         xSemaphoreGive(s_exec.lock);
                         run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
                         if (cfg_fs_is_available()) {
-                            /* FILESYSTEM_PLAN.md dual-write window: this run reached a genuine
+                            /* FILESYSTEM.md dual-write window: this run reached a genuine
                              * completion with cfg_fs live -- counts toward the exit criterion's
                              * "one complete firing run file-backed" leg. Sticky/idempotent. */
                             dualwrite_window_note_firing_complete();
@@ -1213,6 +1238,7 @@ void executor_task_entry(void *arg)
                     }
                     s_exec.dwelling = false;
                     s_exec.segment_elapsed_s = 0;
+                s_exec.segment_elapsed_rem_ms = 0;
                     seg = &s_exec.profile.segments[s_exec.segment_index];
                     /* target_c stays where it is -- that's the new segment's ramp start. */
                     /* A segment boundary is the transition that most changes
@@ -1405,7 +1431,7 @@ void executor_task_entry(void *arg)
                  * decision path further down (apply_relay() is never called
                  * for an on/off zone from the heater apply loop), so the
                  * dashboard showed a zone calling for full heat that could
-                 * never heat, with nothing else set. docs/ON_OFF_ZONE_PLAN.md
+                 * never heat, with nothing else set. docs/ON_OFF_ZONE.md
                  * sec 3: an on/off zone's relay follows its rules and the
                  * failsafe, never a PID output. Report duty 0 and leave
                  * heater_state alone; the on/off path keeps its own
@@ -1531,7 +1557,7 @@ void executor_task_entry(void *arg)
 
         /* --- Apply relays + guards, per active zone -------------------------- */
         bool run_faulted_this_tick = false;
-        /* docs/ON_OFF_ZONE_PLAN.md sec 6: an on/off zone counts toward
+        /* docs/ON_OFF_ZONE.md sec 6: an on/off zone counts toward
          * max_simultaneous_relays (a contactor coil draws the same current
          * whatever it switches) but is suppressed LAST -- only after every
          * heater has already been considered by the pass-1 load-cap loop
@@ -1564,12 +1590,18 @@ void executor_task_entry(void *arg)
              * known) and applied there instead. Heater zones are
              * unaffected: this call and its position are bit-identical to
              * before this feature existed. */
-            if (!zone_on_off[zi] && !z->monitor_only) {
-                apply_relay(zi, want_relay_on[zi]);
-                if (z->heat_blocked) {
-                    z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
-                }
-                profile_executor_account_relay_starvation(z, dt_s);
+            /* Firing review 2026-10-09 item 2: a heater zone's relay is
+             * written AFTER this tick's thermal_guard_tick(), so a tripping
+             * reading never produces an ON write followed by the guard's OFF.
+             * The guards only need to know whether heat is authority-blocked
+             * this tick, a pure query that apply_relay() repeats for its own
+             * gate (and uses for its edge logging, so z->heat_blocked itself
+             * is still written only there). */
+            bool heater_zone_applies_relay = !zone_on_off[zi] && !z->monitor_only;
+            bool heat_blocked_for_guards = z->heat_blocked;
+            if (heater_zone_applies_relay) {
+                uint32_t blocked_sources_pre = 0;
+                heat_blocked_for_guards = relay_authority_zone_blocked(s_exec.safety, zi, &blocked_sources_pre);
             }
 
             /* Guards 1/2/3/7 all gate their multi-tick accumulation windows
@@ -1652,7 +1684,7 @@ void executor_task_entry(void *arg)
              * corrected note on relay_authority_zone_blocked() not feeding
              * back into that file's duty -- see that file's comment; that
              * file's guard wiring is unchanged by this pass.) */
-            float commanded_duty_for_guards = profile_executor_guard_commanded_duty(z->heat_blocked, z->duty);
+            float commanded_duty_for_guards = profile_executor_guard_commanded_duty(heat_blocked_for_guards, z->duty);
 
             /* Guard 1's "climbing" rise requirement (thermal_guard.c: delta
              * >= rate_cfg * elapsed_min whenever error > progress_band_c) is
@@ -1750,7 +1782,7 @@ void executor_task_entry(void *arg)
                 .peer_ok = sensor_ok,
                 .peer_count = MAX31856_CHANNEL_COUNT,
                 .peer_index_self = zi,
-                /* docs/ON_OFF_ZONE_PLAN.md sec 1: guards 1/2/3/4/9 disabled
+                /* docs/ON_OFF_ZONE.md sec 1: guards 1/2/3/4/9 disabled
                  * for an on/off zone (thermal_guard.c gates each block on
                  * this), guards 5/6/7/8 unaffected. peer_is_on_off excludes
                  * every on/off zone from the OTHER side of guard 9 too, for
@@ -1764,7 +1796,15 @@ void executor_task_entry(void *arg)
                 }
             }
 
-            /* docs/ON_OFF_ZONE_PLAN.md sec 3/4/6/8 -- WIRED. Computes this
+            if (heater_zone_applies_relay && !z->faulted && !run_faulted_this_tick) {
+                apply_relay(zi, want_relay_on[zi]);
+                if (z->heat_blocked) {
+                    z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
+                }
+                profile_executor_account_relay_starvation(z, dt_s);
+            }
+
+            /* docs/ON_OFF_ZONE.md sec 3/4/6/8 -- WIRED. Computes this
              * tick's verdict for an on/off zone through the pure on_off_
              * trigger_decide() core, gates it through the actuation-layer
              * min_on_s/min_off_s hold (profile_executor_on_off_actuation_
@@ -1950,11 +1990,11 @@ void executor_task_entry(void *arg)
          * actually left. Skipped if this tick already ended the run -- the
          * terminal transition has turned every aux OFF. */
         if (s_exec.state == PROFILE_EXEC_RUNNING) {
-            profile_executor_aux_tick(dt_s, stretched_this_tick, relays_on_count, on_off_cap);
+            profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, on_off_cap, pre_lock_pico_tripped);
         }
 
         /* --- Unowned-relay sweep (TODO.md 6A.7) -----------------------------
-         * Last thing in the tick that touches copper, deliberately: it must
+         * Last of the tick's relay-OFF work, deliberately (only the gated ON retry below runs after it): it must
          * judge the relay state this tick actually left behind, including a
          * guard trip's force-off above that reported an error. Running it
          * before the apply pass would have it clearing contacts the same tick
@@ -1964,10 +2004,6 @@ void executor_task_entry(void *arg)
          * executor has no business second-guessing a relay an operator turned
          * on manually after a firing ended. */
         sweep_unowned_relays();
-
-        /* Rate-limited internally (at most one NVS write per 10 min, and only
-         * if something changed) -- see relay_cycles.h's flash-wear note. */
-        relay_cycles_maybe_persist();
 
         /* --- History sample (TODO.md section 0 / 6A.9), ALL active zones,
          * one per 30s (2026-09-01: was a single representative zone -- see
@@ -2011,10 +2047,8 @@ void executor_task_entry(void *arg)
         }
 
         /* --- Reboot breadcrumb (TODO.md 6A.3) -------------------------------
-         * Captured under the lock, written outside it. relay_cycles_maybe_
-         * persist() above already does its NVS write with the lock held, so
-         * the precedent for "a flash write inside the tick" exists -- but
-         * this one is easy to keep outside, and the lock also serves
+         * Captured under the lock, written outside it, same as the
+         * relay_cycles persist below: the lock also serves
          * profile_executor_get_status(), which the dashboard polls every 2 s.
          * There is no reason to make a status request wait behind an erase. */
         /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_
@@ -2047,10 +2081,42 @@ void executor_task_entry(void *arg)
                                     * exec_handle_mode_state_violation() on ESP_PLATFORM */
         }
 
+        /* F5HOLDERFX2 LOW-1: retry gate-dropped relay ONs last -- after segment stepping, the zone loop, the
+         * thermal guards, the aux tick and the mode-state check -- so a guard trip this tick never
+         * has an ON write after it. Still gated on RUNNING (a trip/abort already forced everything off). */
+        if (s_exec.state == PROFILE_EXEC_RUNNING && !run_faulted_this_tick) {
+            /* F5HOLDERFX3 LOW-2: re-sample the Pico state under the lock, right before the write. */
+            bool retry_pico_tripped = pre_lock_pico_tripped;
+            if (s_exec.safety) {
+                safety_link_status_t retry_st;
+                if (safety_link_get_status(s_exec.safety, &retry_st) == ESP_OK) {
+                    retry_pico_tripped = retry_pico_tripped || relay_authority_pico_tripped(&retry_st);
+                }
+            }
+            io_segs_retry_on(retry_pico_tripped);
+        }
+
         run_snapshot_buf_t tick_snap;
         capture_run_snapshot(&tick_snap);
         bool faulted_now = run_faulted_this_tick;
         xSemaphoreGive(s_exec.lock);
+
+        /* Rate-limited internally (at most one NVS write per 10 min, and only
+         * if something changed) -- see relay_cycles.h's flash-wear note.
+         *
+         * Called AFTER s_exec.lock is released, never under it: a due
+         * persist dispatches to the flash worker (persist_snapshot_now() ->
+         * uart_bridge_ext_run_on_flash_worker(), which takes s_bx_lock and
+         * waits for the worker). Holding s_exec.lock across that wait
+         * deadlocked against any worker job that itself takes s_exec.lock --
+         * PROFILES DELETE's profile_executor_get_active_id() on the worker, or
+         * a save section holding the worker reservation (cfg_save_lock.h) that
+         * reads the executor. Lock order is s_bx_lock -> s_exec.lock; see
+         * docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, "Save mutex vs. flash
+         * worker". Nothing here reads executor state, so the move changes only
+         * which lock the persist runs under.
+         * Also docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md F1. */
+        relay_cycles_maybe_persist();
 
         if (faulted_now) {
             /* Ended badly, but ENDED -- the distinction the operator needs is
@@ -2070,6 +2136,151 @@ void executor_task_entry(void *arg)
 }
 
 /* ---- watchdog task (guard 9) ------------------------------------------------ */
+
+#define WATCHDOG_LOCK_TIMEOUT_MS 1000u
+
+/* Set by guard9_prelock_check() when it cut heat, cleared once the locked
+ * bookkeeping (global_fault_source OR) has run. */
+static volatile bool s_guard9_bookkeeping_pending = false;
+/* Age (ms) the stale tick had when guard9_prelock_check() set the pending flag. */
+static volatile uint32_t s_guard9_pending_since_ms = 0;
+
+/* Guard 9, lock-free half (audit 2026-10-09 item 1). Reads the control task's
+ * liveness tick without s_exec.lock (single 32-bit writer, volatile field;
+ * nothing else is derived from it so no ordering is needed). On stale it
+ * asserts SAFETY_FAULT_SRC_APP on the safety link (own lock) and then forces
+ * relays off through kiln_io (direct SX1509 write), all without
+ * s_exec.lock. Returns true when stale; *since_ms_out gets the age. */
+static bool guard9_prelock_check(uint32_t *since_ms_out)
+{
+    TickType_t now = xTaskGetTickCount();
+    uint32_t since_ms = ticks_to_ms(now - s_exec.last_tick_tick);
+    if (since_ms_out) *since_ms_out = since_ms;
+    if (since_ms <= WATCHDOG_TICK_DEAD_MS) {
+        return false;
+    }
+    ESP_LOGE(PE_TAG, "guard 9: control tick stale for %lums -- cutting heat before taking s_exec.lock",
+             (unsigned long)since_ms);
+    /* Review F2: assert the APP fault source FIRST so relay_authority blocks any
+     * re-assertion of ON, then cut. kiln_io_all_relays_off() writes the SX1509
+     * directly from this task (chip access is locked inside
+     * sx1509_write_port_locked); it is not serialised through the owner task. */
+    if (s_exec.safety) {
+        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+    }
+    if (s_exec.io) {
+        kiln_io_all_relays_off(s_exec.io);
+    }
+    /* io_segs_force_all_off() mutates s_exec and needs the lock; it runs in
+     * the locked half. */
+    if (!s_guard9_bookkeeping_pending || since_ms > s_guard9_pending_since_ms) {
+        s_guard9_pending_since_ms = since_ms;
+    }
+    s_guard9_bookkeeping_pending = true;
+    return true;
+}
+
+/* Review fix F1: folds a verdict latched by an earlier pass (whose bounded lock
+ * take timed out) into this pass's fresh one, so a control task that recovers
+ * before the next pass still gets the run classified (FAULTED) instead of only
+ * having relays cut. Call with s_exec.lock held; consumes the pending flag. */
+static bool guard9_merge_pending(bool tick_stale, uint32_t since_ms, uint32_t *since_ms_out)
+{
+    bool pending = s_guard9_bookkeeping_pending;
+    uint32_t ms = since_ms;
+    if (pending && (!tick_stale || s_guard9_pending_since_ms > ms)) {
+        ms = s_guard9_pending_since_ms;
+    }
+    s_guard9_bookkeeping_pending = false;
+    s_guard9_pending_since_ms = 0;
+    if (since_ms_out) *since_ms_out = ms;
+    return tick_stale || pending;
+}
+
+/* K7 MED-1: relay_state_unknown (an ON write landed and the bus then died, or
+ * the chip could not be read after a failed write) means a coil may be
+ * energised while the shadow says otherwise. Treat it as a fault, not as OFF:
+ * retry the fail-safe all-off every watchdog period (which also repairs the
+ * expander once it answers) and hold SAFETY_FAULT_SRC_APP -- which blocks
+ * relay-ON everywhere -- until a verified read or all-off clears the flag.
+ * Rising edge here, lock-free; the falling edge is released in the locked half
+ * (relay_unknown_release_locked). */
+static bool s_relay_unknown_fault_asserted = false;
+
+/* K7 review F5: SAFETY_FAULT_SRC_APP is one link bit with several holders. The executor-side
+ * holders are tracked here so the bit drops only when NO owner holds it:
+ *   - guard 9 / global fault: the APP bit in s_exec.global_fault_source (plus
+ *     s_guard9_bookkeeping_pending while the locked half has not run yet);
+ *   - relay-unknown hold: pe_app_owner_relay_unknown() (== s_relay_unknown_fault_asserted);
+ *   - foreign: APP was already asserted on the link by something this module does not track
+ *     (the boot safe-state latch in main*.c); never released here.
+ * clear_this_runs_faults() and relay_unknown_release_locked() both consult these. */
+volatile bool pe_app_owner_foreign = false;
+
+bool pe_app_owner_relay_unknown(void)
+{
+    return s_relay_unknown_fault_asserted;
+}
+
+/* LOW-2 (c)/(a): holders other than this module register explicitly (the boot safe-state
+ * latches in main.c / main_control_bringup.c). The executor no longer infers a foreign holder
+ * from the link bit: that inference raced a halt (false foreign, sticky until reboot) and
+ * missed holders that asserted while the executor already held APP. Sticky for the boot by
+ * design: it fails safe (APP stays held, relay ON refused). */
+void profile_executor_note_external_app_hold(void)
+{
+    pe_app_owner_foreign = true;
+}
+
+bool pe_app_guard9_pending(void)
+{
+    return s_guard9_bookkeeping_pending;
+}
+
+void pe_app_release_recheck(SafetyLinkClass *safety)
+{
+    if (pe_app_owner_foreign && safety) {
+        safety_link_set_fault_source(safety, SAFETY_FAULT_SRC_APP, true);
+    }
+}
+
+static void relay_unknown_prelock_check(void)
+{
+    if (!s_exec.io) return;
+    if (!kiln_io_relay_state_unknown(s_exec.io) && !s_relay_unknown_fault_asserted) return;
+    if (kiln_io_relay_state_unknown(s_exec.io)) {
+        ESP_LOGE(PE_TAG, "relay state unknown -- forcing relays off and holding the app fault source");
+        (void)kiln_io_all_relays_off(s_exec.io);
+    }
+    if (kiln_io_relay_state_unknown(s_exec.io)) {
+        /* LOW-2 (b): a level, not an edge. Publish the owner flag first, then assert APP on
+         * EVERY pass while unknown: a locked halt that read the flag as false and deasserted
+         * after our assert is repaired by the next pass. The assert is idempotent. */
+        s_relay_unknown_fault_asserted = true;
+        if (s_exec.safety) {
+            safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+        }
+    }
+}
+
+/* Must be called with s_exec.lock held. Releases only a hold this check took:
+ * a guard-9 / global-fault assertion of the same bit stays. */
+static void relay_unknown_release_locked(void)
+{
+    if (!s_relay_unknown_fault_asserted) return;
+    if (s_exec.io && kiln_io_relay_state_unknown(s_exec.io)) return;
+    s_relay_unknown_fault_asserted = false;
+    if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) == 0 && !s_guard9_bookkeeping_pending &&
+        !pe_app_owner_foreign && s_exec.safety) {
+        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, false);
+        pe_app_release_recheck(s_exec.safety); /* F5HOLDER LOW-2 */
+    }
+}
+
+static bool guard9_take_lock_bounded(void)
+{
+    return xSemaphoreTake(s_exec.lock, pdMS_TO_TICKS(WATCHDOG_LOCK_TIMEOUT_MS)) == pdTRUE;
+}
 
 void watchdog_task_entry(void *arg)
 {
@@ -2109,25 +2320,36 @@ void watchdog_task_entry(void *arg)
          * larger threshold. */
         uint16_t safety_age_ms = SAFETY_LINK_AGE_NEVER;
         bool safety_diag_valid = false;
+        bool safety_diag_tripped_any_age = false;
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
+        bool safety_k4_closed = false;
+        uint32_t safety_reboot_seq = 0u;
+        bool safety_diag_since_reboot = false;
+        uint8_t safety_boot_reason = 0u;
+        bool safety_status_ok = false;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
+                safety_status_ok = true;
                 safety_age_ms = safety_status.age_ms;
-                /* A trip report is only actionable while the DIAG frame it
-                 * came from is fresh -- diag_age_ms shares the same
-                 * cached_tick as age_ms (safety_link.c), so age_ms doubles as
-                 * the diag frame's own age here. Anything stale beyond
-                 * SAFETY_LINK_STALE_MS is exactly the "link went silent"
-                 * case the 30s check below already owns; this branch must
-                 * never act on a trip read off data that old, or a silent
-                 * link's LAST-KNOWN diag_state would get relabeled as a
-                 * fresh trip. */
+                /* F5HOLDERFX4 MED-1: the DIAG's own age is diag_frame_age_ms (age_ms is the STATUS
+                 * frame's). safety_diag_valid = "fresh enough to act on as OK"; a cached TRIPPED is
+                 * acted on at any age (safety_diag_tripped_any_age), never relabeled as OK. */
                 safety_diag_valid = safety_status.diag_ever_received &&
-                                     !safety_link_is_stale(safety_age_ms, SAFETY_LINK_STALE_MS);
+                                     safety_status.diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS;
+                safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status);
                 safety_diag_state = safety_status.diag_state;
+                safety_reboot_seq = safety_status.pico_reboot_seq;
+                safety_diag_since_reboot = safety_status.diag_since_reboot;
+                safety_boot_reason = safety_status.diag_boot_reason;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
+                /* SAFETYFX10 LOW-1: a trip inferred from a TRIP_EVENT newer than the DIAG has no DIAG reason;
+                 * name the event's own reason instead of "none". */
+                if (safety_diag_tripped_any_age && safety_status.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
+                    safety_diag_trip_reason = safety_status.trip_reason;
+                }
+                safety_k4_closed = safety_status.link_up && (safety_status.flags & SAFETY_FLAG_RELAY) != 0u;
             }
         }
         bool safety_link_silent_30s = s_exec.safety != NULL &&
@@ -2139,8 +2361,8 @@ void watchdog_task_entry(void *arg)
          * blocked new relay-on, but the run itself kept advancing its
          * schedule and both GUIs kept showing a firing in progress while the
          * kiln cooled. */
-        bool safety_processor_tripped = safety_diag_valid &&
-                                         safety_diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+        /* F5HOLDERFX4 MED-1: a cached TRIPPED counts at any age (fail closed). */
+        bool safety_processor_tripped = safety_diag_tripped_any_age;
 
         /* PC link loss (profile_executor.h's PROFILE_EXECUTOR_PC_LINK_ABORT_
          * SILENCE_MS): uart_bridge.c's link_watchdog_task asserts
@@ -2161,40 +2383,49 @@ void watchdog_task_entry(void *arg)
         bool pc_link_down_sustained = pc_link_now_down &&
             ticks_to_ms(pc_link_check_now - pc_link_down_since_tick) >= pc_link_abort_silence_ms();
 
+        bool continue_after_lock_timeout = false;
         bool wdt_faulted = false;
-        xSemaphoreTake(s_exec.lock, portMAX_DELAY);
-        TickType_t now = xTaskGetTickCount();
-        uint32_t since_ms = ticks_to_ms(now - s_exec.last_tick_tick);
-        bool tick_stale = since_ms > WATCHDOG_TICK_DEAD_MS;
+        /* Guard 9 audit 2026-10-09 item 1: staleness is tested and the relays
+         * are cut BEFORE s_exec.lock is touched. A control task that stalls
+         * while holding the lock must not also blind its own watchdog. */
+        uint32_t since_ms = 0;
+        bool tick_stale = guard9_prelock_check(&since_ms);
+        relay_unknown_prelock_check();
+        if (!guard9_take_lock_bounded()) {
+            /* Lock still held by someone else. Relays are already off and the
+             * APP fault source is asserted (above); bookkeeping (state to
+             * FAULTED, fault_reason) happens on a later pass once the lock is
+             * obtainable. Nothing below may touch s_exec without the lock. */
+            ESP_LOGE(PE_TAG, "guard 9: s_exec.lock not obtainable within %ums (tick_stale=%d, %lums)",
+                     (unsigned)WATCHDOG_LOCK_TIMEOUT_MS, (int)tick_stale, (unsigned long)since_ms);
+            continue_after_lock_timeout = true;
+        }
+        if (continue_after_lock_timeout) {
+            /* No reconcile here: it must stay the single, LAST statement of the loop body
+             * (test_heat_enable.c pins that), and it is only a retry -- next pass runs it. */
+            continue;
+        }
 
+        /* LOW-2 (review 2): merge and assert guard 9 BEFORE relay_unknown_release_locked(), which
+         * recomputes the link fault source from global_fault_source; otherwise APP drops briefly. */
+        /* F1: carry a verdict latched on an earlier lock-timeout pass. */
+        tick_stale = guard9_merge_pending(tick_stale, since_ms, &since_ms);
         if (tick_stale) {
-            /* Guard 9 proper forces relays off unconditionally the instant the
-             * control task's own liveness tick goes stale, regardless of what
-             * profile_executor_wd_decide() below says to do about the STATE --
-             * this part is not delegated to that pure function (it always
-             * needs to happen, not just "when RUNNING/PAUSED"). */
-            ESP_LOGE(PE_TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
-                     (unsigned long)since_ms);
+            /* The relay cut itself already happened in guard9_prelock_check();
+             * repeated here under the lock as a cheap idempotent retry (the
+             * profile_executor_wd_decide() below classifies the STATE, this
+             * part is unconditional). */
+            if (tick_stale) {
+                ESP_LOGE(PE_TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
+                         (unsigned long)since_ms);
+            }
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
-            /* kiln_io_all_relays_off() only touches relay bits 1-4; a
-             * relay/IO segment's general-purpose IO_1..7 line needs its own
-             * explicit force-off, and this replaces rules_watchdog_entry's
-             * force-release-and-off for the segment machinery (rules_task.c
-             * is untouched by this pass and is deleted later -- see
-             * profiles_http.h's profile_seg_kind_t comment -- so THIS is now
-             * the one place a stalled control task still gets a relay/IO
-             * segment's contacts open). Unconditional off, same as the relay
-             * call just above: a control task that has stopped ticking gets
-             * no leave_on_at_end exception. */
             io_segs_force_all_off(false);
-            /* See guard9_assert_stale_tick_fault()'s own doc comment for why
-             * this is now a helper rather than the bare safety_link_set_
-             * fault_source() call this used to be, and what defect that
-             * fixes (audit 2026-08-27 item 2). */
             guard9_assert_stale_tick_fault();
         }
+        relay_unknown_release_locked();
 
         /* profile_executor_wd_decide() (profile_executor.h) is the pure
          * classifier this pass extracted so it could be host-tested without
@@ -2326,6 +2557,31 @@ void watchdog_task_entry(void *arg)
          * from safety_link/s_exec under their own locks. Keep it last: a new
          * blocking call must not be put ahead of the staleness checks either.
          */
+        /* F1: tell heat_enable what the Pico reports so a lost grant is re-requested. */
+        uint32_t wdt_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        /* A failed status read must never feed reboot seq 0 (looks like a reboot). */
+        if (safety_status_ok) {
+            heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason, wdt_now_ms);
+        }
+        /* A DIAG from before the latest Pico reboot describes the old boot: feed
+         * INIT so its ARMED cannot satisfy the new boot's K4 check (LOW-3). */
+        heat_enable_note_pico_state(safety_diag_valid,
+                                    safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT,
+                                    safety_k4_closed, wdt_now_ms);
+        /* Safety-link fix batch 2 (MED-1, MED-2): an executor-initiated pause
+         * (non-blocking: relays off, claim released, release frame deferred to
+         * safety_poll_task) instead of a firing that runs cold with K4 open.
+         * Before reconcile so a withdrawn request is not retried. */
+        bool hold_reboot = heat_enable_reboot_hold();
+        bool hold_unconfirmed = !hold_reboot && heat_enable_grant_unconfirmed();
+        if (hold_reboot) {
+            (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
+            /* Autotune has no pause state: abort is its equivalent (relays off). */
+            (void)autotune_engine_abort_bounded("pico_fatal_reboot", 100u);
+        } else if (hold_unconfirmed) {
+            (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
+            (void)autotune_engine_abort_bounded("heat_grant_unconfirmed", 100u);
+        }
         heat_enable_reconcile();
     }
 }

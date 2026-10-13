@@ -16,6 +16,9 @@ typedef int esp_err_t;
 #define ESP_ERR_INVALID_ARG 0x102
 #define ESP_ERR_INVALID_STATE 0x103
 
+// ---- esp_timer ----
+int64_t esp_timer_get_time(void);
+
 // ---- esp_http_server ----
 typedef struct {
     size_t content_len;

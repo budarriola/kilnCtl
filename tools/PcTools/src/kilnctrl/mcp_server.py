@@ -82,7 +82,7 @@ from .web_ui_client import WebUiClient
 from .info import InfoClient, InfoQueryError
 from .system import SystemClient, SystemQueryError
 from .io_expander import IoClient, IoQueryError
-from .link_hub import get_shared_link
+from .link_hub import LinkHubDisabled, NullLink, get_shared_link
 from .profiles import ProfilesClient, ProfilesQueryError
 from .protocol import (
     FACTORY_RESET_SCOPE_KILN,
@@ -120,7 +120,11 @@ from .mcp_server_core import _tool, mcp  # noqa: E402,F401
 #: physical port; this one becomes a client of it either way. The protocol
 #: allows only one outstanding send-and-await-ack cycle anyway (serialized
 #: inside the hub's own UartLink).
-_link = get_shared_link()
+try:
+    _link = get_shared_link()
+except LinkHubDisabled:  # test suite: never connect to the real hub (review testnet MED-A)
+    log.warning("KILNCTL_TEST_NO_HUB is set: link hub disabled, using NullLink")
+    _link = NullLink()
 
 #: File-based session logging, same rollover policy as the GUI (new file on
 #: connect, and on a detected device reboot) -- see session_log.py. This is
@@ -461,6 +465,10 @@ registry = collapse(
     # freshness" section: kiln_help() surfaces this once at startup.
     source_root=os.path.normpath(os.path.join(os.path.dirname(__file__), "..")),
 )
+
+# One timestamped line per tool call (arg keys only) -> logs/mcp_calls/<port>_<date>.log.
+from mcpkit import call_log as _call_log  # noqa: E402
+_call_log.install(mcp, registry, mcp_facade.KEEP)
 
 
 def _close() -> None:

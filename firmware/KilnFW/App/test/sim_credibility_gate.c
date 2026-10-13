@@ -1,4 +1,4 @@
-// sim_credibility_gate -- ITER_TUNE_REDESIGN_PLAN.md sec 6.5: the model's
+// sim_credibility_gate -- ITER_TUNE_REDESIGN.md sec 6.5: the model's
 // own credibility gate. Before any iter_tune result (sim_iter_tune.c) or
 // sensitivity sweep (sim_wide_temp_sweep.c) is believed to mean anything
 // about the real kiln, the extended sim_kiln must be shown to reproduce a
@@ -551,7 +551,7 @@ int main(int argc, char **argv)
     score_replay(cal_ticks, cal_n, cal_sim, &cal_s);
     score_replay(hold_ticks, hold_n, hold_sim, &hold_s);
 
-    printf("=== sim_credibility_gate (ITER_TUNE_REDESIGN_PLAN.md sec 6.5) ===\n");
+    printf("=== sim_credibility_gate (ITER_TUNE_REDESIGN.md sec 6.5) ===\n");
     printf("calibration: %s (%d ticks)\n", cal_path, cal_n);
     printf("hold-out:    %s (%d ticks)\n", hold_path, hold_n);
     printf("model: fixed, checked-in G1 params. Coupling is the ADDITIVE\n"

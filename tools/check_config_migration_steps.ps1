@@ -1,8 +1,8 @@
 # check_config_migration_steps.ps1 -- mechanical enforcement for
-# docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 5, "a config version bump must
+# docs/CONFIG_MIGRATION_CHAIN.md section 5, "a config version bump must
 # fail the build if it does not bring its step and its test."
 #
-# SCOPE: docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 0.1 governs four
+# SCOPE: docs/CONFIG_MIGRATION_CHAIN.md section 0.1 governs four
 # stores (ESP zones config, ESP kiln-config slots, ESP fire profiles,
 # RP2040 safety config). This script enforces all four, but NOT to the same
 # depth -- each store's on-disk migration shape is different, and forcing
@@ -59,7 +59,7 @@
 # rule, the frozen-input _Static_assert/crc32-last-field discipline, the
 # captured-fixture-must-be-referenced rule, and D2's expiry floor -- is
 # follow-up work, not silently assumed done; see
-# docs/CONFIG_MIGRATION_CHAIN_PLAN.md section 5 for why each is deferred
+# docs/CONFIG_MIGRATION_CHAIN.md section 5 for why each is deferred
 # rather than faked against a shape it doesn't fit. Fire profiles now has the
 # frozen-input-struct rule (above); it still lacks D1's "exactly one" rule
 # (moot -- it's a monolithic tail, not a chain), the fixture rule, and D2's
@@ -129,7 +129,7 @@ function Remove-CComments {
 
 function Test-KilnCfgStoreMigrationStep {
     <#
-      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5 follow-up: the ESP
+      docs/CONFIG_MIGRATION_CHAIN.md sec 5 follow-up: the ESP
       kiln-config slot store. Unlike zones this store already carries two
       pre-D1 GRANDFATHERED steps (migrate_store_v1_to_v2, migrate_store_v2_
       to_v3) -- the plan explicitly warns a naive "exactly one step total"
@@ -201,7 +201,7 @@ function Test-KilnCfgStoreMigrationStep {
 
 function Test-ProfilesMigrationStep {
     <#
-      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5 follow-up: the ESP fire
+      docs/CONFIG_MIGRATION_CHAIN.md sec 5 follow-up: the ESP fire
       profiles store. Its converters are named convert_profile_v<N>(...) and
       each converts DIRECTLY from historical version N to the current
       in-memory profile_t (not N -> N+1) -- a "monolithic tail of typed
@@ -213,7 +213,7 @@ function Test-ProfilesMigrationStep {
 
       2026-09-19 extension: this store DOES already carry the frozen-input
       _Static_assert/crc32-last-field discipline per historical struct
-      (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5.1 names
+      (docs/CONFIG_MIGRATION_CHAIN.md sec 5.1 names
       profile_persisted_v3_t specifically as already having it) -- what was
       missing was teaching this check to look, not building new scaffolding
       in profiles_http.c. Mirrors zones' rule 3 (Test-ZonesMigrationSteps
@@ -295,7 +295,7 @@ function Test-ProfilesMigrationStep {
 
 function Test-SaftyConfigStoreMigrationStep {
     <#
-      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5 follow-up: the RP2040 safety
+      docs/CONFIG_MIGRATION_CHAIN.md sec 5 follow-up: the RP2040 safety
       config store. It has no per-transition function at all -- migration is
       a couple of inline `if (version == CONFIG_STORE_FORMAT_VERSION_V<N>)`
       branches in config_store_unpack_ex() -- so what this checks is the
@@ -356,8 +356,9 @@ function Test-SaftyConfigStoreMigrationStep {
 
 function Test-AuxOutputsCfgVersion {
     <#
-      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1 row "ESP aux outputs
-      (spare-relay on/off)": AUX_OUTPUTS_CFG_VERSION in aux_outputs_cfg.c.
+      docs/CONFIG_MIGRATION_CHAIN.md sec 0.1 row "ESP aux outputs
+      (spare-relay on/off)": AUX_OUTPUTS_CFG_VERSION in aux_outputs_cfg.h (moved from the .c);
+      the header is searched too, so a define in either file is found.
       Version 1 has nothing older, so no converter exists. Enforced:
         - the version symbol is defined and parseable;
         - the blob's sizeof is pinned by a _Static_assert (on-flash layout);
@@ -366,9 +367,9 @@ function Test-AuxOutputsCfgVersion {
         - at version > 1, aux_outputs_migrate_v<CURRENT-1> must exist, so a
           bump cannot land without its converter.
     #>
-    param([Parameter(Mandatory = $true)][string]$SourceText)
+    param([Parameter(Mandatory = $true)][string]$SourceText, [string]$HeaderText = "")
     $failures = New-Object System.Collections.Generic.List[string]
-    $clean = Remove-CComments -Text $SourceText
+    $clean = Remove-CComments -Text ($HeaderText + "`n" + $SourceText)
     $verMatch = [regex]::Match($clean, '#define\s+AUX_OUTPUTS_CFG_VERSION\s+(\d+)')
     if (-not $verMatch.Success) {
         $failures.Add("aux outputs store: could not find '#define AUX_OUTPUTS_CFG_VERSION <N>'")
@@ -394,7 +395,7 @@ function Test-AuxOutputsCfgVersion {
 
 function Test-IterTuneStoreMigrationStep {
     <#
-      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1 row "ESP iterative-tuning
+      docs/CONFIG_MIGRATION_CHAIN.md sec 0.1 row "ESP iterative-tuning
       persistence": ITER_TUNE_STORE_VERSION in iter_tune_store.h. Migration is
       one in-RAM function keyed on named ITER_TUNE_STORE_VERSION_V<N> macros.
       Enforced: version symbol parseable; every V1..V<CURRENT-1> macro exists
@@ -758,8 +759,9 @@ $iterTuneHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_
 $iterTuneSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_tune_store.c"
 
 $auxSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\aux_outputs_cfg.c"
+$auxHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\aux_outputs_cfg.h"
 
-foreach ($p in @($iterTuneHeader, $iterTuneSource, $auxSource, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
+foreach ($p in @($iterTuneHeader, $iterTuneSource, $auxSource, $auxHeader, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
         $profilesSource, $saftyVersionHeader, $saftySource)) {
     if (-not (Test-Path $p)) {
         Write-Host "check_config_migration_steps: FAIL -- expected path not found: $p"
@@ -803,7 +805,7 @@ $saftyResult = Test-SaftyConfigStoreMigrationStep -VersionHeaderText (Get-Conten
 
 $iterTuneResult = Test-IterTuneStoreMigrationStep -VersionHeaderText (Get-Content -Raw $iterTuneHeader)
 
-$auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource)
+$auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource) -HeaderText (Get-Content -Raw $auxHeader)
 
 # --- Plan sec 5.1 follow-up rules: D1 new-step-per-bump (vs baseline ref),
 # fixture-must-be-referenced, D2 expiry floor -- all four stores. ---
@@ -869,7 +871,7 @@ $allFailures += $saftyResult.Failures
 if ($allFailures.Count -gt 0) {
     Write-Host ""
     Write-Host "FAILED: check_config_migration_steps found $($allFailures.Count) problem(s)" -ForegroundColor Red
-    Write-Host "        across the governed config stores (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5):" -ForegroundColor Red
+    Write-Host "        across the governed config stores (docs/CONFIG_MIGRATION_CHAIN.md sec 5):" -ForegroundColor Red
     foreach ($f in $allFailures) {
         Write-Host "  - $f" -ForegroundColor Red
     }

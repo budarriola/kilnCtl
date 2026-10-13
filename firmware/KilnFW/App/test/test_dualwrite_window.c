@@ -1,5 +1,5 @@
 // Host tests for App/drivers/persist/dualwrite_window.c -- the owner-approved
-// dual-write closure criterion (docs/FILESYSTEM_PLAN.md "Dual-write
+// dual-write closure criterion (docs/FILESYSTEM.md "Dual-write
 // window"): 20 consecutive clean boots + one file-backed firing + one
 // verified restore round trip.
 //

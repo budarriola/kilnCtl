@@ -161,6 +161,8 @@
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_ct_auto_zero_status.h"
 #include "kilnlink/kilnlink_stack_margin.h"
+#include "kilnlink/kilnlink_test_trip.h"
+#include "kilnlink/kilnlink_test_trip_result.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_param_value.h"
 #include "kilnlink/kilnlink_frame_a_offsets.h" /* KILNLINK_FRAME_A_* -- single source of truth for
@@ -250,7 +252,7 @@ extern "C" {
 #define SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED 0x04u
 
 /* 2026-09-23: mirrors SaftyFW's link_frame.h LINK_FLAG2_ACTIVE_SLOT_KNOWN
- * exactly (same numeric value, same reasoning) -- docs/PICO_AUTO_UPDATE_PLAN.md:64's
+ * exactly (same numeric value, same reasoning) -- docs/PICO_AUTO_UPDATE.md:64's
  * named gap ("the ESP has no wire field for the Pico's active slot, so A/B
  * alternation is blind"). Set iff update_task_get_active_slot() (SaftyFW)
  * established this boot's running bootloader slot from a real flash
@@ -300,6 +302,18 @@ extern "C" {
  * status frame -- see safety_apply_diag() in safety_link.c for the field
  * layout. */
 #define SAFETY_LINK_DIAG_FRAME_LEN 30u
+/* kilnlink audit 2026-10-09 M4 (KILNLINK_PROTOCOL_VERSION 16 -> 17): the
+ * 31-byte form, KILNLINK_DIAG_LEN_V2, adds byte30 = trip_seq. A protocol 17
+ * Pico sends it only after this ESP's ANNOUNCE named >= 17; safety_apply_
+ * diag() accepts both lengths and safety_link_send_clear_trip() echoes the
+ * seq back (4-byte CLEAR_TRIP) only when the cached DIAG carried it. */
+#define SAFETY_LINK_DIAG_FRAME_LEN_V2 31u
+/* KILNLINK_PROTOCOL_VERSION 17 -> 18 (docs/TEST_TRIP_PLAN.md sec 2.2): the
+ * 32-byte form, KILNLINK_DIAG_LEN_V3, adds byte31 = pico_boot_id. Only a
+ * protocol 18 Pico that has learned this ESP is >= 18 sends it; it is what
+ * lets CLEAR_TRIP be bound to the Pico boot (F6) and TEST_TRIP name the boot
+ * it was authorised against. */
+#define SAFETY_LINK_DIAG_FRAME_LEN_V3 32u
 
 /* DIAG flags byte (offset 25), kilnlink_diag.h's kilnlink_diag_flag_t
  * mirrored here for the same reason SAFETY_CMD_POWER/DIAG are hand-parsed
@@ -458,6 +472,11 @@ extern "C" {
  * must not silently loosen along with it. safety_link_is_stale() below is
  * the pure, host-testable comparison against this constant. */
 #define SAFETY_LINK_STALE_MS 1500u
+/* Freshness bound for a cached DIAG itself (two 2000 ms DIAG periods plus jitter); trip_is_test uses it. */
+/* INFO-1: 4500 = 2 x 2000 + 500, where 2000 mirrors the Pico's LINK_DIAG_TX_PERIOD_MS
+ * (firmware/SaftyFW/src/tasks/link_task.c:214). Tolerates one lost DIAG. If the Pico period changes,
+ * revisit this bound (a period above 2250 ms makes trip_is_test flap false on a healthy link). */
+#define SAFETY_LINK_DIAG_FRESH_MS 4500u
 
 /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: 30 s of continued silence aborts a
  * running firing (distinct from, and much larger than, SAFETY_LINK_STALE_MS
@@ -785,6 +804,8 @@ typedef enum {
  * safety_link_update_state_t / SAFETY_LINK_UPDATE_ERR_* by the caller) --
  * kept as plain uint8_t here so an unrecognised future state/bit value from
  * a newer Pico build round-trips instead of being silently coerced. */
+#define SAFETY_REBOOT_NOTE_WINDOW_MS 3000u /* a lost FW_VERSION is accounted for within this */
+
 typedef struct {
     uint8_t  state;
     uint8_t  last_error;
@@ -969,7 +990,7 @@ typedef struct {
     bool     tc_config_reasserted_known;
     bool     tc_config_reasserted;
 
-    /* 2026-09-23: docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- the Pico's
+    /* 2026-09-23: docs/PICO_AUTO_UPDATE.md:64's named gap -- the Pico's
      * own view of which bootloader A/B slot it is currently running,
      * carried in the SAME V3 status frame's flags2 byte (bits 3/4,
      * SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B). Same
@@ -1025,11 +1046,30 @@ typedef struct {
     uint32_t diag_context_frames_bad;  /* CRC/framing/length errors, Pico-side */
     uint32_t diag_tx_frames_dropped;   /* Pico's TX ring full */
     uint8_t  diag_state;               /* SAFETY_LINK_DIAG_STATE_* */
+    /* Safety-link fix batch 2 (MED-1, LOW-3): bumped on every detected Pico
+     * reboot; diag_since_reboot is false from that moment until the first DIAG
+     * of the new boot, so diag_boot_reason/diag_state are only trusted once it
+     * reads true. diag_state itself is reset to INIT at the reboot. */
+    uint32_t pico_reboot_seq;
+    bool     diag_since_reboot;
     uint8_t  diag_flags;               /* SAFETY_LINK_DIAG_FLAG_* bits */
     uint32_t diag_log_frames_dropped;  /* Pico's log_task.c s_dropped -- LOG
                                          * frames never enqueued/sent (queue
                                          * full). Added KILNLINK_PROTOCOL_VERSION
                                          * 15 -> 16 / UART_PROTOCOL_VERSION 12 -> 13. */
+    /* kilnlink audit 2026-10-09 M4: the latched trip occurrence the most
+     * recent DIAG described (byte30 of the 31-byte form). diag_trip_seq_known
+     * is false after a 30-byte DIAG (Pico older than 17, or it has not seen
+     * this ESP's ANNOUNCE yet); safety_link_send_clear_trip() then sends the
+     * legacy unbound 3-byte clear. ESP-internal only: not on the PC wire. */
+    bool     diag_trip_seq_known;
+    uint8_t  diag_trip_seq;
+    /* Protocol 18: the Pico boot_id the most recent DIAG carried (byte31 of
+     * the 32-byte form). Known only after a 32-byte DIAG; forgotten on a 30/31
+     * byte DIAG and on a detected Pico reboot (safety_note_pico_reboot_locked)
+     * so a CLEAR_TRIP/TEST_TRIP never names a boot the Pico has left. */
+    bool     diag_boot_id_known;
+    uint8_t  diag_boot_id;
 
     /* SAFETY_CMD_TRIP_EVENT (Frame D) -- the most recent trip event the Pico
      * has pushed, cached until a newer one replaces it. Deliberately never
@@ -1044,6 +1084,10 @@ typedef struct {
      * the same event refresh trip_event_age_ms but are not logged as a new
      * event (see safety_apply_trip_event() in safety_link.c). */
     bool     trip_event_ever_received;
+    /* SAFETYFX10 MED-1: arrival order of the last TRIP_EVENT versus the last DIAG. Set when a TRIP_EVENT is applied,
+     * cleared when a DIAG is applied and on a Pico reboot. True = no DIAG has arrived since the last TRIP_EVENT.
+     * Replaces comparing trip_event_age_ms with diag_frame_age_ms, which wrap every 2^32 ms. */
+    bool     trip_event_after_diag;
     uint8_t  trip_last_seq;
     uint8_t  trip_reason;              /* SAFETY_TRIP_* at the moment of this trip */
     uint32_t trip_uptime_ms;           /* Pico uptime at trip */
@@ -1090,6 +1134,9 @@ typedef struct {
      * why the two are not conflated). 0 if trip_event_ever_received is
      * false. */
     uint32_t trip_event_age_ms;
+    /* TRIPFX3 LOW-B: age of the last DIAG frame itself (age_ms is the STATUS frame's). 0 until
+     * diag_ever_received. */
+    uint32_t diag_frame_age_ms;
 } safety_link_status_t;
 
 /* Counters for the PC's GET_LINK_STATS. All monotonic since start. */
@@ -1250,6 +1297,7 @@ typedef struct {
     uint32_t cmd_ct_auto_zero_status_count;       /* KILNLINK_CT_AUTO_ZERO_STATUS_CMD (0x28) */
     uint32_t cmd_reboot_result_count;             /* KILNLINK_REBOOT_RESULT_CMD (0x2A) */
     uint32_t cmd_stack_margin_count;              /* KILNLINK_STACK_MARGIN_CMD (0x2C) */
+    uint32_t cmd_test_trip_result_count;          /* KILNLINK_TEST_TRIP_RESULT_CMD (0x2F), reply to TEST_TRIP (0x2E) */
     uint32_t cmd_param_count;                     /* KILNLINK_PARAM_CMD (0x1E), reply to SAFETY_CMD_GET_PARAM (0x23) */
 
     /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
@@ -1280,6 +1328,7 @@ typedef struct {
     uint8_t last_reboot_result_len;
     uint8_t last_stack_margin_len;
     uint8_t last_param_len;
+    uint8_t last_test_trip_result_len;
 
     /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
      * reply latency, measured in safety_exchange() (safety_link_inbox.c)
@@ -1391,6 +1440,11 @@ typedef struct {
      * cached_tick becomes age_ms. Meaningless until
      * cached.trip_event_ever_received is true. */
     TickType_t            trip_event_tick;
+
+    /* When the last DIAG (Frame B) was applied; cached_tick only moves on STATUS (Frame A).
+     * Becomes safety_link_status_t::diag_frame_age_ms. Meaningless until diag_ever_received. */
+    bool                  diag_stale_latched; /* REBOOTFX7 LOW-1: set once the DIAG age was seen past SAFETY_LINK_DIAG_FRESH_MS; cleared only by the next DIAG apply */
+    uint32_t              diag_tick; /* ms receive stamp (uart_proto_message_t::rx_ms), not a tick count */
 
     /* Last CONFIG_PAGE (0x1F) frame that arrived while NOBODY was waiting for
      * one, kept so safety_link_get_config_page() can still find it.
@@ -1517,6 +1571,14 @@ typedef struct {
     bool                 has_stashed_param;
     TickType_t           stashed_param_tick;
 
+    /* KILNLINK_TEST_TRIP_RESULT_CMD (0x2F) -- the reply to TEST_TRIP (0x2E,
+     * KILNLINK_PROTOCOL_VERSION 18). Same "always stashed, one caller
+     * (safety_link_send_test_trip()), serialized by xact_lock" pattern as
+     * stashed_stack_margin; the caller matches request_id after taking it. */
+    uart_proto_message_t stashed_test_trip_result;
+    bool                 has_stashed_test_trip_result;
+    TickType_t           stashed_test_trip_result_tick;
+
     safety_link_stats_t stats;
     /* Running sum backing stats.link_reply_us_mean -- kept outside
      * safety_link_stats_t itself (which is a plain snapshot struct copied
@@ -1610,6 +1672,31 @@ typedef struct {
     uint8_t esp_boot_id;
     uint8_t pico_boot_id;
     bool    pico_boot_id_known;
+    /* Firing audit 2026-10-10 MED-4: true once any FW_VERSION boot id was recorded; NEVER cleared on
+     * link-down (pico_boot_id_known is). boot_id_changed compares against this, so a link blip with the
+     * same boot id is not counted as a Pico reboot. Under state_lock. */
+    bool    pico_boot_id_ever_seen;
+    /* kilnlink audit 2026-10-09 M1: the last DIAG uptime_ms seen from the
+     * Pico, the baseline safety_apply_diag() compares each new DIAG against
+     * (safety_pico_uptime_behind_expected()). A backwards step means the Pico
+     * rebooted even when its 8-bit boot_id happened to repeat, and runs the
+     * same safety_note_pico_reboot_locked() bookkeeping a boot_id change
+     * does. KEPT across link-down (firing audit 2 MED-1: a reboot that spans
+     * a link-down with a repeated boot_id is caught only by this); cleared on a boot_id change,
+     * since the new boot's baseline is not yet known. Under state_lock. */
+    uint32_t pico_uptime_baseline_ms;
+    uint32_t pico_uptime_baseline_esp_ms; /* ESP receive stamp (ms, DIAG rx_ms) of the baseline DIAG */
+    bool     pico_uptime_baseline_known;
+    /* Firing audit 2 MED-1: the uptime path already counted this boot's reboot (seq+1) and no FW_VERSION
+     * has accounted for it yet. A FW_VERSION boot_id change that arrives while this is set records the
+     * new id but does NOT count the same reboot a second time (a second bump would reset heat_enable's
+     * verdict inputs and erase the T3 lost-trip latch). Cleared by any FW_VERSION and on link-down
+     * (when in doubt, count). Under state_lock. */
+    bool     reboot_noted_by_uptime;
+    uint32_t reboot_noted_by_uptime_esp_ms; /* ESP tick (ms) when that flag was set; honoured for SAFETY_REBOOT_NOTE_WINDOW_MS only */
+    /* Count of Pico reboots detected ONLY by the uptime regression (boot_id
+     * unchanged at that point) -- evidence the second signal does work. */
+    uint32_t pico_reboot_by_uptime_count;
     /* Set (under state_lock) by safety_apply_fw_version() when a boot_id
      * change means an ANNOUNCE_VERSION re-burst is owed to the peer, per the
      * comment above. Deliberately NOT sent synchronously from inside that
@@ -1627,6 +1714,14 @@ typedef struct {
      * under state_lock by safety_poll_task once per iteration; never read or
      * cleared anywhere else. */
     bool    reannounce_pending;
+    /* Bounded DIAG-driven re-announce (SAFTYFW_8838DEA7_REVIEW residual): a Pico >= protocol 17
+     * that has not learned OUR version (lost ANNOUNCE burst) keeps sending 30-byte DIAGs.
+     * safety_apply_diag() owes it an ANNOUNCE at most SAFETY_DIAG_REANNOUNCE_MAX times,
+     * SAFETY_DIAG_REANNOUNCE_GAP_MS apart. Counter is the ESP half of a pair with the Pico's
+     * peer version: reset on a 31-byte DIAG (Pico learned it), on a Pico boot_id change
+     * (safety_note_pico_reboot_locked) and on link-down (safety_reset_stale_peer_info_if_link_down). */
+    uint8_t  diag_reannounce_count;
+    uint32_t diag_reannounce_last_ms;
     /* Same deferral, same reason, for safety_apply_diag()'s stale-S6a
      * boot-clear send (safety_link_frames.c) -- another synchronous
      * uart_protocol_send_broadcast()-reaching call previously made straight
@@ -1792,6 +1887,16 @@ esp_err_t safety_link_stop(SafetyLinkClass *link);
  * link_up = 0, not a hung call. This is what the SAFETY bridge task answers
  * GET_STATUS from. */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out);
+
+/* Narrow DIAG read for safety_cfg_write.c's F3 persisted check: just whether a
+ * DIAG was ever received and its flags byte, without copying the whole (large)
+ * safety_link_status_t onto a caller's task stack. Same locking as
+ * safety_link_get_status(). */
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
+                                     uint32_t *out_diag_applied);
+/* out_diag_applied (may be NULL): stats.diag_applied, a count that advances once per
+ * applied DIAG frame, so a caller can tell a DIAG that arrived AFTER some event from
+ * the cached one that predates it (safety_cfg_write.c, F3 pre-commit-DIAG limitation). */
 
 /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- the single shared
  * predicate every "Thermocouple faults"-style display site (LCD, web,
@@ -2033,6 +2138,12 @@ esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_updat
  *     currently latched to clear (the Pico would refuse anyway, but failing
  *     closed here means the operator gets an explanation immediately instead
  *     of after a round trip to a Pico that may not even be listening).
+ * kilnlink audit 2026-10-09 M4: when the cached DIAG carried trip_seq
+ * (31-byte form, protocol 17) the frame is the 4-byte CLEAR_TRIP echoing
+ * that seq too, so a stale or duplicated clear cannot clear a LATER trip of
+ * the same reason (same mask): the Pico refuses a seq that is not the one
+ * latched now. After a 30-byte DIAG it is the legacy 3-byte frame.
+ *
  * A resend after conditions changed (a second, different trip latched, or
  * the original trip cleared on its own) is safe to attempt again: the Pico's
  * own mask check is idempotent and simply refuses the mismatch, which is the
@@ -2676,6 +2787,38 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
  * reading), ESP_FAIL if a reply arrived but failed to decode, ESP_OK on
  * success. */
 esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_margin_t *out);
+
+/* SAFETY_CMD TEST_TRIP (0x2E) / TEST_TRIP_RESULT (0x2F reply), KILNLINK_
+ * PROTOCOL_VERSION 18 -- docs/TEST_TRIP_PLAN.md sec 5.1. Asks the Pico to
+ * latch SAFETY_TRIP_TEST (reason 4, mask 0x0008). It can only ever CAUSE a
+ * trip. Same xact_lock / stale-stash-clear / looped-drain shape as
+ * safety_link_get_stack_margin().
+ *
+ * Local refusals, nothing is sent (*out_outcome says which):
+ *   no/stale DIAG (> SAFETY_LINK_STALE_MS)         -> ESP_ERR_INVALID_STATE, LOCAL_STALE
+ *   cached DIAG not the 32-byte form (Pico < 18)   -> ESP_ERR_NOT_SUPPORTED, LOCAL_PEER_TOO_OLD
+ *   cached DIAG already TRIPPED                    -> ESP_ERR_INVALID_STATE, LOCAL_ALREADY_TRIPPED
+ * No reply within SAFETY_LINK_REPLY_TIMEOUT_MS      -> ESP_ERR_TIMEOUT, NO_REPLY
+ * A decoded reply echoing our request_id            -> ESP_OK, the wire outcome.
+ * The Pico boot_id sent is the cached DIAG's (never FW_VERSION's), so a Pico
+ * that rebooted since that DIAG refuses with REFUSED_BOOT_ID. */
+typedef enum {
+    SAFETY_LINK_TEST_TRIP_ACCEPTED = KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED,
+    SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED,
+    SAFETY_LINK_TEST_TRIP_REFUSED_BOOT_ID = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BOOT_ID,
+    SAFETY_LINK_TEST_TRIP_REFUSED_PEER_VERSION = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_PEER_VERSION,
+    SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT,
+    SAFETY_LINK_TEST_TRIP_REFUSED_UPDATING = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_UPDATING,
+    SAFETY_LINK_TEST_TRIP_REFUSED_BAD_FRAME = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BAD_FRAME,
+    SAFETY_LINK_TEST_TRIP_DUPLICATE = KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE,
+    SAFETY_LINK_TEST_TRIP_LOCAL_STALE = 100,
+    SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD = 101,
+    SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED = 102,
+    SAFETY_LINK_TEST_TRIP_NO_REPLY = 103,
+} safety_link_test_trip_outcome_t;
+
+esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_trip_outcome_t *out_outcome,
+                                      uint8_t *out_trip_seq);
 
 /* SAFETY_CMD_GET_PARAM (0x23) / SAFETY_CMD_PARAM (0x1E reply -- kilnlink_
  * param.h's KILNLINK_PARAM_CMD), KILNLINK_PROTOCOL_VERSION 7 -- docs/

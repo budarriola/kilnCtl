@@ -16,6 +16,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "boot_guard.h"
 #include "danger_mode.h"
 #include "dashboard_json.h"
 #include "http_form.h"
@@ -174,6 +175,8 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
     json_escape(st->profile_name, name_escaped, sizeof(name_escaped));
     char reason_escaped[sizeof(st->fault_reason) * 2 + 1];
     json_escape(st->fault_reason, reason_escaped, sizeof(reason_escaped));
+    char pause_escaped[sizeof(st->pause_reason) * 2 + 1];
+    json_escape(st->pause_reason, pause_escaped, sizeof(pause_escaped));
 
     int64_t total_planned_s, remaining_s;
     uint32_t elapsed_s;
@@ -270,7 +273,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         "\"segment_elapsed_s\":%lu,\"dwell_remaining_s\":%lu,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,\"ramp_stretch_segment_s\":%.2f,\"ramp_stretch_total_s\":%.2f,"
         "\"ramp_dwell_credit_applied_s\":%.2f,"
-        "\"fault_reason\":\"%s\",\"fault_guard\":%u,\"mode_state_fault_latched\":%s,"
+        "\"fault_reason\":\"%s\",\"pause_reason\":\"%s\",\"fault_guard\":%u,\"mode_state_fault_latched\":%s,"
         "\"mode_state_violation_count\":%lu,\"zone_blocked_mask\":%u,"
         "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
         exec_state_name(st->state), st->profile_id, name_escaped, st->zone_mask, st->segment_index,
@@ -278,7 +281,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         (unsigned long)st->segment_elapsed_s, (unsigned long)st->dwell_remaining_s,
         st->ramp_lock_held ? "true" : "false", st->ramp_lock_lagging_mask,
         (double)st->ramp_stretch_segment_s, (double)st->ramp_stretch_total_s,
-        (double)st->ramp_dwell_credit_applied_s, reason_escaped, st->fault_guard,
+        (double)st->ramp_dwell_credit_applied_s, reason_escaped, pause_escaped, st->fault_guard,
         st->mode_state_fault_latched ? "true" : "false", (unsigned long)st->mode_state_violation_count,
         (unsigned)st->zone_blocked_mask,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
@@ -674,6 +677,35 @@ esp_err_t history_csv_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* The three JSON refusal bodies of profile_exec_start_post_handler() live in
+ * noinline helpers so their snprintf buffers (288 + 192 + 257 B) are not part
+ * of the handler's own frame, which sits under profile_executor_run() on the
+ * shared 8 KB httpd stack (check_httpd_task_stack_budget). The helpers run only
+ * on the refusal paths, after which the handler returns; they are never on the
+ * stack together with profile_executor_run(). */
+static __attribute__((noinline)) esp_err_t start_send_gate_refusal(httpd_req_t *req, const char *item_key,
+                                                                    const char *msg)
+{
+    char json[192 + 96];
+    int n = snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                     item_key ? item_key : "", msg);
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+static __attribute__((noinline)) esp_err_t start_send_run_failure(httpd_req_t *req, const char *err_msg)
+{
+    char json[192];
+    char err_escaped[128 * 2 + 1];
+    json_escape(err_msg, err_escaped, sizeof(err_escaped));
+    int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
 esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 {
     /* system_mode_gate (slice 2): checked first, before even reading the
@@ -695,13 +727,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
     mode_snap.recovery_mode = facts.recovery_mode;
     if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, recovery_err, sizeof(recovery_err))) {
         ESP_LOGW(DASH_TAG, "profile_exec/start refused by the system mode gate (recovery mode)");
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return start_send_gate_refusal(req, READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
     }
 
     /* THE READINESS INTERLOCK (readiness_gate.h). profile_executor_run()
@@ -740,13 +766,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
          * doubled ~400-byte scratch buffer on this shared stack -- the exact
          * httpd-stack-blob class CLAUDE.md warns about -- to protect against
          * an input that cannot occur. */
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         item_key ? item_key : "", recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return start_send_gate_refusal(req, item_key, recovery_err);
     }
 
     if (req->content_len <= 0 || req->content_len > 32) {
@@ -767,8 +787,8 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    long id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
-    if (id_len <= 0 || id < 0 || id > 255) {
+    long id = -1;
+    if (id_len <= 0 || !http_form_parse_long(id_val, id_len, 0, 255, &id)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or invalid");
         return ESP_OK;
     }
@@ -784,7 +804,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
      * firing must never start into that state; see danger_mode_request_
      * start()'s own PROFILE_EXEC_RUNNING/PAUSED refusal for the symmetric
      * check in the other direction. */
-    if (danger_mode_active()) {
+    if (danger_mode_blocks_start()) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, "refused -- danger mode is active (diagnostics page); stop it first");
         return ESP_OK;
@@ -800,15 +820,12 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
                       "a hung task during this firing will NOT reboot the board", id);
     }
 
-    char err_msg[128] = "";
+    /* static: off the shared httpd worker's stack (check_httpd_task_stack_budget.ps1); httpd runs one worker
+     * task, so this handler is never re-entered concurrently (same convention as kiln_cfg_http.c). */
+    static char err_msg[READINESS_GATE_MSG_CAP];
+    err_msg[0] = '\0';
     if (!profile_executor_run((uint8_t)id, err_msg, sizeof(err_msg))) {
-        char json[192];
-        char err_escaped[128 * 2 + 1];
-        json_escape(err_msg, err_escaped, sizeof(err_escaped));
-        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return start_send_run_failure(req, err_msg);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -833,6 +850,11 @@ esp_err_t profile_exec_resume_post_handler(httpd_req_t *req)
 {
     bool ok = profile_executor_resume();
     if (!ok) {
+        char why[128];
+        if (profile_executor_resume_refusal(why, sizeof(why))) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, why);
+            return ESP_OK;
+        }
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "nothing paused to resume");
         return ESP_OK;
     }
@@ -899,5 +921,119 @@ esp_err_t safety_clear_trip_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"send failed\"}");
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/* POST /api/safety/test_trip (ROUTE_TIER_ADMIN), docs/TEST_TRIP_PLAN.md sec 5.2.
+ * Asks the Pico to latch SAFETY_TRIP_TEST (reason 4, mask 1<<(4-1)). It can
+ * only ever CAUSE a trip: nothing here clears, masks or blinds one. Body must
+ * carry confirm=1. Deliberately NOT mode-gated (a test trip during a firing is
+ * the point of the test and a trip is the safe direction); the CSRF guard in
+ * the route table still applies. The Pico enforces the 10 s rate limit; the
+ * outcome it reports is mapped to a status here, never folded into a generic
+ * error. */
+#define TEST_TRIP_REASON 4u
+
+static esp_err_t test_trip_reply(httpd_req_t *req, const char *status, const char *json)
+{
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+esp_err_t safety_test_trip_post_handler(httpd_req_t *req)
+{
+    char body[33] = {0};
+    if (req->content_len > 0 && req->content_len <= 32) {
+        size_t received = 0;
+        while (received < (size_t)req->content_len) {
+            int ret = httpd_req_recv(req, body + received, req->content_len - received);
+            if (ret <= 0) {
+                body[0] = '\0';
+                break;
+            }
+            received += (size_t)ret;
+        }
+        body[received < sizeof(body) ? received : sizeof(body) - 1u] = '\0';
+    }
+    char confirm[4] = {0};
+    bool confirmed = http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 &&
+                     strcmp(confirm, "1") == 0;
+    if (!confirmed) {
+        return test_trip_reply(req, "400 Bad Request", "{\"ok\":false,\"error\":\"confirm_required\"}");
+    }
+    if (boot_guard_is_recovery_mode()) {
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"recovery_mode\"}");
+    }
+    if (!s_dash.safety) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "safety link not wired up");
+        return ESP_OK;
+    }
+
+    safety_link_test_trip_outcome_t outcome = SAFETY_LINK_TEST_TRIP_NO_REPLY;
+    uint8_t trip_seq = 0u;
+    esp_err_t err = safety_link_send_test_trip(s_dash.safety, &outcome, &trip_seq);
+
+    char json[256];
+    if (err == ESP_ERR_NOT_SUPPORTED || outcome == SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD ||
+        (err == ESP_OK && outcome == SAFETY_LINK_TEST_TRIP_REFUSED_PEER_VERSION)) {
+        bool known = false;
+        uint16_t peer = 0u;
+        (void)safety_link_get_peer_version_status(s_dash.safety, &known, NULL, &peer, NULL);
+        snprintf(json, sizeof(json), "{\"ok\":false,\"outcome\":\"pico_protocol_too_old\",\"pico_protocol\":%u}",
+                 (unsigned)(known ? peer : 0u));
+        return test_trip_reply(req, "501 Not Implemented", json);
+    }
+    if (err == ESP_ERR_TIMEOUT || outcome == SAFETY_LINK_TEST_TRIP_NO_REPLY ||
+        outcome == SAFETY_LINK_TEST_TRIP_LOCAL_STALE) {
+        const char *name = (outcome == SAFETY_LINK_TEST_TRIP_LOCAL_STALE) ? "link_stale" : "no_reply";
+        snprintf(json, sizeof(json),
+                 "{\"ok\":false,\"outcome\":\"%s\",\"detail\":\"check GET /api/safety status\"}", name);
+        return test_trip_reply(req, "503 Service Unavailable", json);
+    }
+    if (outcome == SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED ||
+        (err == ESP_OK && outcome == SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED)) {
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"already_tripped\"}");
+    }
+    if (err != ESP_OK) {
+        return test_trip_reply(req, "500 Internal Server Error", "{\"ok\":false,\"error\":\"send failed\"}");
+    }
+    switch (outcome) {
+    case SAFETY_LINK_TEST_TRIP_ACCEPTED: {
+        /* WP3 review LOW-2: report what the live DIAG shows, never the requested constants as if observed.
+         * The Pico's TRIPPED DIAG may not have arrived yet (readback:false -> only the requested values are
+         * given, under requested_*), and a real guard that won the same tick shows its own reason here
+         * with is_test:false. Callers must still verify against DIAG, as safety_test_trip does. */
+        safety_link_status_t st;
+        memset(&st, 0, sizeof(st));
+        bool readback = safety_link_get_status(s_dash.safety, &st) == ESP_OK && st.link_up &&
+                        st.diag_ever_received && st.diag_since_reboot &&
+                        st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                        /* TRIPFX3 INFO-A: only the DIAG that names THIS trip occurrence */
+                        st.diag_trip_seq_known && st.diag_trip_seq == trip_seq;
+        if (readback) {
+            snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"readback\":true,"
+                     "\"trip_reason\":%u,\"trip_mask\":%u,\"is_test\":%s}",
+                     (unsigned)trip_seq, (unsigned)st.diag_trip_reason, (unsigned)st.diag_trip_mask,
+                     st.diag_trip_reason == TEST_TRIP_REASON ? "true" : "false");
+        } else {
+            snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"readback\":false,"
+                     "\"requested_trip_reason\":%u,\"requested_trip_mask\":%u}",
+                     (unsigned)trip_seq, TEST_TRIP_REASON, (unsigned)(1u << (TEST_TRIP_REASON - 1u)));
+        }
+        return test_trip_reply(req, "200 OK", json);
+    }
+    case SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"rate_limited\"}");
+    case SAFETY_LINK_TEST_TRIP_REFUSED_UPDATING:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"updating\"}");
+    case SAFETY_LINK_TEST_TRIP_REFUSED_BOOT_ID:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"boot_id_changed\"}");
+    case SAFETY_LINK_TEST_TRIP_DUPLICATE:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"duplicate\"}");
+    default:
+        return test_trip_reply(req, "502 Bad Gateway", "{\"ok\":false,\"outcome\":\"bad_frame\"}");
+    }
 }
 

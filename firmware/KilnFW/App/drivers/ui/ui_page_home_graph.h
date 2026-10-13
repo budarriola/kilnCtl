@@ -347,6 +347,13 @@ bool ui_page_home_lag_notice_should_show(uint32_t consecutive_ticks);
 bool ui_page_home_lag_notice_active(bool have_rich_zone_data, bool any_zone_sustained,
                                      uint32_t debounced_ticks);
 
+/* Short operator text for /api/profile_exec's pause_reason (profile_exec_status_t::pause_reason) for the home
+ * page notice strip (480x320, no scrolling: at most ~50 chars). Writes into out and returns the length; returns 0
+ * (out empty) for a NULL/empty reason. Known reasons: pico_reboot_undecided, pico_fatal_reboot,
+ * heat_grant_unconfirmed. An unknown non-empty reason is shown verbatim after "Paused: " (never hidden). The web
+ * main page (main_page.html pauseReasonText) mirrors the same wording. */
+size_t ui_page_home_pause_reason_text(const char *reason, char *out, size_t out_cap);
+
 /* Extracts the set bits of a ramp_lock_lagging_mask (profile_exec_status_t's
  * uint8_t bitmask, one bit per zone index) into out_indices, lowest zone
  * index first, capped at max_zones bits and out_cap slots (whichever is
@@ -357,6 +364,21 @@ bool ui_page_home_lag_notice_active(bool have_rich_zone_data, bool any_zone_sust
  * back zone INDICES, never names or formatted text. */
 size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_t *out_indices,
                                           size_t out_cap);
+
+
+/* Display maximum for the chart time axis (99 h). A valid but tiny ramp rate
+ * gives a plan horizon above 2^31 s (LCD audit L28); clamping here keeps the
+ * tick math and the lroundf() into a 32-bit long defined. */
+#define UI_PAGE_HOME_GRAPH_MAX_HORIZON_S 356400.0f
+
+/* Axis horizon for an active run: the larger of the plan's nominal length and
+ * the elapsed time (LCD audit L26, a run that outlasts its plan keeps drawing),
+ * clamped to [1, UI_PAGE_HOME_GRAPH_MAX_HORIZON_S]. NaN reads as 1. */
+float ui_page_home_active_horizon_s(float plan_horizon_s, float elapsed_s);
+
+/* Tolerance (s) for matching a chart bucket to a history sample by elapsed_s:
+ * half a bucket, never under one sample period. */
+float ui_page_home_history_tolerance_s(float horizon_s, size_t point_count, float sample_period_s);
 
 #ifdef __cplusplus
 }

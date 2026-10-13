@@ -2,6 +2,7 @@
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
                                     * A4 review follow-up A */
 #include "heat_enable.h"
+#include "danger_mode.h" /* danger_mode_blocks_start(): LCD review R1/R2 */
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_at's definition below */
 
@@ -801,6 +802,9 @@ static void autotune_engine_tick_locked_impl(const ThermoChannelSnapshot *pre_lo
     }
 }
 
+static bool autotune_engine_tick_under_lock(bool other_zone_active_hint, bool peek_active,
+                                            const ThermoChannelSnapshot *pre_lock_snap);
+
 static void task_entry(void *arg)
 {
     (void)arg;
@@ -851,13 +855,7 @@ static void task_entry(void *arg)
             thermo_channels_read(s_at.thermo_bus, &pre_lock_snap);
         }
 
-        xSemaphoreTake(s_at.lock, portMAX_DELAY);
-        bool not_running = !state_is_running(s_at.state);
-        if (!not_running && peek_active) {
-            s_at.other_zone_profile_active_hint = other_zone_active_hint;
-            autotune_engine_tick_locked_impl(&pre_lock_snap);
-        }
-        xSemaphoreGive(s_at.lock);
+        bool not_running = autotune_engine_tick_under_lock(other_zone_active_hint, peek_active, &pre_lock_snap);
 
         if (not_running) {
             /* Backstop, same shape and reasoning as profile_executor.c's in
@@ -874,6 +872,37 @@ static void task_entry(void *arg)
             continue;
         }
     }
+}
+
+/* One tick of task_entry() from taking s_at.lock onward: the definitive
+ * running check and the tick body under the lock, then -- with the lock
+ * given -- any coupling persist the tick decided on. Returns true when the
+ * engine was not running. Split out of task_entry() so host tests drive the
+ * real lock/dispatch ordering.
+ *
+ * Flash-worker lock-inversion audit 2026-10-09 F2: autotune_finalize_fit()
+ * (reached from the tick body) only parks its coupling persist in
+ * s_at.pending_coupling. It is taken under the lock and dispatched to
+ * bx_flash_worker only after xSemaphoreGive(), because the UART autotune
+ * handlers (status, abort, accept, start) run on that worker and take
+ * s_at.lock. Dispatching with the lock held deadlocked both tasks. */
+static bool autotune_engine_tick_under_lock(bool other_zone_active_hint, bool peek_active,
+                                            const ThermoChannelSnapshot *pre_lock_snap)
+{
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    bool not_running = !state_is_running(s_at.state);
+    if (!not_running && peek_active) {
+        s_at.other_zone_profile_active_hint = other_zone_active_hint;
+        autotune_engine_tick_locked_impl(pre_lock_snap);
+    }
+    coupling_persist_job_t coupling_job;
+    bool coupling_pending = autotune_take_pending_coupling_locked(&coupling_job);
+    xSemaphoreGive(s_at.lock);
+
+    if (coupling_pending) {
+        autotune_dispatch_coupling_persist(&coupling_job);
+    }
+    return not_running;
 }
 
 esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
@@ -951,6 +980,10 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * the lock NOT held on failure. */
 bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
 {
+    /* Zones config generation before ANY config read below; re-checked under zones_cfg_lock()
+     * after the heat claim is published (see the "zones config changed" late check). */
+    const uint32_t gen_at_entry = zones_config_generation();
+
     /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h has
      * the full rationale and the standing "NO OVERRIDE" instruction). Extended
      * to autotune the same day, same owner decision: autotune commands heat
@@ -980,7 +1013,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * refusal names recovery mode instead of "autotune engine not started".
      * Nothing here touches s_at, so running before that guard is safe.
      *
-     * Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): same
+     * Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6): same
      * collect-once-then-check pattern as profile_executor_run() -- runs
      * system_mode_gate_check()'s recovery-mode rule against the same facts
      * before readiness_gate_evaluate(), so the recovery-mode wording matches
@@ -998,6 +1031,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
          * profile_executor_run()'s identical check -- a backup restore's
          * commit pass writes the same zone state an autotune start reads. */
         mode_snap.restore_in_flight = backup_import_restore_in_flight();
+        mode_snap.danger_mode_active = danger_mode_blocks_start(); /* LCD review R1/R3 */
         if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, err_msg, err_cap)) {
             ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the system mode gate (recovery mode or restore)",
                      (unsigned)zone_index);
@@ -1065,29 +1099,8 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * that cannot heat should say so at the point the operator asks for it,
      * in the same words. */
     {
-        uint32_t sources = 0;
-        if (relay_authority_on_blocked(s_at.safety, &sources)) {
-            if (err_msg) {
-                /* Kept under 128 chars: dashboard_http.c's autotune handler
-                 * passes a char[128], and the first draft of this message was
-                 * truncated mid-word on the page ("...so it w"). ROADMAP.md
-                 * M13: decode the mask instead of showing a bare hex value --
-                 * same shortening (first source + "(+more)") zones_http.c's
-                 * ZONE_SWEEP_ZONE_ENERGIZE_REFUSED case already uses, since
-                 * the full comma-joined safety_fault_source_words() sentence
-                 * can run to 141 bytes on its own. */
-                char src_words[160];
-                safety_fault_source_words(sources, src_words, sizeof(src_words));
-                char *comma = strchr(src_words, ',');
-                bool more = (comma != NULL);
-                if (comma != NULL) {
-                    *comma = '\0';
-                }
-                snprintf(err_msg, err_cap,
-                         "heat is blocked (%.32s%s, usually the safety link down) -- "
-                         "autotune cannot drive the element",
-                         src_words, more ? " (+more)" : "");
-            }
+        if (relay_authority_start_blocked(s_at.safety, err_msg, err_cap,
+                                          "autotune cannot drive the element")) {
             return false;
         }
     }
@@ -1129,7 +1142,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * exists to prevent cheaply, up front, instead of hours in. Checked here,
      * not only in the tick, for the same "refuse before any heating starts"
      * convention as every other check in this function. */
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1/step 1: refuse an on/off zone BEFORE
+    /* docs/ON_OFF_ZONE.md sec 1/step 1: refuse an on/off zone BEFORE
      * the thermo_mask check just below, same "refuse before any heating"
      * convention as every other check in this function -- a TC-equipped
      * on/off zone (legal per plan sec 2) must get THIS message, not sail
@@ -1279,6 +1292,50 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         late_snap.restore_in_flight = true;
         (void)system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &late_snap, err_msg, err_cap);
         ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)zone_index);
+        return false;
+    }
+    /* Danger mode, second look (LCD review R1/R2) -- same pairing as profile_executor_run()'s identical
+     * check: danger_mode_request_start() opens its window and then reads the heat claim published
+     * above; this side publishes the claim and then reads the window (fail closed). */
+    if (danger_mode_blocks_start()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        sys_mode_snapshot_t late_snap;
+        memset(&late_snap, 0, sizeof(late_snap));
+        late_snap.danger_mode_active = true;
+        (void)system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &late_snap, err_msg, err_cap);
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: danger mode opened meanwhile",
+                 (unsigned)zone_index);
+        return false;
+    }
+    /* Factory reset in flight, second look -- same pairing as profile_executor_run()'s identical
+     * check (relay_authority.h): the reset sets its mark and then re-reads the heat claim, this side
+     * has published the claim and now reads the mark, so at least one of the two refuses. */
+    if (relay_authority_reset_in_flight()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "factory reset in progress -- the controller reboots when it finishes");
+        }
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: factory reset in progress",
+                 (unsigned)zone_index);
+        return false;
+    }
+    /* Zones config changed, second look (HTTP audit E1 finding 1) -- same pairing as
+     * profile_executor_run()'s identical check: POST /api/zones re-reads the heat claim inside its
+     * commit critical section, this side publishes the claim and then reads the generation under
+     * that lock, so either the POST refuses 409 or this refuses rather than run on stale config. */
+    if (zones_config_changed_since(gen_at_entry)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "the zones configuration changed while autotune was starting -- start it again");
+        }
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: zones config changed meanwhile",
                  (unsigned)zone_index);
         return false;
     }

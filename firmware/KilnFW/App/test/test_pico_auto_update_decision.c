@@ -1,5 +1,5 @@
 // Host tests for App/drivers/net/pico_auto_update.h -- the pure decision
-// logic behind docs/PICO_AUTO_UPDATE_PLAN.md ("the ESP checks the Pico's
+// logic behind docs/PICO_AUTO_UPDATE.md ("the ESP checks the Pico's
 // firmware version on every boot and updates it automatically if needed",
 // owner requirement 2026-09-16). Header-only, no I/O -- table-driven over
 // every branch pico_auto_update_decide() names, per the plan's own sec 9

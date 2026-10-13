@@ -204,7 +204,7 @@ Open:
       segment choosing whether its relay is left in its last state at run end
       (default off). `PROFILE_VERSION` 2->3. DONE -- `PROFILE_SEG_KIND_RELAY_IO`
       (`persist/profiles_types.h`: `io_blocking`, `io_leave_on_at_end`) already
-      implements this verbatim; on/off zones (docs/ON_OFF_ZONE_PLAN.md) are a
+      implements this verbatim; on/off zones (docs/ON_OFF_ZONE.md) are a
       distinct, later feature and explicitly say so in that plan's own intro.
 - [x] **Delete the rules engine** afterwards, never before -- otherwise there
       is a window with no way to drive a non-zone relay. `rules_task`'s own
@@ -1345,7 +1345,7 @@ overlap/overflow.
       path has never written an OTA slot (see 9.2's note on what that means
       for rollback confirmation).
 - [x] **Pre-change partition table archived** — MOOT 2026-10-07: the table was
-      redesigned (single-slot, `docs/OTA_SINGLE_SLOT_PLAN.md`) and flashed; there is
+      redesigned (single-slot, `docs/OTA_SINGLE_SLOT.md`) and flashed; there is
       no pre-OTA table to roll back to.
 - [x] **One-time serial flash documented as a prerequisite step**, not a
       footnote. DONE — added a dedicated bullet to
@@ -1401,7 +1401,7 @@ update). `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` deliberately left off.
       2026-10-07: no evidence in `docs/BENCH_TEST_LOG.md` or `logs/bench_test/`). The
       PENDING_VERIFY / rollback-cancel machinery has only run in host tests
       (`test_boot_guard.c`). Under the single-slot design
-      (`docs/OTA_SINGLE_SLOT_PLAN.md`) a direct push into the running `app` slot is
+      (`docs/OTA_SINGLE_SLOT.md`) a direct push into the running `app` slot is
       refused (OT-E01), so exercising it needs the recovery-image path
       (`recovery_enter` -> `recovery_apply_staged` -> `recovery_exit`); that apply
       has not been performed on the bench (the stage step only, BENCH_TEST_LOG).
@@ -2030,7 +2030,7 @@ suspected to be related to this work, was root-caused separately (also in
       e.g. while a profile is firing, stop/pause/modify-this-run is fine, but
       starting a *different* profile, running autotune, or a raw GPIO/SX1509
       debug write should be refused outright. **All five rollout slices
-      LANDED** (`docs/SYSTEM_MODE_GATE_PLAN.md` section 3.6, owner decisions
+      LANDED** (`docs/SYSTEM_MODE_GATE.md` section 3.6, owner decisions
       2026-09-25): `system_mode_gate.h`/`.c` (slice 1); manual relay writes
       via `kiln_io_owner.c`'s `relay_on_blocked()` (slice 3); recovery-mode
       start refusals shared across HTTP/UART/LCD, retiring the HTTP-only

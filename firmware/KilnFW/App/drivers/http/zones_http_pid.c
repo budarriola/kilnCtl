@@ -7,8 +7,11 @@
 
 #include "zones_http_internal.h"
 
+#include <string.h>
 #include "esp_log.h"
 #include "relay_authority.h"
+#include "cfg_fs_refusal_http.h"
+#include "kiln_cfg_swap.h"
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
 
@@ -16,7 +19,7 @@
  * Narrow endpoint versus the whole-page POST /api/zones submit: PID gain
  * (kp/ki/kd) edits ONLY.
  *
- * Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+ * Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
  * spec, owner decision Q2): this endpoint used to be a deliberate exception,
  * allowed even while a firing was RUNNING/PAUSED. That carve-out is REVOKED
  * -- owner decision Q2 is "refuse ALL zone/relay/guard config writes, not
@@ -115,6 +118,11 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         }
     }
 
+    if (kiln_cfg_swap_zone_edits_at_risk()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones/pid refused: rollback journal pending");
+        return system_mode_gate_http_send_refusal(req, KILN_CFG_SWAP_ZONE_EDITS_RISK_TEXT);
+    }
+
     if (req->content_len <= 0 || req->content_len > ZONES_PID_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -131,13 +139,22 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         received += (size_t)ret;
     }
     body[received] = '\0';
+    /* A raw NUL or a "%00" escape would truncate a value at the C-string layer
+     * ("zone=1%002" reads as zone 1); refuse rather than guess (audit L3/A5). */
+    if (memchr(body, '\0', received) != NULL || strstr(body, "%00") != NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "embedded NUL not allowed");
+        return ESP_OK;
+    }
 
     uint8_t zone_index;
     if (!zones_config_json_parse_u8_field(body, "zone", 0, MAX31856_CHANNEL_COUNT - 1, &zone_index)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone missing or out of range");
         return ESP_OK;
     }
-    if (zone_index >= s_zones.cfg.thermo_count) {
+    zones_cfg_lock();
+    const uint8_t thermo_count_now = s_zones.cfg.thermo_count;
+    zones_cfg_unlock();
+    if (zone_index >= thermo_count_now) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone is not configured");
         return ESP_OK;
     }
@@ -161,7 +178,19 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (!zones_config_set_pid(zone_index, kp, ki, kd)) {
+    const zones_set_result_t set_result = zones_config_set_pid_checked(zone_index, kp, ki, kd);
+    if (set_result == ZONES_SET_BUSY_RUNNING) {
+        /* Dev review 9 L2: a run claimed heat after the entry gate above; the setter re-read the
+         * claim inside its commit lock and wrote nothing. Same 409 as the entry gate. */
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones/pid refused: a run started during the request");
+        return system_mode_gate_http_send_refusal(req, "a profile or autotune run is active");
+    }
+    if (set_result != ZONES_SET_OK) {
+        if (zones_config_is_undecided()) {
+            /* PROFILESFX10 LOW-3: the setter refused because the stored zones config was unreadable at boot. */
+            cfg_fs_http_send_zones_undecided_409(req);
+            return ESP_OK;
+        }
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to apply/persist PID gains\"}");

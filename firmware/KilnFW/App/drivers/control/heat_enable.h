@@ -259,6 +259,36 @@ bool heat_enable_retry_pending(void);
 // profile_executor.c's watchdog loop documents why at its call site.
 void heat_enable_reconcile(void);
 
+// F1 (safety link review 2026-10-09): REQUEST_ENABLE is fire-and-forget, so a
+// Pico reboot, a GRACE-dropped request, a CRC-dropped frame or a transient Pico
+// refusal loses the grant while granted==true. The watchdog feeds the Pico's
+// reported state here each tick (before heat_enable_reconcile()): `fresh` =
+// DIAG/STATUS recent, `diag_state` = SAFETY_LINK_DIAG_STATE_*, `k4_closed` =
+// SAFETY_FLAG_RELAY. While a grant is held, the Pico is ARMED and K4 stays open
+// for 3 s, the grant is marked not-granted so reconcile re-sends it, with
+// 6/12/24/48 s backoff and at most 4 re-requests; after that
+// heat_enable_grant_unconfirmed() reads true, is_granted() reads false and
+// retry_pending() reads true until K4 closes or the claim is released.
+void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed, uint32_t now_ms);
+bool heat_enable_grant_unconfirmed(void);
+
+// Safety-link fix batch 2, MED-1: Pico reboot cause. The watchdog feeds
+// safety_link's pico_reboot_seq, whether a DIAG frame arrived since that
+// reboot, and that DIAG's boot_reason (call BEFORE note_pico_state). A reboot
+// with a claim held is classified from the new boot's DIAG: WATCHDOG, BROWNOUT,
+// STACK_OVERFLOW, MALLOC_FAILED or ASSERT_FAILED -> heat_enable_reboot_hold()
+// reads true, the standing/queued request is withdrawn and neither F1 nor
+// reconcile will re-request (the caller pauses the firing with a reason).
+// Anything else keeps the F1 behaviour (re-request once ARMED). Cleared when
+// the last claim is released.
+void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
+                                uint32_t now_ms);
+bool heat_enable_reboot_hold(void);
+// True while a Pico reboot with a claim held is still unclassified (no DIAG of
+// the new boot yet): heat is withheld, the cause is unknown. The profile
+// executor shows it as pause_reason "pico_reboot_undecided" while RUNNING.
+bool heat_enable_reboot_undecided(void);
+
 // Diagnostics/host-test counters: how many REQUEST_ENABLE(true) frames were
 // accepted by the link, and how many REQUEST_ENABLE(false) frames were sent.
 // A run that starts and stops once, on a healthy link, moves each by exactly

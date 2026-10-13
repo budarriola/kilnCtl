@@ -197,18 +197,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 # Every check_*.ps1 anywhere in the tree, excluding build output and any
 # vendored/third-party directory that might ship its own.
-$checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
-    Where-Object {
-        $_.FullName -notmatch '\\build\\' -and
-        $_.FullName -notmatch '\\node_modules\\' -and
-        # Any dotted directory: .venv, .git, and -- the one that actually bit
-        # here -- .claude\worktrees\, which holds leftover per-agent copies of
-        # the whole tree. Without this the first run of this script found 24
-        # scripts where the repository has 11, and would have been reporting
-        # the pass/fail state of an abandoned worktree alongside the real one.
-        $_.FullName -notmatch '\\\.[^\\]+\\'
-    } |
-    Sort-Object FullName
+. (Join-Path $PSScriptRoot "lib_check_discovery.ps1")   # shared with check_build_gate_usage.ps1 (REVIEW_DEVBREAK5 LOW-3)
+$checks = Get-KilnCheckScripts -RepoRoot $repoRoot
 
 # test_check_hal_include_boundary.ps1 is a negative test, not a guard --
 # it proves check_hal_include_boundary.ps1's scan can actually detect a
@@ -286,7 +276,7 @@ if (Test-Path $uriCapNegativeTest) {
 }
 
 # test_check_config_migration_steps.ps1 is a negative test, not a guard -- it
-# proves check_config_migration_steps.ps1's scan (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+# proves check_config_migration_steps.ps1's scan (docs/CONFIG_MIGRATION_CHAIN.md
 # section 5) can actually detect a version bump with no matching step, plus
 # every other rule shape it claims to enforce. Named test_*, not check_*, so
 # the glob above does not pick it up; wired explicitly here, same pattern as
@@ -352,6 +342,32 @@ if (Test-Path $dupSymbolsTest) {
 } else {
     Write-Host ""
     Write-Host "WARNING: expected test $dupSymbolsTest not found -- proceeding" -ForegroundColor Yellow
+}
+
+# test_check_lcd_sink_callgraph.ps1: synthetic-dump test of check_lcd_sink_callgraph.ps1
+# (REVIEW_LCDFX9 HIGH-2); named test_*, wired explicitly.
+$lcdCgTest = Join-Path $repoRoot "tools\test_check_lcd_sink_callgraph.ps1"
+if (Test-Path $lcdCgTest) {
+    $checks += Get-Item $lcdCgTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host "FAILED: expected test $lcdCgTest not found" -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
+}
+
+# test_check_submodule_pins_pushed.ps1 tests the network-dependent
+# check_submodule_pins_pushed.ps1 against local scratch repos (offline). The
+# check itself is excluded from the glob above; wired explicitly here.
+$subPinsTest = Join-Path $repoRoot "tools\test_check_submodule_pins_pushed.ps1"
+if (Test-Path $subPinsTest) {
+    $checks += Get-Item $subPinsTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected test $subPinsTest not found --" -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
 }
 
 # test_check_lcd_home_nav_gated.ps1 is a negative test, not a guard -- it
@@ -674,6 +690,10 @@ $script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -N
 
 Write-Host ""
 Write-Host "Running $($checks.Count) guard scripts from $repoRoot (parallel, throttle $MaxParallel)"
+# Evidence line for tools/land.ps1 and tools/dev_promote.ps1 (they bind a log to a tree).
+$script:RunTreeHash = (& git -C $repoRoot rev-parse 'HEAD^{tree}' 2>$null | Out-String).Trim()
+$script:RunTreeDirty = if ($null -ne $script:MainBaselineStart -and -not $script:MainBaselineStart.Status.Trim()) { 0 } else { 1 }
+Write-Host "Run tree: $($script:RunTreeHash) dirty=$($script:RunTreeDirty) partial=$(if ($Only -or $Skip) { 1 } else { 0 })"
 Write-Host "Run mode: $(if ($Fast) { 'fast' } else { 'full' })"
 if ($script:CheckCacheCtx.Enabled) {
     Write-Host "Check cache: on (tree $($script:CheckCacheCtx.Tree.Substring(0,12)), $($script:CheckCacheCtx.Mode))" -ForegroundColor Cyan
@@ -717,12 +737,16 @@ function Start-CheckAsync {
         $procArgs = @($Check.FullName)
     } else {
         $exe = "powershell"
-        $procArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Check.FullName)
+        $procArgs = @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $Check.FullName)
     }
 
     $tag = ($rel -replace '[\\/:]', '_')
     $outFile = Join-Path $ScratchDir "$tag.out.txt"
     $errFile = Join-Path $ScratchDir "$tag.err.txt"
+    # stdin from an empty file (EOF): a prompt (Read-Host, Remove-Item Confirm?)
+    # fails fast instead of hanging the whole suite.
+    $inFile = Join-Path $ScratchDir "$tag.in.txt"
+    [IO.File]::WriteAllText($inFile, "")
 
     # Start-Process launches a genuinely separate process (same isolation the
     # original in-process `&` call to a child powershell already relied on --
@@ -739,7 +763,7 @@ function Start-CheckAsync {
     if ($Check.FullName -eq $SelfcheckPy) { $env:PYTHONPATH = (Join-Path $checkDir "src") }
     try {
         $proc = Start-Process -FilePath $exe -ArgumentList $procArgs -WorkingDirectory $checkDir `
-            -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
+            -RedirectStandardInput $inFile -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
     } finally {
         $env:PYTHONPATH = $savedPyPath
     }
@@ -857,7 +881,7 @@ function Invoke-ChecksParallel {
         foreach ($r in $running) {
             if ($r.Proc.HasExited) {
                 $results += Complete-CheckResult -Running $r -SkipExitCode $SkipExitCode
-            } elseif ($PerCheckTimeoutSec -gt 0 -and ([DateTime]::UtcNow - $r.Started).TotalSeconds -gt $PerCheckTimeoutSec) {
+            } elseif ($PerCheckTimeoutSec -gt 0 -and ([DateTime]::UtcNow - $r.Started).TotalSeconds -gt $(if ($script:gateWaitingRels -contains $r.Rel) { [Math]::Max($PerCheckTimeoutSec, 1800) } else { $PerCheckTimeoutSec })) {
                 try {
                     $tk = Start-Process -FilePath taskkill -ArgumentList @('/PID', "$($r.Proc.Id)", '/T', '/F') -NoNewWindow -PassThru
                     if (-not $tk.WaitForExit(15000)) { try { $tk.Kill() } catch {} }
@@ -867,8 +891,8 @@ function Invoke-ChecksParallel {
                     if (Test-Path $f) { $partial += (Get-Content -Raw -ErrorAction SilentlyContinue $f) }
                 }
                 Remove-Item -ErrorAction SilentlyContinue $r.OutFile, $r.ErrFile
-                Write-Host "  FAIL  $($r.Rel) (killed: exceeded ${PerCheckTimeoutSec}s wall-clock cap)" -ForegroundColor Red
-                $results += [pscustomobject]@{ Bucket = "fail"; Path = $r.Rel; Code = "timeout"; Output = ("TIMEOUT: exceeded ${PerCheckTimeoutSec}s per-check wall-clock cap; process tree killed.`n" + $partial) }
+                Write-Host "  FAIL  $($r.Rel) (timed out: killed after exceeding ${PerCheckTimeoutSec}s wall-clock cap)" -ForegroundColor Red
+                $results += [pscustomobject]@{ Bucket = "fail"; Path = $r.Rel; Code = "timeout"; Output = ("TIMEOUT: check timed out, exceeded ${PerCheckTimeoutSec}s per-check wall-clock cap; process tree killed.`n" + $partial) }
             } else {
                 $stillRunning += $r
             }
@@ -889,7 +913,7 @@ function Invoke-ChecksParallel {
 # artifact from a previous run instead of this one, same failure shape
 # check_00_kilnfw_target_build.ps1's own header documents.
 #
-# 2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW application build
+# 2026-09-20 (docs/PICO_AUTO_UPDATE.md): the KilnFW application build
 # EMBED_FILES SaftyFW's slot images (SaftyFW_slotA.bin/slotB.bin) and fails
 # at CMake configure time if either is missing or stale. This briefly split
 # phase 1 into a serialized 1a (SaftyFW alone) / 1b (the two KilnFW builds)
@@ -982,12 +1006,12 @@ $script:gateWaitingRels = @($gateWaitingPaths | ForEach-Object { $_.Substring($r
 $results = @()
 if ($buildChecks.Count -gt 0) {
     Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) `
+    $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) -PerCheckTimeoutSec 1800 `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($restChecks.Count -gt 0) {
     Write-Host "Phase 2/3: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel -UnthrottledPaths $gateWaitingPaths `
+    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel -PerCheckTimeoutSec 900 -UnthrottledPaths $gateWaitingPaths `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($uiSweepChecks.Count -gt 0) {
@@ -1038,13 +1062,13 @@ function Exit-WithBaseline {
             $rec = Test-MainBaselineRecordable -RepoRoot $repoRoot -Start $script:MainBaselineStart
             if ($rec.Ok) {
                 $fp = Get-CheckCacheFingerprint -PcToolsPython $selfcheckPython
-                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot
-                Write-Host "Recorded main baseline ($mode) for origin/main $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
+                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot -Ref $rec.Ref
+                Write-Host "Recorded main baseline ($mode) for $($rec.Ref) $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
             } else {
-                Write-Host "Main baseline not recorded: $($rec.Reason)" -ForegroundColor DarkGray
+                Write-Host "This run is not recorded as a new main baseline: $($rec.Reason). The comparison above uses the stored main baseline." -ForegroundColor DarkGray
             }
         } else {
-            Write-Host "Main baseline not recorded: -Only/-Skip run is partial" -ForegroundColor DarkGray
+            Write-Host "This run is not recorded as a new main baseline: -Only/-Skip run is partial." -ForegroundColor DarkGray
         }
     } catch {
         Write-Host "main baseline: skipped ($($_.Exception.Message))" -ForegroundColor Yellow

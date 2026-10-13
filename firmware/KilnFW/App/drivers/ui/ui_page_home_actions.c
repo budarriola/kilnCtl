@@ -7,6 +7,7 @@
  * page's overall design history. */
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
+#include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "ui_page_edit_firing.h" /* owner request 2026-09-28 -- Edit-firing button */
 #include "ui_page_live_decide.h" /* "Keep?" -- end-of-run Discard/Save as/Overwrite */
 #include "profiles_live_http.h" /* profiles_live_decide_status() */
@@ -76,7 +77,7 @@ bool ui_home_profile_name_for_id(uint8_t id, char *out, size_t out_cap)
 static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
 {
     /* Runs on the LVGL task (button press callback) -- heap-allocate rather
-     * than add a 1464-byte profile_exec_status_t stack local (see
+     * than add a 1512-byte profile_exec_status_t stack local (see
      * ui_page_home_refresh.c's own comment on this task's measured stack
      * ceiling for why it is treated as tight, not generous). Needs the full
      * struct's .state and .profile_id, so the narrow
@@ -91,6 +92,13 @@ static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
     return found;
 }
 
+/* L22 (LCD UI audit 2026-10-09): Start runs the profile the Confirm Start
+ * dialog NAMED, not whatever the fallback chain resolves to a few seconds
+ * later (the running/last-boot profile can change while the dialog is open). */
+static uint8_t s_confirmed_start_id;
+static bool s_confirmed_start_valid;
+static bool s_confirmed_start_pending;
+
 static void ui_home_do_start(void)
 {
     /* Same action function dashboard_http.c's POST /api/profile_exec/start
@@ -102,13 +110,21 @@ static void ui_home_do_start(void)
      * who wants a *different* profile than either of those has to use the
      * web dashboard's picker. */
     uint8_t id = 0;
-    if (!ui_home_resolve_start_profile_id(&id)) {
+    bool have = false;
+    if (s_confirmed_start_pending) {
+        s_confirmed_start_pending = false;
+        have = s_confirmed_start_valid;
+        id = s_confirmed_start_id;
+    } else {
+        have = ui_home_resolve_start_profile_id(&id);
+    }
+    if (!have) {
         ESP_LOGW(UI_HOME_TAG, "Start pressed with no known profile id -- nothing has run this boot "
                       "and no picker on this page (TODO.md 10.3's no-scroll rewrite)");
         return;
     }
 
-    char err_msg[160] = ""; /* 64 -> 160, 2026-09-09: the readiness interlock's refusals (readiness_gate.h) name an item AND a remedy; at 64 the remedy was cut off. */
+    char err_msg[READINESS_GATE_MSG_CAP] = ""; /* 64 -> 160, 2026-09-09: the readiness interlock's refusals (readiness_gate.h) name an item AND a remedy; at 64 the remedy was cut off. */
     if (!profile_executor_run(id, err_msg, sizeof(err_msg))) {
         ESP_LOGW(UI_HOME_TAG, "profile_executor_run(%u) refused: %s", id, err_msg);
         /* Same "Cannot Start" modal ui_page_profile_detail.c's confirm_start_cb()
@@ -196,6 +212,9 @@ static void ui_home_show_start_confirm(void)
 {
     uint8_t id = 0;
     bool have_id = ui_home_resolve_start_profile_id(&id);
+    s_confirmed_start_id = id;
+    s_confirmed_start_valid = have_id;
+    s_confirmed_start_pending = true;
 
     profile_t prof;
     bool have_prof = have_id && profiles_http_get(id, &prof);
@@ -294,7 +313,7 @@ void ui_home_fire_btn_cb(lv_event_t *e)
 {
     (void)e;
     /* Only "is a firing active" is needed here, not which fields -- use the
-     * narrow accessor profile_executor.h recommends over a 1464-byte
+     * narrow accessor profile_executor.h recommends over a 1512-byte
      * profile_exec_status_t stack local (this runs on the lvgl task, whose
      * own 2026-09-04 stack-corruption panic is exactly why this file's
      * budget is tracked by check_all_task_stack_budgets.py). */
@@ -326,7 +345,7 @@ static void ui_home_pause_resume_gated_cb(void *user_data)
 {
     (void)user_data;
     /* Runs on the LVGL task -- heap-allocate rather than add another
-     * 1464-byte profile_exec_status_t stack local; needs the full struct's
+     * 1512-byte profile_exec_status_t stack local; needs the full struct's
      * .state to distinguish RUNNING from PAUSED, which the narrow
      * profile_executor_get_active_id() accessor cannot report (it collapses
      * both into a single "active" bool). */
@@ -382,7 +401,7 @@ void ui_home_edit_btn_cb(lv_event_t *e)
     /* Owner decision 2026-09-28: every LCD action other than viewing the
      * dashboard needs the PIN. tools/check_lcd_home_nav_gated.ps1 enforces
      * this mechanically. */
-    ui_lcd_lock_run_gated("Enter PIN to edit firing", LCD_PIN_ROLE_USER,
+    ui_lcd_lock_run_gated("Enter admin PIN to edit firing", LCD_PIN_ROLE_ADMIN,
                            ui_home_edit_btn_gated_cb, NULL);
 }
 
@@ -577,7 +596,7 @@ void ui_home_auth_reset_corner_tap_cb(lv_event_t *e)
 
     bool estop_asserted = dashboard_http_estop_asserted();
     /* Only "is a firing active" is needed here -- narrow accessor instead of
-     * a 1464-byte profile_exec_status_t stack local (this runs on the lvgl
+     * a 1512-byte profile_exec_status_t stack local (this runs on the lvgl
      * task; see this file's own header comment on that task's stack
      * history). */
     uint8_t active_id = 0;

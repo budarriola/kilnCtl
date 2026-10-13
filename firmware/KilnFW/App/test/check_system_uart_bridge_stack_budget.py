@@ -51,13 +51,87 @@ placeholder above) -- an UNDER-estimate of true worst-case depth.
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import check_main_task_stack_budget as base  # noqa: E402
 
 ROOT = "system_bridge_task"
-CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xTaskCreatePinnedToCore() literal
+BRIDGE_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "drivers", "bridge", "uart_bridge_system.c")
+
+
+_LITERAL_OR_COMMENT = re.compile(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|/\*.*?\*/|//[^\n]*', re.S)
+_ZERO = re.compile(r"^\(?\s*(0[uUlL]*|!\s*1[uUlL]*)\s*\)?$")
+_ONE = re.compile(r"^\(?\s*1[uUlL]*\s*\)?$")
+
+
+def strip_dead_c(src):
+    """Comments (string/char-literal aware, so a "/*" in a string is not a comment opener) and preprocessor-dead
+    regions (`#if 0`, `#if 0L`, `#if !1`, `#elif 0`, the else of `#if 1`) removed (REVIEW_DEVBREAK5 LOW-5).
+    Unknown conditions stay live in every branch, so a decoy inside one trips the exactly-one counts."""
+    src = re.sub(r"\\\r?\n", "", src)
+    src = _LITERAL_OR_COMMENT.sub(lambda m: " " if m.group(0).startswith("/") else m.group(0), src)
+    out, stack, live = [], [], True
+    for ln in src.split("\n"):
+        m = re.match(r"\s*#\s*(ifdef|ifndef|if)\b(.*)$", ln)
+        if m:
+            c = m.group(2).strip()
+            kind = "unknown"
+            if m.group(1) == "if" and _ZERO.match(c):
+                kind = "false"
+            elif m.group(1) == "if" and _ONE.match(c):
+                kind = "true"
+            stack.append([live, kind])
+            live = live and kind != "false"
+            continue
+        m = re.match(r"\s*#\s*elif\b(.*)$", ln)
+        if m and stack:
+            kind = "false" if _ZERO.match(m.group(1).strip()) else "unknown"
+            stack[-1][1] = kind
+            live = stack[-1][0] and kind != "false"
+            continue
+        if re.match(r"\s*#\s*else\b", ln) and stack:
+            live = stack[-1][0] and stack[-1][1] != "true"
+            continue
+        if re.match(r"\s*#\s*endif\b", ln) and stack:
+            live = stack.pop()[0]
+            continue
+        if live:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def read_configured_stack(path=BRIDGE_SOURCE):
+    """Derive the task stack from the C source (REVIEW_DEVBREAK4 LOW-4): the literal passed to
+    xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", N, ...) and the one passed to
+    stack_margin_register("system_uart_bridge", ..., N) must both exist, be unique and agree.
+    Returns (bytes, error_message)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+    except OSError as exc:
+        return None, f"cannot read {path}: {exc}"
+    src = strip_dead_c(src)
+    # REVIEW_DEVBREAKFX6 LOW-3: count EVERY create/register site that names the task, parseable or not, and require
+    # exactly one of each; a site whose size is not a plain decimal/hex literal is a failure, never "absent" (a hex
+    # real create beside a decimal decoy used to leave the decoy as the only parseable match).
+    any_create = re.findall(r'xTaskCreate\w*\s*\([^;]*?"system_uart_bridge"', src)
+    any_reg = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"', src)
+    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*,', src)
+    regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*\)\s*;', src)
+    if len(any_create) != 1 or len(any_reg) != 1 or len(created) != 1 or len(regd) != 1:
+        return None, (f"expected exactly one xTaskCreate*(... \"system_uart_bridge\" ...) and one "
+                      f"stack_margin_register(\"system_uart_bridge\", ...), each with a plain decimal/hex literal size, in {path}; "
+                      f"found {len(any_create)} create site(s) ({len(created)} parseable) and {len(any_reg)} register site(s) ({len(regd)} parseable)")
+    c_val, r_val = int(created[0], 0), int(regd[0], 0)
+    if c_val != r_val:
+        return None, (f"{path}: task created with stack {c_val} B but stack_margin_register() reports against "
+                      f"{r_val} B -- the margin is graded against the wrong denominator")
+    return c_val, None
+
+
+CONFIGURED_STACK_BYTES, _STACK_ERR = read_configured_stack()
 
 # Measured 2026-09-08 against KilnCtrl.elf as built that day -- see this
 # module's docstring for the "TODO.md section 13" unresized-stack context.
@@ -73,9 +147,17 @@ CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xT
 # the deepest reachable path (still through the cfg_fs_confirm_format_device
 # chain -- see this module's docstring; that chain is off-limits cfg_fs*
 # code and was not touched) from 2192 B to 1936 B. Retightened to match.
-CEILING_BYTES = 1936
+# 2026-10-09: long calls (l32r+callx) now followed: measured 3136 B (was 1936 B); stack raised 3072 -> 4096.
+# 2026-10-10: 3136 -> 3152 B (+16 B in a frame on the factory_reset_execute/execute_scope chain after the
+# persist K10 fixes touched factory_reset.c); honest headroom 644 B of 4096 B, above the floor (the earlier 256 B figure here was stale; the enforced floor is MIN_HONEST_HEADROOM_BYTES = 512 B, 2026-10-11), so no stack bump.
+# 2026-10-10: 3152 -> 3216 B re-measured; honest headroom still 580 B of 4096 B after the 300 B allowance.
+CEILING_BYTES = 3216
 
 UNMODELED_OVERHEAD_BYTES = 300
+
+# Honest headroom floor, enforced (2026-10-11, REVIEW_DEVBREAK3 LOW-4): retightening CEILING_BYTES upward must not walk
+# the stack into the margin with the check green; a breach forces a stack bump. Same value as the all-task checker's absolute floor.
+MIN_HONEST_HEADROOM_BYTES = 512
 
 
 def main():
@@ -86,6 +168,10 @@ def main():
                      help="override CEILING_BYTES (used by the negative test)")
     args = ap.parse_args()
     ceiling = args.ceiling_bytes if args.ceiling_bytes is not None else CEILING_BYTES
+
+    if CONFIGURED_STACK_BYTES is None:
+        print(f"check_system_uart_bridge_stack_budget: FAIL -- {_STACK_ERR}")
+        return 1
 
     if not os.path.isfile(args.elf):
         print(f"check_system_uart_bridge_stack_budget: SKIP: no ELF at {args.elf}.")
@@ -121,6 +207,12 @@ def main():
     for fn in [ROOT] + path:
         running += frames.get(fn, 0)
         print(f"    {frames.get(fn, 0):>6} B  {running:>6} B cumulative  {fn}")
+
+    if honest_headroom < MIN_HONEST_HEADROOM_BYTES:
+        print()
+        print(f"check_system_uart_bridge_stack_budget: FAIL -- honest headroom {honest_headroom} B is below the "
+              f"{MIN_HONEST_HEADROOM_BYTES} B floor; raise the system_uart_bridge stack instead of raising the ceiling.")
+        return 1
 
     if total > ceiling:
         print()

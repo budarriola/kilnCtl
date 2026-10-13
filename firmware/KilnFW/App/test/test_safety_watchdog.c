@@ -64,6 +64,19 @@ static void test_safety_trip_faults_paused(void)
     TEST_CHECK(strstr(out.fault_reason, "E-stop") != NULL, "reason names the E-stop guard");
 }
 
+static void test_test_trip_reason4_faults_in_words(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- a TEST trip (reason 4) faults the run, named as a test");
+
+    profile_executor_wd_input_t in = base_input();
+    in.safety_processor_tripped = true;
+    in.safety_trip_reason = 4; // SAFETY_TRIP_TEST
+    in.state_running_or_paused = true;
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_FAULT, "a test trip aborts a live firing like any trip");
+    TEST_CHECK(strstr(out.fault_reason, "test trip") != NULL, "fault_reason names it as a test trip");
+}
+
 static void test_trip_wording_distinct_from_silent_link(void)
 {
     TEST_SECTION("profile_executor_wd_decide -- trip wording differs from the silent-link wording");
@@ -446,6 +459,7 @@ void run_test_safety_watchdog(void)
 {
     test_safety_trip_faults_running();
     test_safety_trip_faults_paused();
+    test_test_trip_reason4_faults_in_words();
     test_trip_wording_distinct_from_silent_link();
     test_already_faulted_retries_relay_off_without_reason_change();
     test_idle_trip_does_not_fabricate_run();

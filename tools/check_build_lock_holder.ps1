@@ -38,7 +38,14 @@ function Start-Holder([string]$name, [int]$holdSeconds, [string]$progressDir = "
     $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
     $psi.EnvironmentVariables["KILNCTL_BUILD_LOCK_DIR"] = $tmp
     $proc = [System.Diagnostics.Process]::Start($psi)
-    while (-not $proc.StandardOutput.EndOfStream) { if ($proc.StandardOutput.ReadLine() -match "READY") { break } }
+    # Bounded: an unbounded EndOfStream/ReadLine would hang the check if the holder never prints READY.
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ($true) {
+        $lt = $proc.StandardOutput.ReadLineAsync()
+        $left = [int][Math]::Max(0, ($readyDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if (-not $lt.Wait($left)) { try { & taskkill /T /F /PID $proc.Id | Out-Null } catch { }; throw "holder did not print READY within 60 s" }
+        if ($null -eq $lt.Result -or $lt.Result -match "READY") { break }
+    }
     return $proc
 }
 # Enter-BuildLock, capturing the Write-Host (information stream) text it prints.

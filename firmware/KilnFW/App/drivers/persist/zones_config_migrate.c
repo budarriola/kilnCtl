@@ -770,7 +770,7 @@ static bool convert_versioned_blob_to_current_impl(uint8_t version, const void *
         return true;
     }
     case 22: {
-        /* v22 -> v23 (THIS pass, docs/ON_OFF_ZONE_PLAN.md step 1):
+        /* v22 -> v23 (THIS pass, docs/ON_OFF_ZONE.md step 1):
          * zone_type/failsafe_state/hyst_c/min_on_s/min_off_s are brand new,
          * appended at the true tail after progress_band_c -- zone_cfg_v22_t
          * is therefore a byte-for-byte prefix of the current (v23)

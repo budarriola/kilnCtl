@@ -215,7 +215,7 @@ void profiles_slot_set(uint8_t id);
 void profiles_slot_clear(uint8_t id);
 
 /* ---- shared on-flash blob encode/decode (profiles_http.c) -----------------
- * Widened non-static (2026-09-07, docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+ * Widened non-static (2026-09-07, docs/FILESYSTEM_USER_DATA.md section 5
  * step 4, user-profiles filesystem move) so profiles_cfg_fs.c's read-through/
  * dual-write bridge can validate and produce a `cfg`-partition file using the
  * EXACT SAME version-1/2/3 migration chain and CRC check the NVS path already
@@ -282,6 +282,22 @@ void profiles_save_unlock(void);
 esp_err_t nvs_erase_slot_locked(uint8_t id); /* caller holds profiles_save_lock(); no stats prune */
 esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock() */
 
+/* The one delete sequence behind POST /api/profile/delete
+ * (profile_delete_post_handler) and benchproto PROFILES DELETE
+ * (profiles_http_delete). Defined in profiles_http.c; see its comment for the
+ * delete-in-flight mark that closes the delete-vs-start race (HTTP input
+ * parsing audit L23) and the lock order. */
+typedef enum {
+    PROFILES_DELETE_OK = 0,
+    PROFILES_DELETE_BUILTIN,        /* builtin catalogue id: read-only */
+    PROFILES_DELETE_NOT_FOUND,      /* out of range or unused slot */
+    PROFILES_DELETE_RUNNING,        /* executor is running/paused on this slot */
+    PROFILES_DELETE_BUSY,           /* another delete of this slot is in flight */
+    PROFILES_DELETE_PERSIST_FAILED, /* stats prune or erase failed: slot kept, retryable */
+    PROFILES_DELETE_REV_UNKNOWN,    /* rev floor unknown this boot: refused before any side effect (409) */
+} profiles_delete_result_t;
+profiles_delete_result_t profiles_delete_slot(uint8_t id);
+
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY
  * configured max_temp_c of one of its zone_mask zones -- advisory-only
  * check shared by the list/detail JSON (profiles_catalog_http.c) and the
@@ -290,7 +306,7 @@ esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock()
  * rationale. */
 bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_cap);
 
-/* docs/ON_OFF_ZONE_PLAN.md plan step 5 -- rejects a candidate profile whose
+/* docs/ON_OFF_ZONE.md plan step 5 -- rejects a candidate profile whose
  * on/off rules reference a nonexistent segment or a zone not typed
  * ZONE_TYPE_ON_OFF (the dangerous direction: a HEATER zone driven by on/off
  * logic), or whose numeric fields are out of bounds. Called by
@@ -325,7 +341,7 @@ bool validate_io_segment_in_state(const profile_segment_t *seg, uint8_t seg_num,
 bool validate_on_off_rules_in_state(const profile_t *candidate, const profile_validate_state_t *st, char *err_msg,
                                     size_t err_cap);
 
-/* Widened non-`static` (docs/LIVE_PROFILE_EDIT_PLAN.md section 8 item 1) so
+/* Widened non-`static` (docs/LIVE_PROFILE_EDIT.md section 8 item 1) so
  * the live-edit handler decodes the identical x-www-form-urlencoded shape
  * profiles_edit_http.c's own POST /api/profile does -- two decoders would
  * drift on the first new field. Renamed from the original `static
@@ -335,7 +351,7 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
 
 /* Selects which rule profiles_validate_candidate() applies to a ZONE_RAMP
  * segment's target_c against its zone's CURRENTLY configured max_temp_c
- * (docs/LIVE_PROFILE_EDIT_PLAN.md section 7). PROFILE_VALIDATE_ADVISORY is
+ * (docs/LIVE_PROFILE_EDIT.md section 7). PROFILE_VALIDATE_ADVISORY is
  * today's save-time behavior (profile_exceeds_zone_ceiling(): a profile
  * exceeding the live ceiling still saves, with a warning -- profiles are
  * portable between kilns, and only *starting* one enforces the ceiling).
@@ -365,7 +381,7 @@ _Static_assert(PROFILE_VALIDATE_HARD == 1, "profile_executor.c's local profile_v
 
 /* The one place a candidate profile_t is checked before it is written
  * anywhere. Called by profile_post_handler() (mode ADVISORY, unchanged
- * behavior), the live-edit POST handler (mode HARD, docs/LIVE_PROFILE_EDIT_PLAN.md
+ * behavior), the live-edit POST handler (mode HARD, docs/LIVE_PROFILE_EDIT.md
  * section 7), and the executor's pickup re-check (mode HARD, against the
  * *live* zone config, under s_exec.lock) -- three call sites, one rule.
  * Reads zone config; touches no httpd state, so it host-tests directly

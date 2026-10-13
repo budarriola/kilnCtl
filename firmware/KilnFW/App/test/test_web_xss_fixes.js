@@ -1,0 +1,59 @@
+/* Regression tests for WEB_UI_XSS_AUDIT_2026-10-09 F1/F2/F3/F6.
+ * Run: node firmware/KilnFW/App/test/test_web_xss_fixes.js */
+'use strict';
+const fs = require('fs');
+const vm = require('vm');
+const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const dir = resolveDriversDir(__dirname);
+const read = (n) => fs.readFileSync(resolveDriverFile(dir, n), 'utf8');
+let failed = 0;
+function assert(c, l) { if (c) console.log('PASS: ' + l); else { failed++; console.log('FAIL: ' + l); } }
+
+// F6: loginReturnPath, extracted from login_page.html and run against a real URL.
+const login = read('login_page.html');
+const m = /function loginReturnPath\(\) \{[\s\S]*?\r?\n\}\r?\n/.exec(login);
+assert(!!m, 'loginReturnPath extracted');
+function run(search) {
+  const ctx = { URLSearchParams, URL, window: { location: { search, origin: 'http://board.local' } } };
+  vm.createContext(ctx);
+  vm.runInContext(m[0], ctx);
+  return vm.runInContext('loginReturnPath()', ctx);
+}
+const q = (v) => '?return=' + encodeURIComponent(v);
+assert(run(q('/settings?a=1#x')) === '/settings?a=1#x', 'plain path kept');
+assert(run(q('/\t/evil.example')) === '/', 'tab bypass rejected');
+assert(run(q('/\n/evil.example')) === '/', 'LF bypass rejected');
+assert(run(q('/\r/evil.example')) === '/', 'CR bypass rejected');
+assert(run(q('/ x')) === '/', 'space rejected');
+assert(run(q('//evil.example')) === '/', '// rejected');
+assert(run(q('/\\evil.example')) === '/', 'backslash rejected');
+assert(run(q('https://evil.example/')) === '/', 'absolute rejected');
+assert(run('') === '/', 'missing -> /');
+
+// The URL(...) same-origin re-check is defence in depth: no input can pass the
+// control-char/charAt guard (starts with "/", second char neither "/" nor "\\",
+// no tab/LF/CR/space/control) and still resolve cross-origin against a
+// special-scheme base, so no real URL input can reach its reject branch. Test
+// the layer in isolation with a URL stub that reports a foreign origin, and
+// pin that the resolved (normalised) form is what is returned.
+function runWithUrl(search, UrlImpl) {
+  const ctx = { URLSearchParams, URL: UrlImpl, window: { location: { search, origin: 'http://board.local' } } };
+  vm.createContext(ctx);
+  vm.runInContext(m[0], ctx);
+  return vm.runInContext('loginReturnPath()', ctx);
+}
+class ForeignUrl { constructor() { this.origin = 'http://evil.example'; this.pathname = '/x'; this.search = ''; this.hash = ''; } }
+assert(runWithUrl(q('/settings'), ForeignUrl) === '/', 'origin re-check rejects a cross-origin resolution');
+class ThrowUrl { constructor() { throw new TypeError('bad'); } }
+assert(runWithUrl(q('/settings'), ThrowUrl) === '/', 'URL parse failure falls back to /');
+assert(run(q('/a/../b?x=1')) === '/b?x=1', 'returns the resolved form, not the raw input');
+
+// F1/F2/F3: the cited sinks must route names through an escaper.
+const main = read('main_page.html');
+assert(!/notice \S+ ' \+ name \+/.test(main) && !/Start "' \+ name/.test(main), 'F1 main_page names escaped');
+assert(/Feasibility notice [^']*' \+ window\.kcEscapeHtml\(name\)/.test(main), 'F1 escaped-name case present');
+const zones = read('zones_page.html');
+assert(!/\? ' \(' \+ current\.zones\[i\]\.name \+ '\)' : ''\;/.test(zones) && zones.indexOf('kgEsc(current.zones[i].name)') !== -1, 'F2 zone name escaped');
+assert(!/var caption = rec\.profile_name/.test(zones), 'F3 caption escaped');
+assert(zones.indexOf('var caption = kgEsc(rec.profile_name)') !== -1, 'F3 caption routes profile_name through kgEsc');
+process.exit(failed ? 1 : 0);

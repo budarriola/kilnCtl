@@ -1,4 +1,4 @@
-# KilnFW_recovery -- the OTA recovery image, docs/OTA_SINGLE_SLOT_PLAN.md
+# KilnFW_recovery -- the OTA recovery image, docs/OTA_SINGLE_SLOT.md
 # section 8 step 1. Deliberately a SEPARATE IDF project from firmware/KilnFW
 # (not a component of it) so its much smaller content list can never
 # accidentally drift into a copy of the main OTA application image -- see

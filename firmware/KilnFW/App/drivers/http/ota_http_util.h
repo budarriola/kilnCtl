@@ -84,7 +84,7 @@ bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatte
  * next-update-partition returns ota_0, which is the running `app` itself, and
  * esp_ota_begin() then fails with ESP_ERR_OTA_PARTITION_CONFLICT. An ESP image
  * push goes through the recovery image's route instead
- * (docs/OTA_SINGLE_SLOT_PLAN.md); the application refuses up front with 409. */
+ * (docs/OTA_SINGLE_SLOT.md); the application refuses up front with 409. */
 bool ota_http_esp_target_usable(const void *target, const void *running);
 
 /* Verdict for one step of the bounded drain that follows an early refusal
@@ -100,6 +100,22 @@ typedef enum {
 } ota_http_drain_verdict_t;
 
 ota_http_drain_verdict_t ota_http_drain_verdict(int recv_ret, uint32_t elapsed_ms, uint32_t cap_ms);
+
+/* Overall upload deadline (HTTP audit LOW, group C 7): the per-recv socket
+ * timeout alone lets a slow-drip client hold the update claim and the single
+ * httpd task for as long as it keeps sending a byte inside each window.
+ * Budget = 60 s + content_len at a 2 KB/s minimum rate. */
+#define OTA_HTTP_UPLOAD_BASE_MS 60000u
+#define OTA_HTTP_UPLOAD_MIN_RATE_BPS 2048u
+uint64_t ota_http_upload_budget_ms(size_t content_len);
+/* True once now_ms - start_ms exceeds budget_ms (clock going backwards: false). */
+bool ota_http_upload_deadline_passed(uint64_t start_ms, uint64_t now_ms, uint64_t budget_ms);
+/* Status for a missed upload deadline. NOT 408: browsers silently resend a
+ * request that got 408 on a reused keep-alive socket, re-uploading the whole
+ * image. 503 is not auto-retried. Body error name stays "upload_too_slow". */
+#define OTA_HTTP_UPLOAD_SLOW_CODE 503
+#define OTA_HTTP_UPLOAD_SLOW_STATUS_LINE "503 Service Unavailable"
+#define OTA_HTTP_UPLOAD_SLOW_ERROR "upload_too_slow"
 
 #ifdef __cplusplus
 }

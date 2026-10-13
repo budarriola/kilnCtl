@@ -11,13 +11,15 @@
 #include "esp_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
-#include "freertos/semphr.h" /* s_save_mutex -- profiles_save_lock() */
+#include "freertos/semphr.h"
+#include "cfg_save_lock.h" /* s_save_mutex -- profiles_save_lock() */
 #include "freertos/task.h" /* vTaskDelay() -- same once-guard, the losing task's wait */
 #include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
                             * PSRAM allocation (docs/PROFILE_SLOTS_100.md section 7 task 3) */
 #include "esp_log.h"
 
 #include "hal_kv.h"
+#include "hal_sysinfo.h" /* hal_sysinfo_random_u32() -- boot seed of s_slot_gen */
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t seen by
                               * callers of this module's nvs_*()-named wrappers below */
 #include "nvs_key_check.h"
@@ -47,7 +49,7 @@
 
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
-#include "profiles_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4:
+#include "profiles_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA.md section 5 step 4:
                                 * read-through/dual-write bridge to the `cfg`
                                 * LittleFS partition, one file per slot. See
                                 * that header for the full policy. */
@@ -65,7 +67,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_USED);
 
 /* Per-slot rev counter, PROFILES_MAX_COUNT uint32_t, one blob -- see
  * profiles_http_internal.h's s_profile_rev doc comment for why this must be
- * bumped on delete too, not just save (docs/FILESYSTEM_USER_DATA_PLAN.md
+ * bumped on delete too, not just save (docs/FILESYSTEM_USER_DATA.md
  * section 5 step 4, user-profiles filesystem move). Separate key from
  * NVS_KEY_USED, same reasoning zones_http.c's NVS_KEY_ZONES_REV split from
  * its cfg blob: a rev counter is bookkeeping for the file/NVS bridge, not
@@ -75,6 +77,68 @@ NVS_KEY_LEN_CHECK(NVS_KEY_PROFILE_REV);
 
 uint32_t s_profile_rev[PROFILES_MAX_COUNT];
 bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
+/* Seqlock-style generation per slot (profile start vs RAM assign). ODD while a
+ * RAM assign + persist is in flight, bumped again (EVEN) after every path
+ * (success, failure, revert). profiles_http_slot_rev() returns it; a start that
+ * captured gen G before its unlocked copy passes the recheck only if gen is
+ * still G and even, so a copy that overlapped or preceded any assign (including
+ * a FAILED save, which leaves RAM changed) is refused. gen_begin/gen_end are
+ * atomic RMWs (seq_cst); the reader pairs them with an acquire fence. */
+static _Atomic uint32_t s_slot_gen[PROFILES_MAX_COUNT];
+/* False until profiles_http_start() finished the boot load/migration; every profile start is refused until then. */
+static _Atomic bool s_profiles_loaded;
+static _Atomic bool s_boot_loading; /* review LOW-9: boot load writes RAM slots unlocked; saves are refused meanwhile */
+
+bool profiles_http_loaded(void) { return atomic_load(&s_profiles_loaded); }
+
+/* Review 14 LOW-5: every profile WRITER (save, delete, retarget commit/resume/revert) is refused for the whole
+ * pre-load window -- not just while s_boot_loading is set -- because the boot load writes RAM slots without the
+ * save lock and POST /api/zones (move_zone_to_aux) is registered before profiles_http_start() runs it. */
+static bool profiles_writers_blocked(void)
+{
+    return atomic_load(&s_boot_loading) || !atomic_load(&s_profiles_loaded);
+}
+#ifdef KILNCTL_PROFILES_LOADED_TEST_HOOK /* host test only; compiled out of the target (review LOW-7) */
+void profiles_http_test_set_loaded(bool v)
+{
+    atomic_store(&s_profiles_loaded, v);
+}
+void profiles_http_test_set_boot_loading(bool v)
+{
+    atomic_store(&s_boot_loading, v);
+}
+#endif
+
+/* Ordering: both are seq_cst RMWs under the save lock; a reader must acquire-fence between its unlocked
+ * copy and the generation recheck (profiles_http_slot_runnable_rev). */
+/* Test seam: called right after each gen_begin/gen_end bump so a host test can check the RAM slot
+ * content at those instants (gen_begin must precede the RAM assign). NULL in production. */
+static profiles_slot_gen_hook_t s_slot_gen_hook;
+
+void profiles_slot_gen_set_hook_for_test(profiles_slot_gen_hook_t fn)
+{
+    s_slot_gen_hook = fn;
+}
+
+void profiles_slot_gen_begin(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT) {
+        atomic_fetch_add(&s_slot_gen[id], 1u);
+        if (s_slot_gen_hook != NULL) {
+            s_slot_gen_hook(id, true);
+        }
+    }
+}
+
+void profiles_slot_gen_end(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT) {
+        atomic_fetch_add(&s_slot_gen[id], 1u);
+        if (s_slot_gen_hook != NULL) {
+            s_slot_gen_hook(id, false);
+        }
+    }
+}
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
  * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
@@ -118,7 +182,7 @@ NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
  * mistake zones_http.c's ZONES_CFG_VERSION 6->7 comment already documents by
  * name for zone_cfg_t.
  *
- * 3 -> 4 (docs/ON_OFF_ZONE_PLAN.md plan step 5): profile_t itself grew a
+ * 3 -> 4 (docs/ON_OFF_ZONE.md plan step 5): profile_t itself grew a
  * tail -- on_off_rule_count + on_off_rules[PROFILE_MAX_ON_OFF_RULES]
  * (profiles_types.h). This is the SAFE case the comments above warn is
  * rare: profile_segment_t's own shape is UNCHANGED, so the new fields land
@@ -541,7 +605,7 @@ size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t c
 }
 
 /* profile_decode_result_t is now declared in profiles_http_internal.h
- * (widened non-static, docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4)
+ * (widened non-static, docs/FILESYSTEM_USER_DATA.md section 5 step 4)
  * so profiles_cfg_fs.c can share this exact decode path for the `cfg`
  * filesystem file, not just the NVS blob -- see that header's comment. */
 
@@ -699,53 +763,21 @@ esp_err_t nvs_save_slot(uint8_t id);
  * section. Held across the module's own NVS plus cfg-file I/O only; never across
  * producer calls (firing_stats_erase runs after the unlock). Created on first use
  * under a claim flag, so every take sees a non-NULL handle. */
-static StaticSemaphore_t s_save_mutex_storage;
-static SemaphoreHandle_t s_save_mutex = NULL;
-static portMUX_TYPE s_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
+static cfg_save_lock_t s_save_mutex = CFG_SAVE_LOCK_INIT;
 
-static bool s_save_mutex_claimed = false;
-/* Release/acquire publish of the handle (target GCC builds); the MSVC host test
- * build is single-threaded and uses plain accesses. */
-#if defined(__GNUC__)
-#define SAVE_MUTEX_LOAD() __atomic_load_n(&s_save_mutex, __ATOMIC_ACQUIRE)
-#define SAVE_MUTEX_STORE(v) __atomic_store_n(&s_save_mutex, (v), __ATOMIC_RELEASE)
-#else
-#define SAVE_MUTEX_LOAD() (*(SemaphoreHandle_t volatile *)&s_save_mutex)
-#define SAVE_MUTEX_STORE(v) (*(SemaphoreHandle_t volatile *)&s_save_mutex = (v))
-#endif
-
-void profiles_save_lock(void)
-{
-    if (SAVE_MUTEX_LOAD() == NULL) {
-        /* Same once-guard as profiles_storage_ensure(): only the claim is inside
-         * the critical section; the create runs after it (no FreeRTOS object
-         * creation with interrupts disabled). The loser waits for the winner. */
-        bool mine = false;
-        portENTER_CRITICAL(&s_save_mutex_mux);
-        if (!s_save_mutex_claimed) {
-            s_save_mutex_claimed = true;
-            mine = true;
-        }
-        portEXIT_CRITICAL(&s_save_mutex_mux);
-        if (mine) {
-            SAVE_MUTEX_STORE(xSemaphoreCreateMutexStatic(&s_save_mutex_storage));
-        } else {
-            while (SAVE_MUTEX_LOAD() == NULL) {
-                vTaskDelay(1);
-            }
-        }
-    }
-    (void)xSemaphoreTake(SAVE_MUTEX_LOAD(), portMAX_DELAY);
-}
+/* cfg_save_lock_t since 2026-10-09: the take also reserves the flash worker when the
+ * caller is not the worker. profiles_http_save()/profiles_http_delete() run as
+ * worker jobs too (uart_bridge_ext_control.c PROFILES SAVE/DELETE) while the
+ * section's own cfg write dispatches onto the worker: an httpd save holding this
+ * mutex and waiting for the worker, against a worker job waiting for this mutex,
+ * deadlocked both (on main since the save lock landed). See cfg_save_lock.h. */
+void profiles_save_lock(void) { cfg_save_lock_take(&s_save_mutex); }
 
 static _Atomic bool s_convert_busy = false; /* lock-free, like backup_import.c's s_config_change_in_flight */
 void profiles_http_set_convert_busy(bool busy) { atomic_store(&s_convert_busy, busy); }
 bool profiles_http_convert_busy(void) { return atomic_load(&s_convert_busy); }
 
-void profiles_save_unlock(void)
-{
-    (void)xSemaphoreGive(SAVE_MUTEX_LOAD());
-}
+void profiles_save_unlock(void) { cfg_save_lock_give(&s_save_mutex); }
 
 /* Caller holds profiles_save_lock(). */
 esp_err_t nvs_save_slot_locked(uint8_t id);
@@ -771,30 +803,69 @@ static esp_err_t nvs_partition_init(const char *partition)
  * simply overwritten with the new 16-byte shape the next time anything
  * saves), and used_bitmap_save() always writes the full new shape.
  *
- * The two-branch dispatch (type-mismatch vs size-mismatch) exists because
- * the real ESP-IDF NVS backend enforces the on-flash type of a key (a
- * blob-typed read against a key written as U8 fails with
- * ESP_ERR_NVS_TYPE_MISMATCH, mapped to HAL_INVALID_ARG by
- * hal_kv_esp.c) while the host-test fake backend (hwAbstraction/host/
+ * The multi-branch dispatch exists because the real ESP-IDF NVS backend
+ * (checked against v6.0.2) turns a page-level type mismatch into
+ * ESP_ERR_NVS_NOT_FOUND, so a blob-typed read of a key written as U8 ends in
+ * HAL_NOT_FOUND and the legacy u8 read is tried before the key is declared
+ * absent (a HAL_INVALID_ARG from a different backend is handled the same
+ * way below), while the host-test fake backend (hwAbstraction/host/
  * fake_kv.c) stores everything by raw size with no type tag, so the same
  * old byte instead comes back as a successful blob read of length 1. Both
  * are handled so the migration path is exercised the same way on host as
  * it will behave on target. */
-static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+/* Largest used-bitmap blob accepted as a newer-firmware "longer" shape (review LOW-2). */
+#define USED_BITMAP_LONGER_MAX_BYTES 64u
+
+/* One predicate for load AND save (FIRELOWFX2 LOW-1): a longer newer-firmware bitmap is a whole number of
+ * uint32 words, longer than ours and no longer than the deliberate cap. */
+static bool used_bitmap_len_is_longer_shape(size_t len)
 {
+    return len > sizeof(profiles_slot_bitmap_t) && len <= USED_BITMAP_LONGER_MAX_BYTES && (len % sizeof(uint32_t)) == 0;
+}
+
+static hal_status_t used_bitmap_load_ex(hal_kv_handle_t *h, profiles_slot_bitmap_t *out, bool *wrong_size)
+{
+    *wrong_size = false;
     size_t len = 0;
     hal_status_t err = hal_kv_get_blob(h, NVS_KEY_USED, NULL, &len);
     if (err == HAL_NOT_FOUND) {
-        return HAL_NOT_FOUND;
+        /* On target a blob read of a key stored as U8 ends in NOT_FOUND (ESP-IDF skips the type mismatch),
+         * so NOT_FOUND may still be the legacy single-byte format: try it before declaring the key absent. */
+        uint8_t legacy_nf = 0;
+        if (hal_kv_get_u8(h, NVS_KEY_USED, &legacy_nf) != HAL_OK) {
+            return HAL_NOT_FOUND;
+        }
+        profiles_slot_bitmap_from_u32(out, legacy_nf);
+        return HAL_OK;
     }
     if (err == HAL_OK && len == sizeof(*out)) {
         size_t full_len = sizeof(*out);
         return hal_kv_get_blob(h, NVS_KEY_USED, out, &full_len);
     }
-    /* Either a real-backend type mismatch (err == HAL_INVALID_ARG, the key
-     * was written by a pre-task-6 hal_kv_set_u8()) or the host fake's
-     * size-based equivalent (err == HAL_OK, len == 1) -- both mean "old
-     * single-byte format", so fall back to reading it as one. */
+    if (err == HAL_OK && used_bitmap_len_is_longer_shape(len)) {
+        /* Review LOW-2: a longer bitmap is newer firmware with more slots -- use our first 16 bytes; the tail is
+         * preserved verbatim by used_bitmap_save() (same policy as the rev array). */
+        uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
+        size_t bl = len;
+        hal_status_t gerr = hal_kv_get_blob(h, NVS_KEY_USED, big, &bl);
+        if (gerr != HAL_OK || bl != len) {
+            return gerr != HAL_OK ? gerr : HAL_IO;
+        }
+        memcpy(out, big, sizeof(*out));
+        return HAL_OK;
+    }
+    if (err == HAL_OK) {
+        /* A blob exists but is neither the 16-byte shape nor a longer newer-firmware shape (a 1-byte BLOB is not the
+         * legacy u8 format either: FIRELOWFX2 LOW-2): corrupt. Falling through to the u8 read would answer a type mismatch (NOT_FOUND on target and in the
+         * typed fake) and read as "no bitmap yet" -- silent slot loss. Callers repair via
+         * used_bitmap_load_or_rebuild(). A longer blob must be a whole number of words (LOW-2b) and at most
+         * USED_BITMAP_LONGER_MAX_BYTES (a deliberate limit). */
+        *wrong_size = true;
+        return HAL_IO;
+    }
+    /* A real-backend type mismatch (err == HAL_INVALID_ARG: the key was written by a pre-task-6 hal_kv_set_u8())
+     * means the old single-byte format, so fall back to reading it as one. A 1-byte blob (err == HAL_OK) never gets
+     * here: it is handled above as wrong_size. */
     uint8_t legacy = 0;
     hal_status_t legacy_err = hal_kv_get_u8(h, NVS_KEY_USED, &legacy);
     if (legacy_err != HAL_OK) {
@@ -802,6 +873,12 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
     }
     profiles_slot_bitmap_from_u32(out, legacy);
     return HAL_OK;
+}
+
+static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+{
+    bool ws = false;
+    return used_bitmap_load_ex(h, out, &ws);
 }
 
 /* Forward declaration: both of today's callers (nvs_save_slot(),
@@ -820,7 +897,55 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
                       "DRAM_PSRAM_PLAN.md section 7.2.");
         return HAL_NOT_READY;
     }
+    /* Review LOW-2: a longer newer-firmware bitmap is rewritten at its FULL length, tail verbatim. */
+    size_t cur_len = 0;
+    if (hal_kv_get_blob(h, NVS_KEY_USED, NULL, &cur_len) == HAL_OK && cur_len > sizeof(*bm) &&
+        used_bitmap_len_is_longer_shape(cur_len)) {
+        uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
+        size_t bl = cur_len;
+        if (hal_kv_get_blob(h, NVS_KEY_USED, big, &bl) == HAL_OK && bl == cur_len) {
+            memcpy(big, bm, sizeof(*bm));
+            return hal_kv_set_blob(h, NVS_KEY_USED, big, cur_len);
+        }
+        return HAL_IO;
+    }
     return hal_kv_set_blob(h, NVS_KEY_USED, bm, sizeof(*bm));
+}
+
+/* Review LOW-2: a wrong-size used-bitmap blob must not be a permanent save/delete outage. Rebuilds the bitmap
+ * from the "profN" slot keys actually present (the bitmap is only an index of them); the next used_bitmap_save()
+ * overwrites the bad blob with a 16-byte one. Any other load error is passed through unchanged. */
+static hal_status_t used_bitmap_load_or_rebuild(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+{
+    bool wrong_size = false;
+    hal_status_t err = used_bitmap_load_ex(h, out, &wrong_size);
+    if (err == HAL_OK) {
+        cfg_fs_condition_set("profiles_used_bitmap", false); /* INFO-3: any successful load cures the condition */
+    }
+    if (err != HAL_IO || !wrong_size) {
+        return err; /* a genuine read error is NOT a reason to rebuild (review LOW-2a) */
+    }
+    ESP_LOGW(PROFILES_TAG, "used bitmap blob has an unusable size -- rebuilding it from the profN slot keys");
+    /* A rebuild drops a dangling bit (bit set, key absent): that finishes a delete, unlike the boot path. */
+    profiles_slot_bitmap_t rebuilt;
+    memset(&rebuilt, 0, sizeof(rebuilt));
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        char key[8];
+        profile_nvs_key(id, key, sizeof(key));
+        size_t klen = 0;
+        hal_status_t perr = hal_kv_get_blob(h, key, NULL, &klen);
+        if (perr == HAL_OK) {
+            profiles_slot_bitmap_set(&rebuilt, id);
+        } else if (perr != HAL_NOT_FOUND) {
+            ESP_LOGE(PROFILES_TAG, "used bitmap rebuild: profN probe for slot %u failed (%s) -- failing closed", (unsigned)id,
+                     hal_status_to_name(perr));
+            cfg_fs_condition_set("profiles_used_bitmap", true); /* LOW-3 / FX3 LOW-5: GET /api/cfgfs "conditions", not "degraded" */
+            return perr; /* cannot tell present from absent: fail closed, drop no bit, save nothing */
+        }
+    }
+    cfg_fs_condition_set("profiles_used_bitmap", false);
+    *out = rebuilt;
+    return HAL_OK;
 }
 
 /* Loads NVS_NAMESPACE/NVS_KEY_USED + "profN" out of `partition` into *out,
@@ -1009,24 +1134,37 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
     bool floors_known = (floors_state == REV_KNOWN);
     bool any_resolve_err = false;
     bool slot_res_err[PROFILES_MAX_COUNT] = {false};
+    /* Boot-path stack budget (check_main_task_stack_budget): the two profile_t
+     * scratch copies live on the heap, not in this frame. OOM = every slot
+     * unexamined: refused this boot, exactly like a per-slot resolve error. */
+    profile_t *scratch = persist_scratch_alloc(2 * sizeof(profile_t));
+    if (!scratch) {
+        ESP_LOGE(PROFILES_TAG, "files-only profile load: out of memory for %u B scratch -- every slot unexamined, "
+                 "saves/deletes refused this boot, profile table empty", (unsigned)(2 * sizeof(profile_t)));
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            s_profile_rev[id] = floors[id];
+            s_profile_rev_unknown[id] = true;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    profile_t *resolved_p = &scratch[0];
+    profile_t *none_p = &scratch[1];
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        profile_t resolved;
         uint32_t resolved_rev = 0;
         bool used_file = false;
-        profile_t none;
-        memset(&none, 0, sizeof(none));
+        memset(none_p, 0, sizeof(*none_p));
         /* Floor 0 on purpose: with nvs_valid=false resolve() deletes a file whose rev is
          * <= a nonzero nvs_rev as stale, and the dual-write-era rev array equals the
          * file rev for every slot not re-saved since. This degraded path must never
          * delete; the floor only seeds s_profile_rev below. */
         bool res_err = false;
-        bool have = profiles_cfg_fs_resolve_ex(id, &none, false, 0, &resolved, &resolved_rev, &used_file, &res_err);
+        bool have = profiles_cfg_fs_resolve_ex(id, none_p, false, 0, resolved_p, &resolved_rev, &used_file, &res_err);
         if (res_err) {
             any_resolve_err = true;
             slot_res_err[id] = true; /* review 7 L3: file unexamined -> slot unknown, saves/deletes refused */
         }
         if (have) {
-            out->profiles[id] = resolved;
+            out->profiles[id] = *resolved_p;
             profiles_slot_bitmap_set(&out->used_bitmap, id);
             if (out_any_found) {
                 *out_any_found = true; /* a file-backed profile counts as "recorded": keeps the pre-split migration from re-running over it */
@@ -1039,6 +1177,7 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
             s_profile_rev_unknown[id] = true;
         }
     }
+    free(scratch);
     if (floors_state == REV_JUNK && rev_repair_junk(partition, &out->used_bitmap)) {
         memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
     }
@@ -1049,6 +1188,8 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
     }
     return any_resolve_err ? ESP_ERR_NO_MEM : ESP_OK;
 }
+
+static esp_err_t retire_legacy_slot_blob(uint8_t id);
 
 static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out, bool *out_any_found)
 {
@@ -1161,7 +1302,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
 
     hal_kv_close(&h);
 
-    /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4: read-through/
+    /* docs/FILESYSTEM_USER_DATA.md section 5 step 4: read-through/
      * dual-write resolve against the `cfg` filesystem, one slot at a time.
      * Only meaningful for the real profiles partition -- this function is
      * never actually called with any other partition today (the pre-split
@@ -1173,21 +1314,50 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
      * from this function's pre-existing behavior. */
     bool any_resolve_err = false;
     bool slot_res_err[PROFILES_MAX_COUNT] = {false};
+    profile_t *resolved_p = NULL;
     if (strcmp(partition, PROFILES_NVS_PARTITION) == 0) {
-        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-            profile_t resolved;
+        /* Heap, not stack (check_main_task_stack_budget). OOM: every slot unexamined,
+         * refused this boot (slot_res_err), and the function returns ESP_ERR_NO_MEM.
+         * The NVS-decoded content is NOT kept: profiles_boot_load_body() memsets
+         * s_profiles on any error and retries files-only. */
+        resolved_p = persist_scratch_alloc(sizeof(profile_t));
+        if (!resolved_p) {
+            any_resolve_err = true;
+            for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+                slot_res_err[id] = true;
+                s_profile_rev[id] = nvs_rev[id];
+            }
+        }
+        for (uint8_t id = 0; resolved_p && id < PROFILES_MAX_COUNT; id++) {
             uint32_t resolved_rev = 0;
             bool used_file = false;
             bool res_err = false;
             bool trustworthy = profiles_cfg_fs_resolve_ex(id, &out->profiles[id], nvs_slot_valid[id],
-                                                           slot_blob_bad[id] ? 0 : nvs_rev[id], &resolved, &resolved_rev,
+                                                           slot_blob_bad[id] ? 0 : nvs_rev[id], resolved_p, &resolved_rev,
                                                            &used_file, &res_err);
             if (res_err) {
                 any_resolve_err = true;
                 slot_res_err[id] = true; /* review 7 L3 */
             }
+            /* Retire the superseded legacy blob (bench finding BENCH_PROF1_DIVERGE (a)). Only
+             * when the FILE was read, validated and adopted (used_file implies trustworthy and a
+             * mounted cfg) and its rev is STRICTLY above a decoded NVS blob's non-zero rev. An
+             * equal rev with differing bytes adopts NVS, and erasing it there would make the
+             * file look like a stale leftover of a deleted slot. The rev array (floor) is not
+             * touched, so s_profile_rev below is unchanged by the erase. */
+            if (trustworthy && used_file && !res_err && nvs_slot_valid[id] && !slot_blob_bad[id] &&
+                nvs_rev[id] != 0 && resolved_rev > nvs_rev[id]) {
+                esp_err_t rerr = retire_legacy_slot_blob(id);
+                if (rerr == ESP_OK) {
+                    ESP_LOGI(PROFILES_TAG, "prof%u: legacy NVS blob (rev %lu) retired, cfg file (rev %lu) is authoritative",
+                             (unsigned)id, (unsigned long)nvs_rev[id], (unsigned long)resolved_rev);
+                } else {
+                    ESP_LOGW(PROFILES_TAG, "prof%u: could not retire legacy NVS blob: %s (cfg file stays authoritative; retried next boot only if the used bit is still set)",
+                             (unsigned)id, esp_err_to_name(rerr));
+                }
+            }
             if (trustworthy) {
-                out->profiles[id] = resolved;
+                out->profiles[id] = *resolved_p;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
                 if (out_any_found) {
                     *out_any_found = true; /* see nvs_load_files_only() */
@@ -1207,6 +1377,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             }
             slot_rev_unknown[id] = !rev_floors_known;
         }
+        free(resolved_p);
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
     }
@@ -1243,6 +1414,46 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
+/* Erase ONLY this slot's legacy "profN" blob and its legacy used-bitmap bit. The prof_rev array
+ * (the rev floor) is deliberately left intact. Boot-time, single-threaded caller. */
+static esp_err_t retire_legacy_slot_blob(uint8_t id)
+{
+    if (caller_stack_is_external()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
+    if (kv_err != HAL_OK) {
+        return hal_status_to_esp_err(kv_err);
+    }
+    char key[8];
+    profile_nvs_key(id, key, sizeof(key));
+    /* Review 12 LOW-4: clear the used bit FIRST, erase the key SECOND. A failure part-way then leaves a
+     * harmless orphan key (bit clear, nothing loads it) instead of a dangling bit with no blob, which the
+     * next boot would report as "load failed" and never retire. A bitmap-save failure leaves both intact
+     * (bit set, key present), so the next boot retries. */
+    profiles_slot_bitmap_t nvs_used;
+    memset(&nvs_used, 0, sizeof(nvs_used));
+    kv_err = used_bitmap_load_or_rebuild(&h, &nvs_used);
+    if (kv_err == HAL_NOT_FOUND) {
+        kv_err = HAL_OK;
+    } else if (kv_err == HAL_OK) {
+        profiles_slot_bitmap_clear(&nvs_used, id);
+        kv_err = used_bitmap_save(&h, &nvs_used);
+    }
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_erase_key(&h, key);
+        if (kv_err == HAL_NOT_FOUND) {
+            kv_err = HAL_OK;
+        }
+    }
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(kv_err);
+}
+
 esp_err_t nvs_save_slot(uint8_t id)
 {
     profiles_save_lock();
@@ -1275,6 +1486,9 @@ esp_err_t nvs_save_slot_locked(uint8_t id)
                                "could not be established; a save at rev 1 would be deleted as stale on the next normal boot. "
                                "A junk prof_rev is rebuilt at boot; this one could not be read or rewritten -- "
                                "check the profiles NVS partition, then reboot.", (unsigned)id);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (cfg_save_lock_reset_refused()) { /* caller holds the profiles save lock; factory reset in flight */
         return ESP_ERR_INVALID_STATE;
     }
     uint32_t new_rev = s_profile_rev[id] + 1;
@@ -1366,7 +1580,7 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
     s_profile_rev[id] = new_rev;
     profiles_slot_bitmap_t nvs_used;
     memset(&nvs_used, 0, sizeof(nvs_used));
-    kv_err = used_bitmap_load(&h, &nvs_used);
+    kv_err = used_bitmap_load_or_rebuild(&h, &nvs_used);
     if (kv_err == HAL_NOT_FOUND) {
         memset(&nvs_used, 0, sizeof(nvs_used));
         kv_err = HAL_OK;
@@ -1633,12 +1847,41 @@ static const char *profiles_http_name_at(void *ctx, uint8_t id)
 static bool profiles_http_slot_used_cb(void *ctx, uint8_t id)
 {
     (void)ctx;
-    return profiles_slot_used(id);
+    /* PROFILESFX11: a rev-unknown slot is not allocatable, so first-free skips it. */
+    return profiles_slot_used(id) || s_profile_rev_unknown[id];
 }
 
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
+    return profiles_http_save_ex(requested_id, candidate, out_id, out_warning_count, NULL, err_msg, err_cap);
+}
+
+static bool profiles_http_save_impl(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                                    uint8_t *out_warning_count, bool *out_persisted, bool check_rev,
+                                    uint32_t expected_rev, char *err_msg, size_t err_cap);
+
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap)
+{
+    return profiles_http_save_impl(requested_id, candidate, out_id, out_warning_count, out_persisted, false, 0, err_msg,
+                                   err_cap);
+}
+
+bool profiles_http_save_expect_rev(uint8_t requested_id, const profile_t *candidate, uint32_t expected_rev,
+                                   uint8_t *out_id, uint8_t *out_warning_count, char *err_msg, size_t err_cap)
+{
+    return profiles_http_save_impl(requested_id, candidate, out_id, out_warning_count, NULL, true, expected_rev,
+                                   err_msg, err_cap);
+}
+
+static bool profiles_http_save_impl(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                                    uint8_t *out_warning_count, bool *out_persisted, bool check_rev,
+                                    uint32_t expected_rev, char *err_msg, size_t err_cap)
+{
+    if (out_persisted) {
+        *out_persisted = true;
+    }
     if (!candidate || !out_id) {
         if (err_msg) snprintf(err_msg, err_cap, "internal error");
         return false;
@@ -1747,10 +1990,21 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         snprintf(err_msg, err_cap, "busy: zone conversion running, retry");
         return false;
     }
+    if (profiles_writers_blocked()) { /* review LOW-9 / 14 LOW-5: a save would race the unlocked boot load writes */
+        snprintf(err_msg, err_cap, "busy: profiles still loading, retry");
+        return false;
+    }
     profiles_save_lock(); /* slot allocation, duplicate-name check, validate, assign and save: one section */
     uint8_t target_id;
     if (requested_id < PROFILES_MAX_COUNT) {
         target_id = requested_id;
+        /* REVIEW_WEBGENFX LOW-B: the caller's expected slot revision is compared HERE, under the save lock, the
+         * same place the web path (profiles_edit_http.c) does it, so no save can slip in between check and write. */
+        if (check_rev && profiles_http_slot_rev(target_id) != expected_rev) {
+            profiles_save_unlock();
+            snprintf(err_msg, err_cap, "This profile was changed since you opened it. Reopen it to edit, or save to a different slot.");
+            return false;
+        }
     } else {
         /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
          * backup_import.c's pass-1 commit simulation so the two allocation
@@ -1765,6 +2019,14 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
             return false;
         }
         target_id = (uint8_t)free_slot;
+    }
+
+    /* PROFILESFX10 MED-1: a slot whose stored profile was unreadable at boot cannot be persisted (the rev floor is
+     * unknown), and "applied live, reverts at reboot" is a silent lie. Refuse BEFORE any RAM mutation. */
+    if (s_profile_rev_unknown[target_id]) {
+        profiles_save_unlock();
+        snprintf(err_msg, err_cap, "%s", PROFILES_SAVE_ERR_STORE_UNREADABLE);
+        return false;
     }
 
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
@@ -1797,14 +2059,48 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         return false;
     }
 
+    profiles_slot_gen_begin(target_id);
     s_profiles.profiles[target_id] = *candidate;
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot_locked(target_id);
+    if (err != ESP_OK && out_persisted && requested_id >= PROFILES_MAX_COUNT) {
+        /* fwlow16 LOW-1: a caller that takes the persisted flag as a failure (live save_as) must not leave a
+         * RAM-only phantom in a freshly allocated slot. Roll back here, still inside the save lock and the
+         * generation window, so no other save or delete can have touched the slot in a gap. */
+        profiles_slot_clear(target_id);
+        memset(&s_profiles.profiles[target_id], 0, sizeof(s_profiles.profiles[target_id]));
+        /* misc8 LOW-1: cfg_fs_write_atomic() can fail AFTER its rename (read-back verify), leaving the new file
+         * in place; without this the rolled-back slot reappears at the next boot. Best effort (NOT_FOUND is OK). */
+        /* misc8fx MED-1/LOW-1: delete ONLY a file this save wrote. Pre-write refusals (unknown rev floor, reset in
+         * flight, PSRAM stack, cfg_fs down, encode failure) leave an unexamined or undecodable file that the boot path
+         * kept on purpose. The in-RAM rev advances only on success, so s_profile_rev[] + 1 is the rev this save tried
+         * to write: a readable file carrying exactly that rev is ours. */
+        if (!s_profile_rev_unknown[target_id]) {
+            profile_t *chk = persist_scratch_alloc(sizeof(*chk));
+            if (chk != NULL) {
+                uint32_t file_rev = 0;
+                bool file_valid = false;
+                profiles_cfg_fs_load_raw(target_id, chk, &file_rev, &file_valid);
+                if (file_valid && file_rev == s_profile_rev[target_id] + 1) {
+                    esp_err_t derr = profiles_cfg_fs_delete(target_id);
+                    if (derr != ESP_OK && derr != ESP_ERR_NOT_FOUND) {
+                        ESP_LOGE(PROFILES_TAG, "save rollback: slot %u phantom cfg file delete failed: %s -- the stale cfg file WILL reappear at next boot (reconcile adopts its higher rev over NVS)",
+                                 (unsigned)target_id, esp_err_to_name(derr));
+                    }
+                }
+                free(chk);
+            }
+        }
+    }
+    profiles_slot_gen_end(target_id);
     profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
         /* Still applied -- same convention as profile_post_handler(). */
+        if (out_persisted) {
+            *out_persisted = false;
+        }
     }
 
     *out_id = target_id;
@@ -1814,31 +2110,133 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     return true;
 }
 
-bool profiles_http_delete(uint8_t id)
+/* ---- Delete-in-flight mark (HTTP input parsing audit L23) -----------------
+ *
+ * The race: a delete checks "is the executor running this slot" and then
+ * erases it, while profile_executor_run() copies the slot (profiles_http_get)
+ * and later commits RUNNING under s_exec.lock. Holding s_exec.lock across the
+ * check AND the erase would close it, but is unsafe: the erase reaches the
+ * flash worker / save lock, and the lock order is
+ *
+ *     flash worker (s_bx_lock) -> profiles save lock -> s_exec.lock
+ *
+ * (cfg_save_lock.h: never take a save lock under s_exec.lock;
+ * profile_executor.c's relay_cycles_maybe_persist() comment records the
+ * deadlock that holding s_exec.lock across a worker wait caused). So nothing
+ * here ever holds s_exec.lock across anything else; instead:
+ *
+ *   delete: (1) set this slot's bit in s_delete_pending (seq_cst RMW),
+ *           (2) read the executor's active id (takes and drops s_exec.lock),
+ *               refusing (and clearing the bit) if it is this slot,
+ *           (3) erase, clear the used bit, (4) clear the pending bit.
+ *   start:  under s_exec.lock, after the RUNNING/FAULTED checks and before
+ *           committing RUNNING, profiles_http_slot_runnable() refuses when the
+ *           bit is set or the used bit is already clear.
+ *
+ * Both sides meet in s_exec.lock: if start's locked section comes first it
+ * has committed RUNNING and step (2) refuses the delete; if step (2)'s section
+ * comes first, the bit (set before it) is visible to start's section, or, if
+ * the delete already finished, the cleared used bit is (it is written before
+ * the seq_cst bit clear in step (4)). Same shape as relay_authority's
+ * factory-reset in-flight mark. A second delete of the same slot while one is
+ * in flight is refused BUSY (atomic_fetch_or saw the bit set). */
+#define PROFILES_DELETE_PENDING_WORDS ((PROFILES_MAX_COUNT + 31) / 32)
+static _Atomic uint32_t s_delete_pending[PROFILES_DELETE_PENDING_WORDS];
+
+static bool delete_pending_claim(uint8_t id)
+{
+    uint32_t bit = 1u << (id % 32u);
+    return (atomic_fetch_or(&s_delete_pending[id / 32u], bit) & bit) == 0;
+}
+
+static void delete_pending_release(uint8_t id)
+{
+    (void)atomic_fetch_and(&s_delete_pending[id / 32u], ~(1u << (id % 32u)));
+}
+
+bool profiles_http_slot_runnable(uint8_t id)
+{
+    if (!atomic_load(&s_profiles_loaded)) {
+        return false; /* boot load/migration still writing slots */
+    }
+    if (profiles_builtin_id_valid(id)) {
+        return true;
+    }
+    if (id >= PROFILES_MAX_COUNT) {
+        return false;
+    }
+    if ((atomic_load(&s_delete_pending[id / 32u]) & (1u << (id % 32u))) != 0) {
+        return false;
+    }
+    return profiles_slot_used(id);
+}
+
+uint32_t profiles_http_slot_rev(uint8_t id)
+{
+    if (id >= PROFILES_MAX_COUNT) {
+        return 0; /* builtins and out-of-range: no save revision */
+    }
+    return atomic_load(&s_slot_gen[id]);
+}
+
+bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
+{
+    if (!profiles_http_slot_runnable(id)) {
+        return false;
+    }
+    /* review LOW-4: order the caller's unlocked copy before the generation re-read below (pairs with the
+     * seq_cst RMWs in profiles_slot_gen_begin/end). */
+    atomic_thread_fence(memory_order_acquire);
+    /* Any assign since the capture (or one in flight: odd) makes the copy stale. */
+    if ((captured_rev & 1u) != 0u) {
+        return false;
+    }
+    return profiles_http_slot_rev(id) == captured_rev;
+}
+
+profiles_delete_result_t profiles_delete_slot(uint8_t id)
 {
     /* A builtin is read-only and cannot be deleted -- it is a const table in
      * flash. The user-facing equivalent is hiding it
      * (POST /api/profile/builtin/hide), which is reversible; see
      * profiles_builtin.h. Refuse rather than pretend. */
     if (profiles_builtin_id_valid(id)) {
-        return false;
+        return PROFILES_DELETE_BUILTIN;
+    }
+    if (profiles_writers_blocked()) {
+        return PROFILES_DELETE_BUSY; /* review 14 LOW-5: boot load still owns the slots */
     }
     if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
-        return false;
+        return PROFILES_DELETE_NOT_FOUND;
     }
-    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
+    /* Step (1) of the mark protocol above: claim BEFORE the running check. */
+    if (!delete_pending_claim(id)) {
+        return PROFILES_DELETE_BUSY;
+    }
+    /* A concurrent delete may have finished between the used check above and
+     * the claim. */
+    if (!profiles_slot_used(id)) {
+        delete_pending_release(id);
+        return PROFILES_DELETE_NOT_FOUND;
+    }
+    /* Step (2). Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
      * delete a slot the executor is currently running or has paused --
      * deleting it out from under an in-progress firing would leave
      * profile_executor_run()'s copied-at-start name/segments as the only
      * surviving record of what is actually executing, and a later re-save
-     * of this id would silently relabel that run's history. Same check as
-     * profiles_edit_http.c's web delete handler. */
-    /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1464-byte
-     * profile_exec_status_t stack local. */
+     * of this id would silently relabel that run's history. The narrow
+     * accessor avoids a 1512-byte profile_exec_status_t stack local; it takes
+     * and drops s_exec.lock, and nothing is held here while it does. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
-        return false;
+        delete_pending_release(id);
+        return PROFILES_DELETE_RUNNING;
+    }
+    /* REVIEW_WEBGENFX LOW-C: a rev-unknown slot's erase is refused by the store anyway; refuse HERE, before the
+     * favorite clear and the firing-stats prune, so a delete that cannot succeed wipes nothing. */
+    if (s_profile_rev_unknown[id]) {
+        delete_pending_release(id);
+        return PROFILES_DELETE_REV_UNKNOWN;
     }
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
      * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
@@ -1858,24 +2256,35 @@ bool profiles_http_delete(uint8_t id)
      * (the slot reads unused). nvs_erase_slot() prunes again (idempotent). */
     esp_err_t serr = firing_stats_erase((uint8_t)id);
     if (serr != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "profiles_http_delete(%u): firing stats prune failed: %s -- slot kept, retry", id,
+        ESP_LOGE(PROFILES_TAG, "profiles_delete_slot(%u): firing stats prune failed: %s -- slot kept, retry", id,
                  esp_err_to_name(serr));
-        return false;
+        delete_pending_release(id);
+        return PROFILES_DELETE_PERSIST_FAILED;
     }
-    /* Persistent erase BEFORE dropping RAM state: on failure the slot stays fully
-     * live and the caller can retry; only after it succeeds is the slot cleared. */
+    /* Step (3). Persistent erase BEFORE dropping RAM state: on failure the slot
+     * stays fully live and the caller can retry; only after it succeeds is the
+     * slot cleared. */
     profiles_save_lock();
+    profiles_slot_gen_begin((uint8_t)id);
     esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
     if (err == ESP_OK) {
         profiles_slot_clear(id);
         memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     }
+    profiles_slot_gen_end((uint8_t)id);
     profiles_save_unlock();
+    /* Step (4): only after the used bit is clear (or the slot is known kept). */
+    delete_pending_release(id);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- slot kept, retry", id, esp_err_to_name(err));
-        return false;
+        return PROFILES_DELETE_PERSIST_FAILED;
     }
-    return true;
+    return PROFILES_DELETE_OK;
+}
+
+bool profiles_http_delete(uint8_t id)
+{
+    return profiles_delete_slot(id) == PROFILES_DELETE_OK;
 }
 
 void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
@@ -1895,7 +2304,7 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
  * rev 1 and a later NVS recovery would delete it as stale. Refusing saves
  * instead was rejected: it would strand the operator on a board whose files are
  * perfectly readable. Host tests include this file and call it directly. */
-static esp_err_t profiles_boot_load(void)
+static esp_err_t profiles_boot_load_body(void)
 {
     esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != ESP_OK) {
@@ -1923,19 +2332,56 @@ static esp_err_t profiles_boot_load(void)
         memcpy(keep_unknown, s_profile_rev_unknown, sizeof(keep_unknown));
         memset(&s_profiles, 0, sizeof(s_profiles));
         bool any = false;
-        (void)nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
+        esp_err_t files_err = nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
+        if (files_err != ESP_OK) {
+            ESP_LOGE(PROFILES_TAG, "files-only profile load also failed: %s -- affected slots refused this boot",
+                     esp_err_to_name(files_err));
+        }
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             if (keep_unknown[id]) {
                 s_profile_rev_unknown[id] = true;
             }
         }
     }
+    /* persfx3 MED-2: publish the rev-unknown marks in the degraded registry ("profiles" in GET /api/cfgfs and
+     * the backup stale marker). The HTTP 409 itself is decided per slot from s_profile_rev_unknown[]. */
+    bool any_unknown = false;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        any_unknown = any_unknown || s_profile_rev_unknown[id];
+    }
+    cfg_fs_degraded_set("profiles", any_unknown);
     return err;
+}
+
+/* Boot load/migration writes RAM slots and persists while /api/profile_exec/start is already registered.
+ * Bracket every slot so an overlapping start sees an odd/changed generation, and
+ * profiles_http_slot_runnable() refuses until s_profiles_loaded is published. */
+static esp_err_t profiles_boot_load(void)
+{
+    atomic_store(&s_boot_loading, true);
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profiles_slot_gen_begin(id);
+    }
+    esp_err_t r = profiles_boot_load_body();
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profiles_slot_gen_end(id);
+    }
+    atomic_store(&s_boot_loading, false);
+    return r;
 }
 
 esp_err_t profiles_http_start(void)
 {
+    /* Review web7 LOW-4: s_slot_gen is RAM-only; a random boot seed (shared by all slots, each still counts up
+     * independently) keeps a pre-reboot page's expected_rev from matching a post-reboot count. */
+    {
+        const uint32_t seed = hal_sysinfo_random_u32() & 0x3ffffffeu;
+        for (size_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+            atomic_store(&s_slot_gen[i], seed);
+        }
+    }
     (void)profiles_boot_load();
+    atomic_store(&s_profiles_loaded, true); /* load writes done; route registration below touches no slot */
     esp_err_t err;
 
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -2263,8 +2709,11 @@ static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uin
     bool clean = true;
     while (n > 0) {
         uint8_t id = journal[--n];
+        profiles_slot_gen_begin(id);
         (void)retarget_swap_rules(&s_profiles.profiles[id], from, to);
-        if (nvs_save_slot_locked(id) != ESP_OK || !retarget_verify_slot(id)) {
+        esp_err_t rv_save = nvs_save_slot_locked(id);
+        profiles_slot_gen_end(id);
+        if (rv_save != ESP_OK || !retarget_verify_slot(id)) {
             clean = false;
         }
     }
@@ -2275,6 +2724,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
                             profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t plan;
+    if (profiles_writers_blocked()) {
+        snprintf(err, err_cap, "busy: profiles still loading, retry");
+        if (counts) memset(counts, 0, sizeof(*counts));
+        return false;
+    }
     profile_t *trial = persist_scratch_alloc(sizeof(*trial));
     if (!trial) {
         snprintf(err, err_cap, "out of memory");
@@ -2284,7 +2738,21 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     /* The whole retarget (plan re-check, swap, save, verify, revert) is ONE
      * section under the save mutex; only leaf locks are taken inside. The plan
      * refusals are re-run here, under the lock, so a slot changed since the
-     * caller's own plan() cannot slip past them. */
+     * caller's own plan() cannot slip past them.
+     *
+     * WORKER HOLD (accepted, documented 2026-10-09, review of 4271767d
+     * finding 4): profiles_save_lock() also reserves the flash worker
+     * (cfg_save_lock.h), so for the whole section no other task can run a
+     * flash-worker job. Worst case is every affected slot saved and verified,
+     * then, on a failure, every one reverted and verified again: about 2N cfg
+     * file writes plus 2N reads for N affected slots (N <= PROFILES_MAX_COUNT).
+     * The one safety-relevant waiter is safety_poll's synchronous
+     * safety_cfg_store_flush_if_dirty(), and only when the safety config is
+     * dirty at that moment; it would trip S6b only if the hold outlasted the
+     * link timeout. Retarget is idle-only (refused mid-firing), and S6b is a
+     * fail-safe trip, not an unsafe state. Chunking the section (dropping the
+     * lock between slots) was rejected: it breaks the all-or-nothing retarget
+     * this section exists to guarantee. */
     /* Executor state is read BEFORE the save lock so no executor lock is taken under it. */
     uint8_t active_id = 0;
     bool have_active = profile_executor_get_active_id(&active_id);
@@ -2315,9 +2783,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
             fail = "rewritten profile failed validation";
             break;
         }
+        profiles_slot_gen_begin(id);
         s_profiles.profiles[id] = *trial;
         journal[jn++] = id;
         esp_err_t rt_save = nvs_save_slot_locked(id);
+        profiles_slot_gen_end(id);
         if (rt_save != ESP_OK) {
             fail = "persisting the rewritten profile failed";
             break;
@@ -2360,7 +2830,7 @@ bool profiles_retarget_zone_to_aux_resume(uint8_t zone, uint8_t relay, bool zone
 bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay)
 {
     uint8_t dest = profile_rule_target_from_aux_relay(relay);
-    if (dest == 0xFFu || zone >= MAX31856_CHANNEL_COUNT) {
+    if (dest == 0xFFu || zone >= MAX31856_CHANNEL_COUNT || profiles_writers_blocked()) {
         return false;
     }
     uint8_t journal[PROFILES_MAX_COUNT];

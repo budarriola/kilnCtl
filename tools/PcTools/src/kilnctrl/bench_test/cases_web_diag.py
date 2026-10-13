@@ -59,7 +59,7 @@ def mutating_gate(ctx: dict) -> Optional[str]:
     st, at = _get_json(ctx, "/api/autotune")
     if st != 200 or not isinstance(at, dict):
         return f"GET /api/autotune unreadable (status={st}); cannot confirm autotune is inactive"
-    if at.get("state") not in ("idle", "done", "complete", "failed", "aborted", "accepted"):
+    if at.get("state") not in ("idle", "done", "aborted"):
         return f"autotune is active (state={at.get('state')!r})"
     return None
 
@@ -75,17 +75,20 @@ def _case_diag02(ctx: dict) -> CaseResult:
     present = body.get("present")
     if not isinstance(present, bool):
         return _R(Verdict.FAIL, reason="crash_report 'present' missing or not a bool", observed={"body": body})
-    if present:
+    # An acknowledged record is reviewed board state: the page is still
+    # checked. Only a present-but-unacknowledged record (or an unreadable
+    # flag) stays INCONCLUSIVE, since this case may not ack/clear it.
+    if present and body.get("acknowledged") is not True:
         return _R(Verdict.INCONCLUSIVE,
-                  reason="a crash is on record (board state); this case may not ack/clear it",
-                  observed={"present": True})
+                  reason="an unacknowledged crash is on record (board state); this case may not ack/clear it",
+                  observed={"present": True, "acknowledged": body.get("acknowledged")})
     html, err = _html(ctx, "/diagnostics")
     if html is None:
         return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
     miss = _missing(html, ('id="crashCard"', "crashAckBtn", "crashClearBtn"))
     if miss:
         return _R(Verdict.FAIL, reason=f"/diagnostics HTML missing {miss}", observed={"missing": miss})
-    return _R(Verdict.PASS, observed={"present": False})
+    return _R(Verdict.PASS, observed={"present": present, "acknowledged": body.get("acknowledged")})
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +181,7 @@ def _cfgfs_stable(d: dict) -> dict:
     items = (d.get("dual_write") or {}).get("items") if isinstance(d.get("dual_write"), dict) else None
     names = sorted(i.get("name") for i in items if isinstance(i, dict)) if isinstance(items, list) else None
     return {"mounted": d.get("mounted"), "status": d.get("status"),
-            "total_bytes": cap.get("total_bytes"), "file_count": d.get("file_count"), "items": names}
+            "total_bytes": cap.get("total_bytes"), "items": names}  # file_count excluded: writing cases add cfg files
 
 
 def _case_diag04(ctx: dict) -> CaseResult:
@@ -237,6 +240,10 @@ def _case_diag05(ctx: dict) -> CaseResult:
                 problems.append(f"channel {c.get('channel')} stale {c.get('stale')!r}")
     safety = d.get("safety")
     sstate = safety.get("state") if isinstance(safety, dict) else None
+    if isinstance(safety, dict) and (safety.get("not_installed") is True or safety.get("tc_is_separate_sensor") is False) \
+            and sstate in ("not_converting", "no_link", None):
+        return _R(Verdict.INCONCLUSIVE, reason="safety TC absent or borrowed (not_installed / not a separate sensor)",
+                  observed={"safety": safety, "channel_problems": problems})
     if sstate in ("faulted", "probe_fault", "not_converting"):
         problems.append(f"safety TC state {sstate!r}")
     elif sstate not in ("ok", "no_link"):
@@ -439,12 +446,42 @@ def _alias_static(ctx: dict, markers, target: str) -> CaseResult:
     return _R(Verdict.PASS, observed={"alias_of": target, "static": "present"})
 
 
+# The single-slot redesign retired the ESP picker/update/rollback controls
+# (90b75e27, 02fd73ab); ESP images are staged and installed through the
+# Stage card (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP6).
+_OTA_STAGE_MARKERS = ('id="stagePicker"', 'id="stageFile"', 'id="stageUploadBtn"', 'id="stageInstallBtn"',
+                      "/api/update/stage")
+_OTA_RETIRED_MARKERS = ('id="espPicker"', 'id="espFile"', 'id="espUpdateBtn"', 'id="espRollbackBtn"',
+                        "/api/ota/esp/rollback")
+
+
 def _case_ota03(ctx: dict) -> CaseResult:
-    return _alias_static(ctx, ('id="espPicker"', 'id="espFile"', 'id="espUpdateBtn"', "function pushImage"), "OT-E01")
+    # OT-E01 is "a direct ESP push is refused"; the page must no longer offer one.
+    html, err = _html(ctx, "/ota")
+    if html is None:
+        return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
+    miss = _missing(html, _OTA_STAGE_MARKERS)
+    if miss:
+        return _R(Verdict.FAIL, reason=f"/ota HTML missing Stage/Install card markers {miss}", observed={"missing": miss})
+    stale = [m for m in _OTA_RETIRED_MARKERS if m in html]
+    if stale:
+        return _R(Verdict.FAIL, reason=f"/ota still carries retired ESP push/rollback controls {stale}",
+                  observed={"retired_present": stale})
+    return _alias_static(ctx, (), "OT-E01")
 
 
 def _case_ota04(ctx: dict) -> CaseResult:
-    return _alias_static(ctx, ('id="espRollbackBtn"', "/api/ota/esp/rollback"), "OT-E02")
+    # Rollback is retired (OT-E02 reads NOT_RUN by design); static check only.
+    html, err = _html(ctx, "/ota")
+    if html is None:
+        return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
+    stale = [m for m in _OTA_RETIRED_MARKERS if m in html]
+    if stale:
+        return _R(Verdict.FAIL, reason=f"/ota still carries retired controls {stale}", observed={"retired_present": stale})
+    miss = _missing(html, ('id="stageClearBtn"', 'id="stageInstallBtn"'))
+    if miss:
+        return _R(Verdict.FAIL, reason=f"/ota HTML missing {miss}", observed={"missing": miss})
+    return _R(Verdict.PASS, observed={"static": "retired rollback controls absent; Stage card present"})
 
 
 # ---------------------------------------------------------------------------
@@ -486,9 +523,11 @@ def _case_ota07(ctx: dict) -> CaseResult:
     st, d = _get_json(ctx, "/api/status")
     if st != 200 or not isinstance(d, dict):
         return _R(Verdict.FAIL, reason=f"GET /api/status not 200/JSON (status={st})", observed={"status": st})
-    if d.get("boot_button_bypass_active") not in (None, False):
-        return _R(Verdict.FAIL, reason="/api/status reports boot_button_bypass_active true",
-                  observed={"boot_button_bypass_active": d.get("boot_button_bypass_active")})
+    # boot_button_bypass_active was retired 2026-09-29 and is no longer emitted; any
+    # bypass-flavoured key reappearing true in /api/status is a regression.
+    stale = sorted(k for k in d if "bypass" in k.lower() and d.get(k) not in (None, False))
+    if stale:
+        return _R(Verdict.FAIL, reason=f"/api/status reports a bypass flag: {stale}", observed={"keys": stale})
     return _R(Verdict.PASS)
 
 

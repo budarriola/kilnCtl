@@ -1,5 +1,5 @@
 /* Node-only test for profiles_page.html's on/off-rule editor (owner request
- * 2026-09-14/15, ON_OFF_ZONE_PLAN.md plan step 5's web UI): a
+ * 2026-09-14/15, ON_OFF_ZONE.md plan step 5's web UI): a
  * render(ooRuleFieldsHtml) -> serialize(ooRulesToParams) round trip against
  * the real, extracted page functions, run over a fake but real-markup DOM
  * (same regex parser pattern as test_zones_type_toggle.js -- no jsdom

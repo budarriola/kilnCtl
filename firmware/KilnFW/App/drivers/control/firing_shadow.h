@@ -1,5 +1,5 @@
 #pragma once
-// firing_shadow.h -- ITER_TUNE_REDESIGN_PLAN.md step 8, "shadow mode".
+// firing_shadow.h -- ITER_TUNE_REDESIGN.md step 8, "shadow mode".
 //
 // Scores every real firing the same way the redesigned iter_tune decision
 // core would (firing_score.c/firing_compare.c, steps 1-2), records what the

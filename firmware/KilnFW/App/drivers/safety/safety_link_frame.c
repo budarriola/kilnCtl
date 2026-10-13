@@ -48,6 +48,26 @@ void safety_put_u32_le(uint8_t *out, uint32_t value)
     out[3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
+bool safety_pico_uptime_behind_expected(uint32_t baseline_ms, uint32_t esp_elapsed_ms, uint32_t now_ms)
+{
+    if (esp_elapsed_ms >= 0x80000000u) {
+        return true; /* modular difference no longer meaningful (~24.8 days): in doubt, count a reboot */
+    }
+    uint32_t expected = baseline_ms + esp_elapsed_ms; /* modular: handles the 32-bit wrap */
+    uint32_t tol = SAFETY_PICO_UPTIME_TOL_BASE_MS + esp_elapsed_ms / SAFETY_PICO_UPTIME_TOL_PPM_DIV;
+    /* OLDPOOLA LOW/MED-2: compare forward and backward modular differences separately; a signed diff
+     * misreads a reboot from a 24.9-49.7 day baseline as a large forward step. */
+    uint32_t fwd = now_ms - expected;
+    uint32_t back = expected - now_ms;
+    if (fwd <= tol || back <= tol) {
+        return false;
+    }
+    /* REBOOTFX2 LOW-3: physical bound. A reboot happens after the baseline, so the new boot's uptime cannot
+     * exceed the ESP time elapsed since it. A frozen or late-generated Pico uptime (rx_ms is the receive stamp, so a late drain is not a cause) puts now_ms far from expected
+     * (ahead of it); that is not a reboot. */
+    return now_ms <= esp_elapsed_ms + tol;
+}
+
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
                                       uint16_t peer_protocol, uint16_t peer_min_compatible)
 {

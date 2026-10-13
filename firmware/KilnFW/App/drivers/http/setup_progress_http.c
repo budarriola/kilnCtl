@@ -94,7 +94,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
     if (n < 0 || (size_t)n >= sizeof(s->json)) {
         free(s);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     o = (size_t)n;
 
@@ -115,7 +115,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
             ESP_LOGE(TAG, "setup progress JSON did not fit SETUP_PROGRESS_JSON_CAP=%d", SETUP_PROGRESS_JSON_CAP);
             free(s);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-            return ESP_FAIL;
+            return ESP_OK;
         }
         o += (size_t)n;
     }
@@ -124,7 +124,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
     if (n < 0 || (size_t)n >= sizeof(s->json) - o) {
         free(s);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     o += (size_t)n;
 
@@ -179,7 +179,7 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
 
     char *endp = NULL;
     long step_num = strtol(step_val, &endp, 10);
-    if (endp == step_val || *endp != '\0' || step_num < 0 || step_num >= SETUP_WIZARD_STEP_COUNT) {
+    if (step_val[0] < '0' || step_val[0] > '9' || endp == step_val || *endp != '\0' || step_num < 0 || step_num >= SETUP_WIZARD_STEP_COUNT) {
         /* "unknown-step rejection": a step number outside the valid range is
          * refused here at the HTTP boundary AND, defense in depth, again by
          * setup_wizard_progress_set_step() itself below. */
@@ -193,14 +193,18 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* Contract (setup_wizard_progress.h): a too-long note is truncated, never rejected. */
     char note_val[SETUP_WIZARD_NOTE_MAX];
-    int note_len = http_form_find_field(body, "note", note_val, sizeof(note_val));
-    const char *note = (note_len > 0) ? note_val : NULL;
+    if (!setup_wizard_progress_note_from_form(body, note_val, sizeof(note_val))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note too long or contains a control character");
+        return ESP_OK;
+    }
+    const char *note = (note_val[0] != '\0') ? note_val : NULL;
 
     esp_err_t err = setup_wizard_progress_set_step((uint8_t)step_num, state, note);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "setup_wizard_progress_set_step(%ld) failed: %s", step_num, esp_err_to_name(err));
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, SETUP_WIZARD_PROGRESS_FILE_PATH, err);
     }
 
     httpd_resp_set_type(req, "application/json");

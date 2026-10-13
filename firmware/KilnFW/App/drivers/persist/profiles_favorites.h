@@ -49,7 +49,7 @@
  * record) and saves go there ONLY. The legacy profiles_nvs keys are read once
  * at boot as a fallback and migrated into the file; nothing writes them any
  * more. A save while cfg is unmounted fails (the HTTP route refuses with 503
- * first); the change still applies live and reverts on reboot.
+ * first) and changes nothing: RAM is published only after a successful commit.
  */
 
 #include <stdbool.h>
@@ -73,7 +73,7 @@ bool profiles_favorites_is(uint8_t id);
 
 /* Marks or unmarks `id`. Returns ESP_OK when the change was also persisted;
  * a non-OK return (ESP_ERR_INVALID_STATE when cfg is not mounted) means the
- * change IS live but did not reach flash. An id in neither namespace returns
+ * change was NOT applied (RAM is unchanged). An id in neither namespace returns
  * ESP_ERR_INVALID_ARG and changes nothing. */
 esp_err_t profiles_favorites_set(uint8_t id, bool favorite);
 

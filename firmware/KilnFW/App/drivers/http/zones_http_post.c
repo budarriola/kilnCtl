@@ -23,6 +23,8 @@
 #include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracks the zone max */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- review 14 LOW-3 fence */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_zone_edits_at_risk() -- LOW-1 refusal */
 #include "zone_settings_source_chain.h"
 #include "cfg_fs_refusal_http.h"
 
@@ -34,6 +36,52 @@ static esp_err_t zones_post_body(httpd_req_t *req);
 #define ZONES_POST_NOINLINE __attribute__((noinline))
 #endif
 static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *body);
+static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, char *body, zones_cfg_t *tmp);
+
+/* Tracks the Pico ceiling DOWN to `live_max_temp_c` (the zone maxima now live in RAM, i.e. the
+ * persisted ones), best-effort. Two callers: the post-commit LOWER below, and the lost-update 409,
+ * which must undo the raise it already confirmed (HOST_TEST_GAP_AUDIT_2026-10-09.md gap 3: the
+ * divergence check needs an exact match, so a raise left behind forces relays off until the next
+ * save, and link-up reconcile only ever raises). apply_lower() targets exactly the maximum of the
+ * array and only ever lowers, so the Pico never ends up tighter than the live zone maxima.
+ * NOINLINE: keeps the reason buffer off zones_post_apply()'s frame (httpd stack blob class). */
+static ZONES_POST_NOINLINE void zones_post_track_ceiling_lower(const float *live_max_temp_c, const char *why)
+{
+    safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
+    char ceiling_reason[192];
+    ceiling_reason[0] = '\0';
+    safety_ceiling_sync_apply_lower(s_hw_safety, live_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                     ceiling_reason, sizeof(ceiling_reason));
+    if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
+        ESP_LOGW(ZONES_HTTP_TAG,
+                 "%s: safety processor ceiling not lowered to track the live zone max -- %s -- "
+                 "Pico ceiling stays wider than the live max, which is safe, just not tight",
+                 why, ceiling_reason);
+    } else if (ceiling_result == SAFETY_CEILING_SYNC_LOWERED) {
+        ESP_LOGI(ZONES_HTTP_TAG, "%s: safety processor ceiling lowered to track the live zone max", why);
+    }
+}
+
+/* MED-2/LOW-2 (review persfx/persfx2 2026-10-10): the single 409 body for "the stored zones config could not be
+ * read this boot". Names the actual recovery routes -- a reboot alone retries the same unreadable file. */
+static ZONES_POST_NOINLINE void zones_post_send_undecided_409(httpd_req_t *req)
+{
+    cfg_fs_http_send_zones_undecided_409(req);
+}
+
+/* The commit-time mode-gate refusal (a firing/autotune started during the ceiling raise): undo the
+ * raise to the unchanged live maxima, exactly as the lost-update 409 does, then answer the same 409
+ * the entry gate sends. NOINLINE: keeps the reason buffer off zones_post_apply()'s frame. */
+static ZONES_POST_NOINLINE esp_err_t zones_post_refuse_run_started(httpd_req_t *req, const sys_mode_snapshot_t *snap,
+                                                                   const float *live_max_temp_c)
+{
+    zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones run-started 409");
+    char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+    mode_reason[0] = '\0';
+    (void)system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, snap, mode_reason, sizeof(mode_reason));
+    ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused at commit: a run started meanwhile: %s", mode_reason);
+    return system_mode_gate_http_send_refusal(req, mode_reason);
+}
 
 /* ---- move_zone_to_aux hook and the zone free/restore it drives ---- */
 static zones_move_to_aux_handler_t s_move_to_aux_handler;
@@ -153,7 +201,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * a contact that stays closed because the code that owned it stopped
      * looking at it. See the ota_http_check_interlocks() call below for why
      * that shared gate, not a private profile-is-RUNNING check, is used. */
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * not scoped to which field changed -- while a firing or autotune run is
      * active, PAUSED included, distinct 409 from the OTA interlock's own
@@ -178,6 +226,24 @@ esp_err_t zones_post_handler(httpd_req_t *req)
             ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by system mode gate: %s", mode_reason);
             return system_mode_gate_http_send_refusal(req, mode_reason);
         }
+    }
+
+    /* Review 14 LOW-3: a backup restore (or a zone-to-aux conversion, which raises the same flag) is
+     * mid-commit. A zones page save now could change thermo_count under the restore's already-resolved
+     * topology and turn its later stages into a 500 partial write; the run starters already refuse on this
+     * flag. Same 409 sender as the gates above. */
+    if (backup_import_restore_in_flight()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: a backup restore or configuration change is in flight");
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
+    }
+
+    /* LOW-1 (dev firmware review 10): a kept rollback journal (active_id restore failed) re-imports the pre-swap
+     * zones on every boot, which would silently revert a save made now. Refuse it, naming the cause. */
+    if (kiln_cfg_swap_zone_edits_at_risk()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: rollback journal pending");
+        return system_mode_gate_http_send_refusal(
+            req, KILN_CFG_SWAP_ZONE_EDITS_RISK_TEXT);
     }
 
     /* ota_http_check_interlocks() is that shared gate rather than a private
@@ -273,21 +339,47 @@ static esp_err_t zones_post_body(httpd_req_t *req)
 /* The ordinary whole-page submit, split out of zones_post_body() so the move-to-aux path above never
  * carries this frame (zones_cfg_t tmp alone is ~1.1 KB) on top of its own: noinline keeps the compiler
  * from folding it back, and takes ownership of `body` (frees it on every return). */
-static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *body)
+static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, char *body, zones_cfg_t *tmp)
 {
-    zones_cfg_t tmp;
-    memset(&tmp, 0, sizeof(tmp));
+    memset(tmp, 0, sizeof(*tmp));
     /* Lost-update guard: tmp is assembled from s_zones.cfg (preserved fields) and committed whole at
      * the commit point, after blocking work (Pico ceiling confirm). Any other writer in between bumps
      * s_config_generation; the commit re-checks it and refuses rather than overwrite that write. */
-    const uint32_t gen_at_snapshot = s_config_generation;
+    uint32_t gen_at_snapshot = s_config_generation;
+    /* Optional client-side lost-update token (WEB_UI_JS_AUDIT M-1): the "generation" the page's GET /api/zones
+     * printed. Absent = old behaviour (MCP writers that GET-merge-POST right away). Present and different from
+     * the live generation = the config changed elsewhere since the page loaded: refuse 409, write nothing (this
+     * runs before the Pico ceiling raise). The value also becomes the snapshot, so the commit re-check covers
+     * a bump landing after this point. */
+    {
+        char gval[16];
+        int glen = http_form_find_field(body, "expected_generation", gval, sizeof(gval));
+        if (glen != -1) {
+            long g = 0;
+            if (!http_form_parse_long(gval, glen, 0, 2147483647L, &g)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected_generation must be a non-negative integer");
+                free(body);
+                return ESP_OK;
+            }
+            if ((uint32_t)g != gen_at_snapshot) {
+                ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: expected_generation %ld != live %u", g,
+                         (unsigned)gen_at_snapshot);
+                httpd_resp_set_status(req, "409 Conflict");
+                httpd_resp_set_type(req, "application/json");
+                httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"zones_config_stale\",\"reason\":\"the zones config changed elsewhere (autotune, another page or a tool) since this page loaded; reload and redo your edit\"}");
+                free(body);
+                return ESP_OK;
+            }
+            gen_at_snapshot = (uint32_t)g;
+        }
+    }
 
-    if (!zones_config_json_parse_u8_field(body, "thermo_count", 0, MAX31856_CHANNEL_COUNT, &tmp.thermo_count)) {
+    if (!zones_config_json_parse_u8_field(body, "thermo_count", 0, MAX31856_CHANNEL_COUNT, &tmp->thermo_count)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "thermo_count missing or out of range");
         free(body);
         return ESP_OK;
     }
-    if (!zones_config_json_parse_u8_field(body, "relay_count", 0, KILN_IO_RELAY_COUNT, &tmp.relay_count)) {
+    if (!zones_config_json_parse_u8_field(body, "relay_count", 0, KILN_IO_RELAY_COUNT, &tmp->relay_count)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay_count missing or out of range");
         free(body);
         return ESP_OK;
@@ -299,18 +391,17 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     {
         char val[8];
         int len = http_form_find_field(body, "max_simultaneous_relays", val, sizeof(val));
-        if (len > 0) {
-            char *end = NULL;
-            long v = strtol(val, &end, 10);
-            /* *end != '\0' rejects trailing garbage after a valid numeric
-             * prefix (e.g. "2X"), same gap as zones_config_json_parse_u8_field()/
-             * zones_config_json_parse_float_field() above -- end == val alone lets it through. */
-            if (end == val || *end != '\0' || v < 0 || v > KILN_IO_RELAY_COUNT) {
+        if (len != -1) {
+            /* Present: blank (0), over-long or %00 (-2), trailing garbage
+             * ("2X") and out-of-range values are all refused. len is passed
+             * through, so a -2 never reaches a strtol() of the buffer. */
+            long v = 0;
+            if (!http_form_parse_long(val, len, 0, KILN_IO_RELAY_COUNT, &v)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "max_simultaneous_relays out of range");
                 free(body);
                 return ESP_OK;
             }
-            tmp.max_simultaneous_relays = (uint8_t)v;
+            tmp->max_simultaneous_relays = (uint8_t)v;
         }
     }
     /* Optional, same "missing means keep the safe default" convention as
@@ -320,11 +411,11 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     {
         char val[4];
         int len = http_form_find_field(body, "continue_on_zone_trip", val, sizeof(val));
-        if (len > 0) {
-            if (strcmp(val, "1") == 0) {
-                tmp.continue_on_zone_trip = 1;
-            } else if (strcmp(val, "0") == 0) {
-                tmp.continue_on_zone_trip = 0;
+        if (len != -1) {
+            if (http_form_is_bool01(val, len) && val[0] == '1') {
+                tmp->continue_on_zone_trip = 1;
+            } else if (http_form_is_bool01(val, len)) {
+                tmp->continue_on_zone_trip = 0;
             } else {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "continue_on_zone_trip must be 0 or 1");
                 free(body);
@@ -362,14 +453,14 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
             break; /* no tp<p>_name -- this and every following slot is absent from this submission */
         }
         const char *err_reason = "invalid timing profile field";
-        if (!zones_config_json_parse_timing_profile_fields(body, p, &tmp.timing_profiles[p], &err_reason)) {
+        if (!zones_config_json_parse_timing_profile_fields(body, p, &tmp->timing_profiles[p], &err_reason)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
             free(body);
             return ESP_OK;
         }
-        tmp.timing_profile_count = (uint8_t)(p + 1);
+        tmp->timing_profile_count = (uint8_t)(p + 1);
     }
-    if (tmp.timing_profile_count == 0) {
+    if (tmp->timing_profile_count == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "at least one timing profile (tp0_name) is required");
         free(body);
         return ESP_OK;
@@ -379,11 +470,17 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         const char *err_reason = "invalid zone field";
         /* &s_zones.cfg.zones[i]: the LIVE value, for z%u_tctype's
          * omit-means-preserve fallback (see zones_http_parse_zone_fields()'s comment) --
-         * tmp itself is zeroed, so tmp.zones[i] can't supply "what this
+         * tmp itself is zeroed, so tmp->zones[i] can't supply "what this
          * channel is already set to." */
-        if (!zones_http_parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, tmp.timing_profile_count,
-                               &s_zones.cfg.zones[i], &tmp.zones[i], &err_reason)) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
+        if (!zones_http_parse_zone_fields(body, i, tmp->thermo_count, tmp->relay_count, tmp->timing_profile_count,
+                               &s_zones.cfg.zones[i], &tmp->zones[i], &err_reason)) {
+            /* The cycle-probe allocation failing is a server fault, not a bad request. */
+            if (strcmp(err_reason, ZONES_HTTP_ERR_OOM) == 0) {
+                /* no 503 httpd_err_code_t exists */
+                (void)httpd_resp_send_custom_err(req, "503 Service Unavailable", err_reason);
+            } else {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
+            }
             free(body);
             return ESP_OK;
         }
@@ -396,24 +493,24 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * request, none of which is a cycle by itself against the old live
      * config, but which together close one (e.g. z0_settings_source=1 and
      * z1_settings_source=0 in the same POST when neither zone pointed
-     * anywhere before). tmp.zones[] now holds every zone's fully-assembled
+     * anywhere before). tmp->zones[] now holds every zone's fully-assembled
      * NEW link, so re-walk every zone's chain against THAT -- before the
      * commit point below, so a rejection here still leaves s_zones
      * untouched, same "never partially apply" discipline the rest of this
-     * handler follows. Bounded by tmp.thermo_count, same "unused trailing
+     * handler follows. Bounded by tmp->thermo_count, same "unused trailing
      * slot" discipline zones_config_json_settings_source_chain_has_cycle()'s own comment
      * explains -- a slot past this submission's own thermo_count was never
      * rendered and never posted to, so it is excluded from this walk
      * entirely rather than treated as a real link. (It does NOT read back at
      * a zero-initialized default: zones_http_parse_zone_fields()'s early return for
-     * such a slot does `*z = *current_z`, so tmp.zones[i] carries whatever
+     * such a slot does `*z = *current_z`, so tmp->zones[i] carries whatever
      * settings_source is already LIVE and stored for that zone, not 0 --
      * still bounded out of this walk on principle, since that live value was
      * not part of this submission either, but the "reads back as 0" premise
      * would be wrong if repeated as a reason.) */
     for (uint8_t group = 0; group < SRC_GROUP_COUNT; group++) {
-        for (uint8_t i = 0; i < tmp.thermo_count && i < MAX31856_CHANNEL_COUNT; i++) {
-            if (zones_config_json_settings_source_chain_has_cycle(tmp.zones, group, i, tmp.thermo_count)) {
+        for (uint8_t i = 0; i < tmp->thermo_count && i < MAX31856_CHANNEL_COUNT; i++) {
+            if (zones_config_json_settings_source_chain_has_cycle(tmp->zones, group, i, tmp->thermo_count)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                     "zone settings_source would create an inheritance cycle");
                 free(body);
@@ -432,7 +529,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * regardless of what a submission carries, rather than accepting an
      * operator-typed value that would never actually reach the Pico and
      * would silently desync the displayed value from the real one. */
-    tmp.safety_tc_type = s_zones.cfg.safety_tc_type;
+    tmp->safety_tc_type = s_zones.cfg.safety_tc_type;
 
     /* The one global v8 override. OPTIONAL, and on omit it keeps the CURRENT
      * live value rather than resetting to 0 -- the same reasoning as
@@ -442,16 +539,16 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     {
         char val[16];
         int len = http_form_find_field(body, "pc_link_abort_silence_ms", val, sizeof(val));
-        if (len > 0) {
+        if (len != -1 && len != 0) { /* blank keeps the stored value; -2 overflow still hits the 400 */
             if (!zones_config_json_parse_float_field(body, "pc_link_abort_silence_ms", 0.0f,
-                                   ZONE_PC_LINK_SILENCE_MS_MAX, &tmp.pc_link_abort_silence_ms)) {
+                                   ZONE_PC_LINK_SILENCE_MS_MAX, &tmp->pc_link_abort_silence_ms)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                     "pc_link_abort_silence_ms out of range (0 = firmware default)");
                 free(body);
                 return ESP_OK;
             }
         } else {
-            tmp.pc_link_abort_silence_ms = s_zones.cfg.pc_link_abort_silence_ms;
+            tmp->pc_link_abort_silence_ms = s_zones.cfg.pc_link_abort_silence_ms;
         }
     }
 
@@ -467,7 +564,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * same "omitted means keep the current live value" convention this
      * handler already uses for safety_tc_type/pc_link_abort_silence_ms
      * above, NOT the per-zone fields' "omitted means zero" convention
-     * (tmp.zones[] is zero-initialized; this isn't). That matters here even
+     * (tmp->zones[] is zero-initialized; this isn't). That matters here even
      * more than it does for those: zones_page.html and safety_config_page.html
      * BOTH POST to this same endpoint, and only zones_page.html renders a
      * relay-name input at all (see its renderRelayNames()) -- a save
@@ -500,6 +597,11 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
             free(body);
             return ESP_OK;
         }
+        if (rlen > 0 && http_form_value_has_ctl(rval, rlen)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay name contains a control character");
+            free(body);
+            return ESP_OK;
+        }
         if (rlen >= 0) {
             strncpy(tmp_relay_names.names[r - 1], rval, RELAY_NAME_MAX_LEN);
             tmp_relay_names.names[r - 1][RELAY_NAME_MAX_LEN] = '\0';
@@ -522,12 +624,12 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         snprintf(tkey, sizeof(tkey), "relay%u_type", r);
         char tval[8];
         int tlen = http_form_find_field(body, tkey, tval, sizeof(tval));
-        if (tlen == -2) {
+        if (tlen == -2 || tlen == 0) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay device type out of range");
             free(body);
             return ESP_OK;
         }
-        if (tlen > 0) {
+        if (tlen != -1) {
             char *tend = NULL;
             long tv = strtol(tval, &tend, 10);
             if (tend == tval || *tend != '\0' || tv < 0 || tv >= (long)RELAY_DEVICE_TYPE_COUNT) {
@@ -547,7 +649,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * copy so nothing has been touched yet. Runs against the fully assembled
      * `tmp` (preserved slots included), before any Pico ceiling write. */
     {
-        uint8_t aux_conflict = zones_config_json_aux_conflict_mask(&tmp);
+        uint8_t aux_conflict = zones_config_json_aux_conflict_mask(tmp);
         if (aux_conflict != 0) {
             ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: relay mask 0x%02X is owned by an aux output",
                      (unsigned)aux_conflict);
@@ -572,7 +674,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * configured zone max_temp_c -- see safety_ceiling_policy.h's header
      * comment for the full invariant and why RAISING requires the Pico to
      * be written and CONFIRMED first, strictly before this handler's own
-     * commit point below. `tmp.zones[i].max_temp_c` is the PROPOSED new
+     * commit point below. `tmp->zones[i].max_temp_c` is the PROPOSED new
      * config -- this must run against `tmp`, not the still-live
      * `s_zones.cfg`, and it must run BEFORE the commit point so a refused
      * Pico raise leaves s_zones completely untouched, same "never partially
@@ -585,10 +687,19 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * reports a clear, specific, operator-facing reason via HTTP 409
      * rather than a generic 400/500, and never silently drops the raise or
      * requires an undocumented safety-processor reset. */
+    /* LOW-1 (review persfx2): decide "undecided" BEFORE the Pico ceiling raise -- the commit-point check below
+     * would refuse only after the Pico had already been widened for a submission that can never commit. This is an
+     * unlocked early-out; the locked check at the commit point stays authoritative. */
+    if (zones_config_is_undecided()) {
+        ESP_LOGE(ZONES_HTTP_TAG, "POST /api/zones refused before any Pico write: stored zones config unreadable");
+        zones_post_send_undecided_409(req);
+        free(body);
+        return ESP_OK;
+    }
     {
         float new_max_temp_c[MAX31856_CHANNEL_COUNT];
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            new_max_temp_c[i] = (i < tmp.thermo_count) ? tmp.zones[i].max_temp_c : 0.0f;
+            new_max_temp_c[i] = (i < tmp->thermo_count) ? tmp->zones[i].max_temp_c : 0.0f;
         }
         /* 2026-09-10 opus review, httpd stack blob class: ceiling_reason[192] +
          * escaped[224] + resp[300] used to all live on THIS handler's own
@@ -660,13 +771,52 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * cannot interleave with a concurrent setter. The lock is dropped before the 409 reply and held
      * across no producer call -- everything slow (ceiling write, parsing) happened above on `tmp`. */
     zones_cfg_lock();
-    if (s_config_generation != gen_at_snapshot) {
+    /* Mode gate, second look (HTTP audit E1 finding 1): the entry gate ran before the slow ceiling
+     * raise above, and a firing or autotune start does not touch the generation, so one could begin
+     * in that window and have its config rewritten mid-run. Re-read the heat claim inside the commit
+     * critical section. Pairs with the starters' zones_config_changed_since() check, which publishes
+     * the heat claim and then reads the generation under this same lock: either this read sees the
+     * claim, or the starter sees this commit's bump and refuses. Leaf spinlock read, nothing else. */
+    sys_mode_snapshot_t late_mode = { 0 };
+    relay_authority_heat_run_active(&late_mode.profile_running, &late_mode.autotune_running);
+    if (late_mode.profile_running || late_mode.autotune_running) {
+        float live_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            live_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
+        }
         zones_cfg_unlock();
+        free(body);
+        return zones_post_refuse_run_started(req, &late_mode, live_max_temp_c);
+    }
+    if (s_config_generation != gen_at_snapshot) {
+        /* The raise above may already have widened the Pico for `tmp`, which is now never
+         * committed: snapshot the live maxima under the lock, and lower back to them below. */
+        float live_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            live_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
+        }
+        zones_cfg_unlock();
+        zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones lost-update 409");
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: zones config changed concurrently (generation %u -> %u)",
                  (unsigned)gen_at_snapshot, (unsigned)s_config_generation);
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"zones_config_changed_concurrently\",\"reason\":\"another writer changed the zones config while this submit was being processed; reload and retry\"}");
+        free(body);
+        return ESP_OK;
+    }
+    if (zones_config_is_undecided()) {
+        /* MED-2 (review persfx 2026-10-10): this boot could not read the stored config, so nvs_save() would refuse
+         * and the submission would live only in RAM -- and committing it would mark the config valid and clear the
+         * load fault, lifting the firing refusal. Refuse instead; the fault stays latched until a clean reload. */
+        float live_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            live_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
+        }
+        zones_cfg_unlock();
+        zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones undecided 409");
+        ESP_LOGE(ZONES_HTTP_TAG, "POST /api/zones refused: the stored zones config could not be read this boot");
+        zones_post_send_undecided_409(req);
         free(body);
         return ESP_OK;
     }
@@ -676,7 +826,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * generation may advance. A 400'd submission changed nothing and must
      * not make a running profile re-read identical settings (TODO.md
      * 6A.7). */
-    s_zones.cfg = tmp;
+    s_zones.cfg = *tmp;
     s_relay_names.cfg = tmp_relay_names;
     /* A validated, freshly-submitted config is trustworthy the moment it's
      * live in RAM, regardless of whether the NVS write below succeeds --
@@ -697,7 +847,11 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * or not the NVS write that would make it survive a reboot succeeds. */
     zones_config_push_all_relay_types();
     esp_err_t err = nvs_save();
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        /* Review 11 LOW-3, narrowed by persfx MED-2: only a config that actually persisted retires a stale
+         * load-fault banner; a failed save leaves the fault latched (the config lives in RAM only). */
+        zones_config_load_fault_clear();
+    } else {
         ESP_LOGE(ZONES_HTTP_TAG, "nvs_save failed: %s -- config applied live but will not survive a reboot",
                  esp_err_to_name(err));
         /* Still applied above, but the save failed: reported as an error
@@ -727,23 +881,27 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
             new_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
         }
-        safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
-        char ceiling_reason[192];
-        safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
-                                         ceiling_reason, sizeof(ceiling_reason));
-        if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
-            ESP_LOGW(ZONES_HTTP_TAG,
-                     "safety processor ceiling not lowered to track the new (lower) zone max -- %s -- "
-                     "Pico ceiling stays wider than the new max, which is safe, just not tight",
-                     ceiling_reason);
-        } else if (ceiling_result == SAFETY_CEILING_SYNC_LOWERED) {
-            ESP_LOGI(ZONES_HTTP_TAG, "safety processor ceiling lowered to track the new zone max");
-        }
+        zones_post_track_ceiling_lower(new_max_temp_c, "POST /api/zones");
     }
 
     free(body);
     if (err != ESP_OK || names_err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, "zones.json", err != ESP_OK ? err : names_err);
     }
     return httpd_resp_sendstr(req, "ok");
+}
+
+/* Wrapper: the ~1.1 KB zones_cfg_t scratch lives on the heap (httpd 8 KB stack), freed on every path.
+ * Ownership of `body` passes to zones_post_apply_body() exactly as before; on alloc failure it is freed here. */
+static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *body)
+{
+    zones_cfg_t *tmp = persist_scratch_alloc(sizeof(*tmp));
+    if (tmp == NULL) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    esp_err_t r = zones_post_apply_body(req, body, tmp);
+    free(tmp);
+    return r;
 }

@@ -26,6 +26,9 @@ extern "C" {
  * screen object. Called once by kiln_ui, on first kiln_ui_show("network"). */
 lv_obj_t *ui_page_network_build(void);
 
+/* Closes the AP edit modal and clears typed SSID/password; called on the LCD relock edge. */
+void ui_page_network_relock_close(void);
+
 #ifdef __cplusplus
 }
 #endif

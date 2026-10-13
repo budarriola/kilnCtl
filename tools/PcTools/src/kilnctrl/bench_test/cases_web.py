@@ -33,6 +33,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from typing import Any, List, Optional, Tuple
 
 from . import judgments as J
@@ -103,7 +104,7 @@ def _http_get_raw(host: str, path: str, timeout: float = 5.0) -> "tuple[Optional
             return resp.getcode(), raw.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, None
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, OSError, EOFError, zlib.error) as exc:
         return None, str(exc)
 
 

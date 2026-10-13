@@ -420,7 +420,7 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     // pstat.zones[] itself is the WRONG source for temperature/heater-
     // commanded data.
     /* Heap, not a stack local: this runs on the httpd task (8192-byte
-     * stack, wifi_provision_http.c), and profile_exec_status_t is 1464
+     * stack, wifi_provision_http.c), and profile_exec_status_t is 1512
      * bytes -- same reasoning and pattern as safety_cfg_http.c's reads.
      * Freed right after the switch below; nothing past this point needs
      * more than the enum it already copied out. */
@@ -778,7 +778,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 
     // Deliberate entry into the recovery image -- ota_http_recovery.c's
     // ota_recovery_boot_post_handler() doc comment has the contract
-    // (docs/OTA_SINGLE_SLOT_PLAN.md section 4).
+    // (docs/OTA_SINGLE_SLOT.md section 4).
     static const httpd_uri_t recovery_boot_uri = {
         .uri = "/api/ota/esp/recovery_boot", .method = HTTP_POST, .handler = ota_recovery_boot_post_handler
     };

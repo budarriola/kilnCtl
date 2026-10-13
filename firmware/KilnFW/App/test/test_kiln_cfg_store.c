@@ -915,6 +915,29 @@ static void test_newer_version_blob_refused_by_store(void)
                "active id is unchanged -- the refused apply changed nothing");
 }
 
+// Review 15 LOW-1: a boot-time restore refused ONLY because a run holds the claim must not clear the active id.
+static void test_boot_restore_claim_refusal_keeps_active_id(void)
+{
+    TEST_SECTION("kiln_cfg_store_init -- a boot restore refused on the run claim keeps the active id; a real "
+                 "validation failure still clears it (review 15 LOW-1)");
+    reset_state();
+    int32_t id = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("Boot Cfg", -1, &id, reason, sizeof(reason)), "setup: saved");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id, "setup: it is the active config");
+
+    s_stub_import_result = false;
+    strncpy(s_stub_import_reason, ZONES_IMPORT_REASON_RUN_CLAIMED, sizeof(s_stub_import_reason) - 1);
+    TEST_CHECK(kiln_cfg_store_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id,
+               "a claim refusal at boot is not a validation failure: the active id survives");
+
+    strncpy(s_stub_import_reason, "zone max_temp_c out of range", sizeof(s_stub_import_reason) - 1);
+    TEST_CHECK(kiln_cfg_store_init() == ESP_OK, "init succeeds (validation failure)");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == KILN_CFG_NO_ACTIVE_ID,
+               "a genuine validation failure at boot still clears the active id");
+}
+
 static void test_out_of_range_value_rejected_nothing_written(void)
 {
     TEST_SECTION("kiln_cfg_store_apply -- an out-of-range stored value is rejected, nothing applied");
@@ -1322,7 +1345,7 @@ static void test_nvs_load_store_migrates_v1_blob_at_full_size(void)
 }
 
 // ---------------------------------------------------------------------------
-// FROZEN-INPUT migration fixtures (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+// FROZEN-INPUT migration fixtures (docs/CONFIG_MIGRATION_CHAIN.md
 // follow-up). Unlike build_v1_blob()/build_v2_blob() above, which fill the
 // CURRENT private struct definitions, these are literal byte images of what
 // real old firmware wrote, so a later edit to kiln_cfg_entry_v1_t/_v2_t
@@ -3672,6 +3695,27 @@ static void test_autosave_override_ignores_a_foreign_nonnull_dispatcher(void)
                "deferred, the branch the owner explicitly rejected");
 }
 
+// Review 14 LOW-4: the restore topology override is scoped to the task that
+// installed it; another task validating an upload must see the live counts.
+static void test_topology_override_scoped_to_owning_task(void)
+{
+    kiln_cfg_store_restore_topology_override(true, 3, 6);
+    TEST_CHECK(topology_override_applies_here(), "the installing task sees its own override");
+    TEST_CHECK(s_topology_override_thermo == 3 && s_topology_override_relay == 6, "override counts stored");
+
+    // Simulate another task: the owner is some other handle.
+    void *real_owner = s_topology_override_owner;
+    s_topology_override_owner = (void *)0x7E57F0F0u;
+    TEST_CHECK(!topology_override_applies_here(),
+               "a different task must NOT see the restore's planned topology (would pass/fail an unrelated upload "
+               "against counts the live board does not have)");
+    s_topology_override_owner = real_owner;
+
+    kiln_cfg_store_restore_topology_override(false, 0, 0);
+    TEST_CHECK(!topology_override_applies_here(), "cleared override applies to nobody");
+    TEST_CHECK(s_topology_override_owner == NULL, "clear drops the owner too");
+}
+
 static void test_autosave_from_live_noop_with_no_active_config(void)
 {
     TEST_SECTION("kiln_cfg_store_autosave_from_live -- no-op (success, nothing written) with no active config");
@@ -4175,6 +4219,7 @@ void run_test_kiln_cfg_store(void)
     test_delete_refuses_the_active_config();
     test_delete_refused_by_interlock_while_firing_even_when_not_active();
     test_newer_version_blob_refused_by_store();
+    test_boot_restore_claim_refusal_keeps_active_id();
     test_out_of_range_value_rejected_nothing_written();
     test_save_as_new_rejects_duplicate_name();
     test_clone_rejects_duplicate_name();
@@ -4236,6 +4281,7 @@ void run_test_kiln_cfg_store(void)
     test_autosave_override_ignores_a_foreign_dispatcher();
     test_autosave_override_applies_to_its_own_dispatcher();
     test_autosave_override_ignores_a_foreign_nonnull_dispatcher();
+    test_topology_override_scoped_to_owning_task();
     test_autosave_keeps_existing_pico_half_while_cache_unfetched();
     test_autosave_from_live_suppressed_while_diverged();
     test_autosave_from_live_suppressed_while_swap_pending();

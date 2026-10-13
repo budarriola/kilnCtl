@@ -26,6 +26,10 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+// Bounded wait for one flash-writer op (64 KiB erase+write is well under 1 s). Shared with the host-test
+// fake xSemaphoreTake, which recognises this wait by it, so changing it cannot desync the fake.
+#define FETCH_WR_TIMEOUT_MS 30000u
+
 #ifdef __cplusplus
 extern "C" {
 #endif

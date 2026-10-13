@@ -81,6 +81,12 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
                                            char *reason_out, size_t reason_cap,
                                            safety_ceiling_refusal_class_t *out_class);
 
+/* Blocking sibling for the swap worker's flash fallback (never from
+ * safety_poll_task); waits for a post-commit DIAG, see the definition. */
+bool safety_cfg_write_set_and_confirm_f32_blocking(SafetyLinkClass *link, uint16_t param_id, float value,
+                                                    char *reason_out, size_t reason_cap,
+                                                    safety_ceiling_refusal_class_t *out_class);
+
 /* Volatile-install sibling of the above -- docs/KILN_PROFILES_PLAN.md item 15
  * (SAFETY_CMD_APPLY_CONFIG_VOLATILE, 0x2D) reached the wire 2026-09-14; this
  * is the ONE caller allowed to use it for the ceiling field, and it exists

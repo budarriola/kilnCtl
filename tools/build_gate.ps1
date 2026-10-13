@@ -289,13 +289,14 @@ function Get-KilnBuildGateRecords {
     if (-not (Test-Path -LiteralPath $dir)) { return $out }
     foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter "slot*.json" -ErrorAction SilentlyContinue)) {
         try {
-            $r = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
+            $r = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
             $out += [PSCustomObject]@{
                 Slot = [int]$r.slot; Pid = [int]$r.pid; Alive = (Test-KilnPidAlive -ProcessId ([int]$r.pid) -StartEpoch $r.proc_start)
                 Cmd = [string]$r.cmdline; Label = [string]$r.label; Phase = [string]$r.phase
                 StartedEpoch = [double]$r.started_epoch; Worktree = [string]$r.worktree
             }
         } catch {
+            if (-not (Test-Path -LiteralPath $f.FullName)) { continue }   # REVIEW_WEBFX4 LOW-6: released between enumeration and read -- the slot is free, not unparsable
             if ($f.Name -match '^slot(\d+)\.json$') {   # unparsable record: treat as held, never free
                 $out += [PSCustomObject]@{ Slot = [int]$Matches[1]; Pid = 0; Alive = $true; Cmd = "<unparsable record>"; Label = ""; Phase = ""
                     StartedEpoch = [double]([DateTimeOffset]$f.LastWriteTimeUtc).ToUnixTimeSeconds(); Worktree = "" }

@@ -2,6 +2,8 @@
 #include "persist_scratch.h"
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -287,11 +289,230 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists)
     return ESP_OK;
 }
 
+#define CFG_FS_DEGRADED_MAX 40
+#define CFG_FS_DEGRADED_NAME_MAX 48
+static char s_degraded[CFG_FS_DEGRADED_MAX][CFG_FS_DEGRADED_NAME_MAX];
+static portMUX_TYPE s_degraded_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void cfg_fs_degraded_set(const char *name, bool degraded)
+{
+    if (!name || name[0] == '\0') {
+        return;
+    }
+    bool overflow = false;
+    portENTER_CRITICAL(&s_degraded_mux);
+    int free_slot = -1;
+    bool done = false;
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] == '\0') {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+        } else if (strncmp(s_degraded[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            if (!degraded) {
+                s_degraded[i][0] = '\0';
+            }
+            done = true;
+            break;
+        }
+    }
+    if (degraded && !done) {
+        if (free_slot >= 0) {
+            strncpy(s_degraded[free_slot], name, CFG_FS_DEGRADED_NAME_MAX - 1);
+            s_degraded[free_slot][CFG_FS_DEGRADED_NAME_MAX - 1] = '\0';
+        } else {
+            overflow = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    if (overflow) {
+        ESP_LOGE("cfg_fs", "degraded-store table full: %s not listed (its saves are still refused)", name);
+    }
+}
+
+int cfg_fs_degraded_count(void)
+{
+    int n = 0;
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] != '\0') {
+            n++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return n;
+}
+
+bool cfg_fs_degraded_name(int idx, char *out, size_t cap)
+{
+    bool ok = false;
+    if (!out || cap == 0 || idx < 0) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    int seen = 0;
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] != '\0') {
+            if (seen == idx) {
+                strncpy(out, s_degraded[i], cap - 1);
+                out[cap - 1] = '\0';
+                ok = true;
+                break;
+            }
+            seen++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return ok;
+}
+
+bool cfg_fs_degraded_is(const char *name)
+{
+    bool found = false;
+    if (!name || name[0] == '\0') {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] != '\0' && strncmp(s_degraded[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return found;
+}
+
+#define CFG_FS_CONDITION_MAX 8
+static char s_condition[CFG_FS_CONDITION_MAX][CFG_FS_DEGRADED_NAME_MAX];
+
+void cfg_fs_condition_set(const char *name, bool active)
+{
+    if (!name || name[0] == '\0') {
+        return;
+    }
+    bool overflow = false;
+    portENTER_CRITICAL(&s_degraded_mux);
+    int free_slot = -1;
+    bool done = false;
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] == '\0') {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+        } else if (strncmp(s_condition[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            if (!active) {
+                s_condition[i][0] = '\0';
+            }
+            done = true;
+            break;
+        }
+    }
+    if (active && !done) {
+        if (free_slot >= 0) {
+            strncpy(s_condition[free_slot], name, CFG_FS_DEGRADED_NAME_MAX - 1);
+            s_condition[free_slot][CFG_FS_DEGRADED_NAME_MAX - 1] = '\0';
+        } else {
+            overflow = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    if (overflow) {
+        ESP_LOGE("cfg_fs", "condition table full: %s not listed", name);
+    }
+}
+
+int cfg_fs_condition_count(void)
+{
+    int n = 0;
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] != '\0') {
+            n++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return n;
+}
+
+bool cfg_fs_condition_name(int idx, char *out, size_t cap)
+{
+    bool ok = false;
+    if (!out || cap == 0 || idx < 0) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    int seen = 0;
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] != '\0') {
+            if (seen == idx) {
+                strncpy(out, s_condition[i], cap - 1);
+                out[cap - 1] = '\0';
+                ok = true;
+                break;
+            }
+            seen++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return ok;
+}
+
+bool cfg_fs_condition_is(const char *name)
+{
+    bool found = false;
+    if (!name || name[0] == '\0') {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] != '\0' && strncmp(s_condition[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return found;
+}
+
+void cfg_fs_degraded_clear_for_test(void)
+{
+    portENTER_CRITICAL(&s_degraded_mux);
+    memset(s_degraded, 0, sizeof(s_degraded));
+    memset(s_condition, 0, sizeof(s_condition));
+    portEXIT_CRITICAL(&s_degraded_mux);
+}
+
+#ifndef ESP_PLATFORM /* host-test fault injection only; never compiled into firmware */
+static char s_inject_path[CFG_FS_PATH_MAX];
+static bool s_inject_any;
+static esp_err_t s_inject_err;
+static int s_inject_count;
+
+void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int count)
+{
+    s_inject_any = (rel_path == NULL);
+    s_inject_path[0] = '\0';
+    if (rel_path) {
+        strncpy(s_inject_path, rel_path, sizeof(s_inject_path) - 1);
+        s_inject_path[sizeof(s_inject_path) - 1] = '\0';
+    }
+    s_inject_err = err;
+    s_inject_count = count > 0 ? count : 0;
+}
+#endif
+
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len)
 {
     if (!rel_path || !buf || cap == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+#ifndef ESP_PLATFORM
+    if (s_inject_count > 0 && (s_inject_any || strcmp(rel_path, s_inject_path) == 0)) {
+        s_inject_count--;
+        return s_inject_err;
+    }
+#endif
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -441,8 +662,22 @@ typedef struct {
     uint8_t chunk[256];
 } cfg_fs_write_scratch_t;
 
+static bool (*volatile s_write_refuse_fn)(void) = NULL;
+
+void cfg_fs_set_write_refuse_hook(bool (*fn)(void))
+{
+    s_write_refuse_fn = fn;
+}
+
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len)
 {
+    /* Factory-reset writer fence (pref_cfg_fs.h "WRITER FENCE"): this is the one raw write entry point, so
+     * kiln_cfg_store, firing_stats and the cfgfs restore job are covered without holding a save lock. The
+     * reset job's own task is exempt inside the predicate. Callers treat non-ESP_OK as "did not persist". */
+    bool (*refuse)(void) = s_write_refuse_fn;
+    if (refuse && refuse()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!rel_path || (!data && len > 0)) {
         return ESP_ERR_INVALID_ARG;
     }

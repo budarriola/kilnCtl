@@ -2,7 +2,7 @@
 // per-profile firing-history ring (profile_executor_firing_stats.c's
 // firing_stats_load()/firing_stats_persist(), NVS key "fs_<id>" in
 // profiles_nvs/fire_stats) and the `cfg` LittleFS partition (cfg_fs.h/
-// cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 7
+// cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA.md section 5 item 7
 // ("firing stats / history").
 //
 // SHAPE: copies profiles_cfg_fs.c/.h's per-id file design (one file per

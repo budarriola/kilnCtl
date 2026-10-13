@@ -12,8 +12,8 @@
 // fetch -> render paths run. It asserts key DOM exists, nav links resolve to a
 // real firmware route (`.uri = "..."` under App/drivers/**.c), and that the page
 // raised no console error / uncaught exception / failed resource.
-// Never touches a board. SKIPs (exit 3) only when no Chrome is found or its
-// DevTools port never comes up.
+// Never touches a board. SKIPs (exit 3) only when no Chrome is found; any
+// other harness break FAILs (exit 1).
 //
 // Usage: node ui_content_smoke.mjs [--dir <drivers dir>]
 // Exit: 0 pass, 1 assertion failure, 3 skip/harness error, 4 deadline.
@@ -33,6 +33,9 @@ let DIR = resolveDriversDir(__dirname);
 for (let i = 2; i < process.argv.length; i++) if (process.argv[i] === '--dir') DIR = path.resolve(process.argv[++i]);
 
 const TIMEOUT = 10000;
+// Under load (parallel builds, other sessions' Chrome) a CDP command can take far longer than on an
+// idle box; a fixed 20 s caused 'CDP Page.enable timed out' SKIPs. Override with KC_CDP_TIMEOUT_MS.
+const CDP_TIMEOUT_MS = Number(process.env.KC_CDP_TIMEOUT_MS) || 60000;
 const fetchT = (u, o = {}) => fetch(u, { ...o, signal: AbortSignal.timeout(TIMEOUT) });
 // Race pass: app.js/nav.js/commissioning_shared.js are held back this long so any inline
 // script calling window.kc* helpers at parse time (they come from the deferred app.js) throws.
@@ -139,7 +142,7 @@ class Cdp {
   send(method, params = {}) {
     const id = this.id++;
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP ${method} timed out`)); }, 20000);
+      const t = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP ${method} timed out`)); }, CDP_TIMEOUT_MS);
       this.pending.set(id, { resolve: (v) => { clearTimeout(t); resolve(v); }, reject: (e) => { clearTimeout(t); reject(e); } });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
@@ -154,7 +157,16 @@ class Cdp {
 
 // Load one page, collect console errors, run `probe` (an in-page expression returning
 // an array of failure strings), return failures.
+// Transport-level failures (tab/ws/CDP timeouts) are retried on a fresh tab; a probe result is never retried.
 async function checkPage(cdpPort, base, page, probe, settleMs = 2500, ignore404 = false) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { return await checkPageOnce(cdpPort, base, page, probe, settleMs, ignore404); }
+    catch (e) { lastErr = e; console.log(`ui_content_smoke: ${page}: transport error attempt ${attempt}/3: ${e && e.message}`); await sleep(1000 * attempt); }
+  }
+  throw lastErr;
+}
+async function checkPageOnce(cdpPort, base, page, probe, settleMs = 2500, ignore404 = false) {
   const tab = await (await fetchT(`http://127.0.0.1:${cdpPort}/json/new?about:blank`, { method: 'PUT' })).json();
   const ws = await new Promise((res, rej) => {
     const w = new WebSocket(tab.webSocketDebuggerUrl);
@@ -272,23 +284,35 @@ async function main() {
   if (!chromePath) { console.log('ui_content_smoke: SKIPPED -- no Chrome/Edge found (set KC_SWEEP_CHROME).'); process.exit(3); }
   const uris = [...routeUris()];
   if (uris.length < 50) { console.log(`ui_content_smoke: FAILED -- only ${uris.length} firmware routes found; route scan is broken.`); process.exit(1); }
-  const cdpPort = await freePort();
+  // Unique port + unique temp profile per attempt; relaunch (up to 3x) if DevTools never answers.
   // kc-ui-sweep-profile- prefix: check_ui_responsive_sweep.ps1's orphan reaper keys on it.
-  const profile = await mkdtemp(path.join(os.tmpdir(), 'kc-ui-sweep-profile-smoke-'));
-  const chrome = spawn(chromePath, [`--remote-debugging-port=${cdpPort}`, '--headless=new', '--disable-gpu', '--no-first-run',
-    '--no-default-browser-check', '--disable-extensions', `--user-data-dir=${profile}`], { stdio: 'ignore' });
-  const wd = setTimeout(() => { console.log('ui_content_smoke: OVERALL TIMEOUT'); killTreeSync(chrome.pid); process.exit(4); }, 200000);
+  let cdpPort, profile, chrome;
+  for (let attempt = 1; ; attempt++) {
+    cdpPort = await freePort();
+    profile = await mkdtemp(path.join(os.tmpdir(), 'kc-ui-sweep-profile-smoke-'));
+    chrome = spawn(chromePath, [`--remote-debugging-port=${cdpPort}`, '--headless=new', '--disable-gpu', '--no-first-run',
+      '--no-default-browser-check', '--disable-extensions', '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
+      `--user-data-dir=${profile}`], { stdio: 'ignore' });
+    const t0 = Date.now();
+    let up = false;
+    for (;;) {
+      try { if ((await fetchT(`http://127.0.0.1:${cdpPort}/json/version`)).ok) { up = true; break; } } catch { /* retry */ }
+      if (chrome.exitCode !== null || Date.now() - t0 > 45000) break;
+      await sleep(100);
+    }
+    if (up) break;
+    killTreeSync(chrome.pid);
+    await rm(profile, { recursive: true, force: true }).catch(() => {});
+    console.log(`ui_content_smoke: Chrome DevTools port ${cdpPort} never came up (attempt ${attempt}/3)`);
+    if (attempt >= 3) { console.log('ui_content_smoke: FAILED -- Chrome is present but its DevTools port never came up in 3 launches.'); process.exit(1); }
+  }
+  const wd = setTimeout(() => { console.log('ui_content_smoke: OVERALL TIMEOUT'); killTreeSync(chrome.pid); process.exit(4); }, 270000);
   wd.unref();
   const { server, port } = await startServer();
   const base = `http://127.0.0.1:${port}`;
   let failures = [];
   try {
-    const t0 = Date.now();
-    for (;;) {
-      try { if ((await fetchT(`http://127.0.0.1:${cdpPort}/json/version`)).ok) break; } catch { /* retry */ }
-      if (chrome.exitCode !== null || Date.now() - t0 > 30000) { console.log('ui_content_smoke: SKIPPED -- Chrome DevTools port never came up.'); process.exitCode = 3; return; }
-      await sleep(100);
-    }
     const cases = [
       ['zones_page.html', ZONES_PROBE],
       ['diagnostics_page.html', DIAG_PROBE],
@@ -315,8 +339,9 @@ async function main() {
     }
     scriptDelayMs = 0;
   } catch (e) {
-    console.log(`ui_content_smoke: HARNESS_ERROR ${e && e.message}`);
-    process.exitCode = 3;
+    // Chrome is present and launched, so a harness break is a FAIL, never a SKIP (a SKIP hid this check).
+    console.log(`ui_content_smoke: HARNESS_ERROR (FAIL) ${e && e.message}`);
+    process.exitCode = 1;
     return;
   } finally {
     server.close(); killTreeSync(chrome.pid);

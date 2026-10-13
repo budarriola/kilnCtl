@@ -259,6 +259,13 @@ def _push_image(host: str, path: str, endpoint: str,
                             detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            # The send died mid-upload: the board answered (and closed) before reading the whole body, so the
+            # response (e.g. 503 upload_too_slow, or another refusal) was lost with the socket. That is not "unreachable".
+            log.warning("OTA push: server closed the connection mid-upload: endpoint=%s host=%s sha256=%s detail=%s",
+                        endpoint, host, image_sha256, detail)
+            raise OtaHttpError(f"{endpoint}: server closed the connection mid-upload "
+                               f"(possibly upload_too_slow or another refusal; a board reboot or a Wi-Fi drop mid-upload looks the same): {exc.reason}") from exc
         log.warning("OTA push failed (unreachable): endpoint=%s host=%s sha256=%s detail=%s",
                     endpoint, host, image_sha256, detail)
         raise OtaHttpError(f"{endpoint} unreachable: {detail}") from exc
@@ -511,7 +518,7 @@ def rollback_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
 def recovery_boot_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/recovery_boot -- deliberately reboot the board into its
     RECOVERY image (App/drivers/http/ota_http_recovery.c's
-    ota_recovery_boot_post_handler(); docs/OTA_SINGLE_SLOT_PLAN.md section 4).
+    ota_recovery_boot_post_handler(); docs/OTA_SINGLE_SLOT.md section 4).
     With one OTA slot, ota_rollback_esp() has nothing to roll back to; this is
     the way to reach the image that can take a fresh push.
 

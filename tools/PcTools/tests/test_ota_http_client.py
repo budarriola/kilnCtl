@@ -77,6 +77,28 @@ class PushImageTest(unittest.TestCase):
         self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
         self.assertIsNone(req.headers.get("X-ota-nonce") or req.headers.get("X-Ota-nonce"))
 
+    def test_broken_pipe_mid_upload_is_not_reported_as_unreachable(self):
+        for reason in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(104, "reset")):
+            def boom(req, timeout=None, _r=reason):
+                raise urllib.error.URLError(_r)
+
+            with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=boom):
+                with self.assertRaises(ota.OtaHttpError) as cm:
+                    ota.push_esp_image("kiln.local", self.tmp.name)
+            msg = str(cm.exception)
+            self.assertIn("server closed the connection", msg)
+            self.assertIn("upload_too_slow", msg)
+            self.assertNotIn("unreachable", msg)
+
+    def test_plain_urlerror_still_unreachable(self):
+        def boom(req, timeout=None):
+            raise urllib.error.URLError("no route")
+
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=boom):
+            with self.assertRaises(ota.OtaHttpError) as cm:
+                ota.push_esp_image("kiln.local", self.tmp.name)
+        self.assertIn("unreachable", str(cm.exception))
+
     def test_push_establishes_admin_session_before_big_post(self):
         """A bodyless ADMIN-tier GET (/api/ota/interlock) goes through
         http_auth.urlopen() BEFORE the large POST, for the esp and pico
