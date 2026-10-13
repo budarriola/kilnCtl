@@ -174,3 +174,20 @@ Baseline passed (75.6 s). The run did not report a real-tree change. Result: 6 C
 | M5 | `dirty = strlen(dn) < ...` -> `dirty = false` | CAUGHT | FAIL test_update_stage.c:938, :944 |
 | M6 | dirty rule removed (`if (0 && candidate->dirty)`) | CAUGHT | FAIL test_update_policy.c:153, :315, :322 |
 | M7 | `desc_version_normalise` never strips `-dirty` | CAUGHT | FAIL test_update_stage.c:936-938, :944, :1177 |
+
+## Fix status
+
+Fixed in 03490dd26 (plus this doc commit).
+
+- MED-1 fixed: check_00_kilnfw_target_build.ps1 compares CMakeCache KILN_CONFIGURED_RELEASE_VERSION with KILNCTL_RELEASE_VERSION and forces idf.py reconfigure on a mismatch. Proven with real builds through the build gate, release-after-dev and dev-after-release.
+- LOW-1 fixed: update_stage.c declared X-Stage-Version path derives dirty from the descriptor and refuses a verbatim -DIRTY spelling (BAD_VERSION), same as the undeclared path. Host tests in test_update_stage.c (968-979) and test_update_http_refusals.c (317-327).
+- LOW-2 fixed: update_http.c s_gate.ur.dirty = dirty now covered by test_update_http_refusals.c (dirty upload -> 409 refuse_dirty, force cannot override, nothing staged).
+- INFO fixed: CMakeLists.txt configure tag regex now matches gen_build_info.cmake (lowercase v, no leading zeros). Remaining INFO items stay documented (configure cap 31 vs build-time cap 32; both descriptors hold 31 chars).
+
+Negtest (kilnfw-host, -ExpectPattern, base 03490dd26, baseline PASS, real tree unchanged). Each CAUGHT compiled and failed on an assertion:
+
+| # | Mutation | Verdict | Evidence |
+|---|---|---|---|
+| M1 | declared-branch dirty derivation -> alse | CAUGHT | FAIL test_update_stage.c:968; test_update_http_refusals.c:326, :327 |
+| M2 | declared-branch ci_dirty_suffix refusal -> alse | CAUGHT | FAIL test_update_stage.c:979 |
+| M3 | s_gate.ur.dirty = dirty -> alse (update_http.c) | CAUGHT | FAIL test_update_http_refusals.c:317, :318, :322, :326, :327 |
