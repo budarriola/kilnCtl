@@ -703,18 +703,25 @@ static void test_updlow(void)
     CHECK(strcmp(g_error, "timeout") == 0, "stalled read labelled timeout");
 
     // LOW-8: cancel lands within a slice while a read is stalled
-    fixture(g_sha_hex, IMG_LEN);
-    g_fr_routes[0].read_stall_ms = 200;
-    g_fr_routes[0].stall_reads = 0;
-    CHECK(POST("/api/update/check", NULL) == 202, "check started");
-    Sleep(300);
-    DWORD tc = GetTickCount();
-    CHECK(POST("/api/update/fetch/cancel", NULL) == 200, "cancel accepted");
-    wait_idle();
-    CHECK(GetTickCount() - tc < 1000, "cancel inside a stalled read takes effect within 1 s");
-    job_result();
-    CHECK(strcmp(g_state, "failed") == 0 && strcmp(g_error, "timeout") != 0, "cancelled stalled job failed as cancelled");
-    expect_claim_balanced("cancel in stalled read");
+    for (int hdr = 0; hdr < 2; hdr++) {
+        fixture(g_sha_hex, IMG_LEN);
+        if (hdr) {
+            g_fr_routes[0].advertised = -6; // header read blocks one full slice per call
+        } else {
+            g_fr_routes[0].read_stall_ms = -1; // body read blocks one full slice per call
+            g_fr_routes[0].stall_reads = 0;
+        }
+        CHECK(POST("/api/update/check", NULL) == 202, "check started");
+        Sleep(100);
+        DWORD tc = GetTickCount();
+        CHECK(POST("/api/update/fetch/cancel", NULL) == 200, "cancel accepted");
+        wait_idle();
+        CHECK(GetTickCount() - tc < 1250, hdr ? "cancel inside a stalled header read takes effect within about 1 s"
+                                              : "cancel inside a stalled body read takes effect within about 1 s");
+        job_result();
+        CHECK(strcmp(g_state, "failed") == 0 && strcmp(g_error, "timeout") != 0, hdr ? "cancelled stalled header job failed as cancelled" : "cancelled stalled body job failed as cancelled");
+        expect_claim_balanced("cancel in stalled read");
+    }
 
     // LOW-1: a download that fails before the first flash write leaves the old verified stage alone
     fixture(g_sha_hex, IMG_LEN);

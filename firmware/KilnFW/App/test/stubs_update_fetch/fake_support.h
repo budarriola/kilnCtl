@@ -22,7 +22,7 @@ typedef struct {
     const char *location;     // Location header (redirects)
     const char *retry_after;  // Retry-After header value
     const char *ratelimit_reset; // X-RateLimit-Reset header value
-    long read_stall_ms;       // >0: each read sleeps this long then reports EAGAIN until stall_reads exhausted
+    long read_stall_ms;       // nonzero: each read sleeps this long (<0: the client slice) then reports EAGAIN until stall_reads exhausted
     int stall_reads;          // number of stalled reads (0 with read_stall_ms = stall forever)
     bool open_fail;           // esp_http_client_open() fails
     void (*on_read)(void);    // called once, at the first read of this response

@@ -585,6 +585,10 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c)
         ev.user_data = c->cfg.user_data;
         c->cfg.event_handler(&ev);
     }
+    if (r->advertised == -6) {
+        Sleep((DWORD)c->cfg.timeout_ms); // header read blocks for the whole slice, like the real client
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
     if (r->advertised == -5) {
         return -ESP_ERR_HTTP_EAGAIN; // header read timeout
     }
@@ -610,9 +614,9 @@ int esp_http_client_read(esp_http_client_handle_t c, char *buf, int len)
             c->route->on_read();
         }
     }
-    if (c->route->read_stall_ms > 0 && (c->route->stall_reads == 0 || c->stalled < c->route->stall_reads)) {
+    if (c->route->read_stall_ms != 0 && (c->route->stall_reads == 0 || c->stalled < c->route->stall_reads)) {
         c->stalled++;
-        Sleep((DWORD)c->route->read_stall_ms);
+        Sleep((DWORD)(c->route->read_stall_ms < 0 ? c->cfg.timeout_ms : c->route->read_stall_ms)); // <0: block for the client's slice
         g_fr_eagain_n++;
         return -ESP_ERR_HTTP_EAGAIN;
     }
