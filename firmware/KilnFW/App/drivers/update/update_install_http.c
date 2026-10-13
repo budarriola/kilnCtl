@@ -205,6 +205,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     int have = read_result(&res);
 
     char rv[UPDATE_VERSION_STR_MAX], sv[UPD_INST_SEMVER_LEN], lv[UPD_INST_SEMVER_LEN];
+    char lid[UPD_INST_ID_HEX_LEN];
+    update_install_id_hex(res.id, lid); /* res is zeroed when nothing is recorded: "00000000" */
     json_safe(rv, sizeof(rv), run.version);
     json_safe(sv, sizeof(sv), staged_ver);
     json_safe(lv, sizeof(lv), have == 1 ? res.semver : "");
@@ -213,11 +215,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     int w = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"running_version\":\"%s\",\"stage_busy\":%s,\"staged\":%s,"
                      "\"staged_version\":\"%s\",\"last_install\":{\"state\":\"%s\",\"code\":\"%s\","
-                     "\"reason\":\"%s\",\"version\":\"%s\"}}",
+                     "\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\"}}",
                      rv, busy ? "true" : "false", staged ? "true" : "false", sv,
                      have == 1 ? "recorded" : (have == 0 ? "none" : "unreadable"),
                      have == 1 ? update_install_code_name(res.code) : "none",
-                     have == 1 ? update_install_reason_name(res.reason) : "none", lv);
+                     have == 1 ? update_install_reason_name(res.reason) : "none", lv, lid);
     if (w < 0 || (size_t)w >= sizeof(json)) {
         return httpd_resp_send_500(req);
     }

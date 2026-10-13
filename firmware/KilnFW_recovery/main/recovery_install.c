@@ -23,6 +23,7 @@ static const char *TAG = "rec_install";
 static update_install_res_t s_last;
 static bool s_have_last;
 static char s_semver[UPD_INST_SEMVER_LEN];
+static uint8_t s_id[UPD_INST_ID_LEN]; // sha256 prefix of the request being applied (result identity)
 
 // ---- raw NVS ----
 
@@ -147,7 +148,7 @@ static int guard_clear(void)
 static int pre_boot(void)
 {
     bool ok = false;
-    if (update_install_pre_boot(&s_ops, guard_clear, s_semver, &ok) != 0) {
+    if (update_install_pre_boot(&s_ops, guard_clear, s_semver, s_id, &ok) != 0) {
         ESP_LOGE(TAG, "pre-boot clear failed; not selecting app");
         return -1;
     }
@@ -200,7 +201,7 @@ static void poll_task(void *arg)
         recovery_apply_progress_t p;
         recovery_apply_esp_status(&p);
         if (p.phase == RECOVERY_APPLY_FAILED) {
-            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, s_semver);
+            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, s_semver, s_id);
             load_last();
             show_failure(UPD_INST_REASON_APPLY_FAILED);
             break;
@@ -225,6 +226,7 @@ void recovery_install_boot(void)
         update_install_req_t rq;
         if (kv_read(UPD_INST_KEY_REQ, buf, sizeof(buf), &n) == 0 && update_install_req_decode(buf, n, &rq)) {
             memcpy(s_semver, rq.semver, sizeof(s_semver) - 1);
+            memcpy(s_id, rq.sha256, UPD_INST_ID_LEN);
         }
     }
     update_install_res_t res;
@@ -245,7 +247,7 @@ void recovery_install_boot(void)
             ESP_LOGE(TAG, "poll task create failed");
             // The apply task is already running and usually succeeds, so this is NOT "apply failed":
             // record that the outcome is unknown and tell the operator not to power-cycle.
-            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_OUTCOME_UNKNOWN, s_semver);
+            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_OUTCOME_UNKNOWN, s_semver, s_id);
             load_last();
             if (!s_have_last) {
                 memset(&s_last, 0, sizeof(s_last));

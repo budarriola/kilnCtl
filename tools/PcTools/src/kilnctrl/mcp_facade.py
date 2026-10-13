@@ -389,6 +389,8 @@ KEYWORDS = {
                                "running", "progress", "runner.log", "result"),
     "ota_matrix_start": ("ota", "matrix", "background", "async", "timeout", "idle", "long run", "job",
                           "watchdog"),
+    "update_install_start": ("update", "install", "staged", "background", "async", "timeout", "idle",
+                              "long run", "job", "watchdog", "300 s", "recovery", "unattended"),
     "bench_test_last": ("standardized", "test", "suite", "history", "last run", "summary"),
     "ota_matrix_run": ("ota", "matrix", "regression", "update", "rollback", "pico", "esp",
                        "corrupt image", "power loss", "otadata", "confirm", "dry run",

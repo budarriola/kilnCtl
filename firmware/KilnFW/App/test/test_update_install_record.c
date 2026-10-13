@@ -306,12 +306,12 @@ static void test_boot_logic(void)
     fake_init(&f);
     f.res_rc = -1;
     o = ops_for(&f);
-    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, "x") != 0,
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, "x", NULL) != 0,
                "failed result write is reported by record_result");
 
     fake_init(&f);
     o = ops_for(&f);
-    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "1.0.0-pre.3") == 0,
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "1.0.0-pre.3", NULL) == 0,
                "ok result writes");
     update_install_res_t d;
     TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
@@ -327,6 +327,55 @@ static int guard_fn(void)
     return g_guard_rc;
 }
 
+static const uint8_t id_a[UPD_INST_ID_LEN] = { 0xA0, 0xA1, 0xA2, 0xA3 };
+
+static void test_result_identity(void)
+{
+    TEST_SECTION("update_install_record -- result identity (sha256 prefix of the request)");
+    update_install_res_t s, d;
+    uint8_t rb[UPD_INST_RES_SIZE];
+    memset(&s, 0, sizeof(s));
+    s.code = UPD_INST_RES_OK;
+    strcpy(s.semver, "1.0.0-pre.3");
+    memcpy(s.id, id_a, UPD_INST_ID_LEN);
+    TEST_CHECK(update_install_res_encode(&s, rb) == UPD_INST_RES_SIZE && update_install_res_decode(rb, sizeof(rb), &d) &&
+                   memcmp(d.id, id_a, UPD_INST_ID_LEN) == 0,
+               "identity round trips through the result blob");
+    rb[8 + UPD_INST_SEMVER_LEN] ^= 0x01u;
+    TEST_CHECK(!update_install_res_decode(rb, sizeof(rb), &d), "identity bytes are covered by the CRC");
+    memset(&s, 0, sizeof(s));
+    s.code = UPD_INST_RES_OK;
+    TEST_CHECK(update_install_res_encode(&s, rb) == UPD_INST_RES_SIZE && update_install_res_decode(rb, sizeof(rb), &d) &&
+                   memcmp(d.id, "\0\0\0\0", UPD_INST_ID_LEN) == 0,
+               "no identity decodes as zeros");
+    char hex[UPD_INST_ID_HEX_LEN];
+    update_install_id_hex(id_a, hex);
+    TEST_CHECK(strcmp(hex, "a0a1a2a3") == 0, "identity hex");
+
+    // The recorded results carry the request's sha256 prefix.
+    fake_t f;
+    update_install_res_t res;
+    update_install_ops_t o;
+    fake_init(&f);
+    o = ops_for(&f);
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_STARTED && memcmp(res.id, id_a, UPD_INST_ID_LEN) == 0,
+               "started outcome carries the request identity");
+    fake_init(&f);
+    f.stage_sha[0] ^= 0xFFu;
+    o = ops_for(&f);
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && memcmp(res.id, id_a, UPD_INST_ID_LEN) == 0 &&
+                   update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && memcmp(d.id, id_a, UPD_INST_ID_LEN) == 0,
+               "a refusal records the request identity too");
+    fake_init(&f);
+    o = ops_for(&f);
+    g_guard_f = &f;
+    g_guard_rc = 0;
+    bool ok = false;
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "1.0.0-pre.3", id_a, &ok) == 0 && ok &&
+                   update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && memcmp(d.id, id_a, UPD_INST_ID_LEN) == 0,
+               "the pre-boot OK result carries the identity");
+}
+
 static void test_pre_boot(void)
 {
     TEST_SECTION("update_install_record -- recovery pre-boot hook (success path)");
@@ -338,7 +387,7 @@ static void test_pre_boot(void)
     o = ops_for(&f);
     g_guard_f = &f;
     g_guard_rc = 0;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "1.0.0-pre.3", &ok) == 0 && ok, "success path returns 0");
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "1.0.0-pre.3", id_a, &ok) == 0 && ok, "success path returns 0");
     TEST_CHECK(f.have_req == 0 && f.clear_calls == 1, "request cleared on success");
     TEST_CHECK(f.res_writes == 1 && update_install_res_decode(f.res_blob, sizeof(f.res_blob), &(update_install_res_t){0}),
                "OK result written");
@@ -353,14 +402,14 @@ static void test_pre_boot(void)
     f.clear_rc = -1;
     o = ops_for(&f);
     g_guard_f = &f;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", &ok) == -1 && !ok, "uncleared request aborts boot switch");
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", NULL, &ok) == -1 && !ok, "uncleared request aborts boot switch");
     TEST_CHECK(f.have_req == 1 && f.res_writes == 0, "request kept, no OK result when clear failed");
 
     fake_init(&f);
     o = ops_for(&f);
     g_guard_f = &f;
     g_guard_rc = -1;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", &ok) == -1 && f.clear_calls == 0 && f.res_writes == 0,
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", NULL, &ok) == -1 && f.clear_calls == 0 && f.res_writes == 0,
                "boot guard failure aborts before any clear");
     g_guard_rc = 0;
 
@@ -368,7 +417,7 @@ static void test_pre_boot(void)
     f.res_rc = -1;
     o = ops_for(&f);
     g_guard_f = &f;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", &ok) == 0 && !ok && f.have_req == 0,
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", NULL, &ok) == 0 && !ok && f.have_req == 0,
                "result write failure does not block the switch, reported via result_ok");
 }
 
@@ -472,5 +521,6 @@ void run_test_update_install_record(void)
     test_codec();
     test_boot_logic();
     test_pre_boot();
+    test_result_identity();
     test_prepare();
 }

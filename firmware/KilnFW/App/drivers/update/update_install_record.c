@@ -78,6 +78,7 @@ size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_
     out[5] = r->code;
     out[6] = r->reason;
     memcpy(out + 8, r->semver, UPD_INST_SEMVER_LEN);
+    memcpy(out + 8 + UPD_INST_SEMVER_LEN, r->id, UPD_INST_ID_LEN);
     put_u32(out + UPD_INST_RES_SIZE - 4, ota_image_crc32(out, UPD_INST_RES_SIZE - 4));
     return UPD_INST_RES_SIZE;
 }
@@ -98,11 +99,22 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
     r.code = buf[5];
     r.reason = buf[6];
     memcpy(r.semver, buf + 8, UPD_INST_SEMVER_LEN);
+    memcpy(r.id, buf + 8 + UPD_INST_SEMVER_LEN, UPD_INST_ID_LEN);
     if (r.code > UPD_INST_RES_FAIL || r.reason >= UPD_INST_REASON_COUNT || !semver_terminated(r.semver)) {
         return false;
     }
     *out = r;
     return true;
+}
+
+void update_install_id_hex(const uint8_t id[UPD_INST_ID_LEN], char out[UPD_INST_ID_HEX_LEN])
+{
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < UPD_INST_ID_LEN; i++) {
+        out[2 * i] = hex[id[i] >> 4];
+        out[2 * i + 1] = hex[id[i] & 0x0f];
+    }
+    out[UPD_INST_ID_LEN * 2u] = '\0';
 }
 
 const char *update_install_reason_name(uint8_t reason)
@@ -121,7 +133,7 @@ const char *update_install_code_name(uint8_t code)
 }
 
 int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
-                                 const char *semver)
+                                 const char *semver, const uint8_t *id)
 {
     if (!ops || !ops->res_write) {
         return -1;
@@ -133,6 +145,9 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
     if (semver) {
         strncpy(r.semver, semver, UPD_INST_SEMVER_LEN - 1);
     }
+    if (id) {
+        memcpy(r.id, id, UPD_INST_ID_LEN);
+    }
     uint8_t blob[UPD_INST_RES_SIZE];
     size_t n = update_install_res_encode(&r, blob);
     if (n == 0) {
@@ -142,7 +157,7 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
 }
 
 int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void),
-                            const char *semver, bool *result_ok)
+                            const char *semver, const uint8_t *id, bool *result_ok)
 {
     if (result_ok) {
         *result_ok = false;
@@ -156,7 +171,7 @@ int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_cl
     if (ops->req_clear(ops->ctx) != 0) {
         return -1;
     }
-    bool ok = update_install_record_result(ops, UPD_INST_RES_OK, UPD_INST_REASON_NONE, semver) == 0;
+    bool ok = update_install_record_result(ops, UPD_INST_RES_OK, UPD_INST_REASON_NONE, semver, id) == 0;
     if (result_ok) {
         *result_ok = ok;
     }
@@ -164,7 +179,7 @@ int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_cl
 }
 
 static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uint8_t reason,
-                                            const char *semver, update_install_res_t *res_out)
+                                            const char *semver, const uint8_t *id, update_install_res_t *res_out)
 {
     if (res_out) {
         memset(res_out, 0, sizeof(*res_out));
@@ -173,8 +188,11 @@ static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uin
         if (semver) {
             strncpy(res_out->semver, semver, UPD_INST_SEMVER_LEN - 1);
         }
+        if (id) {
+            memcpy(res_out->id, id, UPD_INST_ID_LEN);
+        }
     }
-    (void)update_install_record_result(ops, UPD_INST_RES_FAIL, reason, semver);
+    (void)update_install_record_result(ops, UPD_INST_RES_FAIL, reason, semver, id);
     return UPD_INST_BOOT_REFUSED;
 }
 
@@ -196,44 +214,45 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
     }
     if (rr < 0) {
         // Cannot read the request: stay in recovery, apply nothing.
-        return refuse(ops, UPD_INST_REASON_NVS_UNAVAILABLE, NULL, res_out);
+        return refuse(ops, UPD_INST_REASON_NVS_UNAVAILABLE, NULL, NULL, res_out);
     }
     update_install_req_t req;
     if (!update_install_req_decode(blob, len, &req)) {
         (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_RECORD_BAD, NULL, res_out);
+        return refuse(ops, UPD_INST_REASON_RECORD_BAD, NULL, NULL, res_out);
     }
     // Refusals below leave the app untouched, so the request is dropped.
     if (req.attempts >= UPD_INST_MAX_ATTEMPTS) {
         (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_ATTEMPTS_EXCEEDED, req.semver, res_out);
+        return refuse(ops, UPD_INST_REASON_ATTEMPTS_EXCEEDED, req.semver, req.sha256, res_out);
     }
     uint32_t stage_len = 0;
     uint8_t stage_sha[UPD_INST_SHA_LEN];
     if (!ops->stage_verified(ops->ctx, &stage_len, stage_sha)) {
         (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_STAGE_NOT_READY, req.semver, res_out);
+        return refuse(ops, UPD_INST_REASON_STAGE_NOT_READY, req.semver, req.sha256, res_out);
     }
     if (stage_len != req.image_length) {
         (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_SIZE_MISMATCH, req.semver, res_out);
+        return refuse(ops, UPD_INST_REASON_SIZE_MISMATCH, req.semver, req.sha256, res_out);
     }
     if (memcmp(stage_sha, req.sha256, UPD_INST_SHA_LEN) != 0) {
         (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_SHA_MISMATCH, req.semver, res_out);
+        return refuse(ops, UPD_INST_REASON_SHA_MISMATCH, req.semver, req.sha256, res_out);
     }
     // Raise the attempt counter (read back) BEFORE any erase can happen.
     req.attempts++;
     uint8_t nb[UPD_INST_REQ_SIZE];
     if (update_install_req_encode(&req, nb) == 0 || ops->req_write(ops->ctx, nb, UPD_INST_REQ_SIZE) != 0) {
-        return refuse(ops, UPD_INST_REASON_COUNTER_FAILED, req.semver, res_out);
+        return refuse(ops, UPD_INST_REASON_COUNTER_FAILED, req.semver, req.sha256, res_out);
     }
     if (ops->apply_start(ops->ctx) != 0) {
-        return refuse(ops, UPD_INST_REASON_APPLY_FAILED, req.semver, res_out);
+        return refuse(ops, UPD_INST_REASON_APPLY_FAILED, req.semver, req.sha256, res_out);
     }
     if (res_out) {
         res_out->code = UPD_INST_RES_NONE;
         strncpy(res_out->semver, req.semver, UPD_INST_SEMVER_LEN - 1);
+        memcpy(res_out->id, req.sha256, UPD_INST_ID_LEN);
     }
     return UPD_INST_BOOT_STARTED;
 }

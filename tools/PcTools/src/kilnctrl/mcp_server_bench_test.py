@@ -364,8 +364,8 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
 
 @_core._tool()
 def bench_test_job_status(job_id: str, wait_s: float = 0.0) -> str:
-    """Report a background run started by `bench_test_start` or
-    `ota_matrix_start`: RUNNING (with the tail of the run's runner.log), then
+    """Report a background run started by `bench_test_start`,
+    `ota_matrix_start` or `update_install_start`: RUNNING (with the tail of the run's runner.log), then
     OK (exit_code 0) / INCOMPLETE (exit_code 3: skips/inconclusive) / FAILED,
     plus the same report the synchronous tool prints. `wait_s` blocks up to
     that many seconds (capped at 120, under the client idle watchdog) for

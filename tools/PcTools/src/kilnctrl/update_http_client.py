@@ -293,7 +293,9 @@ def sha256_hex(image: bytes) -> str:
 
 def get_install_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
     """GET /api/update/status. Keys: running_version, stage_busy, staged,
-    staged_version, last_install{state (recorded/none/unreadable), code, reason, version}."""
+    staged_version, last_install{state (recorded/none/unreadable), code, reason, version,
+    id}. ``id`` is the first 4 bytes of the installed image's sha256 as 8 hex chars
+    ("00000000" for a legacy record, absent on a board that predates the field)."""
     req = urllib.request.Request(_url(host, INSTALL_STATUS_PATH), method="GET")
     data = _request(req, INSTALL_STATUS_PATH, timeout)
     if "running_version" not in data or not isinstance(data.get("last_install"), dict):

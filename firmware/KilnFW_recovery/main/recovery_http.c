@@ -610,6 +610,9 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
             ir_ver[i] = (c == 0) ? 0 : ((c < 0x20 || c > 0x7e || c == '"' || c == '\\') ? '?' : (char)c);
         }
         ir_ver[sizeof(ir_ver) - 1] = '\0';
+        char ir_id[UPD_INST_ID_HEX_LEN];
+        static const uint8_t no_id[UPD_INST_ID_LEN];
+        update_install_id_hex(have_ir ? ir.id : no_id, ir_id);
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
                            "\"heap_internal_min_free\":%u,\"free_heap\":%u,",
                       nvs_failed ? "true" : "false", nvs_failed,
@@ -618,9 +621,9 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
         // last_install goes out as its own fragment: the longest reason name (34 chars) plus a 31-char version
         // is ~125 B and must never share a 200 B fragment with the numeric fields (it was cut short at 14-char versions).
         if (e == ESP_OK) {
-            e = send_frag(req, "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\"}}",
+            e = send_frag(req, "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\"}}",
                           have_ir ? update_install_code_name(ir.code) : "none",
-                          have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver);
+                          have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver, ir_id);
         }
     }
     if (e != ESP_OK) {

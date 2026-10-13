@@ -196,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset check -Preset
 
 ## Fix status (2026-10-13)
 
-Fixed in `75ff29b39` (code, check) with test follow-ups in the two commits after it on the same push:
+Fixed in `55718f506` (code, check) with test follow-ups in the two commits after it on the same push:
 
 - MED-1: `t_pre` is taken after the `before_up` read returns; `elapsed` is taken before the after-read is sent, so request latency can only under-count. `SlowReadTests` (virtual clock, slow before-read, slow after-read, slow both) must not return ok; a real reboot with slow reads still does.
 - LOW-1: pending records expire 600 s after `t_pre` (`_PENDING_TTL_S`, past the 270 s poll cap) and are dropped on expiry. Not done: the `last_install.state == "none"` proof that the POST arrived.

@@ -38,6 +38,10 @@ extern "C" {
 #define UPD_INST_REQ_SIZE 80u
 #define UPD_INST_MAX_ATTEMPTS 3u
 #define UPD_INST_RES_SIZE 48u
+// Identity of the install a result belongs to: the first UPD_INST_ID_LEN bytes of the staged
+// image's sha256 (copied from the request). All zero = unknown/legacy record. It lives in the
+// previously unused bytes 40..43 of the result blob, so the blob size and CRC span are unchanged.
+#define UPD_INST_ID_LEN 4u
 
 typedef struct {
     uint8_t attempts; // apply attempts already started for this request
@@ -72,6 +76,7 @@ typedef struct {
     uint8_t code;   // update_install_res_code_t
     uint8_t reason; // update_install_reason_t
     char semver[UPD_INST_SEMVER_LEN];
+    uint8_t id[UPD_INST_ID_LEN]; // sha256 prefix of the request this result answers; zeros = none
 } update_install_res_t;
 
 // Codecs. Encode returns the blob length or 0 on bad arguments. Decode returns
@@ -80,6 +85,11 @@ size_t update_install_req_encode(const update_install_req_t *r, uint8_t out[UPD_
 bool update_install_req_decode(const uint8_t *buf, size_t len, update_install_req_t *out);
 size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_INST_RES_SIZE]);
 bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_res_t *out);
+
+// Writes the identity as UPD_INST_ID_LEN*2 lowercase hex chars plus NUL into out (needs
+// UPD_INST_ID_HEX_LEN bytes). All-zero (no identity) prints as "00000000".
+#define UPD_INST_ID_HEX_LEN (UPD_INST_ID_LEN * 2u + 1u)
+void update_install_id_hex(const uint8_t id[UPD_INST_ID_LEN], char out[UPD_INST_ID_HEX_LEN]);
 
 const char *update_install_reason_name(uint8_t reason);
 const char *update_install_code_name(uint8_t code);
@@ -116,8 +126,9 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 // Records a failure/success for the request that update_install_boot_run
 // started (apply task failed, or pre-boot success). Returns 0 when the result
 // write verified.
+// ``id`` is the request's sha256 prefix (UPD_INST_ID_LEN bytes) or NULL for none.
 int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
-                                 const char *semver);
+                                 const char *semver, const uint8_t *id);
 
 // Recovery pre-boot hook body (after the copy verified, before the boot target
 // switch). Order: boot_guard_clear (nonzero aborts), req_clear (nonzero aborts,
@@ -125,7 +136,7 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
 // logged by the caller: the install is good). Returns 0 to let the switch run,
 // -1 to abort. *result_ok is set to whether the OK result verified.
 int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void),
-                            const char *semver, bool *result_ok);
+                            const char *semver, const uint8_t *id, bool *result_ok);
 
 // ---- Application side: write the request before the reboot into recovery ----
 // Injected IO for update_install_prepare (the install route's prepare hook).
