@@ -340,3 +340,42 @@ def test_cli_recovery_qr_never_prints_the_passphrase(font, tmp_path, capsys):
     res = json.loads(out.strip().splitlines()[-1])
     assert res["ok"] and res["candidate_count"] == 1 and res["warnings"] == []
     assert cand.read_text(encoding="utf-8").splitlines() == [pw]
+
+class _Hit:
+    def __init__(self, text):
+        self.text = text
+
+
+def test_wifi_payloads_upscales_when_raw_frame_has_no_code():
+    from PIL import Image
+
+    sizes = []
+
+    def fake_reader(img):
+        sizes.append(img.size)
+        # Decodes only once the frame has been enlarged at least 3x.
+        return [_Hit("WIFI:T:WPA;S:x;P:y;;")] if img.size[0] >= 300 else []
+
+    im = Image.new("RGB", (100, 80))
+    assert r.wifi_payloads(fake_reader, im) == ["WIFI:T:WPA;S:x;P:y;;"]
+    assert sizes[0] == (100, 80)
+    assert max(sizes) == (300, 240)
+
+
+def test_wifi_payloads_ignores_non_wifi_and_gives_up():
+    from PIL import Image
+
+    def fake_reader(img):
+        return [_Hit("https://example.com")]
+
+    assert r.wifi_payloads(fake_reader, Image.new("RGB", (50, 50))) == []
+
+
+def test_join_script_retries_live_reads_with_fresh_capture():
+    from pathlib import Path
+
+    text = (Path(r.__file__).parents[2] / "scripts" / "join_board_ap.ps1").read_text(encoding="utf-8")
+    assert "$ReadAttempts" in text
+    assert "for ($try = 1; $try -le $attempts; $try++)" in text
+    # The capture sits inside the retry loop, not before it.
+    assert text.index("for ($try") < text.index("capture_lcd.ps1')")

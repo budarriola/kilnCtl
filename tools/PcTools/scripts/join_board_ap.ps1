@@ -50,6 +50,10 @@
   Python interpreter with numpy and Pillow. Defaults to this tree's PcTools
   venv (a fresh worktree has none, so pass the main tree's).
 
+.PARAMETER ReadAttempts
+  Live captures to try before giving up on reading the screen (default 4).
+  Ignored with -Image.
+
 .PARAMETER ConnectTimeoutSec
   How long to wait for each candidate to connect (default 20).
 
@@ -65,6 +69,7 @@ param(
     [switch]$DryRun,
     [switch]$Disconnect,
     [string]$ProfileName,
+    [int]$ReadAttempts = 4,
     [int]$ConnectTimeoutSec = 20,
     [string]$Python
 )
@@ -121,24 +126,32 @@ $candFile = Join-Path $tmp "kilnctl_ap_$tag.cand"
 $xmlFile = Join-Path $tmp "kilnctl_ap_$tag.xml"
 
 try {
-    if ($Image) {
-        $imgPath = (Resolve-Path $Image).Path
-    } else {
-        $captureFile = Join-Path $tmp "kilnctl_ap_$tag.jpg"
-        & (Join-Path $PSScriptRoot 'capture_lcd.ps1') -Full -Out $captureFile | Out-Null
-        if (-not (Test-Path $captureFile)) { throw "capture_lcd.ps1 produced no frame" }
-        $imgPath = $captureFile
-    }
-
-    # -I keeps a stray module in the cwd from shadowing the reader, and also
-    # ignores PYTHONPATH, so the source dir goes on sys.path explicitly.
+    # A live read is frame-dependent (glyph segmentation, QR scale), so a failed
+    # read is retried on a fresh capture. A fixed -Image is read once.
     $src = Join-Path $repoRoot 'tools\PcTools\src'
     $boot = 'import sys; sys.path.insert(0, sys.argv.pop(1)); from kilnctrl.lcd_ap_reader import main; sys.exit(main(sys.argv[1:]))'
-    $pyArgs = @('-I', '-c', $boot, $src, '--image', $imgPath, '--mode', $Mode)
-    if (-not $DryRun) { $pyArgs += @('--candidates-out', $candFile) }
-    $json = & $venvPython @pyArgs
-    $rc = $LASTEXITCODE
-    $read = ($json | Select-Object -Last 1) | ConvertFrom-Json
+    $attempts = if ($Image) { 1 } else { [Math]::Max(1, $ReadAttempts) }
+    $read = $null
+    for ($try = 1; $try -le $attempts; $try++) {
+        if ($Image) {
+            $imgPath = (Resolve-Path $Image).Path
+        } else {
+            if ($captureFile) { Remove-Item -LiteralPath $captureFile -Force -ErrorAction SilentlyContinue }
+            $captureFile = Join-Path $tmp "kilnctl_ap_$tag.jpg"
+            & (Join-Path $PSScriptRoot 'capture_lcd.ps1') -Full -Out $captureFile | Out-Null
+            if (-not (Test-Path $captureFile)) { throw "capture_lcd.ps1 produced no frame" }
+            $imgPath = $captureFile
+        }
+        # -I keeps a stray module in the cwd from shadowing the reader, and also
+        # ignores PYTHONPATH, so the source dir goes on sys.path explicitly.
+        $pyArgs = @('-I', '-c', $boot, $src, '--image', $imgPath, '--mode', $Mode)
+        if (-not $DryRun) { $pyArgs += @('--candidates-out', $candFile) }
+        $json = & $venvPython @pyArgs
+        $rc = $LASTEXITCODE
+        $read = ($json | Select-Object -Last 1) | ConvertFrom-Json
+        if ($rc -eq 0 -and $read.ok) { break }
+        if ($try -lt $attempts) { Write-Output "read attempt $try of $attempts failed: $($read.error); recapturing" }
+    }
     if ($rc -ne 0 -or -not $read.ok) {
         Write-Output "read failed: $($read.error)"
         exit 2

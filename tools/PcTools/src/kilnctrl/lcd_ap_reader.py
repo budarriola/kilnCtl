@@ -896,8 +896,38 @@ def _wifi_qr_payloads(img) -> List[str]:
         raise ReadError("the zxing-cpp wheel is missing (uv sync in tools/PcTools)") from exc
     if isinstance(img, np.ndarray):
         img = np.clip(img, 0, 255).astype(np.uint8)
-    results = zxingcpp.read_barcodes(img)
-    return [r.text for r in results if r.text.startswith("WIFI:")]
+    return wifi_payloads(zxingcpp.read_barcodes, img)
+
+
+QR_UPSCALES = (1, 2, 3, 4)
+
+
+def wifi_payloads(read_barcodes, im) -> List[str]:
+    """WIFI: payloads in a camera frame, retrying at larger scales.
+
+    The panel's QR is only about 90 camera px wide, so a decoder given the
+    raw frame often finds nothing; the same frame upscaled 2x-4x (grayscale,
+    then autocontrast) decodes. The raw frame is tried first, then the first
+    scale that yields a payload wins.
+    """
+    from PIL import Image, ImageOps
+
+    def hits(x):
+        return [r.text for r in read_barcodes(x) if r.text.startswith("WIFI:")]
+
+    found = hits(im)
+    if found:
+        return found
+    if isinstance(im, np.ndarray):
+        im = Image.fromarray(im)
+    gray = ImageOps.grayscale(im)
+    for scale in QR_UPSCALES:
+        base = gray if scale == 1 else gray.resize((gray.width * scale, gray.height * scale))
+        for variant in (base, ImageOps.autocontrast(base)):
+            found = hits(variant)
+            if found:
+                return found
+    return []
 
 
 def read_recovery_qr(img: np.ndarray) -> ApRead:
