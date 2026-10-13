@@ -474,7 +474,7 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "no_stable_release") == 0, "404 on releases/latest -> no_stable_release");
     fixture(g_sha_hex, IMG_LEN);
-    add_route("https://api.github.com/repos/" REPO "/releases?per_page=5", "{}", 2)->status = 404;
+    add_route("https://api.github.com/repos/" REPO "/releases?per_page=15", "{}", 2)->status = 404;
     POST("/api/update/check", "allow_prerelease=1");
     wait_idle();
     job_result();
@@ -637,10 +637,101 @@ static void test_stage_upload_and_clear(void)
 
 // ---------------------------------------------------------------------------------------------------------
 // LAST: a flash-writer op that never returns. Permanent until reboot, so nothing may follow.
+// UPDATE_PATH_ROBUSTNESS_AUDIT LOW-1/2/4/8: rate-limit and server-error reasons with a backoff, header/read
+// timeouts labelled timeout, cancel inside a stalled read, old stage kept when a new download fails early.
+static unsigned status_retry_after(void)
+{
+    const char *p = strstr(g_rq.resp, "\"retry_after_s\":");
+    return p ? (unsigned)strtoul(p + 16, NULL, 10) : 9999u;
+}
+static void outwait_backoff(void) { g_fr_tick_skew_ms += 4000000LL; }
+
+static void test_updlow(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 429;
+    g_fr_routes[0].retry_after = "120";
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "rate_limited") == 0, "429 -> rate_limited");
+    CHECK(status_retry_after() >= 100 && status_retry_after() <= 120, "Retry-After 120 reported in status");
+    CHECK(POST("/api/update/check", NULL) == 429 && resp_has("\"error\":\"backoff\""), "check refused during backoff");
+    CHECK(POST("/api/update/download", NULL) == 429 && resp_has("\"error\":\"backoff\""), "download refused during backoff");
+    expect_claim_balanced("backoff refusal");
+    outwait_backoff();
+    g_fr_routes[0].status = 200;
+    g_fr_routes[0].retry_after = NULL;
+    CHECK(POST("/api/update/check", NULL) == 202, "check accepted once the backoff passed");
+    wait_idle();
+
+    fixture(g_sha_hex, IMG_LEN);
+    char reset[24];
+    snprintf(reset, sizeof(reset), "%lld", g_fr_now_epoch + 300);
+    g_fr_routes[0].status = 403;
+    g_fr_routes[0].ratelimit_reset = reset;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "rate_limited") == 0, "403 -> rate_limited");
+    CHECK(status_retry_after() >= 250 && status_retry_after() <= 300, "X-RateLimit-Reset sets the backoff");
+    outwait_backoff();
+
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 503;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "server_error") == 0, "503 -> server_error");
+    CHECK(status_retry_after() >= 50 && status_retry_after() <= 60, "5xx default backoff 60 s");
+    outwait_backoff();
+
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 418;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "http_status") == 0, "other status stays http_status");
+    CHECK(status_retry_after() == 0, "no backoff for other statuses");
+    CHECK(POST("/api/update/check", NULL) == 202, "no refusal after a plain http_status");
+    wait_idle();
+
+    // LOW-4: a header timeout is a timeout, not bad_response
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].advertised = -5;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "timeout") == 0, "header timeout labelled timeout");
+    expect_claim_balanced("header timeout");
+
+    // LOW-4/8: a read that never delivers fails as timeout after the stall budget
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].read_stall_ms = 200;
+    g_fr_routes[0].stall_reads = 0;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "timeout") == 0, "stalled read labelled timeout");
+
+    // LOW-8: cancel lands within a slice while a read is stalled
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].read_stall_ms = 200;
+    g_fr_routes[0].stall_reads = 0;
+    CHECK(POST("/api/update/check", NULL) == 202, "check started");
+    Sleep(300);
+    DWORD tc = GetTickCount();
+    CHECK(POST("/api/update/fetch/cancel", NULL) == 200, "cancel accepted");
+    wait_idle();
+    CHECK(GetTickCount() - tc < 1000, "cancel inside a stalled read takes effect within 1 s");
+    job_result();
+    CHECK(strcmp(g_state, "failed") == 0 && strcmp(g_error, "timeout") != 0, "cancelled stalled job failed as cancelled");
+    expect_claim_balanced("cancel in stalled read");
+
+    // LOW-1: a download that fails before the first flash write leaves the old verified stage alone
+    fixture(g_sha_hex, IMG_LEN);
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "first download staged");
+    g_app_route->status = 404;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "failed") == 0, "second download failed");
+    CHECK(stage_staged(), "old verified stage kept when the new download fails before writing");
+    expect_claim_balanced("old stage kept");
+}
+
 static void test_writer_wedge(void)
 {
     fixture(g_sha_hex, IMG_LEN);
     CHECK(!update_fetch_writer_wedged(), "writer not wedged before the case");
+    const long heap_pre_wedge = g_fr_heap_live;
     g_fr_time_div = 1000; // the writer wait becomes milliseconds
     g_fr_flash_write_block = true;
     CHECK(POST("/api/update/download", NULL) == 202, "download accepted");
@@ -654,6 +745,7 @@ static void test_writer_wedge(void)
     WAIT_FOR(!g_fr_claim_held);
     expect_claim_balanced("wedged job");
     CHECK(g_fr_flash_blocked_n >= 1, "the abandoned writer is still parked in flash");
+    CHECK(g_fr_heap_live > heap_pre_wedge, "wedged job buffers stay held while the writer is parked");
 
     // a NEW job is refused: no second writer next to the parked one
     const long heap_before = g_fr_heap_live;
@@ -702,6 +794,9 @@ static void test_writer_wedge(void)
     WAIT_FOR_MS(g_fr_sem_idle_waiters >= 1, 30000);
     CHECK(g_fr_sem_idle_waiters >= 1, "released writer is back at its idle wait");
     CHECK(g_fr_sem_bad_n == 0, "no semaphore take/give on a NULL or deleted handle (wr_stop kept the parked writer's semaphores)");
+    // LOW-5: the wedged job's buffers are reclaimed by the writer when its late op returns
+    WAIT_FOR(g_fr_heap_live == heap_pre_wedge);
+    CHECK(g_fr_heap_live == heap_pre_wedge, "late-exiting writer freed the wedged job buffers");
 }
 
 int main(void)
@@ -727,6 +822,7 @@ int main(void)
     test_claim_released_on_failures();
     test_heap_admission_updfx2();
     test_redirect_hop_frees_first_client();
+    test_updlow();
     test_heap_admission_updfx3();
     test_handler_refusals();
     test_stage_upload_and_clear();

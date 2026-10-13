@@ -180,6 +180,33 @@ static void test_repo_and_builders(void)
     TEST_CHECK(!update_tag_valid(NULL), "NULL tag");
 }
 
+static void test_rate_capture(void)
+{
+    update_rate_capture_t c;
+    update_rate_capture_init(&c);
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1000) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: 429 default");
+    TEST_CHECK(update_rate_backoff_s(&c, 503, 1000) == UPDATE_BACKOFF_DEFAULT_SERVER_S, "rate: 5xx default");
+    update_rate_capture_feed(&c, "Retry-After", "120");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1000) == 120, "rate: Retry-After seconds");
+    update_rate_capture_feed(&c, "x-ratelimit-reset", "1500");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == 120, "rate: Retry-After beats reset");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "X-RateLimit-Reset", "1500");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == 500, "rate: reset minus now");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 0) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: no clock -> default");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1499) == UPDATE_BACKOFF_MIN_S, "rate: clamped up to min");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "999999");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_MAX_S, "rate: clamped down to max");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: HTTP-date ignored");
+    TEST_CHECK(update_status_is_rate_or_server(403) && update_status_is_rate_or_server(429) &&
+                   update_status_is_rate_or_server(500) && update_status_is_rate_or_server(599) &&
+                   !update_status_is_rate_or_server(404) && !update_status_is_rate_or_server(200),
+               "rate: status classes");
+}
+
 static void test_asset_pin(void)
 {
     TEST_SECTION("update_url -- asset URL pinned to repo, tag and name");
@@ -298,5 +325,6 @@ void run_test_update_url(void)
     test_redirects();
     test_repo_and_builders();
     test_asset_pin();
+    test_rate_capture();
     test_location_capture();
 }

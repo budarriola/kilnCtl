@@ -45,6 +45,7 @@ typedef struct {
 } esp_http_client_config_t;
 
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config);
+esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t c, int timeout_ms);
 esp_err_t esp_http_client_set_header(esp_http_client_handle_t c, const char *key, const char *value);
 esp_err_t esp_http_client_open(esp_http_client_handle_t c, int write_len);
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c);

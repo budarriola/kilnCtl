@@ -60,6 +60,8 @@ int g_fr_claim_begin_n, g_fr_claim_end_n;
 int g_fr_interlock_result;
 bool g_fr_heat_profile, g_fr_heat_autotune;
 bool g_fr_clock_synced;
+long long g_fr_now_epoch;
+volatile long g_fr_eagain_n;
 char g_fr_repo[96];
 size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
 int g_fake_heap_recover_reads;      // >0: after this many internal-free reads, free becomes g_fake_heap_recover_to
@@ -115,6 +117,8 @@ void fr_reset(void)
     g_fr_interlock_result = 0; // OTA_INTERLOCK_OK
     g_fr_heat_profile = g_fr_heat_autotune = false;
     g_fr_clock_synced = true;
+    g_fr_now_epoch = 1800000000LL;
+    g_fr_eagain_n = 0;
     strcpy(g_fr_repo, "budarriola/kilnCtl");
     g_fake_heap_free_internal = 200000;
     g_fake_heap_largest_internal = 100000;
@@ -254,7 +258,8 @@ void vTaskDelete(TaskHandle_t t)
     }
 }
 void vTaskDeleteWithCaps(TaskHandle_t t) { vTaskDelete(t); }
-TickType_t xTaskGetTickCount(void) { return (TickType_t)GetTickCount(); }
+long long g_fr_tick_skew_ms;
+TickType_t xTaskGetTickCount(void) { return (TickType_t)(GetTickCount() + g_fr_tick_skew_ms); }
 void vTaskDelay(TickType_t ticks) { Sleep(ticks); }
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)1; }
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t t)
@@ -501,6 +506,7 @@ struct esp_http_client {
     const fr_route_t *route;
     size_t pos;
     bool read_once;
+    int stalled;
 };
 
 static const fr_route_t *route_for(const char *url)
@@ -544,6 +550,11 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t c, int write_len)
     }
     return ESP_OK;
 }
+esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t c, int timeout_ms)
+{
+    c->cfg.timeout_ms = timeout_ms;
+    return ESP_OK;
+}
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c)
 {
     const fr_route_t *r = c->route;
@@ -555,6 +566,27 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c)
         ev.header_value = (char *)r->location;
         ev.user_data = c->cfg.user_data;
         c->cfg.event_handler(&ev);
+    }
+    if (r->retry_after != NULL && c->cfg.event_handler != NULL) {
+        esp_http_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event_id = HTTP_EVENT_ON_HEADER;
+        ev.header_key = (char *)"Retry-After";
+        ev.header_value = (char *)r->retry_after;
+        ev.user_data = c->cfg.user_data;
+        c->cfg.event_handler(&ev);
+    }
+    if (r->ratelimit_reset != NULL && c->cfg.event_handler != NULL) {
+        esp_http_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event_id = HTTP_EVENT_ON_HEADER;
+        ev.header_key = (char *)"X-RateLimit-Reset";
+        ev.header_value = (char *)r->ratelimit_reset;
+        ev.user_data = c->cfg.user_data;
+        c->cfg.event_handler(&ev);
+    }
+    if (r->advertised == -5) {
+        return -ESP_ERR_HTTP_EAGAIN; // header read timeout
     }
     if (r->advertised == -4) {
         return -1;
@@ -577,6 +609,12 @@ int esp_http_client_read(esp_http_client_handle_t c, char *buf, int len)
         if (c->route->on_read != NULL) {
             c->route->on_read();
         }
+    }
+    if (c->route->read_stall_ms > 0 && (c->route->stall_reads == 0 || c->stalled < c->route->stall_reads)) {
+        c->stalled++;
+        Sleep((DWORD)c->route->read_stall_ms);
+        g_fr_eagain_n++;
+        return -ESP_ERR_HTTP_EAGAIN;
     }
     size_t avail = deliverable(c->route) - c->pos;
     size_t n = avail < (size_t)len ? avail : (size_t)len;
@@ -711,6 +749,7 @@ void time_sync_get_status(time_sync_status_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->ever_synced = g_fr_clock_synced;
+    out->now_epoch = (time_t)g_fr_now_epoch;
 }
 bool stack_margin_register(const char *name, void *slot, uint32_t bytes)
 {

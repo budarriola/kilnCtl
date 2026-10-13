@@ -22,6 +22,7 @@
 #define KILNCTL_UPDATE_URL_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -106,6 +107,30 @@ void update_loc_capture_init(update_loc_capture_t *c, char *buf, size_t cap);
 void update_loc_capture_feed(update_loc_capture_t *c, const char *key, const char *value);
 // Returns the captured Location, or NULL when none was seen or it was refused (*refused says which).
 const char *update_loc_capture_get(const update_loc_capture_t *c, bool *refused);
+
+// ---- rate-limit / retry-after capture (UPDATE_PATH_ROBUSTNESS_AUDIT LOW-2) ---------------------
+// GitHub answers rate limits with 403/429 and may send Retry-After (delta seconds) or
+// X-RateLimit-Reset (epoch seconds); 5xx may carry Retry-After. Feed every response header;
+// only those two are kept. Non-numeric values (an HTTP-date Retry-After) are ignored, never guessed.
+#define UPDATE_BACKOFF_MIN_S 5u
+#define UPDATE_BACKOFF_MAX_S 3600u
+#define UPDATE_BACKOFF_DEFAULT_RATE_S 900u   // 403/429 with no usable header
+#define UPDATE_BACKOFF_DEFAULT_SERVER_S 60u  // 5xx with no usable header
+typedef struct {
+    bool have_retry_after;
+    uint32_t retry_after_s;
+    bool have_reset;
+    int64_t reset_epoch;
+} update_rate_capture_t;
+
+void update_rate_capture_init(update_rate_capture_t *c);
+void update_rate_capture_feed(update_rate_capture_t *c, const char *key, const char *value);
+// Seconds to wait before the next GitHub request after an HTTP `status`. Retry-After wins, then
+// X-RateLimit-Reset minus now_epoch (ignored when now_epoch <= 0), then the default for the class.
+// Result is clamped to [UPDATE_BACKOFF_MIN_S, UPDATE_BACKOFF_MAX_S].
+uint32_t update_rate_backoff_s(const update_rate_capture_t *c, int status, int64_t now_epoch);
+// True for the statuses that mean "slow down": 403, 429 and 5xx.
+bool update_status_is_rate_or_server(int status);
 
 #ifdef __cplusplus
 }

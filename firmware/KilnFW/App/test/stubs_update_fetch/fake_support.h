@@ -20,6 +20,10 @@ typedef struct {
     int64_t advertised;       // Content-Length: >=0 as given; -1 = chunked; -2 = body_len
     size_t deliver;           // bytes actually handed out before the connection "ends" (FR_ALL = body_len)
     const char *location;     // Location header (redirects)
+    const char *retry_after;  // Retry-After header value
+    const char *ratelimit_reset; // X-RateLimit-Reset header value
+    long read_stall_ms;       // >0: each read sleeps this long then reports EAGAIN until stall_reads exhausted
+    int stall_reads;          // number of stalled reads (0 with read_stall_ms = stall forever)
     bool open_fail;           // esp_http_client_open() fails
     void (*on_read)(void);    // called once, at the first read of this response
     void (*on_open)(void);    // called at every esp_http_client_open() of this URL
@@ -53,6 +57,9 @@ extern int g_fr_claim_begin_n, g_fr_claim_end_n;
 extern int g_fr_interlock_result;          // ota_interlock_result_t value
 extern bool g_fr_heat_profile, g_fr_heat_autotune;
 extern bool g_fr_clock_synced;
+extern long long g_fr_now_epoch;
+extern long long g_fr_tick_skew_ms;       // added to the fake tick count (lets a test outwait a backoff)
+extern volatile long g_fr_eagain_n;  // EAGAIN results handed out
 extern char g_fr_repo[96];
 extern size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
 extern size_t g_fake_heap_dma_free_internal;

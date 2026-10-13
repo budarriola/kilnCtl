@@ -56,7 +56,10 @@ static const char *TAG = "update_fetch";
 
 // ---- limits ---------------------------------------------------------------------------------
 #define FETCH_API_BODY_CAP (256u * 1024u)    // releases/latest or releases?per_page=N JSON; PSRAM
-#define FETCH_LIST_PER_PAGE 5u               // releases list size when pre-releases are allowed
+// Releases list size when pre-releases are allowed. 5 could hide the newest usable release behind
+// drafts/prereleases; 15 pages deeper. The list JSON (~1-3 KB per release, assets included) is read into
+// the 256 KB PSRAM body buffer, so this adds no internal RAM; update_url_build_list allows 1..30.
+#define FETCH_LIST_PER_PAGE 15u
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
@@ -73,11 +76,14 @@ static const char *TAG = "update_fetch";
 // The tx buffer stays 2048 B (a JWT-signed release-assets GET line can exceed 1 KB, so 1 KB would
 // risk a truncated request); that costs 1 KB over the spike and is inside the worst-case draw.
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
-// Per-socket-operation timeout. Cancel latency is bounded by it: the loop checks the cancel flag
-// between reads, and a read may block this long, with at most FETCH_EAGAIN_RETRIES retries after a
-// timed-out read, so a cancel takes effect within (1 + retries) * timeout = 10 s.
+// Socket timeout for the TLS connect/handshake inside esp_http_client_open (cannot be sliced; a cancel
+// issued there waits for it, at most 5 s). Header and body reads are sliced at FETCH_SLICE_MS and the
+// cancel flag is checked between slices, so a cancel takes effect within about 1 s there.
 #define FETCH_HTTP_TIMEOUT_MS 5000
-#define FETCH_EAGAIN_RETRIES 1u
+#define FETCH_SLICE_MS 1000
+// A header or body read that times out FETCH_STALL_SLICES slices in a row (5 s without a byte) is a
+// "timeout" failure, same total patience as the former 5 s socket timeout.
+#define FETCH_STALL_SLICES 5u
 // Stack sizes are still the WP7 spike's numbers. OWED ON THE BENCH: measure the production
 // high-water marks (stack_margin reports "update_fetch" and "update_fetch_wr") over a full
 // download that includes the redirect hop with a JWT-sized URL, and adjust. Not measured here.
@@ -148,6 +154,13 @@ typedef struct {
     SemaphoreHandle_t wr_req;
     SemaphoreHandle_t wr_done;
     volatile update_wr_arb_t wr_arb; // guarded by s_wr_mux; see update_wr_arb.h
+    // LOW-5: buffers of the job that wedged the writer. Exactly one side frees them, decided under
+    // s_wr_mux: the writer once its late op finally returns (wr_late_exited), or the job if the writer
+    // already returned first. At most one set is ever held (wr_wedged blocks every later job's writer).
+    void *leak_w;
+    void *leak_body;
+    void *leak_scratch;
+    volatile bool wr_late_exited;
     volatile bool wr_wedged;  // a writer op timed out: its task/buffers are abandoned until reboot
     wr_cmd_t wr;
 } fetch_ctx_t;
@@ -167,6 +180,7 @@ struct work {
     char url[UPDATE_URL_MAX];
     char loc[UPDATE_URL_MAX]; // response Location of the current hop (PSRAM, bounded)
     update_loc_capture_t loc_cap;
+    update_rate_capture_t rate_cap;
     update_release_info_t info;
     update_manifest_t man;
     uint8_t *body;
@@ -254,6 +268,39 @@ static bool clock_synced(void)
     memset(&ts, 0, sizeof(ts));
     time_sync_get_status(&ts);
     return ts.ever_synced;
+}
+
+static int64_t now_epoch(void)
+{
+    time_sync_status_t ts;
+    memset(&ts, 0, sizeof(ts));
+    time_sync_get_status(&ts);
+    return ts.ever_synced ? (int64_t)ts.now_epoch : 0;
+}
+
+// LOW-2 backoff: after a rate-limited (403/429) or server-error (5xx) answer the check/download POST
+// handlers refuse with 429 until the "not before" tick passes, so a retrying UI or script cannot hammer
+// GitHub. RAM only (a reboot clears it); duration comes from Retry-After / X-RateLimit-Reset, clamped.
+static volatile bool s_backoff_valid;
+static volatile uint32_t s_backoff_until;
+
+static void backoff_note(uint32_t secs)
+{
+    s_backoff_until = xTaskGetTickCount() + pdMS_TO_TICKS(secs * 1000u);
+    s_backoff_valid = true;
+}
+
+static uint32_t backoff_remaining_s(void)
+{
+    if (!s_backoff_valid) {
+        return 0;
+    }
+    const int32_t left = (int32_t)(s_backoff_until - xTaskGetTickCount());
+    if (left <= 0) {
+        s_backoff_valid = false;
+        return 0;
+    }
+    return ((uint32_t)left * portTICK_PERIOD_MS + 999u) / 1000u;
 }
 
 static bool deadline_passed(const work_t *w)
@@ -408,10 +455,23 @@ static void wr_task(void *arg)
         // Review 5 L1: one critical section decides whether the caller already timed out, so a finish in
         // the same tick as the timeout is either collected by the caller or undone here, never both
         // skipped.
+        void *reclaim_w = NULL, *reclaim_body = NULL, *reclaim_scratch = NULL;
         portENTER_CRITICAL(&s_wr_mux);
         const bool abandoned = update_wr_arb_writer_done(&s_c->wr_arb);
+        if (abandoned) {
+            // The op returned: nothing of the dead job's buffers is read again (the undo below uses only
+            // the stage). Take what the job handed off; if it has not yet, it will see wr_late_exited.
+            s_c->wr_late_exited = true;
+            reclaim_w = s_c->leak_w;
+            reclaim_body = s_c->leak_body;
+            reclaim_scratch = s_c->leak_scratch;
+            s_c->leak_w = s_c->leak_body = s_c->leak_scratch = NULL;
+        }
         portEXIT_CRITICAL(&s_wr_mux);
         if (abandoned) {
+            heap_caps_free(reclaim_scratch);
+            heap_caps_free(reclaim_body);
+            heap_caps_free(reclaim_w);
             // Review 3 LOW-1: this op was abandoned (the job already reported FAILED). Never let it leave
             // a valid stage behind: undo a late finish (clear) or begin/write (abort). The abort is scoped
             // to the fetch's own upload (review 5 L3) so it cannot kill a newer hand upload.
@@ -532,7 +592,9 @@ static bool is_redirect(int s)
 static esp_err_t http_event(esp_http_client_event_t *e)
 {
     if (e->event_id == HTTP_EVENT_ON_HEADER && e->user_data != NULL) {
-        update_loc_capture_feed((update_loc_capture_t *)e->user_data, e->header_key, e->header_value);
+        work_t *w = (work_t *)e->user_data;
+        update_loc_capture_feed(&w->loc_cap, e->header_key, e->header_value);
+        update_rate_capture_feed(&w->rate_cap, e->header_key, e->header_value);
     }
     return ESP_OK;
 }
@@ -565,11 +627,12 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             return adm;
         }
         update_loc_capture_init(&w->loc_cap, w->loc, sizeof(w->loc));
+        update_rate_capture_init(&w->rate_cap);
         esp_http_client_config_t cfg = {
             .url = w->url,
             .timeout_ms = FETCH_HTTP_TIMEOUT_MS,
             .event_handler = http_event,
-            .user_data = &w->loc_cap,
+            .user_data = w,
             .buffer_size = 2048,
             .buffer_size_tx = FETCH_TX_BUF_BYTES,
             .disable_auto_redirect = true,
@@ -587,14 +650,26 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             esp_http_client_cleanup(c);
             return "connect_failed";
         }
-        int64_t clen = esp_http_client_fetch_headers(c);
+        esp_http_client_set_timeout_ms(c, FETCH_SLICE_MS);
+        int64_t clen = -1;
+        unsigned hslices = 0;
+        for (;;) {
+            clen = esp_http_client_fetch_headers(c);
+            if (clen != -ESP_ERR_HTTP_EAGAIN || s_c->cancel || ++hslices >= FETCH_STALL_SLICES) {
+                break;
+            }
+        }
         int status = esp_http_client_get_status_code(c);
         st_lock();
         s_c->st.http_status = status;
         st_unlock();
         const char *fail = NULL;
         bool again = false;
-        if (clen < 0) {
+        if (s_c->cancel) {
+            fail = "cancelled";
+        } else if (clen == -ESP_ERR_HTTP_EAGAIN) {
+            fail = "timeout"; // header read timed out (not a malformed response)
+        } else if (clen < 0) {
             fail = "bad_response";
         } else if (is_redirect(status)) {
             bool loc_refused = false;
@@ -613,6 +688,10 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     again = true;
                 }
             }
+        } else if (update_status_is_rate_or_server(status)) {
+            // LOW-2: rate limit / server error get their own reasons and a backoff the POST handlers honour.
+            fail = (status == 403 || status == 429) ? "rate_limited" : "server_error";
+            backoff_note(update_rate_backoff_s(&w->rate_cap, status, now_epoch()));
         } else if (status != 200) {
             fail = "http_status";
         } else {
@@ -659,8 +738,12 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                         fail = "short_body";
                     }
                     break;
-                } else if (n == -ESP_ERR_HTTP_EAGAIN && ++eagain <= FETCH_EAGAIN_RETRIES) {
-                    continue;
+                } else if (n == -ESP_ERR_HTTP_EAGAIN) {
+                    if (++eagain >= FETCH_STALL_SLICES) {
+                        fail = "timeout";
+                        break;
+                    }
+                    continue; // cancel/deadline are re-checked at the top of the loop, once per slice
                 } else {
                     fail = "read_failed";
                     break;
@@ -921,9 +1004,25 @@ static void fetch_task(void *arg)
         err = "writer_wedged_reboot_required";
     }
     if (s_c->wr_wedged && !wedged_at_start) {
-        // This job's writer op timed out and may still be reading these; abandon them (a reboot recovers)
-        // rather than race it.
-        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
+        // This job's writer op timed out and may still be reading these: never race it. Hand them to the
+        // writer, which frees them when the late op finally returns (LOW-5); if it already returned, free
+        // them here. Decided under s_wr_mux so exactly one side frees.
+        portENTER_CRITICAL(&s_wr_mux);
+        const bool writer_gone = s_c->wr_late_exited;
+        if (!writer_gone) {
+            s_c->leak_w = w;
+            s_c->leak_body = body;
+            s_c->leak_scratch = scratch;
+        }
+        portEXIT_CRITICAL(&s_wr_mux);
+        if (writer_gone) {
+            heap_caps_free(scratch);
+            heap_caps_free(body);
+            heap_caps_free(w);
+            ESP_LOGE(TAG, "flash writer wedged earlier, already returned: job buffers freed, update claim released");
+        } else {
+            ESP_LOGE(TAG, "flash writer wedged: job buffers handed to the writer, update claim released");
+        }
     } else {
         heap_caps_free(scratch);
         heap_caps_free(body);
@@ -953,6 +1052,15 @@ static esp_err_t send_error_json(httpd_req_t *req, const char *status, const cha
     char json[96];
     snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name);
     httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t send_backoff_json(httpd_req_t *req, uint32_t secs)
+{
+    char json[96];
+    snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"backoff\",\"retry_after_s\":%u}", (unsigned)secs);
+    httpd_resp_set_status(req, "429 Too Many Requests");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, json);
 }
@@ -1015,6 +1123,10 @@ static esp_err_t check_post_handler(httpd_req_t *req)
     } else if (qe != ESP_ERR_NOT_FOUND) {
         return send_error_json(req, "400 Bad Request", "bad_query");
     }
+    const uint32_t bo = backoff_remaining_s();
+    if (bo > 0) {
+        return send_backoff_json(req, bo);
+    }
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
@@ -1069,6 +1181,10 @@ static esp_err_t download_post_handler(httpd_req_t *req)
         return send_error_json(req, "400 Bad Request", "bad_query");
     }
 
+    const uint32_t bo = backoff_remaining_s();
+    if (bo > 0) {
+        return send_backoff_json(req, bo);
+    }
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
@@ -1132,9 +1248,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const job_status_t *s = &s_c->st;
     snprintf(bf->a, sizeof(bf->a),
              "{\"ok\":true,\"state\":\"%s\",\"kind\":\"%s\",\"stage\":\"%s\",\"error\":\"%s\","
-             "\"http_status\":%d,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
+             "\"http_status\":%d,\"retry_after_s\":%u,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
              state_name(s->state), s->kind == KIND_CHECK ? "check" : "download", s->stage ? s->stage : "",
-             s->error ? s->error : "", s->http_status, (unsigned)s->done, (unsigned)s->total,
+             s->error ? s->error : "", s->http_status, (unsigned)backoff_remaining_s(), (unsigned)s->done, (unsigned)s->total,
              s_c->busy ? "true" : "false");
     json_safe_copy(bf->repo_now, sizeof(bf->repo_now), s->repo);
     json_safe_copy(bf->running, sizeof(bf->running), s->running);
