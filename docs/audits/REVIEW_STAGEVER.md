@@ -124,3 +124,20 @@ the log shows the mutant compiled and `test_update_stage.c` assertions failed; n
 | M5 | `strcmp(dn, semver)` to prefix `strncmp` | CAUGHT | FAIL :1157 (genuinely different version refused) |
 | M6 | version gate disabled (`false &&`) | CAUGHT | FAIL :1133, :1157, :969/:970 |
 | M7 | `desc_version_normalise` to `strcpy(dn, v)` | CAUGHT | FAIL :1107, :1114, :1141, :1146, :1193, :1195, :1203, :932 (every v-prefixed descriptor now mismatches) |
+
+## Fix status
+
+Fixed in the STAGEVERFX commit (see git log for the landed SHA).
+
+| Finding | Status | Evidence |
+|---|---|---|
+| MED-1 | FIXED | `flush_head` undeclared branch strips v/V and one `-dirty` via `desc_version_normalise`, passes `dirty` to the gate; `policy_gate` sets `update_upload_request_t.dirty`; `update_policy_decide_upload` sets the candidate dirty so the dirty rule refuses. A differently-cased `-DIRTY`, `-dirty` alone and `v-dirty` are refused (BAD_VERSION). Tests in `test_update_stage.c` (undeclared -dirty, uppercase V, odd spellings) and `test_update_policy.c` (dirty upload refused on newer and same running version). |
+| LOW-1 | FIXED | `CMakeLists.txt` stores the configure-time value in cache (`KILN_CONFIGURED_RELEASE_VERSION`); `gen_build_info.cmake` (every build) fails on env/configured mismatch in either direction. Unset env builds pass (check_00_kilnfw_target_build PASS with the var unset). |
+| LOW-2 | FIXED | Configure fails on a tag over 31 characters or not semver. |
+
+Negtest (kilnfw-host, ExpectPattern; both mutants compiled, test assertions failed):
+
+| # | Mutation | Verdict | Evidence |
+|---|---|---|---|
+| M1 | `dirty = strlen(dn) < ...` to `dirty = false` | CAUGHT | FAIL test_update_stage.c:938, :944 |
+| M2 | undeclared branch uses `strip_v(v)` instead of normalise | CAUGHT | FAIL test_update_stage.c:936-938, :944 |
