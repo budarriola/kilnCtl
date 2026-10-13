@@ -375,7 +375,7 @@ def test_join_script_retries_live_reads_with_fresh_capture():
     from pathlib import Path
 
     text = (Path(r.__file__).parents[2] / "scripts" / "join_board_ap.ps1").read_text(encoding="utf-8")
-    assert "$ReadAttempts" in text
+    assert "[Math]::Max(1, $ReadAttempts)" in text
     assert "for ($try = 1; $try -le $attempts; $try++)" in text
     # The capture sits inside the retry loop, not before it.
     assert text.index("for ($try") < text.index("capture_lcd.ps1')")
