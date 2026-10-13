@@ -296,6 +296,7 @@ static void test_claim_released_on_failures(void)
     wait_idle();
     job_result();
     CHECK(strcmp(g_state, "failed") == 0, "low heap fails the job");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "low free heap error is low_heap_free");
     expect_claim_balanced("low_heap_free");
 
     fixture(g_sha_hex, IMG_LEN);
