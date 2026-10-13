@@ -3261,3 +3261,14 @@ Board dev firmware d93cf774a, MCP server fresh at 129586d4f with KILNCTL_AUX_BEN
 Plan step 9 (convert ON_OFF zones to aux) is a one-way owner-offered conversion, not a bench step; not run. End state: idle, link up, armed, no trip; no BENCH_AUX_RULE slot (profiles_list shows only M18C_TEST, B1_THROWAWAY); aux enabled_mask 0.
 - `20261009T215021Z_web_benchweb` suite=`web` exit_code=1 PASS=78 FAIL=24 INCONCLUSIVE=3 NOT_RUN=13 SKIP=2 esp_fw=Oct  9 2026 14:44:39 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261009T215021Z_web_benchweb/`
 - `20261010T180128Z_aux_bench1` suite=`aux` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=5 SKIP=2 esp_fw=Oct 10 2026 10:11:00 pico_fw=Pico build: e6a0ff34 built 2026-10-10 04:59:54Z log=`logs/bench_test/20261010T180128Z_aux_bench1/`
+
+## 2026-10-12 -- GitHub auto-update chain against v1.0.0-pre.3 (benchupd)
+
+Built and flashed origin/dev 721b3fc7e (flash_firmware verified). Post-flash: link up, armed, no trip, heap_internal free 30299 B, min_free 11419 B.
+
+- update_get_settings, update_check (allow_prerelease): PASS, verdict refuse_needs_force (dev build has no semver). Two more back-to-back update_checks: PASS, no fetch_busy, no claim leak.
+- update_stage_release attempt 1: FAIL `low_heap_free`: "internal free 27855 (need 28532), largest block 7680 (need 6144), download" (http_status 302). Idle free is 30299 B; the TLS/redirect step drops free internal heap about 2.4 KB below the download admission threshold (update_fetch.c ~205, update_fetch_heap.h).
+- update_stage_release attempt 2 (force, confirm_downgrade): FAIL `version_mismatch` right after the writer was created (http_status 200, verdict allow_reinstall). The manifest gate set at update_fetch.c ~370 compares against the image app_desc version; update_stage.c flush_head ~260 rejects it (comment there says only hand-upload stagers are gated).
+- Not run (blocked by staging): stage_clear/restart, fetch_cancel mid-download, full stage of pre.3, recovery_enter, recovery_apply_staged, post-apply verify.
+
+After failures: update_fetch_status failed/version_mismatch, busy False, writer not wedged; stage partition still staged=True semver 1.0.0-pre.1 (old); update_check still works; link up, armed, no trip; heap free 30299 B, min_free 11419 B.
