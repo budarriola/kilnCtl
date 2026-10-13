@@ -35,6 +35,7 @@ size_t update_install_req_encode(const update_install_req_t *r, uint8_t out[UPD_
     memset(out, 0, UPD_INST_REQ_SIZE);
     put_u32(out, REQ_MAGIC);
     out[4] = (uint8_t)REC_VERSION;
+    out[5] = r->attempts;
     put_u32(out + 8, r->image_length);
     memcpy(out + 12, r->sha256, UPD_INST_SHA_LEN);
     memcpy(out + 44, r->semver, UPD_INST_SEMVER_LEN);
@@ -55,6 +56,7 @@ bool update_install_req_decode(const uint8_t *buf, size_t len, update_install_re
     }
     update_install_req_t r;
     memset(&r, 0, sizeof(r));
+    r.attempts = buf[5];
     r.image_length = get_u32(buf + 8);
     memcpy(r.sha256, buf + 12, UPD_INST_SHA_LEN);
     memcpy(r.semver, buf + 44, UPD_INST_SEMVER_LEN);
@@ -108,6 +110,7 @@ const char *update_install_reason_name(uint8_t reason)
     static const char *const names[UPD_INST_REASON_COUNT] = {
         "none",         "record_bad",   "clear_failed",    "stage_not_ready",   "size_mismatch",
         "sha_mismatch", "apply_failed", "nvs_unavailable", "result_write_failed",
+        "attempts_exceeded", "counter_failed",
     };
     return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
 }
@@ -159,8 +162,8 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
     if (res_out) {
         memset(res_out, 0, sizeof(*res_out));
     }
-    if (!ops || !ops->req_read || !ops->req_clear || !ops->res_write || !ops->stage_verified ||
-        !ops->apply_start) {
+    if (!ops || !ops->req_read || !ops->req_clear || !ops->req_write || !ops->res_write ||
+        !ops->stage_verified || !ops->apply_start) {
         return UPD_INST_BOOT_NO_REQUEST;
     }
     uint8_t blob[UPD_INST_REQ_SIZE + 16];
@@ -170,27 +173,38 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
         return UPD_INST_BOOT_NO_REQUEST;
     }
     if (rr < 0) {
+        // Cannot read the request: stay in recovery, apply nothing.
         return refuse(ops, UPD_INST_REASON_NVS_UNAVAILABLE, NULL, res_out);
-    }
-    // Clear FIRST, read back, whether or not the record is usable: a request
-    // that cannot be removed must never reach the apply.
-    if (ops->req_clear(ops->ctx) != 0) {
-        return refuse(ops, UPD_INST_REASON_CLEAR_FAILED, NULL, res_out);
     }
     update_install_req_t req;
     if (!update_install_req_decode(blob, len, &req)) {
+        (void)ops->req_clear(ops->ctx);
         return refuse(ops, UPD_INST_REASON_RECORD_BAD, NULL, res_out);
+    }
+    // Refusals below leave the app untouched, so the request is dropped.
+    if (req.attempts >= UPD_INST_MAX_ATTEMPTS) {
+        (void)ops->req_clear(ops->ctx);
+        return refuse(ops, UPD_INST_REASON_ATTEMPTS_EXCEEDED, req.semver, res_out);
     }
     uint32_t stage_len = 0;
     uint8_t stage_sha[UPD_INST_SHA_LEN];
     if (!ops->stage_verified(ops->ctx, &stage_len, stage_sha)) {
+        (void)ops->req_clear(ops->ctx);
         return refuse(ops, UPD_INST_REASON_STAGE_NOT_READY, req.semver, res_out);
     }
     if (stage_len != req.image_length) {
+        (void)ops->req_clear(ops->ctx);
         return refuse(ops, UPD_INST_REASON_SIZE_MISMATCH, req.semver, res_out);
     }
     if (memcmp(stage_sha, req.sha256, UPD_INST_SHA_LEN) != 0) {
+        (void)ops->req_clear(ops->ctx);
         return refuse(ops, UPD_INST_REASON_SHA_MISMATCH, req.semver, res_out);
+    }
+    // Raise the attempt counter (read back) BEFORE any erase can happen.
+    req.attempts++;
+    uint8_t nb[UPD_INST_REQ_SIZE];
+    if (update_install_req_encode(&req, nb) == 0 || ops->req_write(ops->ctx, nb, UPD_INST_REQ_SIZE) != 0) {
+        return refuse(ops, UPD_INST_REASON_COUNTER_FAILED, req.semver, res_out);
     }
     if (ops->apply_start(ops->ctx) != 0) {
         return refuse(ops, UPD_INST_REASON_APPLY_FAILED, req.semver, res_out);

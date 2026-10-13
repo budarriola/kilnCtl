@@ -21,10 +21,13 @@ typedef struct {
     uint8_t stage_sha[UPD_INST_SHA_LEN];
     uint8_t res_blob[UPD_INST_RES_SIZE];
     int res_writes;
+    int write_rc;
+    int write_calls;
+    int clear_calls;
     int apply_calls;
 } fake_t;
 
-enum { EV_READ = 1, EV_CLEAR, EV_STAGE, EV_APPLY, EV_RES };
+enum { EV_READ = 1, EV_CLEAR, EV_STAGE, EV_APPLY, EV_RES, EV_WRITE };
 
 static void ev(fake_t *f, int e)
 {
@@ -52,10 +55,23 @@ static int f_clear(void *c)
 {
     fake_t *f = c;
     ev(f, EV_CLEAR);
+    f->clear_calls++;
     if (f->clear_rc == 0) {
         f->have_req = 0;
     }
     return f->clear_rc;
+}
+
+static int f_write(void *c, const uint8_t *b, size_t n)
+{
+    fake_t *f = c;
+    ev(f, EV_WRITE);
+    f->write_calls++;
+    if (f->write_rc == 0 && n <= sizeof(f->req)) {
+        memcpy(f->req, b, n);
+        f->req_len = n;
+    }
+    return f->write_rc;
 }
 
 static int f_res(void *c, const uint8_t *b, size_t n)
@@ -109,6 +125,7 @@ static update_install_ops_t ops_for(fake_t *f)
     o.ctx = f;
     o.req_read = f_read;
     o.req_clear = f_clear;
+    o.req_write = f_write;
     o.res_write = f_res;
     o.stage_verified = f_stage;
     o.apply_start = f_apply;
@@ -170,6 +187,7 @@ static void test_boot_logic(void)
     fake_t f;
     update_install_res_t res;
     update_install_ops_t o;
+    update_install_req_t r;
 
     fake_init(&f);
     f.have_req = 0;
@@ -182,23 +200,38 @@ static void test_boot_logic(void)
     o = ops_for(&f);
     TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_STARTED, "good request starts the apply");
     TEST_CHECK(f.apply_calls == 1 && f.res_writes == 0, "apply started once, no result yet");
-    TEST_CHECK(index_of(&f, EV_CLEAR) >= 0 && index_of(&f, EV_CLEAR) < index_of(&f, EV_APPLY),
-               "request cleared BEFORE the apply starts");
-    TEST_CHECK(f.have_req == 0, "request is gone after boot logic");
+    TEST_CHECK(f.have_req == 1 && f.clear_calls == 0, "request stays present through the apply");
+    TEST_CHECK(update_install_req_decode(f.req, f.req_len, &r) && r.attempts == 1, "attempt counter raised to 1");
+    TEST_CHECK(index_of(&f, EV_WRITE) >= 0 && index_of(&f, EV_WRITE) < index_of(&f, EV_APPLY),
+               "attempt counter written BEFORE the apply starts");
     TEST_CHECK(strcmp(res.semver, "1.0.0-pre.3") == 0, "started outcome carries the target version");
 
+    // Idempotent re-run after a simulated power cut mid-copy: request still there.
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_STARTED && f.apply_calls == 2 &&
+                   update_install_req_decode(f.req, f.req_len, &r) && r.attempts == 2,
+               "second boot re-applies and counts attempt 2");
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_STARTED && f.apply_calls == 3 &&
+                   update_install_req_decode(f.req, f.req_len, &r) && r.attempts == 3,
+               "third boot re-applies and counts attempt 3");
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 3,
+               "bound reached: no fourth apply");
+    TEST_CHECK(res.reason == UPD_INST_REASON_ATTEMPTS_EXCEEDED && f.have_req == 0 && f.res_writes == 1,
+               "bound reached: reason recorded and request cleared");
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_NO_REQUEST, "no loop after the bound");
+
     fake_init(&f);
-    f.clear_rc = -1;
+    f.write_rc = -1;
     o = ops_for(&f);
-    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0,
-               "failed clear refuses and never applies");
-    TEST_CHECK(res.reason == UPD_INST_REASON_CLEAR_FAILED && f.res_writes == 1, "clear failure recorded");
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0 &&
+                   res.reason == UPD_INST_REASON_COUNTER_FAILED,
+               "counter write failure never applies");
 
     fake_init(&f);
     f.stage_sha[5] ^= 0xFF;
     o = ops_for(&f);
-    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0,
-               "sha mismatch refuses");
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0 &&
+                   f.write_calls == 0,
+               "sha mismatch refuses, counter untouched");
     TEST_CHECK(res.reason == UPD_INST_REASON_SHA_MISMATCH && f.have_req == 0,
                "sha mismatch recorded, request gone");
 
@@ -206,14 +239,14 @@ static void test_boot_logic(void)
     f.stage_len += 1;
     o = ops_for(&f);
     TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0 &&
-                   res.reason == UPD_INST_REASON_SIZE_MISMATCH,
+                   res.reason == UPD_INST_REASON_SIZE_MISMATCH && f.have_req == 0,
                "size mismatch refuses");
 
     fake_init(&f);
     f.stage_ok = false;
     o = ops_for(&f);
     TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0 &&
-                   res.reason == UPD_INST_REASON_STAGE_NOT_READY,
+                   res.reason == UPD_INST_REASON_STAGE_NOT_READY && f.have_req == 0,
                "unverified stage refuses");
 
     fake_init(&f);
@@ -221,29 +254,21 @@ static void test_boot_logic(void)
     o = ops_for(&f);
     TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0 &&
                    res.reason == UPD_INST_REASON_RECORD_BAD && f.have_req == 0,
-               "corrupt record refused and still cleared");
+               "corrupt record refused and cleared");
 
     fake_init(&f);
     f.apply_rc = -1;
     o = ops_for(&f);
     TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED &&
-                   res.reason == UPD_INST_REASON_APPLY_FAILED && f.res_writes == 1,
-               "apply start failure recorded");
+                   res.reason == UPD_INST_REASON_APPLY_FAILED && f.res_writes == 1 && f.have_req == 1,
+               "apply start failure recorded, request kept for retry");
 
     fake_init(&f);
     f.read_rc = -1;
     o = ops_for(&f);
     TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.apply_calls == 0 &&
-                   res.reason == UPD_INST_REASON_NVS_UNAVAILABLE,
-               "unreadable NVS refuses");
-
-    // A second boot after a refused install must find no request (no loop).
-    fake_init(&f);
-    f.stage_sha[0] ^= 1;
-    o = ops_for(&f);
-    (void)update_install_boot_run(&o, &res);
-    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_NO_REQUEST && f.apply_calls == 0,
-               "next boot sees no request after a refusal");
+                   res.reason == UPD_INST_REASON_NVS_UNAVAILABLE && f.clear_calls == 0,
+               "unreadable NVS refuses, nothing cleared");
 
     fake_init(&f);
     f.res_rc = -1;

@@ -8,11 +8,16 @@
 // next install request replaces it, so GET /api/update/status can always show
 // how the last unattended install ended.
 //
-// Recovery-side contract (update_install_boot_run): the request is cleared
-// FIRST and the clear is read back, so a failing apply can never loop; the
-// staged image's size and sha256 must equal the request's before an apply is
-// started; every failure is recorded as a result and the image stays in
-// recovery. All IO is injected so the logic is host-testable.
+// Recovery-side contract (update_install_boot_run): the request stays present
+// until the apply succeeds, so a power cut mid-copy (app erased, otadata at
+// factory) is re-applied on the next recovery boot. Each boot with a request
+// raises its attempt counter, read back, BEFORE any erase; after
+// UPD_INST_MAX_ATTEMPTS the request is cleared and the failure recorded, and
+// recovery stays up. The staged image's size and sha256 must equal the
+// request's before an apply is started. The success path clears the request
+// (read back) before the boot target is set (the pre-boot hook). Every
+// failure is recorded as a result and the image stays in recovery. Nothing
+// here uses the Pico link. All IO is injected so the logic is host-testable.
 #ifndef KILNCTL_UPDATE_INSTALL_RECORD_H
 #define KILNCTL_UPDATE_INSTALL_RECORD_H
 
@@ -31,9 +36,11 @@ extern "C" {
 #define UPD_INST_SHA_LEN 32u
 #define UPD_INST_SEMVER_LEN 32u
 #define UPD_INST_REQ_SIZE 80u
+#define UPD_INST_MAX_ATTEMPTS 3u
 #define UPD_INST_RES_SIZE 48u
 
 typedef struct {
+    uint8_t attempts; // apply attempts already started for this request
     uint32_t image_length;
     uint8_t sha256[UPD_INST_SHA_LEN];
     char semver[UPD_INST_SEMVER_LEN]; // NUL terminated
@@ -55,6 +62,8 @@ typedef enum {
     UPD_INST_REASON_APPLY_FAILED,
     UPD_INST_REASON_NVS_UNAVAILABLE,
     UPD_INST_REASON_RESULT_WRITE_FAILED,
+    UPD_INST_REASON_ATTEMPTS_EXCEEDED,
+    UPD_INST_REASON_COUNTER_FAILED,
     UPD_INST_REASON_COUNT
 } update_install_reason_t;
 
@@ -81,6 +90,8 @@ typedef struct {
     int (*req_read)(void *ctx, uint8_t *buf, size_t cap, size_t *len);
     // Erases the request AND reads back that it is gone.
     int (*req_clear)(void *ctx);
+    // Rewrites the request blob AND reads it back equal (attempt counter bump).
+    int (*req_write)(void *ctx, const uint8_t *buf, size_t len);
     // Writes the result blob AND reads it back equal.
     int (*res_write)(void *ctx, const uint8_t *buf, size_t len);
     // Staged image as the stage header describes it. Returns true only when the
@@ -92,7 +103,7 @@ typedef struct {
 
 typedef enum {
     UPD_INST_BOOT_NO_REQUEST = 0, // nothing to do
-    UPD_INST_BOOT_STARTED,        // apply task started; result is written later
+    UPD_INST_BOOT_STARTED,        // apply task started; pre-boot hook clears the request
     UPD_INST_BOOT_REFUSED,        // failure recorded, stay in recovery
 } update_install_boot_outcome_t;
 
