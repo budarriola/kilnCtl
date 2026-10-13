@@ -169,8 +169,8 @@ only the first case matters. A release build is unaffected
 
 ### INFO-2: the short-hash fallback is refused as `bad_version`, not by the dirty rule
 
-When the describe form is too long, `PROJECT_VER` becomes `abc1234-dirty` (or
-`abc1234`). Neither is semver, so an upload is refused as `bad_version` before
+When the describe form is too long, `PROJECT_VER` becomes `<shorthash>-dirty` (or
+`<shorthash>`). Neither is semver, so an upload is refused as `bad_version` before
 the dirty rule sees it. Fails closed; the operator message names the wrong
 reason.
 
