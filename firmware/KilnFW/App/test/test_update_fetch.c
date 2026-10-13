@@ -400,6 +400,7 @@ static void test_heap_admission_updfx2(void)
 }
 
 static void set_dma_low(void) { g_fake_heap_dma_free_internal = 551; }
+static void set_dma_ok(void) { g_fake_heap_dma_free_internal = 100000; }
 static void set_heap_28000(void) { g_fake_heap_free_internal = 28000; }
 static void set_heap_25000(void) { g_fake_heap_free_internal = 25000; }
 static void set_heap_30311(void) { g_fake_heap_free_internal = 30311; }
@@ -453,7 +454,7 @@ static void test_heap_admission_updfx3(void)
     fixture(g_sha_hex, IMG_LEN);
     g_app_route->status = 302;
     g_app_route->location = HOP_URL;
-    add_route(HOP_URL, g_img, IMG_LEN);
+    add_route(HOP_URL, g_img, IMG_LEN)->on_open = set_dma_ok;  // restored after the hop admission, so only that gate sees it low
     g_fake_heap_free_internal = 30311;
     g_app_route->on_open = set_dma_low;
     run_job_and_result("/api/update/download");
