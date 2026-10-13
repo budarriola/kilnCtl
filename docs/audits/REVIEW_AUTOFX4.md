@@ -136,3 +136,17 @@ Commands (from the worktree):
 powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset pytest -PresetArg tests/test_mcp_server_update_install.py -Mutations py.json
 powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset check -PresetArg firmware/KilnFW_recovery/main/check_recovery_status_fragments.ps1 -Mutations ck.json
 ```
+
+## Fix status
+
+Fixed in `60c7ea992` and `4b8150857` (rebased SHAs listed in the landing note below if they changed).
+
+- LOW-1 (no identity): the install result record now carries the first 4 bytes of the staged sha256 (8 hex chars, `id` in `GET /api/update/status` `last_install` and in the recovery fragment), stored in the previously unused result-blob bytes at offset 8+32. Fragment worst case is 196 B of 200 B, `check_recovery_status_fragments.ps1` passes. No new allocations. The tool ignores a non-zero id that differs from the staged image's, and counts a matching id as new only if it differs from the id seen before the POST. An all-zero or absent id falls back to the old logic.
+- LOW-2 (lost record): after expiry or MCP restart an unconfirmed call answers `UNKNOWN: cannot confirm`, naming the 900 s window and `update_status`, never a REFUSED with a confirm=True hint.
+- LOW-3 (slack): `UptimeSlackTests` pins the truncation slack; `_UPTIME_SLACK_S = 0.5` now fails it (was P8 MISSED).
+- INFO-2: the in-loop uptime read is charged to the deadline (`DeadlineChargeTests`).
+- INFO-3: SHA in REVIEW_AUTOFX3 corrected to `55718f506`.
+- Bench follow-up (benchupd4/5 UNKNOWN at about 231-235 s uptime): new background twin `update_install_start`, polled with `bench_test_job_status`, wait bound 600 s (about 2.5x the observed return). A 404 on `/api/update/status` while polling means the recovery image is still applying. Tool count 234 -> 235.
+
+Negtest (new mutants, all runs baseline pass, real tree unchanged): pytest 15/15 CAUGHT (all real `FAILED tests/...` assertions); kilnfw-host 9/9 CAUGHT on `update_install_record.c`, each a `FAIL test_update_install_record.c:N` from a mutant that compiled; check preset 1/1 CAUGHT (fragment growth, `worst case 225 B does not fit frag[200]`).
+Not covered: INFO-1 (`#if 0` supersede, C4) is unchanged and still open.
