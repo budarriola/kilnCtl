@@ -1,0 +1,203 @@
+// update_install_record.c -- see update_install_record.h.
+#include "update_install_record.h"
+
+#include <string.h>
+
+#include "ota_image_crc.h"
+
+#define REQ_MAGIC 0x31524955u // "UIR1"
+#define RES_MAGIC 0x31535255u // "URS1"
+#define REC_VERSION 1u
+
+static void put_u32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t get_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool semver_terminated(const char *s)
+{
+    return memchr(s, '\0', UPD_INST_SEMVER_LEN) != NULL;
+}
+
+size_t update_install_req_encode(const update_install_req_t *r, uint8_t out[UPD_INST_REQ_SIZE])
+{
+    if (!r || !out || !semver_terminated(r->semver) || r->image_length == 0) {
+        return 0;
+    }
+    memset(out, 0, UPD_INST_REQ_SIZE);
+    put_u32(out, REQ_MAGIC);
+    out[4] = (uint8_t)REC_VERSION;
+    put_u32(out + 8, r->image_length);
+    memcpy(out + 12, r->sha256, UPD_INST_SHA_LEN);
+    memcpy(out + 44, r->semver, UPD_INST_SEMVER_LEN);
+    put_u32(out + UPD_INST_REQ_SIZE - 4, ota_image_crc32(out, UPD_INST_REQ_SIZE - 4));
+    return UPD_INST_REQ_SIZE;
+}
+
+bool update_install_req_decode(const uint8_t *buf, size_t len, update_install_req_t *out)
+{
+    if (!buf || !out || len != UPD_INST_REQ_SIZE) {
+        return false;
+    }
+    if (get_u32(buf) != REQ_MAGIC || buf[4] != REC_VERSION) {
+        return false;
+    }
+    if (get_u32(buf + UPD_INST_REQ_SIZE - 4) != ota_image_crc32(buf, UPD_INST_REQ_SIZE - 4)) {
+        return false;
+    }
+    update_install_req_t r;
+    memset(&r, 0, sizeof(r));
+    r.image_length = get_u32(buf + 8);
+    memcpy(r.sha256, buf + 12, UPD_INST_SHA_LEN);
+    memcpy(r.semver, buf + 44, UPD_INST_SEMVER_LEN);
+    if (r.image_length == 0 || !semver_terminated(r.semver)) {
+        return false;
+    }
+    *out = r;
+    return true;
+}
+
+size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_INST_RES_SIZE])
+{
+    if (!r || !out || !semver_terminated(r->semver)) {
+        return 0;
+    }
+    memset(out, 0, UPD_INST_RES_SIZE);
+    put_u32(out, RES_MAGIC);
+    out[4] = (uint8_t)REC_VERSION;
+    out[5] = r->code;
+    out[6] = r->reason;
+    memcpy(out + 8, r->semver, UPD_INST_SEMVER_LEN);
+    put_u32(out + UPD_INST_RES_SIZE - 4, ota_image_crc32(out, UPD_INST_RES_SIZE - 4));
+    return UPD_INST_RES_SIZE;
+}
+
+bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_res_t *out)
+{
+    if (!buf || !out || len != UPD_INST_RES_SIZE) {
+        return false;
+    }
+    if (get_u32(buf) != RES_MAGIC || buf[4] != REC_VERSION) {
+        return false;
+    }
+    if (get_u32(buf + UPD_INST_RES_SIZE - 4) != ota_image_crc32(buf, UPD_INST_RES_SIZE - 4)) {
+        return false;
+    }
+    update_install_res_t r;
+    memset(&r, 0, sizeof(r));
+    r.code = buf[5];
+    r.reason = buf[6];
+    memcpy(r.semver, buf + 8, UPD_INST_SEMVER_LEN);
+    if (r.code > UPD_INST_RES_FAIL || r.reason >= UPD_INST_REASON_COUNT || !semver_terminated(r.semver)) {
+        return false;
+    }
+    *out = r;
+    return true;
+}
+
+const char *update_install_reason_name(uint8_t reason)
+{
+    static const char *const names[UPD_INST_REASON_COUNT] = {
+        "none",         "record_bad",   "clear_failed",    "stage_not_ready",   "size_mismatch",
+        "sha_mismatch", "apply_failed", "nvs_unavailable", "result_write_failed",
+    };
+    return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
+}
+
+const char *update_install_code_name(uint8_t code)
+{
+    return code == UPD_INST_RES_OK ? "ok" : code == UPD_INST_RES_FAIL ? "fail" : "none";
+}
+
+int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
+                                 const char *semver)
+{
+    if (!ops || !ops->res_write) {
+        return -1;
+    }
+    update_install_res_t r;
+    memset(&r, 0, sizeof(r));
+    r.code = code;
+    r.reason = reason;
+    if (semver) {
+        strncpy(r.semver, semver, UPD_INST_SEMVER_LEN - 1);
+    }
+    uint8_t blob[UPD_INST_RES_SIZE];
+    size_t n = update_install_res_encode(&r, blob);
+    if (n == 0) {
+        return -1;
+    }
+    return ops->res_write(ops->ctx, blob, n);
+}
+
+static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uint8_t reason,
+                                            const char *semver, update_install_res_t *res_out)
+{
+    if (res_out) {
+        memset(res_out, 0, sizeof(*res_out));
+        res_out->code = UPD_INST_RES_FAIL;
+        res_out->reason = reason;
+        if (semver) {
+            strncpy(res_out->semver, semver, UPD_INST_SEMVER_LEN - 1);
+        }
+    }
+    (void)update_install_record_result(ops, UPD_INST_RES_FAIL, reason, semver);
+    return UPD_INST_BOOT_REFUSED;
+}
+
+update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t *ops,
+                                                      update_install_res_t *res_out)
+{
+    if (res_out) {
+        memset(res_out, 0, sizeof(*res_out));
+    }
+    if (!ops || !ops->req_read || !ops->req_clear || !ops->res_write || !ops->stage_verified ||
+        !ops->apply_start) {
+        return UPD_INST_BOOT_NO_REQUEST;
+    }
+    uint8_t blob[UPD_INST_REQ_SIZE + 16];
+    size_t len = 0;
+    int rr = ops->req_read(ops->ctx, blob, sizeof(blob), &len);
+    if (rr == 1) {
+        return UPD_INST_BOOT_NO_REQUEST;
+    }
+    if (rr < 0) {
+        return refuse(ops, UPD_INST_REASON_NVS_UNAVAILABLE, NULL, res_out);
+    }
+    // Clear FIRST, read back, whether or not the record is usable: a request
+    // that cannot be removed must never reach the apply.
+    if (ops->req_clear(ops->ctx) != 0) {
+        return refuse(ops, UPD_INST_REASON_CLEAR_FAILED, NULL, res_out);
+    }
+    update_install_req_t req;
+    if (!update_install_req_decode(blob, len, &req)) {
+        return refuse(ops, UPD_INST_REASON_RECORD_BAD, NULL, res_out);
+    }
+    uint32_t stage_len = 0;
+    uint8_t stage_sha[UPD_INST_SHA_LEN];
+    if (!ops->stage_verified(ops->ctx, &stage_len, stage_sha)) {
+        return refuse(ops, UPD_INST_REASON_STAGE_NOT_READY, req.semver, res_out);
+    }
+    if (stage_len != req.image_length) {
+        return refuse(ops, UPD_INST_REASON_SIZE_MISMATCH, req.semver, res_out);
+    }
+    if (memcmp(stage_sha, req.sha256, UPD_INST_SHA_LEN) != 0) {
+        return refuse(ops, UPD_INST_REASON_SHA_MISMATCH, req.semver, res_out);
+    }
+    if (ops->apply_start(ops->ctx) != 0) {
+        return refuse(ops, UPD_INST_REASON_APPLY_FAILED, req.semver, res_out);
+    }
+    if (res_out) {
+        res_out->code = UPD_INST_RES_NONE;
+        strncpy(res_out->semver, req.semver, UPD_INST_SEMVER_LEN - 1);
+    }
+    return UPD_INST_BOOT_STARTED;
+}

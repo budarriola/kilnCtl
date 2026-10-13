@@ -22,6 +22,7 @@ void run_test_sim_mistune(void);
 void run_test_sim_factorial_design(void);
 void run_test_ota_auth(void);
 void run_test_login_backoff(void);
+void run_test_update_install_record(void);
 void run_test_update_semver(void);       // GITHUB_RELEASE_UPDATE_PLAN.md update/* (WP3)
 void run_test_update_stage_header(void);
 void run_test_update_policy(void);
@@ -163,6 +164,7 @@ int main(void)
     run_test_sim_factorial_design();
     run_test_ota_auth();
     run_test_login_backoff();
+    run_test_update_install_record();
     run_test_update_semver();
     run_test_update_stage_header();
     run_test_update_policy();
