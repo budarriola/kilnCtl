@@ -953,6 +953,18 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
         try { $previousBuiltHash = ([System.IO.File]::ReadAllText($SdkconfigHashMarker, [System.Text.Encoding]::UTF8)).Trim() } catch { $previousBuiltHash = $null }
     }
     $sdkconfigStale = ($previousBuiltHash -ne $mainHash)
+    # KILNCTL_RELEASE_VERSION is cached at configure time (KILN_CONFIGURED_RELEASE_VERSION) and a changed
+    # env var does not make idf.py rerun cmake; gen_build_info.cmake is FATAL on a mismatch in either
+    # direction (REVIEW_STAGEVERFX MED-1). Reconfigure when the cached value differs from the env.
+    $wantRelVer = if ($env:KILNCTL_RELEASE_VERSION) { $env:KILNCTL_RELEASE_VERSION } else { "" }
+    if (Test-Path -LiteralPath $CMakeCacheFile) {
+        $relMatch = Select-String -LiteralPath $CMakeCacheFile -Pattern '^KILN_CONFIGURED_RELEASE_VERSION:[A-Z]+=(.*)$' | Select-Object -First 1
+        $cachedRelVer = if ($relMatch) { $relMatch.Matches[0].Groups[1].Value.Trim() } else { "" }
+        if ($cachedRelVer -ne $wantRelVer) {
+            Write-Host "STALE CONFIG: build directory was configured with KILNCTL_RELEASE_VERSION='$cachedRelVer' but the environment has '$wantRelVer'; running idf.py reconfigure." -ForegroundColor Yellow
+            $sdkconfigStale = $true
+        }
+    }
     if ($sdkconfigStale -and (Test-Path -LiteralPath $CMakeCacheFile)) {
         $prevDisplay = if ($previousBuiltHash) { $previousBuiltHash } else { "(none recorded -- first run under this guard, or a build directory from before it existed)" }
         Write-Host "STALE CONFIG: build directory at $WorktreePath was last reconfigured against sdkconfig hash $prevDisplay; the sdkconfig just copied in hashes $mainHash. Running 'idf.py reconfigure' before building so cached CMake/Kconfig state (e.g. a component's compile-time CONFIG_* branch) cannot disagree with the config this run verified." -ForegroundColor Yellow

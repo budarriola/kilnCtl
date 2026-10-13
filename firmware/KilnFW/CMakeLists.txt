@@ -30,9 +30,9 @@ if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" 
         message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='$ENV{KILNCTL_RELEASE_VERSION}' is ${_kiln_rv_len} "
                             "characters; esp_app_desc_t.version holds at most 31.")
     endif()
-    if(NOT "$ENV{KILNCTL_RELEASE_VERSION}" MATCHES "^[vV]?[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$")
+    if(NOT "$ENV{KILNCTL_RELEASE_VERSION}" MATCHES "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$")
         message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='$ENV{KILNCTL_RELEASE_VERSION}' is not a semver "
-                            "([v]MAJOR.MINOR.PATCH[-prerelease]).")
+                            "(vMAJOR.MINOR.PATCH[-prerelease], lowercase v, no leading zeros, as gen_build_info.cmake requires).")
     endif()
     set(PROJECT_VER "$ENV{KILNCTL_RELEASE_VERSION}")
     set(KILN_CONFIGURED_RELEASE_VERSION "$ENV{KILNCTL_RELEASE_VERSION}")

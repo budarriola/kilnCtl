@@ -294,6 +294,15 @@ static update_stage_err_t flush_head(update_stage_t *st)
         update_semver_t dv;
         char dn[STAGE_SEMVER_FIELD_LEN + 1];
         desc_version_normalise(v, dn);
+        // The dirty fact comes from the descriptor, not from whether the uploader declared a version
+        // (REVIEW_STAGEVERFX LOW-1): a declared "-dirty" image is refused exactly like an undeclared one.
+        dirty = strlen(dn) < strlen(strip_v(v));
+        {
+            const size_t dl = strlen(dn);
+            if (dl >= 6u && ci_dirty_suffix(dn + dl - 6u)) {
+                return UPDATE_STAGE_ERR_BAD_VERSION;
+            }
+        }
         if (st->gate != NULL && update_semver_parse(dn, &dv) && strcmp(dn, st->semver) != 0) {
             return UPDATE_STAGE_ERR_VERSION_MISMATCH;
         }

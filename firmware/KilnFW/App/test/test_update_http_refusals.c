@@ -305,6 +305,28 @@ static void test_stage_routes_extra(void)
     CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "refused downgrade staged nothing");
     (void)e0;
     expect_claim_balanced("downgrade upload");
+    // STAGEVERFX2 LOW-2: a -dirty descriptor (upgrade, so only the dirty rule can refuse) reaches the policy
+    // through update_http's gate as dirty=true and is answered refuse_dirty, forced or not.
+    {
+        static uint8_t dirty_img[IMG_LEN];
+        memcpy(dirty_img, g_img, IMG_LEN);
+        memset(dirty_img + 48, 0, 32);
+        memcpy(dirty_img + 48, "v1.2.3-dirty", 12);
+        upload(dirty_img, IMG_LEN);
+        code = run_upload();
+        CHECK(code == 409 && resp_has("refuse_dirty"), "undeclared -dirty upload -> 409 refuse_dirty");
+        CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "refused dirty upload staged nothing");
+        upload(dirty_img, IMG_LEN);
+        fr_req_header(&g_rq, "X-Stage-Force", "1");
+        code = run_upload();
+        CHECK(code == 409 && resp_has("refuse_dirty"), "forced -dirty upload still refused (force cannot override)");
+        upload(dirty_img, IMG_LEN);
+        fr_req_header(&g_rq, "X-Stage-Version", "1.2.3");
+        code = run_upload();
+        CHECK(code == 409 && resp_has("refuse_dirty"), "declared version does not launder a -dirty descriptor");
+        CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "dirty uploads staged nothing");
+        expect_claim_balanced("dirty upload");
+    }
 
     // status GET reports a staged image, and clear removes it
     upload(g_img, IMG_LEN);

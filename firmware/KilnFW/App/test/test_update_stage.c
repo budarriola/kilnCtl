@@ -958,6 +958,25 @@ static void test_install_gate(void)
     make_image(30000, "v1.0.0-pre.3");
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty && strcmp(r.semver, "1.0.0-pre.3") == 0,
                "undeclared clean descriptor: not dirty");
+    // STAGEVERFX2 LOW-1: a DECLARED version derives dirty from the descriptor too.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3-dirty");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && r.calls == 1 &&
+                   strcmp(r.semver, "1.0.0-pre.3") == 0,
+               "declared, -dirty descriptor: staged by the stager, declared semver to the gate");
+    TEST_CHECK(r.dirty, "declared, -dirty descriptor: dirty flag set (declaring does not launder it)");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty,
+               "declared, clean descriptor: not dirty");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3-DIRTY");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3-DIRTY", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 &&
+                   !is_staged(),
+               "declared verbatim -DIRTY descriptor: refused before the gate, nothing staged");
     reset_board();
     memset(&r, 0, sizeof(r));
 
