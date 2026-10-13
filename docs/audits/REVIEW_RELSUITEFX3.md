@@ -147,3 +147,14 @@ table. Each CAUGHT log has a `FAILED tests/...` assertion line (test named).
 | M16 | pre-run update_status drops host | CAUGHT | test_d01_every_update_call_carries_the_pinned_host |
 
 M1 is CAUGHT only because the test fake returns a `str`; see MED-1.
+
+## Fix status
+
+Fixed in 62377b873 (cases_release.py, test_bench_test_cases_release.py).
+
+- MED-1 / LOW-1: `_pin_identity` pins the real `IPv4Address` through `mcp_server_aux._pin_host` (port kept). Test goes through the real `_board_identity_check`.
+- MED-2: only `error:` / `REFUSED` results mean the install never started; every other non-ok result polls for the reboot and skips cancel/clear. Tests for `UNKNOWN`, `FAILED: install recorded a failure`, `FAILED: install refused or lost`.
+- LOW-2 (M14), LOW-3 (M11), INFO-2 (M3), INFO-3 (M15): tests added.
+- INFO-1: unreadable post-install fields give INCONCLUSIVE.
+
+Negtest (`negtest.ps1 -Preset pytest`, 12 mutations, all CAUGHT with a `FAILED tests/...` assertion line, baseline passed, real tree unchanged): pin write removed, pin as `str(ip)` without port, pin only if str, UNKNOWN treated as pre-POST, FAILED treated as pre-POST, non-ok no longer may-have-run, non-ok reboot gives PASS, deadline 3000 s, stage-empty drops ok prefix, post-install judge FAIL ignored, missing fw_build refusal removed, post-install inconclusive ignored.
