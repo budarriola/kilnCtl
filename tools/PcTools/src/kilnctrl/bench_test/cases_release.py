@@ -880,6 +880,8 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
         # Only error:/REFUSED precede the install POST. UNKNOWN, FAILED: install
         # recorded a failure and FAILED: install refused or lost all come after
         # it was sent, so the recovery image may be applying: never clean up.
+        # BUSY (another confirmed install call is in flight) also falls through to may-have-run on
+        # purpose: that call's install owns the stage, so this one must not cancel or clear it.
         if str(res).startswith(("error: could not read GET", "REFUSED")) or re.match(
                 r"FAILED: install refused or lost: HTTP 4\d\d", str(res)):
             # Definite: the board answered the POST with a 4xx (or it was never sent).

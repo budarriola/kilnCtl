@@ -889,8 +889,9 @@ def parse_wifi_qr(text: str) -> Tuple[str, str]:
 
 
 # Where the recovery screen's own QR sits in a bench camera frame: the panel's
-# top-right corner, i.e. the upper-right quarter of the frame (bench aim
-# 2026-09-24: x ~820..1045 of 1280, y ~70..230 of 720). A foreign WIFI: code
+# top-right corner, i.e. the upper-right quarter of the frame (x >= 0.5*W,
+# y <= 0.5*H). FRAME_CORNERS puts the QR at about x 820..1045, y 118..327 of a
+# 1280x720 frame (computed from the corners; no real capture yet). A foreign WIFI: code
 # (phone, printout) elsewhere in the frame is ignored. Fractions (x0,y0,x1,y1).
 RECOVERY_QR_REGION = (0.5, 0.0, 1.0, 0.5)
 MAX_SSID_BYTES = 32

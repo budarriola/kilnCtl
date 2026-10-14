@@ -1069,8 +1069,10 @@ def test_install_without_pre_install_fw_build_is_inconclusive_and_never_installs
 
 @pytest.mark.parametrize("res", [
     "error: unexpected OSError: reset after the POST",
-    "FAILED: install refused or lost: HTTP 5",
+    "FAILED: install refused or lost: HTTP 500 internal error",
+    "FAILED: install refused or lost: HTTP 503 busy",
     "FAILED: install refused or lost: reply dropped",
+    "BUSY: another confirmed install call for this host is already in flight in this server (host=h)",
 ])
 def test_install_non_definite_error_is_may_have_run_and_never_cleans_up(res):
     """RELSUITEFX4 LOW-1/LOW-4: only a pre-POST error or a definite 4xx lets cleanup run."""

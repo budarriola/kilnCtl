@@ -205,10 +205,46 @@ static void test_lcd_source(const char *path)
         CHECK(chk != NULL && strstr(chk, "s_ready = false") != NULL, "failed draw clears s_ready");
         CHECK(chk != NULL && strstr(chk, "s_draw_failures++") != NULL, "failed draw is counted");
         CHECK(strstr(ds, "RLCD_BG_INVALID") != NULL, "screen has a 'record invalid' state");
-        CHECK(strstr(ds, "rlcd_qr_visible(") != NULL, "draw_status uses the shared QR visibility rule");
-        CHECK(strstr(ds, "rlcd_qr_draw_after_text(") != NULL, "draw_status orders the QR area by the policy");
+        // QR wiring (REVIEW_RECQRFX LOW-1/LOW-3): one call per phase, in order, and the text
+        // branch driven by the policy's text mode, never by a hand copy of the state flags.
+        const char *pre = strstr(ds, "rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT, draw_qr_area)");
+        const char *post = strstr(ds, "rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT, draw_qr_area)");
+        const char *first_text = strstr(ds, "draw_line(Y_TITLE");
+        const char *last_text = strstr(ds, "\"New password each boot\"");
+        const char *starting = strstr(ds, "\"Network: starting...\"");
+        CHECK(pre != NULL && strstr(pre + 1, "rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT") == NULL,
+              "draw_status hides the QR area exactly once, through the policy");
+        CHECK(post != NULL && strstr(post + 1, "rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT") == NULL,
+              "draw_status paints the QR exactly once, through the policy");
+        CHECK(pre != NULL && first_text != NULL && pre < first_text, "the blank QR area is painted before any text line");
+        CHECK(post != NULL && last_text != NULL && starting != NULL && post > last_text && post > starting,
+              "the QR symbol is painted after every text branch");
+        CHECK(strstr(ds, "bool show_qr = qr_visible_now();") != NULL, "draw_status takes QR visibility from the one helper");
+        CHECK(strstr(ds, "rlcd_text_mode_t mode = text_mode_now();") != NULL, "draw_status takes the text mode from the one helper");
+        CHECK(strstr(ds, "mode == RLCD_TEXT_ERROR") != NULL && strstr(ds, "mode == RLCD_TEXT_NET_FAIL") != NULL &&
+                  strstr(ds, "mode == RLCD_TEXT_NET_SET") != NULL,
+              "the text branches are selected by the text mode");
+        CHECK(strstr(ds, "s_net_set") == NULL && strstr(ds, "s_net_none") == NULL && strstr(ds, "if (s_net_storage_fail") == NULL &&
+                  strstr(ds, "s_err_head[0] ||") == NULL && strstr(ds, "|| s_ap_down") == NULL,
+              "the text branch keeps no hand copy of the QR visibility flags");
         free(ds);
     }
+    char *tm = fn_body(src, "static rlcd_text_mode_t text_mode_now(void)");
+    CHECK(tm != NULL && strstr(tm, "rlcd_text_mode(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0, s_net_storage_fail != 0,") != NULL &&
+              strstr(tm, "s_net_set != 0)") != NULL,
+          "text_mode_now feeds every state flag to the policy");
+    free(tm);
+    char *qv = fn_body(src, "static bool qr_visible_now(void)");
+    CHECK(qv != NULL && strstr(qv, "rlcd_qr_visible(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0, s_net_storage_fail != 0,") != NULL &&
+              strstr(qv, "s_net_set != 0, s_qr_size)") != NULL,
+          "qr_visible_now feeds every state flag and the symbol size to the policy");
+    free(qv);
+    char *raw = fn_body(src, "static esp_err_t draw_line_raw(");
+    CHECK(raw != NULL && strstr(raw, "rlcd_band_width(y, h, qr_visible_now(), PANEL_W, RQR_AREA_PX)") != NULL &&
+              strstr(raw, "set_window(0, y, w - 1, y + h - 1)") != NULL && strstr(raw, "recovery_text_scanline(text, scale, row, fg, bg, w, s_line)") != NULL &&
+              strstr(raw, "send_data(s_line, (size_t)w * 2)") != NULL,
+          "text bands are clipped to the QR's left edge through the policy");
+    free(raw);
     char *burst = fn_body(src, "static bool lcd_bring_up_burst(void)");
     CHECK(burst != NULL, "burst function found");
     if (burst) {
@@ -400,8 +436,100 @@ static void test_qr_policy(void)
     CHECK(!rlcd_qr_visible(false, false, false, true, true, 29), "QR hidden on storage failure");
     CHECK(!rlcd_qr_visible(false, false, false, false, false, 29), "QR hidden before the network is set");
     CHECK(!rlcd_qr_visible(false, false, false, false, true, 0), "QR hidden when nothing was encoded");
-    CHECK(rlcd_qr_draw_after_text(true), "visible QR is painted after the text");
-    CHECK(!rlcd_qr_draw_after_text(false), "hidden area is painted before the text");
+}
+
+static int g_paint_calls, g_paint_last, g_paint_ret;
+
+static int fake_paint(bool show)
+{
+    g_paint_calls++;
+    g_paint_last = show ? 1 : 0;
+    return g_paint_ret;
+}
+
+// Exhaustive: the text mode and the QR visibility over every state, against a
+// reference written out independently of the header.
+static void test_text_mode_and_qr_exhaustive(void)
+{
+    int bad_mode = 0, bad_vis = 0, n = 0;
+    for (int m = 0; m < 32; m++) {
+        bool err = m & 1, down = m & 2, none = m & 4, fail = m & 8, set = m & 16;
+        rlcd_text_mode_t ref;
+        if (err || down) {
+            ref = RLCD_TEXT_ERROR;
+        } else if (none || fail) {
+            ref = RLCD_TEXT_NET_FAIL;
+        } else if (set) {
+            ref = RLCD_TEXT_NET_SET;
+        } else {
+            ref = RLCD_TEXT_STARTING;
+        }
+        for (int qr = 0; qr <= 29; qr += 29) {
+            n++;
+            if (rlcd_text_mode(err, down, none, fail, set) != ref) {
+                bad_mode++;
+            }
+            bool vis_ref = (ref == RLCD_TEXT_NET_SET) && qr > 0;
+            if (rlcd_qr_visible(err, down, none, fail, set, qr) != vis_ref) {
+                bad_vis++;
+            }
+        }
+    }
+    CHECK(n == 64, "every state combination was visited");
+    CHECK(bad_mode == 0, "text mode matches the reference for every state");
+    CHECK(bad_vis == 0, "QR visible iff the passphrase text mode is shown and a symbol exists");
+    CHECK(rlcd_text_mode(false, true, false, false, true) == RLCD_TEXT_ERROR, "AP down overrides a set network");
+    CHECK(rlcd_text_mode(true, false, false, false, true) == RLCD_TEXT_ERROR, "error banner overrides a set network");
+    CHECK(rlcd_text_mode(false, false, true, false, true) == RLCD_TEXT_NET_FAIL, "no network is a failure text");
+    CHECK(rlcd_text_mode(false, false, false, false, false) == RLCD_TEXT_STARTING, "unknown state is starting");
+}
+
+// The show/hide wiring of the QR area (what draw_status() calls twice).
+static void test_qr_paint_phases(void)
+{
+    g_paint_ret = 0;
+    g_paint_calls = 0;
+    CHECK(rlcd_qr_paint(true, RLCD_QR_BEFORE_TEXT, fake_paint) == 0 && g_paint_calls == 0,
+          "visible QR: nothing painted before the text");
+    CHECK(rlcd_qr_paint(true, RLCD_QR_AFTER_TEXT, fake_paint) == 0 && g_paint_calls == 1 && g_paint_last == 1,
+          "visible QR: the symbol is painted after the text");
+    g_paint_calls = 0;
+    CHECK(rlcd_qr_paint(false, RLCD_QR_BEFORE_TEXT, fake_paint) == 0 && g_paint_calls == 1 && g_paint_last == 0,
+          "hidden QR: the blank area is painted before the text (stale symbol cleared)");
+    g_paint_calls = 0;
+    CHECK(rlcd_qr_paint(false, RLCD_QR_AFTER_TEXT, fake_paint) == 0 && g_paint_calls == 0,
+          "hidden QR: the symbol is never painted (AP down / error banner / no network)");
+    // A failed paint is counted, in the phase that ran.
+    g_paint_ret = 7;
+    CHECK(rlcd_qr_paint(true, RLCD_QR_AFTER_TEXT, fake_paint) == 1, "a failed symbol paint counts as one failed line");
+    CHECK(rlcd_qr_paint(false, RLCD_QR_BEFORE_TEXT, fake_paint) == 1, "a failed blank paint counts as one failed line");
+    // Across every state, a symbol (paint(true)) is only ever painted for a visible state.
+    int shown_while_hidden = 0;
+    for (int m = 0; m < 32; m++) {
+        bool vis = rlcd_qr_visible(m & 1, m & 2, m & 4, m & 8, m & 16, 29);
+        g_paint_ret = 0;
+        g_paint_calls = 0;
+        g_paint_last = -1;
+        (void)rlcd_qr_paint(vis, RLCD_QR_BEFORE_TEXT, fake_paint);
+        (void)rlcd_qr_paint(vis, RLCD_QR_AFTER_TEXT, fake_paint);
+        if (g_paint_calls != 1 || g_paint_last != (vis ? 1 : 0)) {
+            shown_while_hidden++;
+        }
+    }
+    CHECK(shown_while_hidden == 0, "exactly one paint per draw, and the symbol only while visible");
+}
+
+static void test_band_width(void)
+{
+    // Rows reaching into the QR square are clipped only while it is visible.
+    CHECK(rlcd_band_width(104, 14, true, 480, 124) == 356, "relay band stops at the QR when it is visible");
+    CHECK(rlcd_band_width(50, 14, true, 480, 124) == 356, "boot-guard band stops at the QR when it is visible");
+    CHECK(rlcd_band_width(104, 14, false, 480, 124) == 480, "relay band is full width while the QR is hidden");
+    CHECK(rlcd_band_width(123, 14, true, 480, 124) == 356, "last QR row still clips a band that starts in it");
+    CHECK(rlcd_band_width(124, 14, true, 480, 124) == 480, "a band wholly below the QR square is full width");
+    CHECK(rlcd_band_width(126, 14, true, 480, 124) == 480, "join row is full width");
+    CHECK(rlcd_band_width(290, 14, true, 480, 124) == 480, "note row is full width");
+    CHECK(rlcd_band_width(4, 21, true, 480, 124) == 356, "title band is clipped");
 }
 
 int main(int argc, char **argv)
@@ -409,6 +537,9 @@ int main(int argc, char **argv)
     test_schedule();
     test_classify();
     test_qr_policy();
+    test_text_mode_and_qr_exhaustive();
+    test_qr_paint_phases();
+    test_band_width();
     if (argc < 3) {
         fprintf(stderr, "usage: %s <recovery_lcd.c> <recovery_http.c>\n", argv[0]);
         return 2;

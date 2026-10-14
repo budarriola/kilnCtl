@@ -457,3 +457,61 @@ def test_zxing_dependency_floor_covers_the_writer_api():
 
     m = _re.search(r'"zxing-cpp>=(\d+)\.(\d+)', text)
     assert m and (int(m.group(1)), int(m.group(2))) >= (3, 0)
+
+
+# --- recovery QR region filter, end to end through the real decoder ------------
+
+def _paste_decoy(img, payload, x0, y0, module=3, quiet=4):
+    """Paste a QR (light quiet zone) with its top-left at frame (x0, y0)."""
+    import zxingcpp
+
+    bc = zxingcpp.create_barcode(payload, zxingcpp.BarcodeFormat.QRCode, ec_level="L")
+    mods = np.asarray(zxingcpp.write_barcode_to_image(bc, add_quiet_zones=False)) > 127
+    n = mods.shape[0]
+    full = np.ones((n + 2 * quiet, n + 2 * quiet), dtype=bool)
+    full[quiet:quiet + n, quiet:quiet + n] = mods
+    px = np.kron(full, np.ones((module, module)))
+    h, w = px.shape
+    out = img.copy()
+    out[y0:y0 + h, x0:x0 + w, :] = np.where(px > 0, 225.0, 30.0)[:, :, None]
+    return out, w, h
+
+
+def _blank_frame():
+    return np.full((FRAME_H, FRAME_W, 3), 5.0)
+
+
+def test_region_ignores_a_wifi_code_outside_the_quarter():
+    pw = "23456789ABCD"
+    payload = wifi_payload(SSID, pw)
+    # lower-left, upper-left and lower-right are all outside (0.5,0,1,0.5).
+    for x0, y0 in ((100, 500), (100, 20), (1000, 500)):
+        img, _w, _h = _paste_decoy(_blank_frame(), payload, x0, y0)
+        with pytest.raises(r.ReadError):
+            r.read_recovery_qr(img)
+    img, _w, _h = _paste_decoy(_blank_frame(), payload, 900, 20)
+    assert r.read_recovery_qr(img).passphrases == [pw]
+
+
+def test_region_y_bound_is_half_the_frame_height():
+    pw = "23456789ABCD"
+    payload = wifi_payload(SSID, pw)
+    _img, _w, h = _paste_decoy(_blank_frame(), payload, 900, 0)
+    ok_y = int(FRAME_H * 0.5 - h / 2) - 20      # symbol centre well above 0.5*H
+    bad_y = int(FRAME_H * 0.5 - h / 2) + 20     # symbol centre well below 0.5*H
+    img, _w, _h = _paste_decoy(_blank_frame(), payload, 900, ok_y)
+    assert r.read_recovery_qr(img).passphrases == [pw]
+    img, _w, _h = _paste_decoy(_blank_frame(), payload, 900, bad_y)
+    with pytest.raises(r.ReadError):
+        r.read_recovery_qr(img)
+
+
+def test_region_applies_to_upscaled_retries():
+    pw = "23456789ABCD"
+    payload = wifi_payload(SSID, pw)
+    # 1 px modules: too small for the raw frame, found only after an upscale.
+    inside, _w, _h = _paste_decoy(_blank_frame(), payload, 900, 20, module=1)
+    outside, _w, _h = _paste_decoy(_blank_frame(), payload, 100, 500, module=1)
+    assert r.read_recovery_qr(inside).passphrases == [pw]
+    with pytest.raises(r.ReadError):
+        r.read_recovery_qr(outside)

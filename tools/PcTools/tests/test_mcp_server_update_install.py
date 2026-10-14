@@ -544,6 +544,64 @@ class RecoveryApplyingTests(_Base):
         self.assertIn("WITHOUT the install route", out)
         self.assertNotIn("recovery image is still applying", out)
 
+    def test_app_that_answers_between_last_poll_and_probe_is_ok_not_a_downgrade(self):
+        """UPDLOWFX LOW-3: a good install landing right after the last poll must not read as a downgrade."""
+        e404 = uhc.UpdateHttpError("GET failed: HTTP 404", 404, "not found")
+        t0 = self.clock.t
+
+        def status(host, timeout=8.0):
+            if self.clock.t > t0 + 60:  # only the post-loop re-read runs past the deadline
+                return _ok()
+            if self.clock.t < t0 + 3:
+                return _st()
+            raise e404
+
+        with mock.patch.object(uhc, "get_install_status", side_effect=status),              mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertNotIn("downgrade", out)
+
+    def test_tail_reads_are_short_and_bounded(self):
+        """UPDLOWFX LOW-3: the post-loop probe and re-read each use the short timeout."""
+        e404 = uhc.UpdateHttpError("GET failed: HTTP 404", 404, "not found")
+        seen = []
+
+        def status(host, timeout=8.0):
+            seen.append(timeout)
+            if len(seen) == 1:
+                return _st()
+            raise e404
+
+        probes = []
+        orig = msu._read_uptime
+        with mock.patch.object(uhc, "get_install_status", side_effect=status),              mock.patch.object(msu, "_read_uptime", side_effect=lambda h, timeout=5.0: probes.append(timeout) or orig(h, timeout)),              mock.patch.object(uhc, "start_install", return_value={}):
+            msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertEqual(probes[-1], msu._TAIL_PROBE_S)
+        self.assertEqual(seen[-1], msu._TAIL_PROBE_S)
+        self.assertLessEqual(msu._TAIL_PROBE_S, 3.0)
+
+    def test_default_wait_leaves_margin_over_the_bench_return_time(self):
+        """UPDLOWFX LOW-3: the app came back at ~231-235 s after the POST, 15 s of it spent in the settle sleep."""
+        import inspect
+        default = inspect.signature(msu.update_install_staged).parameters["wait_s"].default
+        self.assertGreaterEqual(default, 265.0)
+        self.assertLessEqual(default, msu._SYNC_WAIT_CAP_S)
+
+    def test_unreadable_install_record_is_unknown_not_ok(self):
+        """UPDLOWFX LOW-2."""
+        st = _st(staged=False, state="unreadable", code="none")
+        with mock.patch.object(uhc, "get_install_status", return_value=st),              mock.patch.object(uhc, "start_install") as post:
+            out = msu.update_install_staged(confirm=False)
+        post.assert_not_called()
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("unreadable", out)
+        self.assertNotIn("ok - nothing", out)
+
+    def test_no_record_and_nothing_staged_is_still_plain_ok(self):
+        with mock.patch.object(uhc, "get_install_status", return_value=_st(staged=False)):
+            out = msu.update_install_staged(confirm=False)
+        self.assertTrue(out.startswith("ok - nothing staged"), out)
+
 
 class FlightAndStaleTests(_Base):
     """AUTOFX5 LOW-2/3/4."""
@@ -555,7 +613,7 @@ class FlightAndStaleTests(_Base):
                  mock.patch.object(uhc, "start_install") as post:
                 out = msu.update_install_staged(confirm=True, wait_s=60)
             post.assert_not_called()
-            self.assertTrue(out.startswith("REFUSED") and "in flight" in out, out)
+            self.assertTrue(out.startswith("BUSY") and "in flight" in out, out)
         finally:
             msu._INSTALL_INFLIGHT.discard("h")
 
@@ -569,7 +627,7 @@ class FlightAndStaleTests(_Base):
         with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [_ok()] * 5),              mock.patch.object(uhc, "start_install", side_effect=post):
             msu.update_install_staged(confirm=True, wait_s=60)
         self.assertEqual(len(seen), 1)
-        self.assertTrue(seen[0].startswith("REFUSED") and "in flight" in seen[0], seen[0])
+        self.assertTrue(seen[0].startswith("BUSY") and "in flight" in seen[0], seen[0])
 
     def test_inflight_marker_is_released_after_success_and_failure(self):
         with mock.patch.object(uhc, "get_install_status", side_effect=[_st(), _ok()]), \
