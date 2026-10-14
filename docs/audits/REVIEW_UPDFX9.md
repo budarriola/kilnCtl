@@ -128,3 +128,13 @@ PcTools: 3 CAUGHT, 1 MISSED.
 - INFO-3: fixed: `test_refused_hop_prints_its_settle_details` (pytest) feeds `hop: "refused"`.
 - INFO-5: fixed: `test_start_dma_refusal_leaves_hop_none_updfx9` (a START refused on DMA keeps `"hop":"none"`) and a `start_free == BENCH_IDLE_FREE` assertion in `test_rtc_offset_persistent_alloc_updfx9` (pair 0's reading is what `start_free` reports).
 - INFO-4: unchanged (test-fake limits, no defect).
+
+## UPDLOWFX negtest results (2026-10-14)
+
+Every mutation compiled/ran and a test assertion failed (CAUGHT), real tree unchanged.
+
+kilnfw-host (`update_fetch`, `update_http_refusals`): settings always clears backoff (test_update_http_refusals.c:190), repo compare case-sensitive (:192), hop DMA refusal not recorded (test_update_fetch.c:413), START DMA refusal recorded as hop (:926), start_free from picked pair (:903).
+
+pytest: refused-hop settle detail, single-flight marker (added `test_marker_is_held_during_the_call_so_a_concurrent_call_is_refused` after the first run MISSED it), stale failure record, 404 probe, plain status read, post-POST exception wrapper, login wording, RL-D01 4xx regex, RL-D01 raised-unreadable FAIL, `install_non_ok`, dram_bss missing data section, both `is not None` ceilings: all CAUGHT.
+
+check_internal_alloc_allowlist.ps1: `strdup`, `#define` alias to malloc, `(malloc)(n)`, malloc in a `.inc`: all CAUGHT.
