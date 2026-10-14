@@ -36,6 +36,8 @@ JPEG), and `tools/negtest.ps1` (table at the end).
 
 ## LOW-1: the stack payload wipe can be optimised away and does not use the module's secure_zero
 
+> **Fixed:** `rqr_secure_zero()` (volatile store loop) now wipes `payload`, `tmp` and the overflow path; a source scan test and mutants `securezero_noop`/`payload_memset` pin it.
+
 `rqr_encode()` ends with `memset(payload, 0, sizeof(payload))` on a local that is dead right
 after. GCC at `-Os` (`CONFIG_COMPILER_OPTIMIZATION_SIZE=y`) is allowed to remove that store.
 `recovery_wifi.c` already uses a `secure_zero()` for the same reason. Impact is small (the same
@@ -46,12 +48,16 @@ wipe (share `secure_zero`) or note the limit in the header.
 
 ## LOW-2: app_main stack headroom with the encoder nested in not yet measured
 
+> **Fixed:** `CONFIG_ESP_MAIN_TASK_STACK_SIZE=4608` set in `sdkconfig.defaults` (+1024 B internal RAM over the 3584 B default); a test pins >= 4608. The real `app_main` high-water mark is still to be read on the next bench boot.
+
 The encoder (~400 B) runs nested in `app_main` under `start_softap()`. `CONFIG_ESP_MAIN_TASK_STACK_SIZE`
 is the IDF default (not set in `sdkconfig.defaults`). The commit reports image size only, not the
 `stack hwm: app_main min free` line `recovery_main.c` prints. Read that line on the next bench boot
 of this image; raise the main stack if it is under ~1 KB.
 
 ## LOW-3: the QR area truncates full-width fault bands at x=356
+
+> **Fixed:** the hidden (background) QR area is now painted BEFORE the text, so full-width fault bands paint over it; a visible symbol is still painted after (`rlcd_qr_draw_after_text`, host-tested).
 
 `draw_qr_area()` paints its 124x124 square after the text, including when hidden (solid background).
 The red `NVS UNAVAILABLE` / `BOOT GUARD RECORD INVALID` / `RELAY CTRL FAULT` bands in rows 50..121
@@ -61,12 +67,16 @@ rows that are not a fault band.
 
 ## LOW-4: show/hide logic has no test
 
+> **Fixed:** `rlcd_qr_visible()` in `recovery_lcd_policy.h` is the one predicate; `draw_status()` uses it; unit-tested per input plus source-wiring mutants (`qr_ignores_apdown`, `qr_handcopy`, ...).
+
 `show_qr` is a hand copy of the text branch condition in `draw_status()`, which no host test covers;
 `check_recovery_wifi_qr.ps1` builds only `recovery_wifi_qr.c` (negtest `lcd_show_ignores_ap_down`
 MISSED). It matches today. Moving the predicate into `recovery_lcd_policy.c` (already host-tested)
 and using it for both the text branch and the QR would keep them from drifting.
 
 ## LOW-5: recovery QR SSID trusted without a cross-check; reader test gaps; dependency floor
+
+> **Fixed (reader side):** QR must lie in the panel's top-right region (`RECOVERY_QR_REGION`), SSID non-empty and <= 32 bytes, multi-QR/empty-SSID/loose-length tests added (negtest CAUGHT), zxing-cpp floor raised to >=3.0. Cross-checking the QR SSID against the glyph SSID is not done (region filter only).
 
 (a) `read_recovery_qr()` accepts any single `WIFI:` code whose password matches the recovery
 alphabet, with whatever SSID it carries. The glyph reader already finds the SSID band; comparing
