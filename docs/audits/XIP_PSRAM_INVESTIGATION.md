@@ -1,10 +1,13 @@
 # XIP from PSRAM as an alternative to CONFIG_UART_ISR_IN_IRAM (investigation, 2026-10-13)
 
-Status: investigation only. Owner decision 2026-10-13: no build or sdkconfig
-change lands from this work, and the bench board was not touched. Every number
-below is a static link-map measurement from four target builds of origin/dev
-`7c5c63988` (worktree `C:\wt\xipinv_95fur3`, through
-`check_00_kilnfw_target_build.ps1`) unless it is marked as an estimate.
+Status: LANDED 2026-10-14 (owner decision "Finish trial, then land"). Variant C
+(`CONFIG_SPIRAM_XIP_FROM_PSRAM=y`, `CONFIG_UART_ISR_IN_IRAM` unset) is now in
+`sdkconfig.defaults`. Bench results (A vs C table, per-step verdicts) are in
+`docs/BENCH_TEST_LOG.md`, entry "xipland": idle internal free 30-34.7 KB to
+45.4-45.9 KB, GitHub fetch admitted with 0 link errors, boot time unchanged
+within 0.5 s. Not run: forced-panic coredump (no tool). The sections below are
+the original static investigation (origin/dev `7c5c63988`, worktree
+`C:\wt\xipinv_95fur3`).
 
 ## Question
 
