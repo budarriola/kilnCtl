@@ -559,6 +559,18 @@ class FlightAndStaleTests(_Base):
         finally:
             msu._INSTALL_INFLIGHT.discard("h")
 
+    def test_marker_is_held_during_the_call_so_a_concurrent_call_is_refused(self):
+        seen = []
+
+        def post(*a, **k):
+            seen.append(msu.update_install_staged(confirm=True, wait_s=60))
+            return {}
+
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [_ok()] * 5),              mock.patch.object(uhc, "start_install", side_effect=post):
+            msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith("REFUSED") and "in flight" in seen[0], seen[0])
+
     def test_inflight_marker_is_released_after_success_and_failure(self):
         with mock.patch.object(uhc, "get_install_status", side_effect=[_st(), _ok()]), \
              mock.patch.object(uhc, "start_install", return_value={}):
