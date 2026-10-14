@@ -523,6 +523,7 @@ class RecoveryApplyingTests(_Base):
 
     def test_only_404s_is_unknown_naming_the_recovery_image_and_the_background_tool(self):
         e404 = uhc.UpdateHttpError("GET failed: HTTP 404", 404, "not found")
+        self.uptime_readable = False  # the recovery image has no /api/status either
         with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [e404] * 300), \
              mock.patch.object(uhc, "start_install", return_value={}):
             out = msu.update_install_staged(confirm=True, wait_s=60)
@@ -530,6 +531,76 @@ class RecoveryApplyingTests(_Base):
         self.assertIn("recovery image is still applying", out)
         self.assertNotIn("never answered", out)
         self.assertIn("update_install_start", out)
+
+
+    def test_404_while_app_status_answers_is_an_app_without_the_install_route(self):
+        """AUTOFX5 LOW-1."""
+        e404 = uhc.UpdateHttpError("GET failed: HTTP 404", 404, "not found")
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [e404] * 300), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("WITHOUT the install route", out)
+        self.assertNotIn("recovery image is still applying", out)
+
+
+class FlightAndStaleTests(_Base):
+    """AUTOFX5 LOW-2/3/4."""
+
+    def test_second_confirmed_call_while_one_is_in_flight_is_refused(self):
+        msu._INSTALL_INFLIGHT.add("h")
+        try:
+            with mock.patch.object(uhc, "get_install_status", return_value=_st()), \
+                 mock.patch.object(uhc, "start_install") as post:
+                out = msu.update_install_staged(confirm=True, wait_s=60)
+            post.assert_not_called()
+            self.assertTrue(out.startswith("REFUSED") and "in flight" in out, out)
+        finally:
+            msu._INSTALL_INFLIGHT.discard("h")
+
+    def test_inflight_marker_is_released_after_success_and_failure(self):
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st(), _ok()]), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            self.assertTrue(msu.update_install_staged(confirm=True, wait_s=60).startswith("ok"))
+        self.assertEqual(msu._INSTALL_INFLIGHT, set())
+        with mock.patch.object(uhc, "get_install_status", return_value=_st()), \
+             mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("x", 409, "busy")):
+            msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertEqual(msu._INSTALL_INFLIGHT, set())
+
+    def test_stale_failure_record_does_not_end_a_lost_post_install(self):
+        stale = _st(state="recorded", code="apply_failed", reason="old")
+        with mock.patch.object(uhc, "get_install_status", side_effect=[stale, stale, stale, _ok()] + [_ok()] * 5), \
+             mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertFalse(out.startswith("FAILED"), out)
+
+    def test_new_failure_record_still_ends_a_lost_post_install(self):
+        stale = _st(state="recorded", code="apply_failed", reason="old")
+        newer = _st(state="recorded", code="apply_failed", reason="new")
+        with mock.patch.object(uhc, "get_install_status", side_effect=[stale, newer] + [newer] * 5), \
+             mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_plain_status_read_with_nothing_recorded_is_not_cannot_confirm(self):
+        with mock.patch.object(uhc, "get_install_status", return_value=_st(running="1.0.1", staged=False)):
+            out = msu.update_install_staged(confirm=False)
+        self.assertTrue(out.startswith("ok - nothing staged"), out)
+        self.assertNotIn("cannot confirm", out)
+
+    def test_unexpected_exception_after_the_post_is_unknown_not_error(self):
+        """RELSUITEFX4 LOW-1: the POST was sent, so the bench case must not read it as never started."""
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st(), RuntimeError("boom")]),              mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("UNKNOWN") and "RuntimeError" in out, out)
+        self.assertEqual(msu._INSTALL_INFLIGHT, set())
+
+    def test_unexpected_exception_before_the_post_is_still_an_error(self):
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()]), \
+             mock.patch.object(msu, "_staged_id", side_effect=RuntimeError("boom")):
+            out = msu.update_install_staged(confirm=True, wait_s=60)  # _tool wrapper turns it into error:
+        self.assertTrue(out.startswith("error:"), out)
 
 
 class InstallStartTests(_Base):

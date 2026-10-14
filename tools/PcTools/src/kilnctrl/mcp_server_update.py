@@ -30,6 +30,7 @@ Credentials never appear here; every request goes through http_auth.urlopen().
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Optional
 
@@ -590,6 +591,13 @@ _PENDING_INSTALL: dict = {}
 #: follow-up say "cannot confirm: record expired" instead of offering a fresh install.
 _EXPIRED_INSTALL: dict = {}
 
+#: Hosts with a confirmed install call in flight in THIS process (single flight:
+#: a second confirmed call for the same host is refused, never a second POST).
+#: The bench board lock is deliberately not taken: the release bench suite holds
+#: it while it calls this tool, so taking it here would refuse that run.
+_INSTALL_INFLIGHT: set = set()
+_INSTALL_INFLIGHT_LOCK = threading.Lock()
+
 #: A pending record older than this (seconds past its pre-POST read) is dropped:
 #: past the longest wait any call makes (``_BG_WAIT_S``), so a late reboot
 #: cannot count as this install.
@@ -681,8 +689,18 @@ def _ok_is_new(host: str, st: dict, pend: dict, deadline: Optional[float] = None
 
 
 def _failure_is_this(li: dict, pend: dict) -> bool:
-    return (li.get("state") == "recorded" and li.get("code") not in ("ok", None)
-            and not _stale_id(li, pend))
+    if not (li.get("state") == "recorded" and li.get("code") not in ("ok", None)
+            and not _stale_id(li, pend)):
+        return False
+    if pend.get("post_unknown") and pend.get("before_fail") == _fail_key(li):
+        # The POST got no answer and this record is identical to the one read before it:
+        # it may be a stale earlier failure, not evidence about this install.
+        return False
+    return True
+
+
+def _fail_key(li: dict) -> tuple:
+    return (li.get("code"), li.get("reason"), _id_of(li))
 
 
 def _staged_id(host: str) -> str:
@@ -729,6 +747,11 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
                     f"{_install_line(before)}; poll again with update_install_staged(confirm=False) "
                     f"(host={resolved})")
         lost = _EXPIRED_INSTALL.get(resolved)
+        bli0 = before.get("last_install") or {}
+        if lost is None and not before.get("staged") and bli0.get("state") != "recorded":
+            # Plain status read: nothing staged, no install ever recorded, no record of ours.
+            return (f"ok - nothing staged and no install recorded (read-only, nothing sent): "
+                    f"{_install_line(before)} (host={resolved})")
         if lost is not None or not before.get("staged"):
             what = (f"the pending record for {lost!r} expired" if lost is not None
                     else "this server has no pending install record")
@@ -737,6 +760,29 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
                     f"provable from here: {_install_line(before)}; compare running_version with the "
                     f"version you meant to install via update_status (host={resolved})")
         return _refuse_unconfirmed(f"would install the staged image: {_install_line(before)} (host={resolved})")
+    with _INSTALL_INFLIGHT_LOCK:
+        if resolved in _INSTALL_INFLIGHT:
+            return (f"REFUSED: another confirmed install call for this host is already in flight in this "
+                    f"server; poll it (bench_test_job_status or update_install_staged(confirm=False)) "
+                    f"(host={resolved})")
+        _INSTALL_INFLIGHT.add(resolved)
+    old_pend = _PENDING_INSTALL.get(resolved)
+    try:
+        return _install_confirmed(resolved, before, deadline)
+    except Exception as exc:  # noqa: BLE001
+        cur = _PENDING_INSTALL.get(resolved)
+        if cur is not None and cur is not old_pend:
+            # This call's pending record exists, so the POST was already sent: the
+            # install may be running. Never let the wrapper's "error:" read as "never started".
+            return (f"UNKNOWN: install may be running; {type(exc).__name__} after the install POST was sent: "
+                    f"{exc}; poll again with update_install_staged(confirm=False) (host={resolved})")
+        raise
+    finally:
+        with _INSTALL_INFLIGHT_LOCK:
+            _INSTALL_INFLIGHT.discard(resolved)
+
+
+def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
     if not before.get("staged") or before.get("stage_busy"):
         return f"REFUSED: no verified stage ready (staged={before.get('staged')}, stage_busy={before.get('stage_busy')}) (host={resolved})"
     _EXPIRED_INSTALL.pop(resolved, None)
@@ -759,7 +805,8 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
         # rebooted. Do not call it failed; let the follow-up reads decide.
         post_unknown = True
     pend = {"want": want, "post_unknown": post_unknown, "before_running": before.get("running_version"),
-            "before_up": before_up, "t_pre": t_pre, "id": inst_id, "before_ok_id": before_ok_id}
+            "before_up": before_up, "t_pre": t_pre, "id": inst_id, "before_ok_id": before_ok_id,
+            "before_fail": _fail_key(bli) if (bli.get("state") == "recorded" and bli.get("code") not in ("ok", None)) else None}
     _PENDING_INSTALL[resolved] = pend
     time.sleep(min(15.0, max(0.0, deadline - time.monotonic())))  # let the board go down before polling
     last = None
@@ -788,7 +835,11 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
     if last:
         tail = _install_line(last)
     elif n404:
-        tail = f"HTTP 404 on {uhc.INSTALL_STATUS_PATH} x{n404}: the recovery image is still applying the stage"
+        if _read_uptime(resolved) is not None:
+            tail = (f"HTTP 404 on {uhc.INSTALL_STATUS_PATH} x{n404} while GET /api/status answers: the board runs "
+                    f"an application WITHOUT the install route (a downgrade?), not the recovery image applying")
+        else:
+            tail = f"HTTP 404 on {uhc.INSTALL_STATUS_PATH} x{n404}: the recovery image is still applying the stage"
     else:
         tail = "board never answered the application API"
     note = " The install POST got no HTTP answer (possibly applied)." if post_unknown else ""

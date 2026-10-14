@@ -1002,7 +1002,9 @@ def test_install_post_sent_non_ok_without_reboot_still_skips_cleanup():
     assert r.verdict == Verdict.FAIL and "cancel" not in names and "clear" not in names
 
 
-@pytest.mark.parametrize("res", ["error: could not read the stage", "REFUSED: not staged"])
+@pytest.mark.parametrize("res", [
+    "error: could not read GET /api/update/status (host=h): down", "REFUSED: not staged",
+    "FAILED: install refused or lost: HTTP 409 busy"])
 def test_install_pre_post_refusal_cleans_up(res):
     c = _inst_ctx([snap(identity=_ident("b1", 500))], lambda confirm=False, host=None, r=res: r)
     r = get_case("RL-D01").judge(c)
@@ -1060,3 +1062,28 @@ def test_install_without_pre_install_fw_build_is_inconclusive_and_never_installs
                   lambda confirm=False, host=None: ran.append(1) or "ok installed")
     r = get_case("RL-D01").judge(c)
     assert r.verdict == Verdict.INCONCLUSIVE and ran == []
+
+
+@pytest.mark.parametrize("res", [
+    "error: unexpected OSError: reset after the POST",
+    "FAILED: install refused or lost: HTTP 5",
+    "FAILED: install refused or lost: reply dropped",
+])
+def test_install_non_definite_error_is_may_have_run_and_never_cleans_up(res):
+    """RELSUITEFX4 LOW-1/LOW-4: only a pre-POST error or a definite 4xx lets cleanup run."""
+    c = _inst_ctx([snap(identity=_ident("b1", 500)), OSError("down"), snap(identity=_ident("b2", 5))],
+                  lambda confirm=False, host=None, r=res: r)
+    r = get_case("RL-D01").judge(c)
+    names = [n for n, _h in c["_seen"]]
+    assert r.verdict == Verdict.FAIL and "cancel" not in names and "clear" not in names
+
+
+def test_install_raised_then_unreadable_baseline_is_fail_not_inconclusive():
+    """RELSUITEFX4 LOW-2: a raised install must not be lost behind an INCONCLUSIVE."""
+    def boom(confirm=False, host=None):
+        raise OSError("link dropped")
+
+    bad = snap(identity=_ident("b2", 5), link_timeouts=None)
+    c = _inst_ctx([snap(identity=_ident("b1", 500), link_timeouts=0), OSError("down"), bad], boom)
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and "raised" in r.reason and "unproven" in r.reason

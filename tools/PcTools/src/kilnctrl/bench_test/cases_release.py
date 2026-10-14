@@ -878,7 +878,9 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
         # Only error:/REFUSED precede the install POST. UNKNOWN, FAILED: install
         # recorded a failure and FAILED: install refused or lost all come after
         # it was sent, so the recovery image may be applying: never clean up.
-        if str(res).startswith(("error:", "REFUSED")):
+        if str(res).startswith(("error: could not read GET", "REFUSED")) or re.match(
+                r"FAILED: install refused or lost: HTTP 4\d\d", str(res)):
+            # Definite: the board answered the POST with a 4xx (or it was never sent).
             return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]}", observed=obs), False
         raised_non_ok = True
     else:
@@ -916,6 +918,10 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
         obs["install_non_ok"] = True
     if after is None:
         ctx["_rl_baseline"] = None  # since-boot watermarks are gone; F01 cannot compare
+        if bad_field and (raised or raised_non_ok):
+            return CaseResult(Verdict.FAIL, reason=(
+                f"update_install_staged {'raised ' + str(raised) if raised else 'returned ' + repr(str(res)[:80])}"
+                f" and after the reboot the baseline field {bad_field} stayed unreadable; install state unproven"), observed=obs), True
         if bad_field:
             return CaseResult(Verdict.INCONCLUSIVE, reason=f"after the reboot the baseline field {bad_field} stayed unreadable", observed=obs), True
         why = "update_install_staged raised and " if raised else (
