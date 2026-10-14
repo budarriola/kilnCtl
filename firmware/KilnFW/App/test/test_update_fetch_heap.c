@@ -213,6 +213,25 @@ static void test_dma(void)
     TEST_CHECK(update_fetch_heap_dma_abort(low, BENCH_RTC_FREE, &h), "the fourth low within 8 samples aborts");
 }
 
+static void test_pick_pair(void)
+{
+    TEST_SECTION("update_fetch_heap -- rtc offset pair pick (UPDFX8 LOW-1)");
+    // A concurrent allocation between the f read and the dma read of pair 0 inflates its offset (9288); the clean
+    // pair 1 (7788) must win. The inflated pair sits first and last so neither "first" nor "last" passes.
+    const uint32_t f[3] = { 40000u, 40000u, 40000u };
+    const uint32_t d1[3] = { 40000u - 9288u, 40000u - 7788u, 40000u - 9288u };
+    TEST_CHECK(update_fetch_heap_dma_pick_pair(f, d1, 3) == 1u, "smallest offset pair wins over inflated first and last");
+    TEST_CHECK(update_fetch_heap_dma_offset(f[1], d1[1]) == BENCH_RTC_FREE, "the picked pair derives 7788 B");
+    // A concurrent free deflates an offset (smaller rtc, stricter floor): that is the pair to keep.
+    const uint32_t d2[3] = { 40000u - 7788u, 40000u - 6000u, 40000u - 7788u };
+    TEST_CHECK(update_fetch_heap_dma_pick_pair(f, d2, 3) == 1u, "a deflated offset (stricter floor) is kept");
+    // Tie on offset: lower DMA reading wins.
+    const uint32_t f3[2] = { 40000u, 39000u };
+    const uint32_t d3[2] = { 40000u - 7788u, 39000u - 7788u };
+    TEST_CHECK(update_fetch_heap_dma_pick_pair(f3, d3, 2) == 1u, "offset tie goes to the lower DMA reading");
+    TEST_CHECK(update_fetch_heap_dma_pick_pair(f, d1, 1) == 0u, "a single pair returns index 0");
+}
+
 static void test_abort(void)
 {
     TEST_SECTION("update_fetch_heap -- mid-body abort");
@@ -237,5 +256,6 @@ void run_test_update_fetch_heap(void)
     test_admit();
     test_hop();
     test_dma();
+    test_pick_pair();
     test_abort();
 }

@@ -80,6 +80,9 @@ extern void (*g_fr_on_delay)(int call_no);
 extern size_t g_fr_dma_seq[FR_DMA_SEQ_MAX];
 extern int g_fr_dma_seq_n, g_fr_dma_seq_i;
 extern bool g_fr_dma_seq_armed;
+// Scripted DMA-free per heap_caps_get_free_size(DMA|INTERNAL) CALL (UPDFX8): the Nth call returns [N]; afterwards the static value.
+extern size_t g_fr_dma_call_seq[FR_DMA_SEQ_MAX];
+extern int g_fr_dma_call_seq_n, g_fr_dma_call_seq_i;
 extern size_t g_fake_heap_recover_to;
 extern volatile long g_fr_internal_mallocs;
 extern bool g_fr_internal_alloc_fail;

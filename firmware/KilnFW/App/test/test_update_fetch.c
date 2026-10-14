@@ -331,6 +331,7 @@ static void heap_idle_pair(uint32_t internal_free)
     g_fake_heap_dma_free_internal = internal_free - T_RTC;
 }
 #define HOP_URL "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin"
+#define HOP2_URL "https://objects.githubusercontent.com/second/KilnCtrl-v1.2.3.bin"
 static void hop_dma_one_under(void)
 {
     g_fake_heap_free_internal = 47191u;  /* internal fine, DMA one byte under the derived hop need */
@@ -740,6 +741,17 @@ static void hop_edge_then_recover(void)
     g_fake_heap_recover_reads = 3;
 }
 
+// UPDFX8: hop 1 settles up to the hop edge + 500 B; the heap handed to the NEXT admission is set by the route that
+// redirects (an on_open runs after that route's own admission).
+static void hop_edge_plus_500_then_recover(void)
+{
+    g_fake_heap_free_internal = FETCH_HOP_DOWNLOAD_HEAP_MIN - 1;
+    g_fake_heap_dma_free_internal = BENCH_IDLE_FREE - T_RTC;
+    g_fake_heap_recover_to = FETCH_HOP_DOWNLOAD_HEAP_MIN + 500;
+    g_fake_heap_recover_reads = 3;
+}
+static void hop_idle_clean(void) { heap_idle_pair(BENCH_IDLE_FREE); }
+
 static long json_heap_num(const char *key)
 {
     const char *h = strstr(g_rq.resp, "\"heap\":{");
@@ -811,6 +823,60 @@ static void test_heap_status_json_updfx7(void)
     CHECK(strstr(g_rq.resp, "\"hop\":\"refused\"") != NULL, "refused hop reported");
     CHECK(json_heap_num("hop_settle_tries") == (long)FETCH_HEAP_SETTLE_TRIES, "refused hop used every settle try");
     expect_claim_balanced("heap json hop refused");
+
+    // UPDFX8 LOW-2: every hop is recorded. Hop 1 recovers in the settle wait (tries > 0), hop 2 is clean: the
+    // job reports the most settle re-samples of any hop and the lowest hop reading, not the last hop's.
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_app_route->status = 302;
+    g_app_route->location = HOP_URL;
+    g_app_route->on_open = hop_edge_plus_500_then_recover;
+    fr_route_t *h1 = add_route(HOP_URL, g_img, IMG_LEN);
+    h1->status = 302;
+    h1->location = HOP2_URL;
+    h1->on_open = hop_idle_clean;
+    add_route(HOP2_URL, g_img, IMG_LEN);
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "two-hop download completes");
+    CHECK(strstr(g_rq.resp, "\"hop\":\"admitted\"") != NULL, "two admitted hops report admitted");
+    CHECK(json_heap_num("hop_settle_tries") > 0, "hop_settle_tries keeps the most re-samples of any hop");
+    CHECK(json_heap_num("hop_free") == (long)(FETCH_HOP_DOWNLOAD_HEAP_MIN + 500),
+          "hop_free keeps the lowest hop reading (hop 1), not the clean second hop's");
+    expect_claim_balanced("heap json two hops");
+
+    // UPDFX8 LOW-2: hop 1 admitted, hop 2 refused: the refusal is reported (a first-hop-only record says admitted).
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_app_route->status = 302;
+    g_app_route->location = HOP_URL;
+    h1 = add_route(HOP_URL, g_img, IMG_LEN);
+    h1->status = 302;
+    h1->location = HOP2_URL;
+    h1->on_open = set_heap_hop_edge;
+    add_route(HOP2_URL, g_img, IMG_LEN);
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "second hop one byte under the need refused");
+    CHECK(strstr(g_rq.resp, "\"hop\":\"refused\"") != NULL, "a refused second hop is reported refused");
+    CHECK(json_heap_num("hop_settle_tries") == (long)FETCH_HEAP_SETTLE_TRIES, "second hop's settle tries reported");
+    expect_claim_balanced("heap json second hop refused");
+}
+
+// UPDFX8 LOW-1: rtc_free is the smallest offset of the back-to-back first-admission pairs. The first DMA reading
+// is taken just after a concurrent 1500 B allocation (offset 9288); reading only that pair would lower the DMA floor.
+static void test_rtc_offset_min_of_pairs_updfx8(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_fr_dma_call_seq[0] = BENCH_IDLE_FREE - T_RTC - 1500u;
+    g_fr_dma_call_seq[1] = BENCH_IDLE_FREE - T_RTC;
+    g_fr_dma_call_seq[2] = BENCH_IDLE_FREE - T_RTC - 1500u;
+    g_fr_dma_call_seq_n = 3;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "download with a perturbed first DMA reading completes");
+    CHECK(g_fr_dma_call_seq_i >= 3, "the first admission took three DMA readings");
+    CHECK(json_heap_num("rtc_free") == (long)T_RTC, "rtc_free is the smallest-offset pair (7788), not the inflated first pair");
+    CHECK(json_heap_num("start_dma") == (long)(BENCH_IDLE_FREE - T_RTC), "start_dma is the picked pair's DMA reading");
+    expect_claim_balanced("rtc min of pairs");
 }
 
 // UPDFX7 LOW-4: a check starting with internal free between the hop need and the start need is refused as a
@@ -1222,6 +1288,7 @@ int main(void)
     test_sha_mismatch();
     test_claim_released_on_failures();
     test_heap_admission_updfx2();
+    test_rtc_offset_min_of_pairs_updfx8();
     test_redirect_hop_frees_first_client();
     test_updlow();
     test_heap_admission_updfx3();

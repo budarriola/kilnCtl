@@ -64,6 +64,20 @@ bool update_fetch_heap_dma_admit(uint32_t dma_free, uint32_t rtc_free, bool is_d
     return dma_free >= update_fetch_heap_dma_need(is_download, hop, rtc_free);
 }
 
+unsigned update_fetch_heap_dma_pick_pair(const uint32_t *f, const uint32_t *dma, unsigned n)
+{
+    unsigned best = 0;
+    uint32_t best_off = sub_sat(f[0], dma[0]);
+    for (unsigned i = 1; i < n; i++) {
+        const uint32_t off = sub_sat(f[i], dma[i]);
+        if (off < best_off || (off == best_off && dma[i] < dma[best])) {
+            best = i;
+            best_off = off;
+        }
+    }
+    return best;
+}
+
 bool update_fetch_heap_dma_abort(uint32_t dma_free, uint32_t rtc_free, unsigned *hist)
 {
     if (dma_free < update_fetch_heap_dma_hard_min(rtc_free)) {

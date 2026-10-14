@@ -13,18 +13,23 @@
 //
 //   FLOOR                8192 B   owner floor
 //   MAX_STEP             1024 B   margin for heap movement between two samples (LOW-1 below)
-//   ABORT_BELOW          9216 B   = FLOOR + MAX_STEP: a sample at or above this cannot be taken under the
-//                                 floor by the next step, so the mid-body abort fires before the floor is crossed
+//   ABORT_BELOW          9216 B   = FLOOR + MAX_STEP: a SAMPLED BACKSTOP, not a guarantee (UPDFX8, REVIEW_UPDFX7
+//                                 MED-1). The abort fires on a sample under this level; nothing bounds the movement
+//                                 between two samples (see "Limits"). What actually protects the floor is the draw
+//                                 model plus the admission margin below.
 //   MEASURED_DRAW       21488 B   the LARGEST measured whole-run draw, scratch held. Draw table:
 //                                   run        firmware   idle   low-water  from idle  scratch held
 //                                   benchupd2  c549a144c  30299    8339      21960      20936
 //                                   benchupd3  c549a144c  30427   10079      20348      19324
 //                                   benchupd4  36f3ad031  47191   24679      22512      21488  <- maximum
 //                                   benchupd5  468f0c5cb  34783   14115      20668      19644  (UART ISR in IRAM)
-//   DRAW_MARGIN          1024 B   explicit margin over the maximum: the runs spread 19.3..21.5 KB (2.2 KB)
+//   DRAW_MARGIN          1024 B   BENCH-PENDING (UPDFX8, REVIEW_UPDFX7 MED-2): explicit margin over the maximum: the runs spread 19.3..21.5 KB (2.2 KB)
 //                                 because every low-water includes concurrent httpd/MCP/LVGL activity, so no
 //                                 single run is a bound
 //   MODEL_DRAW          22512 B   = MEASURED_DRAW + DRAW_MARGIN
+//   BENCH-PENDING: the margin (1024 B) is under half the observed spread (2.2 KB) of only four runs, and only
+//   benchupd5 ran on this firmware. Do not call these numbers sized, and do not lower ADMISSION further, until at
+//   least 5 heap.min_free readings from this build (GET /api/update/fetch) are in the table.
 //   ADMISSION (held)    31728 B   = ABORT_BELOW + MODEL_DRAW (9216 + 22512). An admitted fetch bottoms out at or
 //                                 above ABORT_BELOW with the margin to spare.
 //   same before scratch 32752 B   = ADMISSION + SCRATCH (FETCH_HEAP_PRECHECK_MIN: what an idle board must show)
@@ -41,14 +46,14 @@
 //   low_heap_free after the settle wait; it never runs into the floor. Re-measure on the bench before lowering
 //   ADMISSION.
 //
-// LOW-1 (MAX_STEP). REVIEW_UPDFX6 LOW-1 showed the old 4096 B justification (a flash-write bounce buffer) does
+// LOW-1 (MAX_STEP). ABORT_BELOW is a backstop (UPDFX8), see "Limits" for what it does not bound. REVIEW_UPDFX6 LOW-1 showed the old 4096 B justification (a flash-write bounce buffer) does
 // not exist. Re-derived from the allocations one read-loop pass actually makes (ESP-IDF v6.0.2, the toolchain
 // this tree builds with, /c/esp/v6.0.2/esp-idf):
 //   - flash write: esp_flash_write copies a non-DRAM source through a 32 B STACK buffer, no heap
 //     (components/spi_flash/esp_flash_api.c:1135-1142, `uint32_t temp_buf[8]`);
 //   - SHA-256 (hardware SHA DMA): a partial block is copied into an internal DMA buffer of at most one block,
-//     64 B (components/mbedtls/port/sha/core/sha.c:335, buf_len <= block_length checked at :322); the copies at
-//     :172/:185 go to SPIRAM because the chunk and the context are external RAM;
+//     64 B (components/mbedtls/port/sha/core/sha.c:335, buf_len <= block_length checked at :322); the reallocs at
+//     :172/:185 are the flash-encryption-only paths and are inactive here (flash encryption is off);
 //   - mbedtls record buffers: PSRAM (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y); the client rx/tx buffers (2048 B each)
 //     are allocated at open, before the loop; lwIP/WiFi pbufs prefer PSRAM and the WiFi static rx buffers are
 //     preallocated.
@@ -76,7 +81,9 @@
 // CHECK_DRAW (a check runs the same abort loop); the first admission of a check uses the download need (a check
 // that starts is a precursor to a download).
 //
-// DMA (LOW-2). internal free = DMA free + RTC-heap free: with CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP=y the
+// DMA (LOW-2; UPDFX8 REVIEW_UPDFX7 LOW-1: rtc_free is the smallest offset of FETCH_DMA_OFFSET_PAIRS back-to-back
+// (internal, DMA) pairs, so a concurrent allocation between one pair's two reads cannot lower the DMA floor).
+// internal free = DMA free + RTC-heap free: with CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP=y the
 // RTC FAST heap (7788 B free on the bench in every pair) is internal but not DMA-capable. The guard no longer
 // hard-codes 7788: heap_admit() derives rtc_free = internal free - DMA free at the job's first admission
 // (update_fetch_heap_dma_offset) and uses it for every DMA number of that job, so a build with a different RTC
@@ -94,7 +101,25 @@
 // (+ overhead); 6144 B = 1.5x passes the idle largest block (9728 B, sk04 log; 11776 B in benchupd5, low-water
 // 7680 B in the TLS handshake). A check needs only the 2 KB client buffers (3072 B).
 //
-// Limits (review 2026-10-07, REVIEW_UPDFX4/5/6). Admission is the ONLY guard for the TLS handshake,
+// Limits (review 2026-10-07, REVIEW_UPDFX4/5/6/7).
+// ABORT_BELOW is a sampled backstop (REVIEW_UPDFX7 MED-1). Concurrent tasks allocate internal RAM in blocks larger
+// than MAX_STEP: profile_exec_status_t (1512 B) is heap_caps_malloc'd MALLOC_CAP_INTERNAL on about 10 paths
+// (safety_build_and_send_context, ui_page_home_refresh, screen_idle, dashboard_exec_http, ota_http,
+// safety_cfg_http, uart_bridge_ext_control), 2-3 of them can be in flight (about 3-4.5 KB), and
+// diagnostics_http.c allocates 8192 B internal; the Wi-Fi blob's own internal RX buffers are not visible from
+// source. So one sample can read above ABORT_BELOW and the next below FLOOR; the abort cannot prevent that.
+// Protection of the floor is the draw model (whole-run low-waters already contain these transients) plus the
+// admission margin: the worst measured run admitted at the edge ends 2048 B above the floor (n = 4 runs,
+// 2.2 KB spread; the 258b80d4 dip to 8295 B and benchupd2's 8339 B both sat within about 150 B of the floor). The
+// residual risk is a run whose draw exceeds MODEL_DRAW; a steady-state lowest-sample rule cannot remove it, only
+// more bench evidence can narrow it.
+// DMA floor residual (REVIEW_UPDFX7 LOW-3): the sustained DMA floor is 1428 B, about 3 KB closer to exhaustion than
+// the former 4500 B. Runtime MALLOC_CAP_DMA allocators outside the fetch: the MAX31856 SPI bounce buffer (at most
+// about 20 B, an unaligned stack source on the DMA-enabled shared bus; failure is a thermocouple read error, which
+// fails safe: fault, heat off, and the operator must clear the latched thermo fault), the AES DMA bounce (up to
+// 1600 B for a non-GCM suite with an unaligned PSRAM record; GCM bounces about 16 B and GitHub negotiates GCM, not
+// proven), and the Wi-Fi blob's RX/TX DMA (not verifiable). The fetch refuses to run during a heat run, so the
+// residual is an idle-board thermo read error during a fetch. Admission is the ONLY guard for the TLS handshake,
 // esp_http_client_open and anything inside a single esp_http_client_read: the abort runs between reads only.
 // The numbers are a snapshot (TOCTOU), the draw is the maximum of four bench runs plus a stated margin, and the
 // board's own transients are larger than any margin here (idle low-water 16555 B against idle free 31123 B). The
@@ -117,11 +142,13 @@ extern "C" {
 // per read (review GITHUB_UPDATE_CHAIN_REVIEW_2026-10-09 MED-1).
 #define FETCH_HEAP_SCRATCH_BYTES 1024u
 // Margin for heap movement between two samples (LOW-1 above): empirical, not a per-pass fetch allocation.
+// Not a bound: ABORT_BELOW is a sampled backstop (see "Limits").
 #define FETCH_HEAP_MAX_STEP_BYTES 1024u
 // Idle bench minimum of the older firmware (logs/sk04_sampling/2026-10-06.tsv). Historical: admission is now
 // ABOVE it, see the header comment.
 #define FETCH_IDLE_MIN_FREE_BYTES 29647u
 // Largest measured whole-run draw with the scratch held (benchupd4, table above) plus the explicit margin.
+// BENCH-PENDING (UPDFX8): needs at least 5 heap.min_free readings from this build before any further lowering.
 #define FETCH_HEAP_MEASURED_DRAW_BYTES 21488u
 #define FETCH_HEAP_DRAW_MARGIN_BYTES 1024u
 #define FETCH_HEAP_MODEL_DRAW_BYTES (FETCH_HEAP_MEASURED_DRAW_BYTES + FETCH_HEAP_DRAW_MARGIN_BYTES)
@@ -167,6 +194,8 @@ _Static_assert(FETCH_HOP_CHECK_HEAP_MIN - FETCH_CHECK_DRAW_BYTES >= FETCH_HEAP_A
 // is never sampled). Abort on FETCH_DMA_LOW_READS consecutive low samples, or FETCH_DMA_WINDOW_LOW low samples
 // among the last FETCH_DMA_WINDOW (low,low,ok repeating), or one sample under the hard minimum.
 #define FETCH_DMA_LOW_READS 3u
+// Back-to-back (internal, DMA) pairs read at the job's first admission to derive rtc_free (UPDFX8 LOW-1).
+#define FETCH_DMA_OFFSET_PAIRS 3u
 #define FETCH_DMA_WINDOW 8u
 #define FETCH_DMA_WINDOW_LOW 4u
 
@@ -191,6 +220,10 @@ uint32_t update_fetch_heap_need(bool is_download, bool hop);
 
 // RTC-heap free (internal but not DMA-capable) derived from one pair of readings; saturates at 0.
 uint32_t update_fetch_heap_dma_offset(uint32_t free_internal, uint32_t dma_free);
+
+// Index of the pair (f[i], dma[i]), i < n, with the smallest RTC offset (internal free - DMA free, saturating at 0);
+// ties go to the lower DMA reading. The smallest offset is the conservative one: it gives the highest DMA floor.
+unsigned update_fetch_heap_dma_pick_pair(const uint32_t *f, const uint32_t *dma, unsigned n);
 
 // DMA needs for a job whose offset is rtc_free; each is the internal quantity less rtc_free, saturating at 0.
 uint32_t update_fetch_heap_dma_need(bool is_download, bool hop, uint32_t rtc_free);  // admission

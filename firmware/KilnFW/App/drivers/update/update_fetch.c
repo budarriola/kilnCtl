@@ -111,8 +111,8 @@ typedef struct {
     char confirm[UPDATE_TAG_MAX];
 } job_params_t;
 
-// Heap evidence of the job (REVIEW_UPDFX6 MED-2 / UPDFX7): the first admission, the first redirect hop's
-// settle result, and the low-waters of every sample the job took. Exported in GET /api/update/fetch "heap".
+// Heap evidence of the job (REVIEW_UPDFX6 MED-2 / UPDFX7): the first admission, the worst redirect hop's
+// settle result (UPDFX8: every hop is recorded), and the low-waters of every sample the job took. Exported in GET /api/update/fetch "heap".
 typedef enum { HOP_NONE = 0, HOP_ADMITTED, HOP_REFUSED } hop_result_t;
 typedef struct {
     bool sampled;          // min_* are valid (at least one sample taken)
@@ -121,8 +121,8 @@ typedef struct {
     uint32_t start_free;   // internal free at the first admission (scratch held)
     uint32_t start_dma;    // DMA-capable internal free at the first admission
     hop_result_t hop_result;
-    uint32_t hop_free;     // internal free at the first redirect hop's final admission sample
-    uint32_t hop_tries;    // settle re-samples used at that hop
+    uint32_t hop_free;     // lowest internal free at any redirect hop's final admission sample
+    uint32_t hop_tries;    // most settle re-samples used at any hop
     uint32_t min_free;     // low-waters over admission and read-loop samples
     uint32_t min_dma;
     uint32_t min_block;
@@ -304,23 +304,51 @@ static const char *heap_admit(const work_t *w, bool hop)
         ESP_LOGI(TAG, "heap settle: %u re-sample(s) x %u ms, free %u, %s%s", tries, (unsigned)FETCH_HEAP_SETTLE_MS,
                  (unsigned)f, hv == FETCH_HEAP_OK ? "admitted" : "still short", hop ? " (redirect hop)" : "");
     }
-    // First hop only: keep the settle result (re-samples used, the final reading, the verdict) for the status JSON.
-    const bool first_hop = hop && s_c->st.heap.hop_result == HOP_NONE;
-    if (first_hop) {
+    // Every hop is folded into the job's hop evidence (REVIEW_UPDFX7 LOW-2): the WORST result (a refusal sticks),
+    // the lowest admitting/refusing reading and the most settle re-samples used.
+    if (hop) {
         st_lock();
-        s_c->st.heap.hop_free = f;
-        s_c->st.heap.hop_tries = tries;
-        s_c->st.heap.hop_result = hv == FETCH_HEAP_OK ? HOP_ADMITTED : HOP_REFUSED;
+        job_heap_t *jh = &s_c->st.heap;
+        if (jh->hop_result == HOP_NONE) {
+            jh->hop_free = f;
+            jh->hop_tries = tries;
+        } else {
+            if (f < jh->hop_free) {
+                jh->hop_free = f;
+            }
+            if (tries > jh->hop_tries) {
+                jh->hop_tries = tries;
+            }
+        }
+        if (hv != FETCH_HEAP_OK) {
+            jh->hop_result = HOP_REFUSED;
+        } else if (jh->hop_result == HOP_NONE) {
+            jh->hop_result = HOP_ADMITTED;
+        }
         st_unlock();
     }
     if (hv == FETCH_HEAP_OK) {
-        const uint32_t dma = dma_free_internal();
+        uint32_t dma = dma_free_internal();
         heap_note(UINT32_MAX, dma, UINT32_MAX);
-        // LOW-2: the RTC FAST heap is internal but not DMA-capable; derive its free size from the first admission
-        // (redundant with the internal check there, by construction) and hold it for every later DMA number.
+        // LOW-2: the RTC FAST heap is internal but not DMA-capable; derive its free size at the first admission and
+        // hold it for every later DMA number. REVIEW_UPDFX7 LOW-1: f and dma are read at different instants, and a
+        // concurrent allocation between the two reads would inflate rtc_free and so LOWER the DMA floor for the whole
+        // job. Take FETCH_DMA_OFFSET_PAIRS back-to-back pairs and keep the one with the smallest offset (the
+        // conservative direction: a concurrent free can only make the floor stricter).
         if (!s_c->st.heap.rtc_set) {
+            uint32_t pf[FETCH_DMA_OFFSET_PAIRS];
+            uint32_t pd[FETCH_DMA_OFFSET_PAIRS];
+            pf[0] = f;
+            pd[0] = dma;
+            for (unsigned i = 1; i < FETCH_DMA_OFFSET_PAIRS; i++) {
+                pf[i] = free_internal();
+                pd[i] = dma_free_internal();
+                heap_note(pf[i], pd[i], UINT32_MAX);
+            }
+            const unsigned best = update_fetch_heap_dma_pick_pair(pf, pd, FETCH_DMA_OFFSET_PAIRS);
+            dma = pd[best];
             st_lock();
-            s_c->st.heap.rtc_free = update_fetch_heap_dma_offset(f, dma);
+            s_c->st.heap.rtc_free = update_fetch_heap_dma_offset(pf[best], pd[best]);
             s_c->st.heap.rtc_set = true;
             s_c->st.heap.start_free = f;
             s_c->st.heap.start_dma = dma;

@@ -81,6 +81,8 @@ int g_fake_heap_recover_reads;      // >0: after this many internal-free reads, 
 size_t g_fake_heap_recover_to;
 volatile long g_fr_internal_mallocs; // MALLOC_CAP_INTERNAL heap_caps_malloc/calloc calls that succeeded
 size_t g_fake_heap_dma_free_internal;
+size_t g_fr_dma_call_seq[FR_DMA_SEQ_MAX];
+int g_fr_dma_call_seq_n, g_fr_dma_call_seq_i;
 bool g_fr_internal_alloc_fail;
 
 const char *g_fr_fail_task;
@@ -143,6 +145,7 @@ void fr_reset(void)
     g_fake_heap_free_internal = 200000;
     g_fake_heap_largest_internal = 100000;
     g_fake_heap_dma_free_internal = 100000;
+    g_fr_dma_call_seq_n = g_fr_dma_call_seq_i = 0;
     g_fake_heap_recover_reads = 0;
     g_fr_delay_calls = 0;
     g_fr_delay_total_ticks = 0;
@@ -195,6 +198,9 @@ void heap_caps_free(void *p)
 size_t heap_caps_get_free_size(uint32_t caps)
 {
     if ((caps & MALLOC_CAP_INTERNAL) && (caps & MALLOC_CAP_DMA)) {
+        if (g_fr_dma_call_seq_i < g_fr_dma_call_seq_n) {
+            return g_fr_dma_call_seq[g_fr_dma_call_seq_i++];  // scripted per-call readings, then the static value
+        }
         return g_fake_heap_dma_free_internal;
     }
     if ((caps & MALLOC_CAP_INTERNAL) && g_fake_heap_recover_reads > 0 && --g_fake_heap_recover_reads == 0) {
