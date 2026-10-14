@@ -110,6 +110,17 @@ CALLX_RE = re.compile(r"\bcallx(?:0|4|8|12)\b")
 # across a branch target can only ADD an edge, never hide one (the safe
 # direction for this checker).
 # ---------------------------------------------------------------------------
+# Linker section-boundary symbols. objdump captions them like functions, and an
+# l32r of one is a pointer-range comparison literal (spi_flash_cache2phys
+# compares against _stext), never a call. Under CONFIG_SPIRAM_XIP_FROM_PSRAM
+# (2026-10-14) _stext sits at the start of .flash.text, where objdump decodes
+# the literal pool as an `entry` with a 7696 B frame, so a stale register
+# pairing it with a later callx grafted that frame onto ota_confirm, screen_idle
+# and lvgl. These names are never call targets.
+LINKER_BOUNDARY_NAMES = frozenset((
+    "_stext", "_text_start", "_etext", "_iram_text_start", "_iram_text_end",
+    "_rodata_start", "_rodata_end", "_flash_text_start", "_flash_text_end",
+))
 L32R_RE = re.compile(r"\tl32r\t(a\d+),\s*[0-9a-f]+(?: <[^>]*>)? \(([0-9a-f]+) <([^>]+)>\)")
 CALLX_REG_RE = re.compile(r"\tcallx(?:0|4|8|12)\t(a\d+)")
 _INSN_RE = re.compile(r"^[0-9a-f]+:\t[0-9a-f ]+\t(\S+)\s+(a\d+)\b")
@@ -413,6 +424,8 @@ def parse(objdump, elf):
     bodyless = {}
     for fn, lits in pending_lc.items():
         for addr, name in lits:
+            if name in LINKER_BOUNDARY_NAMES:
+                continue   # a section-bound literal, not a call target
             if addr in frames:
                 calls[fn].add(addr)
             elif ROM_ADDR_RANGE[0] <= addr < ROM_ADDR_RANGE[1]:
