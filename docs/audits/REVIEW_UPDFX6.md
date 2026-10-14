@@ -265,3 +265,59 @@ compiled and a test assertion failed.
 4/5 CAUGHT. All four CAUGHT mutants compiled and failed a test assertion (no
 BUILD FAILURES). Real tree unchanged. The run was at base cd5ef2623.
 
+
+## Fix status (UPDFX7)
+
+Landed on dev as 79232daa7, e1dfa978e, e95803d1a and fbb68c838 (model, tests,
+status JSON, PcTools, docs). Mid-run SK-04 alarm threshold is unchanged.
+
+Model (`update_fetch_heap.h`):
+
+| name | value | derivation |
+|---|---|---|
+| `FETCH_HEAP_FLOOR_BYTES` | 8192 | owner floor |
+| `FETCH_HEAP_MAX_STEP_BYTES` | 1024 | see LOW-1 |
+| `FETCH_HEAP_ABORT_BELOW` | 9216 | 8192 + 1024 |
+| `FETCH_HEAP_MEASURED_DRAW_BYTES` | 21488 | largest measured draw |
+| `FETCH_HEAP_MODEL_DRAW_BYTES` | 22512 | 21488 + 1024 margin |
+| `FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH` | 31728 | 9216 + 22512 |
+| `FETCH_HEAP_PRECHECK_MIN` | 32752 | 31728 + 1024 scratch |
+| `FETCH_HOP_DOWNLOAD_HEAP_MIN` | 30192 | 31728 - 1536 hop dip |
+| `FETCH_HOP_CHECK_HEAP_MIN` | 21284 | 9216 + 12068 check draw |
+
+- MED-1: the model draw is 22512, the largest measured draw (21488) plus a
+  stated 1024 margin. An admission at exactly the edge ending with the worst
+  measured draw sits at 31728 - 21488 = 10240, 2048 above the floor. Static
+  asserts pin this.
+- LOW-1: MAX_STEP is no longer 4096 on the strength of a flash-write bounce.
+  The write path stages through a stack `temp_buf[8]`
+  (`components/spi_flash/esp_flash_api.c:1135-1142`, ESP-IDF v6.0.2) and the
+  SHA DMA buffer is at most 64 B (`components/mbedtls/port/sha/core/sha.c:322-335`;
+  the PSRAM copies at `:172`/`:185`). The real fetch pass allocates about
+  100 B between samples, so 1024 is an empirical concurrency margin for other
+  tasks. Start admission on the measured benchupd5 idle of 34783 B is
+  32752 (precheck, scratch not yet held), margin +2031 B, which satisfies
+  the 2 KB requirement; the predicted hop reading is 34783 - 1024 - 1420 =
+  32339, +2147 over the hop need. Older firmware idling at 29647 is refused
+  (it would end at 7135 under the floor). The mid-run abort at 9216 keeps
+  min_free >= 8192 with 1024 B of step margin.
+- MED-2 / LOW-3: the hop rule is the start need less the measured hop dip
+  (1536 B), documented at the constants, with the settle wait
+  (12 x 250 ms) re-sampling before a refusal.
+- LOW-2: the DMA guard is derived: the RTC FAST heap (7788 B on the bench) is
+  internal free minus DMA free at the first admission. DMA start need
+  31728 - 7788 = 23940, hop need 30192 - 7788 = 22404, abort floor
+  9216 - 7788 = 1428, hard minimum 8192 - 7788 = 404. The first-admission DMA
+  gate is redundant by construction (it is derived from the same sample); it
+  binds at hops and in the read loop, where the tests exercise it.
+- LOW-4: `test_check_start_between_needs_updfx7` starts a check with internal
+  free between the hop need and the download need; mutant N4 is now CAUGHT.
+- `GET /api/update/fetch` carries a `heap` object (start free/DMA, RTC, the
+  302-hop `heap settle:` result and tries, internal/DMA/largest-block
+  low-waters); the PcTools `update_fetch_status` prints it.
+
+Negtest: kilnfw-host preset, 20 mutations (every threshold constant, each
+admit/abort comparison, the hop and DMA paths, N4): baseline passed, 20 of 20
+CAUGHT, each confirmed by a compiled mutant failing a test assertion, real
+tree unchanged. pytest preset on `test_mcp_server_update_fetch.py`: 4 of 4
+CAUGHT. Full `run_all_checks.ps1`: 206 passed, 0 failed, 0 NEW.

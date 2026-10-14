@@ -248,3 +248,18 @@ REVIEW_UPDFX6).
 
 The two compile CAUGHTs are the static assertions themselves firing; the unmutated file compiles
 cleanly with the same command. Every run reported the real tree unchanged.
+
+## Fix status (UPDFX7)
+
+Landed on dev as 79232daa7, e1dfa978e, e95803d1a and fbb68c838.
+
+- LOW-2: `hal_uart_esp.c` now includes `kilnlink/kilnlink_frame.h` and asserts
+  `RX >= 3 * KILNLINK_FRAME_STUFFED_MAX` and `TX >= KILNLINK_FRAME_STUFFED_MAX + 64`,
+  so a protocol bump that raises the maximum frame is caught at compile time.
+  The file compiles only in the target build, which the full suite ran
+  (`check_00_kilnfw_target_build.ps1` passed).
+- LOW-3: `check_sdkconfig_defaults_applied.ps1` has a `$mustBe` table of keys
+  whose value is load-bearing, starting with `CONFIG_UART_ISR_IN_IRAM = y`.
+  Negtest (`-Preset check`): flipping the line to
+  `# CONFIG_UART_ISR_IN_IRAM is not set` is now CAUGHT ("load-bearing
+  sdkconfig.defaults value changed").
