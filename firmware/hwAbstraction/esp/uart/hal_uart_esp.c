@@ -63,12 +63,12 @@ static const char *TAG = "hal_uart_esp";
  * espInterfaces/uart_owner.c macros this comment used to point at no longer
  * exist; these are the only ring sizes.) */
 /* 2026-10-13 (docs/audits/LINK_CRC_DURING_FETCH.md): 4096 -> 2048 RX / 1024 TX.
- * CONFIG_UART_ISR_IN_IRAM=y (sdkconfig.defaults) makes the IDF driver allocate
- * these rings MALLOC_CAP_INTERNAL (an IRAM-resident ISR cannot touch PSRAM),
- * where they used to be taken from PSRAM; at 2 x (4096+4096) that was ~22 KB
- * of internal heap and starved the TLS fetch (low_heap_free). One worst-case
- * stuffed kilnlink frame is KILNLINK_FRAME_STUFFED_MAX (528 B), so 2048 RX holds
- * 3+ frames and a 1024 TX ring holds one (plus the 8 B ring item header). */
+ * That cut was made for CONFIG_UART_ISR_IN_IRAM=y, which makes the IDF driver allocate these rings
+ * MALLOC_CAP_INTERNAL (an IRAM-resident ISR cannot touch PSRAM). 2026-10-14: the UART ISR is no longer in IRAM;
+ * CONFIG_SPIRAM_XIP_FROM_PSRAM=y (sdkconfig.defaults) keeps the cache on during flash erase/write instead, so
+ * the rings come from the default (PSRAM) heap again. The 2048/1024 sizes are kept: one worst-case stuffed
+ * kilnlink frame is KILNLINK_FRAME_STUFFED_MAX (528 B), so 2048 RX holds 3+ frames and a 1024 TX ring holds one
+ * (plus the 8 B ring item header). */
 #define HAL_UART_ESP_RX_RING_BUF_SIZE 2048
 #define HAL_UART_ESP_TX_RING_BUF_SIZE 1024
 _Static_assert(HAL_UART_ESP_RX_RING_BUF_SIZE >= 3 * KILNLINK_FRAME_STUFFED_MAX,

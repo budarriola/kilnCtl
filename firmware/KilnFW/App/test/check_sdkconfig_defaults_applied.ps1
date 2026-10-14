@@ -71,7 +71,8 @@ $watchedKeys = @(
     'CONFIG_KILNCTL_ENABLE_GPIO_PROBE',     # 2026-09-23: pinned y so a clean worktree keeps gpio_probe
     'CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC',    # 2026-10-05 WP8: TLS option D; a stale sdkconfig keeps option B (does not fit)
     'CONFIG_MBEDTLS_DYNAMIC_BUFFER',        # 2026-10-05 WP8: TLS option D, same reason
-    'CONFIG_UART_ISR_IN_IRAM'               # 2026-10-13: kilnlink RX survives flash erase/write (LINK_CRC_DURING_FETCH.md)
+    'CONFIG_UART_ISR_IN_IRAM',              # 2026-10-14: stays OFF; XIP keeps the cache on during flash erase/write (XIP_PSRAM_INVESTIGATION.md)
+    'CONFIG_SPIRAM_XIP_FROM_PSRAM'          # 2026-10-14: kilnlink RX survives flash erase/write without internal RAM
 )
 
 function Get-ConfigValue {
@@ -130,7 +131,8 @@ if ($missingFromDefaults.Count -gt 0) {
 # "# ... is not set" (or any other value) is a valid pin the generic comparison would happily match against a
 # regenerated sdkconfig, so assert the expected value in sdkconfig.defaults itself (REVIEW_LINKCRC LOW-3).
 $mustBe = @{
-    'CONFIG_UART_ISR_IN_IRAM' = 'y'   # off brings back the 14/8/12/28 link errors during a fetch (LINK_CRC_DURING_FETCH.md)
+    'CONFIG_SPIRAM_XIP_FROM_PSRAM' = 'y'          # off (with the UART ISR not in IRAM) brings back the 14/8/12/28 link errors during a fetch (LINK_CRC_DURING_FETCH.md)
+    'CONFIG_UART_ISR_IN_IRAM' = '(not set)'       # on costs ~12 KB internal RAM (rings move from PSRAM) and starves the fetch admission
 }
 $wrongValue = @()
 foreach ($key in $mustBe.Keys) {

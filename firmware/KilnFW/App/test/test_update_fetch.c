@@ -767,6 +767,14 @@ static long json_heap_num(const char *key)
 
 static void test_heap_status_json_updfx7(void)
 {
+    // A REFUSED first admission still reports the refusing reading as heap.start_free (it used to read 0).
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 1000;
+    POST("/api/update/download", NULL);
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "refused first admission is low_heap_free");
+    CHECK(json_heap_num("start_free") == 1000, "refused admission reports the refusing reading as heap.start_free, not 0");
     // A completed download: sampled, rtc, start values and the low-waters are reported.
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);

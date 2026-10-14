@@ -378,6 +378,16 @@ static const char *heap_admit(const work_t *w, bool hop)
         // A hop's REFUSED record was already written above from the same DMA verdict (UPDFX9 LOW-2, INFO-2).
         return "low_heap_dma";
     }
+    // XIP trial 2026-10-14: a refused first admission used to leave heap.start_free at 0 (it was set only on the
+    // admitted path), so the refusal text read "start free=0" while the log had the real shortfall. Record the
+    // refusing reading as the start reading; the admitted path overwrites it with the same value.
+    if (!hop) {
+        st_lock();
+        if (!s_c->st.heap.rtc_set) {
+            s_c->st.heap.start_free = f;
+        }
+        st_unlock();
+    }
     const unsigned need_free = update_fetch_heap_need(dl, hop);
     ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s%s", (unsigned)f, need_free,
              (unsigned)l, (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check",
