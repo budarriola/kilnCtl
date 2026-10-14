@@ -28,7 +28,7 @@ safe because prepare erased the old result first. A lost POST needs the uptime r
 confirmed exactly as before the id existed, never by the id alone.
 
 **Old firmware / all-zero id.** Safe. An app or recovery image older than this change has no `id` key,
-or writes zeros. `_id_of` maps absent, malformed and `00000000` to `""`. `_stale_id` and the shortcut
+or writes zeros. `_id_of` maps absent, malformed and the all-zero id to `""`. `_stale_id` and the shortcut
 both need a non-empty id, so the old logic runs unchanged (`test_zero_id_falls_back_to_the_old_proof`,
 P7). An unreadable stage sha also falls back (`_staged_id` -> `""`).
 
@@ -115,7 +115,7 @@ fragment and route emission are now checked (C1 to C4).
 
 ### INFO-2: OUTCOME_UNKNOWN in-RAM fallback has id zeros
 When both the NVS write and the reload fail, `recovery_install_boot()` fills `s_last` by `memset` with
-no id. Recovery status then shows `00000000` for that record. The tool treats it as "this install's"
+no id. Recovery status then shows the all-zero id for that record. The tool treats it as "this install's"
 failure, which is correct.
 
 ### INFO-3: fragment headroom is 4 B
@@ -149,7 +149,7 @@ All runs: baseline passed, real tree unchanged, copies removed.
 | P4 | pytest | 404 "recovery applying" tail dropped | CAUGHT | `test_only_404s_is_unknown_naming_the_recovery_image_and_the_background_tool` |
 | P5 | pytest | start gate `confirm is not True` -> `not confirm` | CAUGHT | `test_unconfirmed_starts_no_job_and_posts_nothing` |
 | P6 | pytest | background job uses the 270 s sync cap | CAUGHT | `test_job_runs_the_real_install_and_waits_much_longer_than_one_call` |
-| P7 | pytest | `00000000` treated as a real id | CAUGHT | `test_zero_id_falls_back_to_the_old_proof`, `test_failure_without_an_id_is_still_failed` |
+| P7 | pytest | all-zero id treated as a real id | CAUGHT | `test_zero_id_falls_back_to_the_old_proof`, `test_failure_without_an_id_is_still_failed` |
 | P8 | pytest | `_failure_is_this` ignores a stale id | CAUGHT | `test_stale_failure_with_another_id_is_ignored` |
 | K1 | kilnfw-host | encode skips id bytes | CAUGHT | `test_update_install_record.c:343/368/376` assertions |
 | K2 | kilnfw-host | decode skips id bytes | CAUGHT | `:343/368/376` assertions |
