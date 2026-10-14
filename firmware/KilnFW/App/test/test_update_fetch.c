@@ -900,8 +900,31 @@ static void test_rtc_offset_persistent_alloc_updfx9(void)
     CHECK(strcmp(g_state, "done") == 0, "download with a persistent allocation inside pair 0 completes");
     CHECK(g_fr_int_call_seq_i == 2, "pairs 1 and 2 each re-read internal free");
     CHECK(json_heap_num("rtc_free") == (long)T_RTC, "rtc_free comes from the re-read pairs (7788), not pair 0's stale f");
+    CHECK(json_heap_num("start_free") == (long)BENCH_IDLE_FREE, "start_free reports pair 0's internal reading (the verdict's), not the picked pair's (UPDFX9 INFO-5)");
     CHECK(json_heap_num("min_dma") == (long)(low - T_RTC), "min_dma carries the lowest scripted DMA reading");
     expect_claim_balanced("rtc persistent alloc");
+}
+
+// UPDFX9 INFO-5: a START (not a hop) can be refused on DMA: pair 0's internal reading admits, a persistent allocation
+// then lowers the later pairs, whose offset is the picked one, so the DMA check (which reduces to pf[best] >= need)
+// refuses. The hop record is only for hops: it must stay "none".
+static void test_start_dma_refusal_leaves_hop_none_updfx9(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    const uint32_t dma_low = update_fetch_heap_dma_need(true, false, T_RTC) - 1u;
+    g_fr_dma_call_seq[0] = BENCH_IDLE_FREE - T_RTC - 1500u; /* pair 0 offset 9288, never picked */
+    g_fr_dma_call_seq[1] = dma_low;
+    g_fr_dma_call_seq[2] = dma_low;
+    g_fr_dma_call_seq_n = 3;
+    g_fr_int_call_after = 1;
+    g_fr_int_call_seq[0] = dma_low + T_RTC;
+    g_fr_int_call_seq[1] = dma_low + T_RTC;
+    g_fr_int_call_seq_n = 2;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "a start refused on DMA reports low_heap_dma");
+    CHECK(strstr(g_rq.resp, "\"hop\":\"none\"") != NULL, "a START DMA refusal is not recorded as a hop refusal");
+    expect_claim_balanced("start dma refused");
 }
 
 // UPDFX9 LOW-1: only the THIRD pair is clean (offsets 9288, 9788, 7788), and the lowest DMA reading is pair 1's.
@@ -1333,6 +1356,7 @@ int main(void)
     test_heap_admission_updfx2();
     test_rtc_offset_min_of_pairs_updfx8();
     test_rtc_offset_persistent_alloc_updfx9();
+    test_start_dma_refusal_leaves_hop_none_updfx9();
     test_rtc_offset_third_pair_clean_updfx9();
     test_redirect_hop_frees_first_client();
     test_updlow();

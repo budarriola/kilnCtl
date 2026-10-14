@@ -161,7 +161,7 @@ class StatusTest(_Base):
             self.assertTrue(msu.update_fetch_status().startswith("error:"))
 
     def test_heap_readings_are_printed(self):
-        # UPDFX7: the 302 hop's settle result and the job's low-waters reach the status text.
+        # UPDFX7: the worst settle result over all redirect hops and the job's low-waters reach the status text.
         orig = self.board._fetch_status
 
         def with_heap():
@@ -176,6 +176,22 @@ class StatusTest(_Base):
         for needle in ("start free=34783", "dma=26995", "rtc=7788", "hop=admitted", "heap settle:",
                        "lowest free=32339", "most re-samples=2", "worst over all hops", "low-water free=13295", "dma=5507",
                        "largest_block=7936"):
+            self.assertIn(needle, out)
+
+    def test_refused_hop_prints_its_settle_details(self):
+        # UPDFX9 INFO-3: a refused hop still carries the settle result (free reached, re-sample count).
+        orig = self.board._fetch_status
+
+        def with_heap():
+            st = orig()
+            st["heap"] = {"sampled": True, "rtc_free": 7788, "start_free": 34783, "start_dma": 26995,
+                          "hop": "refused", "hop_free": 29000, "hop_settle_tries": 12,
+                          "min_free": 13295, "min_dma": 5507, "min_block": 7936}
+            return st
+
+        self.board._fetch_status = with_heap
+        out = msu.update_fetch_status()
+        for needle in ("hop=refused", "heap settle:", "lowest free=29000", "most re-samples=12"):
             self.assertIn(needle, out)
 
     def test_unsampled_heap_is_not_printed(self):

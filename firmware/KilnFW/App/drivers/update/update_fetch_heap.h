@@ -82,10 +82,10 @@
 // CHECK_DRAW (a check runs the same abort loop); the first admission of a check uses the download need (a check
 // that starts is a precursor to a download).
 //
-// DMA (LOW-2; UPDFX8 REVIEW_UPDFX7 LOW-1: rtc_free is the smallest offset of FETCH_DMA_OFFSET_PAIRS back-to-back
-// (internal, DMA) pairs, so a concurrent allocation between one pair's two reads cannot lower the DMA floor
-// provided at least one pair is clean: a reduction, not a bound. Pair 0 is not back-to-back, its f is read before
-// the largest-block read and the hop-record lock, so it has the widest window; pairs 1 and 2 are).
+// DMA (LOW-2; UPDFX8 REVIEW_UPDFX7 LOW-1: rtc_free is the smallest offset of FETCH_DMA_OFFSET_PAIRS (internal, DMA)
+// pairs, so a concurrent allocation between one pair's two reads cannot lower the DMA floor
+// provided at least one pair is clean: a reduction, not a bound. Pair 0's internal reading is taken before
+// the largest-block read and a heap_note lock cycle, so its pair has the widest window; pairs 1.. are read back-to-back).
 // internal free = DMA free + RTC-heap free: with CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP=y the
 // RTC FAST heap (7788 B free on the bench in every pair) is internal but not DMA-capable. The guard no longer
 // hard-codes 7788: heap_admit() derives rtc_free = internal free - DMA free at the job's first admission
@@ -94,8 +94,8 @@
 // less rtc_free: admission = ADMISSION - rtc_free (31728 - 7788 = 23940 B on the bench), sustained-low floor =
 // ABORT_BELOW - rtc_free (1428 B), hard minimum = FLOOR - rtc_free (404 B: at the owner floor only ~404 B of
 // DMA-capable DRAM is left, which is what the floor means on this board). At the FIRST admission the DMA check
-// is redundant with the internal one by construction (the offset comes from the same sample); its value is the
-// later samples: after every read that returned data, DMA free is compared against the offset fixed at the job
+// re-judges the picked pair (pf[best]), not pair 0: it can refuse where the internal verdict (pair 0) admitted if
+// free fell after pair 0; its main value is the later samples: after every read that returned data, DMA free is compared against the offset fixed at the job
 // start, so DMA-capable memory that falls faster than the internal total is caught by the window/consecutive
 // rule and the hard minimum. Predicted on the benchupd5 idle board: DMA free 26995 - 1024 = 25971 B against a
 // need of 23940 B, +2031 B.
@@ -197,7 +197,7 @@ _Static_assert(FETCH_HOP_CHECK_HEAP_MIN - FETCH_CHECK_DRAW_BYTES >= FETCH_HEAP_A
 // is never sampled). Abort on FETCH_DMA_LOW_READS consecutive low samples, or FETCH_DMA_WINDOW_LOW low samples
 // among the last FETCH_DMA_WINDOW (low,low,ok repeating), or one sample under the hard minimum.
 #define FETCH_DMA_LOW_READS 3u
-// Back-to-back (internal, DMA) pairs read at the job's first admission to derive rtc_free (UPDFX8 LOW-1).
+// (internal, DMA) pairs read at the job's first admission to derive rtc_free (UPDFX8 LOW-1).
 #define FETCH_DMA_OFFSET_PAIRS 3u
 #define FETCH_DMA_WINDOW 8u
 #define FETCH_DMA_WINDOW_LOW 4u

@@ -304,6 +304,18 @@ static const char *heap_admit(const work_t *w, bool hop)
         ESP_LOGI(TAG, "heap settle: %u re-sample(s) x %u ms, free %u, %s%s", tries, (unsigned)FETCH_HEAP_SETTLE_MS,
                  (unsigned)f, hv == FETCH_HEAP_OK ? "admitted" : "still short", hop ? " (redirect hop)" : "");
     }
+    // REVIEW_UPDFX9 INFO-2: a hop's DMA verdict is read BEFORE the hop record is written, so the record is written once
+    // (a status GET can never see a transient "admitted" for a hop that then refuses on DMA). The hop is never the
+    // job's first admission, so rtc_set is already latched and the offset is final.
+    uint32_t hop_dma = 0;
+    bool hop_dma_ok = true;
+    if (hop && hv == FETCH_HEAP_OK) {
+        hop_dma = dma_free_internal();
+        heap_note(UINT32_MAX, hop_dma, UINT32_MAX);
+        if (s_c->st.heap.rtc_set) {
+            hop_dma_ok = update_fetch_heap_dma_admit(hop_dma, s_c->st.heap.rtc_free, dl, true);
+        }
+    }
     // Every hop is folded into the job's hop evidence (REVIEW_UPDFX7 LOW-2): the WORST result (a refusal sticks),
     // the lowest admitting/refusing reading and the most settle re-samples used.
     if (hop) {
@@ -320,7 +332,7 @@ static const char *heap_admit(const work_t *w, bool hop)
                 jh->hop_tries = tries;
             }
         }
-        if (hv != FETCH_HEAP_OK) {
+        if (hv != FETCH_HEAP_OK || !hop_dma_ok) {
             jh->hop_result = HOP_REFUSED;
         } else if (jh->hop_result == HOP_NONE) {
             jh->hop_result = HOP_ADMITTED;
@@ -328,13 +340,15 @@ static const char *heap_admit(const work_t *w, bool hop)
         st_unlock();
     }
     if (hv == FETCH_HEAP_OK) {
-        uint32_t dma = dma_free_internal();
-        heap_note(UINT32_MAX, dma, UINT32_MAX);
+        uint32_t dma = hop ? hop_dma : dma_free_internal();
+        if (!hop) {
+            heap_note(UINT32_MAX, dma, UINT32_MAX);
+        }
         // LOW-2: the RTC FAST heap is internal but not DMA-capable; derive its free size at the first admission and
         // hold it for every later DMA number. REVIEW_UPDFX7 LOW-1: f and dma are read at different instants, and a
         // concurrent allocation between the two reads would inflate rtc_free and so LOWER the DMA floor for the whole
         // job. Take FETCH_DMA_OFFSET_PAIRS pairs (pairs 1.. are back-to-back; pair 0's f was read earlier, before the largest-block
-        // read, heap_note and the hop-record lock, so it has the widest window) and keep the one with the smallest offset (the
+        // read and a heap_note lock cycle, so it has the widest window) and keep the one with the smallest offset (the
         // conservative direction: a concurrent free can only make the floor stricter).
         if (!s_c->st.heap.rtc_set) {
             uint32_t pf[FETCH_DMA_OFFSET_PAIRS];
@@ -361,12 +375,7 @@ static const char *heap_admit(const work_t *w, bool hop)
         }
         ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u, rtc %u)", (unsigned)dma,
                  (unsigned)update_fetch_heap_dma_need(dl, hop, rtc), (unsigned)rtc);
-        if (hop) {
-            // UPDFX9 LOW-2: the hop record above says admitted (internal verdict only); a DMA refusal overrides it.
-            st_lock();
-            s_c->st.heap.hop_result = HOP_REFUSED;
-            st_unlock();
-        }
+        // A hop's REFUSED record was already written above from the same DMA verdict (UPDFX9 LOW-2, INFO-2).
         return "low_heap_dma";
     }
     const unsigned need_free = update_fetch_heap_need(dl, hop);

@@ -315,7 +315,7 @@ def _fmt_fetch(st: dict) -> str:
 
 
 def _fmt_heap(h: Optional[dict]) -> str:
-    """The job's internal-RAM readings (UPDFX7): admission reading, the 302 hop's settle result and the low-waters."""
+    """The job's internal-RAM readings (UPDFX7): admission reading, the worst settle result over all redirect hops and the low-waters."""
     if not isinstance(h, dict) or not h.get("sampled"):
         return ""
     text = (f"heap[start free={h.get('start_free')} dma={h.get('start_dma')} rtc={h.get('rtc_free')}; "
