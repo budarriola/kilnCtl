@@ -3361,3 +3361,34 @@ from the AP-only mode is none by design (no uplink).
 Restore: `-Disconnect`, PC back on the LAN, board mode home, STA connected
 192.168.1.156, stage cleared, link up, no trip, no crash, readiness unchanged.
 S6b from the recovery dwell was cleared once after the dev reflash.
+
+## 2026-10-14 benchap3 -- app-AP fetch check and XIP bench trial (variant C, no land)
+
+Board found healthy on the LAN (app, dev tip b3cc27846 clean, no trip, home Wi-Fi,
+nothing staged); only the kilnctrl MCP serial hub on 8765 had died, restarted
+with `mcp_servers.ps1 restart -Server kilnctrl`. No rebuild/flash needed for
+phase A step 1 (board already ran the dev tip build); backup_export taken.
+
+Phase A. `wifi_set_mode ap`; LCD showed the AP card with credentials (an LCD
+admin session was already open); `join_board_ap.ps1 -Mode normal` joined
+(candidate 1 of 1, no fix needed). Over 192.168.4.1 `update_check` and
+`update_stage_release` (pre.3, force, allow_downgrade) both FAILED
+`low_heap_free`: the board refused at admission (internal free 29267 B in AP
+mode against the 32752 B FETCH_HEAP_PRECHECK_MIN), with no uplink in AP-only mode
+anyway. Idle dev tip internal free settles at ~30.0 KB (34.2 KB right after
+boot), min_free 19463 B, largest block 11264 B (SK-04 alarm 7168 B not tripped);
+readings at uptime 34831/35127/35185/35295/35419 s all stable. Link errors 0.
+Restore: `-Disconnect`, `wifi_set_mode home`, STA 192.168.1.156.
+
+Phase B (variant C = XIP_FROM_PSRAM=y + FETCH_INSTRUCTIONS=y + RODATA=y
+confirmed in build/config/sdkconfig.h, UART_ISR_IN_IRAM off; worktree sdkconfig
+only, restored). Booted healthy, boot_count 1, persisted 0, no trip, link up.
+Idle internal free 45163 B / largest 15872 B / min 28143 B (A: ~30.0 KB / 11264 /
+19463). PSRAM total 5.37 MB (A 8.24 MB: ~2.9 MB copied for XIP). GitHub fetch
+pre.3 over the LAN: staged and verified, fetch start free 43887 B, low-water
+free 28111 B, DMA low-water 20303 B, largest 15872 B; link crc/len/timeouts 0
+before and after (445 frames). Stage cleared. latency_soak 120 s: 0 errors, 0
+clustered stalls (status p95 524 ms, max 587 ms). LCD renders home page; one
+display_flush max 574 ms seen during the soak. Not run: forced panic (no tool),
+recovery apply on C, variant C+Q (the sdkconfig QIO edit was denied by the
+auto-mode classifier). Dev tip rebuilt and flashed back, healthy.
