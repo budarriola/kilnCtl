@@ -3392,3 +3392,40 @@ clustered stalls (status p95 524 ms, max 587 ms). LCD renders home page; one
 display_flush max 574 ms seen during the soak. Not run: forced panic (no tool),
 recovery apply on C, variant C+Q (the sdkconfig QIO edit was denied by the
 auto-mode classifier). Dev tip rebuilt and flashed back, healthy.
+
+## 2026-10-14 xipland -- XIP from PSRAM (variant C) landed on dev
+
+Owner decision 2026-10-14 "Finish trial, then land". Change: `sdkconfig.defaults`
+sets `CONFIG_SPIRAM_XIP_FROM_PSRAM=y` and leaves `CONFIG_UART_ISR_IN_IRAM` unset;
+`check_sdkconfig_defaults_applied.ps1` pins both. The recovery image has its own
+sdkconfig and is unchanged. Board ran the variant C JTAG build (e9b50d8f8) for the
+whole trial; backup_export taken first.
+
+| Metric | A (dev tip) | C (XIP, ISR off) |
+|---|---|---|
+| Boot to HTTP answer | 18.7 s | 19.2 s |
+| Boot to UART link answer | 16.1 s | 16.1 s |
+| Idle internal free | 30.0-34.7 KB | 45.4-45.9 KB |
+| Largest free block | 11264 B | 16384 B |
+| Internal min_free | 18-19.5 KB | 28.8 KB |
+| PSRAM total | 8.24 MB | 5.37 MB |
+| GitHub fetch admission | refused (low_heap_free) | admitted |
+| Fetch start free / low-water free / DMA low-water | n/a | 44399 / 28463 / 20655 B |
+| Link crc/len/timeouts during fetch | n/a | 0/0/0 |
+
+Steps: boot PASS; six idle readings over about 19 min PASS (SK-04 7168 B never
+tripped); GitHub fetch and stage of pre.3 PASS; full install via
+`update_install_start` PASS in effect (board came up on pre.3 with the right
+commit, but the job itself ended UNKNOWN after 600 s with 404 on
+/api/update/status: the old app lacks that route and the recovery apply ran
+longer than the earlier ~4 min; treated as a job-tracking artifact); JTAG flash of
+C back PASS; short firing PASS (link counters flat, cfg_fs and storage ok);
+latency_soak PASS (0 errors, 0 clustered stalls); LCD capture PASS (normal UI);
+forced panic coredump SKIP (no tool exists).
+
+Device bug found and fixed: a fetch refused at admission reported
+`heap.start_free = 0` ("start free=0"), because `start_free` was only written on
+the admitted path. `heap_admit()` now records the refusing reading; host test
+`test_update_fetch` covers it. Negtest: dropping the write is CAUGHT by the new
+assertion (test_update_fetch.c:777); the four sdkconfig-pin mutants are CAUGHT by
+`check_sdkconfig_defaults_applied.ps1`.
