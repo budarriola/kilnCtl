@@ -478,7 +478,7 @@ def judge_pico_stack_margins(tasks: "list[dict]", min_fraction: float = 0.25) ->
 
 
 def judge_heap_dram_floor(dram_largest_free_before: Optional[int], dram_largest_free_after: Optional[int],
-                           unacknowledged_crash: bool, floor_bytes: int = 8704) -> CaseResult:
+                           unacknowledged_crash: bool, floor_bytes: int = 7168) -> CaseResult:
     """SK-04: internal DRAM largest free block never below the floor; no
     UNACKNOWLEDGED CRASH REPORT banner.
 
@@ -488,7 +488,7 @@ def judge_heap_dram_floor(dram_largest_free_before: Optional[int], dram_largest_
     ``KILN_DRAM_FREE_ALARM_BYTES`` (11903, a *total-free* alarm,
     ``firmware/KilnFW/App/drivers/common/dram_margin.h``), misapplied here to
     a *largest-contiguous-block* reading. The correct anchor is firmware's
-    own largest-block alarm, ``KILN_DRAM_LARGEST_ALARM_BYTES = 8704``
+    own largest-block alarm, ``KILN_DRAM_LARGEST_ALARM_BYTES = 7168``
     (``dram_margin.h``, the largest-free-block value at which a real failure
     happened 2026-08-22) -- a first re-derivation attempt set this to 8192
     (a 2026-09-21 measured reading, ROADMAP.md) without checking it against
@@ -497,11 +497,14 @@ def judge_heap_dram_floor(dram_largest_free_before: Optional[int], dram_largest_
     history: ~7936-8192 B on 2026-09-21 (below today's floor -- expected,
     that was the regressed reading the alarm exists for), 9216 B on the
     current bench board (a06389f9, 2026-09-24, post-DRAM-fixes baseline --
-    still comfortably above 8704). ``min_free`` (32787/14015 B in the same
+    still comfortably above the then-8704 floor). ``min_free`` (32787/14015 B in the same
     read) is a separate, already-healthy number this floor does not gate --
     it only ever concerns the single largest contiguous free block, the
     number that actually predicts whether one more large allocation can
-    succeed."""
+    succeed.
+
+    Owner decision 2026-10-13: lowered 8704 -> 7168 B (a GitHub fetch dips the
+    largest block to 7680 B on the bench); mirrors dram_margin.h."""
     if unacknowledged_crash:
         return CaseResult(Verdict.FAIL, reason="unacknowledged crash report present", observed={})
     for label, value in (("before", dram_largest_free_before), ("after", dram_largest_free_after)):

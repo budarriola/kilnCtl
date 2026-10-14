@@ -246,7 +246,7 @@ def get_heap_status(host: Optional[str] = None) -> str:
     if isinstance(low, dict):
         lines.append(
             f"heap_internal largest_free_block low-water: {low.get('bytes')} B first seen at "
-            f"uptime_s={low.get('at_uptime_s')} (SK-04 alarm 8704 B)"
+            f"uptime_s={low.get('at_uptime_s')} (SK-04 alarm 7168 B)"
         )
     else:
         lines.append("heap_internal largest_free_block low-water: not reported (older firmware or not sampled yet)")
