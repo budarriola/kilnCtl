@@ -799,8 +799,9 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
         if exc.status is not None:
             return f"FAILED: install refused or lost: {_refusal_text(exc)} (host={resolved})"
         if isinstance(exc.__cause__, http_auth.HttpAuthError):
-            # Relogin refused, lockout or no credential: the handler never ran. Definite, not "possibly applied".
-            return f"FAILED: install not sent, authentication refused: {exc} (host={resolved})"
+            # Relogin refused or failed on transport, lockout or no credential: the handler never ran. Definite,
+            # not "possibly applied". (AUTOFX2 INFO-3: the login can fail on transport too, so the text says "login".)
+            return f"FAILED: install not sent, login refused or failed: {exc} (host={resolved})"
         # Transport failure/timeout: the board may have accepted the request and
         # rebooted. Do not call it failed; let the follow-up reads decide.
         post_unknown = True

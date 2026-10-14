@@ -173,3 +173,11 @@ No result came from a collection or import error.
 | N12 | `_stage_empty` drops the `ok` prefix | CAUGHT | test_stage_empty_requires_ok_prefix (both params) |
 
 Tally: 10/12 CAUGHT. Both MISSED results are diagnostic text only.
+
+## Fix status (UPDLOWFX)
+
+- LOW-1: fixed: an unexpected exception after the install POST returns `UNKNOWN: install may be running; ...` (single-flight wrapper in `_install_impl`); before the POST it stays `error:`.
+- LOW-2: fixed: a raised or non-ok install followed by an unreadable baseline is FAIL naming the install result, not INCONCLUSIVE.
+- LOW-3: fixed: `REVIEW_RELSUITEFX3.md` now cites `bbfa0712d`.
+- LOW-4: fixed: only a pre-POST `error: could not read GET`, `REFUSED`, or `FAILED: install refused or lost: HTTP 4xx` lets cleanup run; everything else is may-have-run.
+- INFO-1: fixed (docstring). INFO-2: fixed (the no-reboot test pins `install_non_ok` and the reason text). INFO-3, INFO-4, INFO-5: unchanged (slow-test clock injection; pin keeps port; hardware-gated).

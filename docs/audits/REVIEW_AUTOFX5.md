@@ -165,3 +165,11 @@ Every kilnfw-host mutant compiled (no BUILD FAILURES line) and failed a named as
 - `firmware/KilnFW_recovery/main/check_recovery_status_fragments.ps1`: section 3, install id emission
   in both images.
 - `tools/PcTools/tests/test_mcp_server_update_install.py`: `test_pending_record_outlives_the_background_wait`.
+
+## Fix status (UPDLOWFX)
+
+- LOW-1: fixed: a 404 poll tail now probes `GET /api/status` (`_read_uptime`); if it answers, the text says the board runs an application WITHOUT the install route, else the old "recovery image is still applying" text. Pytest both ways.
+- LOW-2: fixed: `_INSTALL_INFLIGHT` single-flight set (per host, locked, released in `finally`); a second confirmed call is REFUSED before any POST. The bench board lock is deliberately NOT taken: the release bench suite holds it while it calls this tool.
+- LOW-3: fixed: the pending record keeps the pre-POST failure key (code, reason, id); with `post_unknown` an identical record is ignored. Pytest: stale ignored, a new one still ends FAILED.
+- LOW-4: fixed: a plain status read with nothing staged, no install recorded and no tombstone answers `ok - nothing staged and no install recorded`, not "cannot confirm".
+- INFO-1..6: unchanged (informational).

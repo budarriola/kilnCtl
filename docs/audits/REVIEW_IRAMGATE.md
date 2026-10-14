@@ -156,3 +156,10 @@ For every CAUGHT row, the log shows no build failure. The FAIL line is a test as
 ## Fix status
 
 Open: LOW-1, LOW-2, LOW-3 (tooling only). Per the owner's 2026-10-12 "device bugs only" rule, these are recorded, not fixed here.
+
+## Fix status (UPDLOWFX)
+
+- LOW-3: fixed: `check_kilnfw_dram_bss_budget.py` FAILs when `.dram0.data` is absent and uses `is not None` for both ceiling overrides (`tests/test_dram_bss_budget_check.py`).
+- LOW-2 (second bullet): fixed: the allocation gate scans `*.inc` and `*.cpp` too.
+- LOW-1: partly fixed: the gate also counts `pvPortMalloc`, `strdup`/`strndup`, `asprintf`/`vasprintf`, and a bare `malloc`/`calloc`/`realloc` token not followed by `(` (alias, `(malloc)(n)`, function pointer). NOT done: `heap_caps_malloc(..., MALLOC_CAP_INTERNAL)` and the `*WithCaps` forms (76 existing ungated `MALLOC_CAP_INTERNAL` uses would all need reviewed allowlist entries; a separate pass).
+- LOW-2 (first bullet, same-file swap): not fixed, design choice for a cheap count gate.

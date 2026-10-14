@@ -179,6 +179,21 @@ static void test_settings_http(void)
     fixture(g_sha_hex, IMG_LEN);
     CHECK(POST("/api/update/check", NULL) == 202, "repo change cleared the backoff");
     wait_idle();
+    // UPDBATCH LOW-1: re-saving the SAME repo (any case) must not walk past a fresh backoff.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 429;
+    g_fr_routes[0].retry_after = "300";
+    run_job_and_result("/api/update/check");
+    CHECK(POST("/api/update/check", NULL) == 429, "backoff active before the same-repo save");
+    strcpy(g_fr_repo, "bob/proj"); // fixture() blanks the fake's repo; set it only after the job ran
+    CHECK(post_settings("repo=bob%2Fproj", 0) == 200, "same-repo settings POST succeeds");
+    CHECK(POST("/api/update/check", NULL) == 429, "same-repo save leaves the backoff in place");
+    CHECK(post_settings("repo=BOB%2FPROJ", 0) == 200, "case-only repo POST succeeds");
+    CHECK(POST("/api/update/check", NULL) == 429, "case-only repo change leaves the backoff in place");
+    CHECK(post_settings("repo=carol%2Fproj", 0) == 200, "different repo POST succeeds");
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(POST("/api/update/check", NULL) == 202, "a real repo change still clears the backoff");
+    wait_idle();
     strcpy(g_fr_repo, "budarriola/kilnCtl");
 }
 

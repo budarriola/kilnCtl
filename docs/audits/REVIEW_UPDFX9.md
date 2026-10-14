@@ -119,3 +119,12 @@ PcTools: 3 CAUGHT, 1 MISSED.
 | lowest_prints_min | "lowest free" prints `min_free` | CAUGHT (test_heap_readings_are_printed) |
 | worst_text_dropped | "worst over all hops" phrase removed | CAUGHT (test_heap_readings_are_printed) |
 | refused_hop_no_settle | settle details only for `admitted` | MISSED (INFO-3) |
+
+## Fix status (UPDLOWFX)
+
+- LOW-1: fixed (comments only): "back-to-back" dropped from the `update_fetch_heap.h` pair text and the `FETCH_DMA_OFFSET_PAIRS` define; "hop-record lock" dropped from the header and `update_fetch.c`; the "redundant by construction" sentence now says the first DMA check re-judges the picked pair.
+- INFO-1: fixed (`_fmt_heap` docstring and the test comment now say "worst settle result over all redirect hops").
+- INFO-2: fixed with no new RAM: `heap_admit()` reads the hop's DMA verdict (`hop_dma`, a local) BEFORE the hop record, so the record is written once under one `st_lock`. The post-hoc REFUSED overwrite is gone. Cost: 0 B internal static/heap, 8 B of stack.
+- INFO-3: fixed: `test_refused_hop_prints_its_settle_details` (pytest) feeds `hop: "refused"`.
+- INFO-5: fixed: `test_start_dma_refusal_leaves_hop_none_updfx9` (a START refused on DMA keeps `"hop":"none"`) and a `start_free == BENCH_IDLE_FREE` assertion in `test_rtc_offset_persistent_alloc_updfx9` (pair 0's reading is what `start_free` reports).
+- INFO-4: unchanged (test-fake limits, no defect).

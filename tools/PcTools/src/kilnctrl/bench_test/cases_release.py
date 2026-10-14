@@ -859,8 +859,10 @@ def _valid_baseline(snap: dict) -> Optional[str]:
 
 
 def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool]:
-    """Returns (result, install_may_have_run). The stage is only left alone when
-    the install tool reported ok or raised (it may be installing/rebooting)."""
+    """Returns (result, install_may_have_run). The stage is left alone whenever the
+    install POST may have been sent: the tool reported ok, raised, or returned any
+    non-ok result other than a pre-POST error or a definite 4xx refusal
+    (it may be installing/rebooting)."""
     before = _snapshot(ctx)
     bident = before.get("identity") or {}
     before_build = bident.get("fw_build")

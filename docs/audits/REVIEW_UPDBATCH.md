@@ -244,3 +244,8 @@ worktree at `386f897e7` (origin/dev `20236041e` plus the two test commits):
 class). Versus the stored baseline: NEW 0, KNOWN 0. Five checks reported as FIXED
 pass here because the baseline is from an older origin/dev, not because of
 these commits.
+
+## Fix status (UPDLOWFX)
+
+- LOW-1: fixed: `settings_post_handler` copies the repo in force into the (dead) form-body buffer before `update_settings_set()` and clears the backoff only when the repo in force afterwards differs case-insensitively (or the old one was unreadable). Cost: 0 B internal static/heap, 0 B extra stack (the body buffer is reused). Test: same-repo and case-only saves keep the 429; a real change clears it.
+- INFO-1..8: unchanged.

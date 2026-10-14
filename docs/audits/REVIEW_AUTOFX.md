@@ -290,3 +290,8 @@ Code fixes landed in `e8a6ad365`. The fix doc commit follows it on dev.
 | LOW-4 | not fixed | Unreachable in practice (a client must join within milliseconds of SoftAP start); the fix is a boot-order change in `recovery_main.c`, out of scope here. |
 | LOW-5 | partly fixed `e8a6ad365` | One shared `RECOVERY_INSTALL_POLL_STACK` define in `recovery_apply_esp.h`, used by both files. Not done: the source-level supersede guard. `recovery_http.c` has no host coverage and no harness was added, so the LOW-2 call is covered by the recovery target build only. |
 | INFO-1..5 | not fixed | Informational. |
+
+## Fix status 2 (UPDLOWFX)
+
+- LOW-4: not fixed. Moving `recovery_install_boot()` ahead of `recovery_http_start()` (or giving the four mutating routes the apply claim) changes recovery boot order and the `recovery_apply_busy()` contract, and the recovery image has no host harness. It needs a recovery target build plus hardware verification; the window is milliseconds after SoftAP start and needs an already-joined client.
+- LOW-5: already closed by earlier work: the shared poll-stack define (`e8a6ad365`) and the source-level supersede guards (AUTOFX3 INFO-1, `check_recovery_status_fragments.ps1`); no behavioural harness exists.

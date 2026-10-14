@@ -1000,6 +1000,9 @@ def test_install_post_sent_non_ok_without_reboot_still_skips_cleanup():
     r = get_case("RL-D01").judge(c)
     names = [n for n, _h in c["_seen"]]
     assert r.verdict == Verdict.FAIL and "cancel" not in names and "clear" not in names
+    # RELSUITEFX4 INFO-2: the diagnostics are pinned: the observed flag and the install text in the reason.
+    assert r.observed.get("install_non_ok") is True
+    assert "UNKNOWN: mid-apply" in r.reason and "returned" in r.reason
 
 
 @pytest.mark.parametrize("res", [

@@ -178,6 +178,7 @@ class InstallBudgetTests(_Base):
             out = msu.update_install_staged(confirm=True)
         self.assertTrue(out.startswith("FAILED"), out)
         self.assertNotIn("possibly applied", out)
+        self.assertIn("login refused or failed", out)  # AUTOFX2 INFO-3: not "authentication refused"
         self.assertEqual(g.call_count, 1)  # initial GET only, no polling
 
 

@@ -205,3 +205,7 @@ Fixed in `55718f506` (code, check) with test follow-ups in the two commits after
 - INFO-1: the supersede call must be a top-level statement of `ota_esp_post` (4-space indent), so `if (0) { ... }` fails. A deeper dead-code guard would need a C parser and is not attempted.
 
 Negtest: pytest preset 4/4 CAUGHT (t_pre before read, elapsed after read, no TTL, REFUSED wording); check preset 3/3 CAUGHT (digit-bearing long name, old narrow regex plus that name, dead supersede).
+
+## Fix status 2 (UPDLOWFX)
+
+- INFO-1: already fixed in `55718f506` (top-level-statement guard); a deeper dead-code guard needs a C parser and is not attempted.

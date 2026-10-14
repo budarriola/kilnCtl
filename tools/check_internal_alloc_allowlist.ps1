@@ -68,9 +68,11 @@ function Strip-C([string]$t) {
     $sb.ToString()
 }
 
-$rx = [regex]'(?<![A-Za-z0-9_.>])(malloc|calloc|realloc|xTaskCreate|xTaskCreatePinnedToCore)\s*\('
+# IRAMGATE LOW-1/LOW-2: also the other plain-heap spellings (pvPortMalloc, strdup/strndup, asprintf), and a bare
+# malloc/calloc/realloc token NOT followed by '(' (a #define alias, '(malloc)(n)', a function pointer).
+$rx = [regex]'(?<![A-Za-z0-9_.>])(?:(?:malloc|calloc|realloc|xTaskCreate|xTaskCreatePinnedToCore|pvPortMalloc|strdup|strndup|asprintf|vasprintf)\s*\(|(?:malloc|calloc|realloc)(?![A-Za-z0-9_]))'
 $cur = @{}
-Get-ChildItem -Path $app -Recurse -Include *.c, *.h -File | Where-Object { $_.FullName -notmatch '[/\\]test[/\\]' } | ForEach-Object {
+Get-ChildItem -Path $app -Recurse -Include *.c, *.h, *.inc, *.cpp -File | Where-Object { $_.FullName -notmatch '[/\\]test[/\\]' } | ForEach-Object {
     $rel = $_.FullName.Substring($app.Length + 1) -replace '[\\]', '/'
     $m = $rx.Matches((Strip-C ([IO.File]::ReadAllText($_.FullName)))).Count
     if ($m -gt 0) { $cur[$rel] = $m }

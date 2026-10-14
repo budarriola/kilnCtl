@@ -150,7 +150,7 @@ M1 is CAUGHT only because the test fake returns a `str`; see MED-1.
 
 ## Fix status
 
-Fixed in 62377b873 (cases_release.py, test_bench_test_cases_release.py).
+Fixed in bbfa0712d (cases_release.py, test_bench_test_cases_release.py).
 
 - MED-1 / LOW-1: `_pin_identity` pins the real `IPv4Address` through `mcp_server_aux._pin_host` (port kept). Test goes through the real `_board_identity_check`.
 - MED-2: only `error:` / `REFUSED` results mean the install never started; every other non-ok result polls for the reboot and skips cancel/clear. Tests for `UNKNOWN`, `FAILED: install recorded a failure`, `FAILED: install refused or lost`.

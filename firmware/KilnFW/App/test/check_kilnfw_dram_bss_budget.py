@@ -142,8 +142,8 @@ def main():
     ap.add_argument("--data-ceiling-bytes", type=int, default=None,
                     help="override DATA_CEILING_BYTES (used by the negative test)")
     args = ap.parse_args()
-    data_ceiling = args.data_ceiling_bytes if args.data_ceiling_bytes else DATA_CEILING_BYTES
-    ceiling = args.ceiling_bytes if args.ceiling_bytes else CEILING_BYTES
+    data_ceiling = args.data_ceiling_bytes if args.data_ceiling_bytes is not None else DATA_CEILING_BYTES  # IRAMGATE LOW-3: an explicit 0 is a value
+    ceiling = args.ceiling_bytes if args.ceiling_bytes is not None else CEILING_BYTES
     name = "check_kilnfw_dram_bss_budget"
 
     if not os.path.isfile(args.elf):
@@ -180,7 +180,12 @@ def main():
         print("  Prefer EXT_RAM_BSS_ATTR (PSRAM .bss) for anything large that is not touched by an")
         print("  ISR, DMA, or a flash-write path. Raise CEILING_BYTES only per the module docstring.")
         return 1
-    data = sizes.get(DATA_SECTION, 0)
+    if DATA_SECTION not in sizes:
+        # IRAMGATE LOW-3: a renamed section must not silently stop grading initialised data.
+        print(f"{name}: FAIL -- {DATA_SECTION} section not present in {args.elf}; "
+              f"sections seen: {', '.join(sorted(sizes))}")
+        return 1
+    data = sizes[DATA_SECTION]
     print(f"{name}: {DATA_SECTION} = {data} B, ceiling {data_ceiling} B (headroom {data_ceiling - data} B)")
     if data > data_ceiling:
         print(f"{name}: FAIL -- {DATA_SECTION} is {data} B, over the {data_ceiling} B ceiling by "

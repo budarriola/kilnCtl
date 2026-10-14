@@ -222,3 +222,9 @@ fragment, supersede dropped, supersede not reported, supersede after the boot se
 
 INFO-1..5 are unchanged. Not fixed: INFO-5 (slow P4 mutant) is addressed in passing, because the tests now run on a
 virtual clock.
+
+## Fix status 2 (UPDLOWFX)
+
+- INFO-3: fixed: the FAILED text is now `install not sent, login refused or failed` (the login can fail on transport); pytest pins it.
+- INFO-5: already addressed (virtual clock, AUTOFX3).
+- INFO-1 (double fault on the OK result write), INFO-2 (advice outlives the event), INFO-4 (false UNKNOWN): not fixed; recovery-side or safe-direction, no host harness.
