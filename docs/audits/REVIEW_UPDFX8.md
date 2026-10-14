@@ -153,7 +153,7 @@ do not cover the pair loop's internal reads, which is where LOW-1 sits.
 - LOW-1: fixed. The fake gained `g_fr_int_call_seq` (scripted internal free per call, from `g_fr_int_call_after`
   DMA readings on). New tests `test_rtc_offset_persistent_alloc_updfx9` (an allocation persisting between pair 0's
   reads; `rtc_free` 7788, both re-reads consumed, `min_dma`) and `test_rtc_offset_third_pair_clean_updfx9` (only
-  pair 3 clean, pair 1 lowest DMA). Negtests below.
+  pair 3 clean, pair 1 lowest DMA). Negtests: REVIEW_UPDFX9.md (the UPDFX9 commit recorded none).
 - LOW-2: fixed. A hop refused on DMA now sets `hop_result` to refused; `hop_dma_one_under` asserts `"hop":"refused"`.
 - LOW-3: fixed (text). ADMISSION row says "if the draw is within MODEL_DRAW"; the pairs comment says a reduction,
   not a bound (needs one clean pair), and that pair 0 is not back-to-back.
