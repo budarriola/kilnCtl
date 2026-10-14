@@ -34,7 +34,7 @@ dependencies = [
     # recovery image and the application's AP card draw on the LCD. Imported
     # lazily: a missing wheel degrades the recovery read to glyph segmentation
     # and fails the normal-mode read with an install hint.
-    "zxing-cpp>=2.2",
+    "zxing-cpp>=3.0",
 ]
 
 [dependency-groups]

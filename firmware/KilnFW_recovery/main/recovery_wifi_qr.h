@@ -40,6 +40,9 @@ extern "C" {
 #define RQR_QUIET     4
 #define RQR_AREA_PX   124
 
+// Volatile-store zeroing the optimizer may not elide; used for every wipe here.
+void rqr_secure_zero(void *p, size_t n);
+
 // Builds the payload with the Wi-Fi QR escaping (backslash, semicolon, comma,
 // colon and double quote get a backslash). Returns the length, or 0 if an
 // argument is NULL, the SSID is empty, or it does not fit (out is then wiped).

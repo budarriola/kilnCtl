@@ -3,6 +3,16 @@
 
 #include <string.h>
 
+// Zeroes a buffer in a way the optimizer may not elide (a dead stack local's
+// plain memset can be dropped at -Os).
+void rqr_secure_zero(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) {
+        *v++ = 0;
+    }
+}
+
 static bool needs_escape(char c)
 {
     return c == '\\' || c == ';' || c == ',' || c == ':' || c == '"';
@@ -36,7 +46,7 @@ size_t rqr_build_payload(const char *ssid, const char *pass, char *out, size_t c
               put_str(out, cap, &n, ";P:", false) && put_str(out, cap, &n, pass, true) &&
               put_str(out, cap, &n, ";;", false);
     if (!ok) {
-        memset(out, 0, cap);
+        rqr_secure_zero(out, cap);
         return 0;
     }
     out[n] = '\0';
@@ -53,9 +63,9 @@ int rqr_encode(const char *ssid, const char *pass, uint8_t *qr, uint8_t *tmp)
                              qrcodegen_Mask_AUTO, true)) {
         size = qrcodegen_getSize(qr);
     }
-    memset(payload, 0, sizeof(payload));
+    rqr_secure_zero(payload, sizeof(payload));
     if (tmp) {
-        memset(tmp, 0, RQR_BUF_LEN);
+        rqr_secure_zero(tmp, RQR_BUF_LEN);
     }
     return size;
 }

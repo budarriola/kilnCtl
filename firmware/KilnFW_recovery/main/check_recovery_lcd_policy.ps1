@@ -116,7 +116,11 @@ try {
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "case RLCD_GET_BAD_LENGTH: return RLCD_BG_INVALID;" -Replacement "case RLCD_GET_BAD_LENGTH: return RLCD_BG_NONE;" -Tag "badlen_none"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "return failed_lines == 0;" -Replacement "return true;" -Tag "drawalways"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "LCD NOT READY, passphrase not displayed" -Replacement "LCD ok" -Tag "msg"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "&& net_set && qr_size > 0;" -Replacement "&& qr_size > 0;" -Tag "qr_ignores_netset"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return !(err_head || ap_down || net_none || storage_fail)" -Replacement "return !(err_head || net_none || storage_fail)" -Tag "qr_ignores_apdown"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return visible;" -Replacement "return true;" -Tag "qr_always_after"
     # Source wiring.
+    Test-Mutant -File "recovery_lcd.c" -Needle "rlcd_qr_visible(" -Replacement "rlcd_qr_vis_unused(" -Tag "qr_handcopy"
     Test-Mutant -File "recovery_lcd.c" -Needle "        s_ready = false;`n        ESP_LOGE(TAG, `"status draw failed" -Replacement "        ESP_LOGE(TAG, `"status draw failed" -Tag "draw_keeps_ready"
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "(void)0;" -Tag "nowarn"
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "ESP_LOGE(TAG, RLCD_NOT_READY_MSG); ESP_LOGI(TAG, `"pw %s`", s_net_pass);" -Tag "passleak"

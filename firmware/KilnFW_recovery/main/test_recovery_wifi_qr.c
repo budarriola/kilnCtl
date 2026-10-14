@@ -2,6 +2,7 @@
 // check_recovery_wifi_qr.ps1 (MSVC). Prints "RESULT pass=N fail=N".
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "recovery_wifi_qr.h"
@@ -167,8 +168,55 @@ static void test_scanline(void)
 #undef PX
 }
 
-int main(void)
+// LOW-2: the encoder runs nested in app_main; the default main stack (3584 B)
+// left no measured headroom, so sdkconfig.defaults must set it explicitly.
+static void test_main_stack(const char *cfg_path)
 {
+    FILE *f = cfg_path ? fopen(cfg_path, "rb") : NULL;
+    CHECK(f != NULL, "sdkconfig.defaults readable for the main stack scan");
+    if (!f) {
+        return;
+    }
+    static char cfg[16384];
+    size_t n = fread(cfg, 1, sizeof(cfg) - 1, f);
+    fclose(f);
+    cfg[n] = 0;
+    const char *k = "\nCONFIG_ESP_MAIN_TASK_STACK_SIZE=";
+    const char *p = strstr(cfg, k);
+    CHECK(p != NULL, "main task stack size is set explicitly");
+    CHECK(p != NULL && atoi(p + strlen(k)) >= 4608, "main task stack is at least 4608 B");
+}
+
+static void test_wipe(const char *src_path)
+{
+    uint8_t b[16];
+    memset(b, 0xA5, sizeof(b));
+    rqr_secure_zero(b, sizeof(b));
+    int z = 1;
+    for (size_t i = 0; i < sizeof(b); i++) {
+        z &= b[i] == 0;
+    }
+    CHECK(z, "rqr_secure_zero zeroes the whole buffer");
+
+    // The stack payload local is dead after the wipe, so only the source can
+    // show the wipe is the non-elidable one (LOW-1).
+    FILE *f = src_path ? fopen(src_path, "rb") : NULL;
+    CHECK(f != NULL, "recovery_wifi_qr.c readable for the wipe scan");
+    if (!f) {
+        return;
+    }
+    static char src[16384];
+    size_t n = fread(src, 1, sizeof(src) - 1, f);
+    fclose(f);
+    src[n] = 0;
+    CHECK(strstr(src, "rqr_secure_zero(payload, sizeof(payload))") != NULL, "payload wiped with secure_zero");
+    CHECK(strstr(src, "memset(payload") == NULL, "payload not wiped with a plain memset");
+}
+
+int main(int argc, char **argv)
+{
+    test_wipe(argc > 1 ? argv[1] : NULL);
+    test_main_stack(argc > 2 ? argv[2] : NULL);
     test_payload();
     test_encode_matches_reference();
     test_scanline();

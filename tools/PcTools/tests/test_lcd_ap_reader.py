@@ -285,7 +285,7 @@ def test_recovery_without_qr_falls_back_to_glyphs(font):
 def test_recovery_bad_qr_passphrase_falls_back_to_glyphs(font):
     pw = "23456789ABCD"
     # QR present but its passphrase is not a recovery passphrase (length, alphabet).
-    for bad in ("short", "0OIl0OIl0OIl", pw + "E"):
+    for bad in ("short", "0OIl0OIl0OIl", pw + "E", pw[:11]):
         read = _qr_read(font, pw, wifi_payload(SSID, bad))
         assert read.passphrases[0] == pw, bad
         assert read.warnings and "glyph segmentation" in read.warnings[0]
@@ -379,3 +379,81 @@ def test_join_script_retries_live_reads_with_fresh_capture():
     assert "for ($try = 1; $try -le $attempts; $try++)" in text
     # The capture sits inside the retry loop, not before it.
     assert text.index("for ($try") < text.index("capture_lcd.ps1')")
+
+
+def _pin_payloads(monkeypatch, *payloads):
+    monkeypatch.setattr(r, "_wifi_qr_payloads", lambda img, region=None: list(payloads))
+
+
+def test_recovery_qr_two_distinct_codes_refused(monkeypatch):
+    pw = "23456789ABCD"
+    _pin_payloads(monkeypatch, wifi_payload(SSID, pw), wifi_payload("other-ap", "HJKLMNPQRSTU"))
+    with pytest.raises(r.ReadError, match="more than one"):
+        r.read_recovery_qr(np.zeros((4, 4, 3)))
+
+
+def test_recovery_qr_same_code_twice_is_one_code(monkeypatch):
+    pw = "23456789ABCD"
+    _pin_payloads(monkeypatch, wifi_payload(SSID, pw), wifi_payload(SSID, pw))
+    assert r.read_recovery_qr(np.zeros((4, 4, 3))).passphrases == [pw]
+
+
+def test_recovery_qr_empty_or_overlong_ssid_refused(monkeypatch):
+    pw = "23456789ABCD"
+    for ssid in ("", "x" * 33):
+        _pin_payloads(monkeypatch, wifi_payload(ssid, pw))
+        with pytest.raises(r.ReadError, match="SSID"):
+            r.read_recovery_qr(np.zeros((4, 4, 3)))
+    _pin_payloads(monkeypatch, wifi_payload("x" * 32, pw))
+    assert r.read_recovery_qr(np.zeros((4, 4, 3))).ssid == "x" * 32
+
+
+class _Pt:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+class _PosHit:
+    def __init__(self, text, cx, cy):
+        self.text = text
+        d = 5
+        self.position = type("P", (), {
+            "top_left": _Pt(cx - d, cy - d), "top_right": _Pt(cx + d, cy - d),
+            "bottom_right": _Pt(cx + d, cy + d), "bottom_left": _Pt(cx - d, cy + d)})()
+
+
+def test_wifi_payloads_region_drops_a_foreign_code():
+    from PIL import Image
+
+    inside = _PosHit("WIFI:T:WPA;S:a;P:b;;", 900, 100)    # top-right of 1000x800
+    outside = _PosHit("WIFI:T:WPA;S:evil;P:c;;", 100, 700)  # bottom-left
+
+    def reader(img):
+        return [inside, outside]
+
+    im = Image.new("RGB", (1000, 800))
+    assert r.wifi_payloads(reader, im, r.RECOVERY_QR_REGION) == ["WIFI:T:WPA;S:a;P:b;;"]
+    assert len(r.wifi_payloads(reader, im)) == 2  # no region: unfiltered
+
+
+def test_wifi_payloads_region_scales_upscaled_coordinates():
+    from PIL import Image
+
+    def reader(img):
+        if img.size[0] < 200:
+            return []
+        k = img.size[0] / 100.0  # symbol at (80,10) of the original frame
+        return [_PosHit("WIFI:T:WPA;S:a;P:b;;", 80 * k, 10 * k)]
+
+    im = Image.new("RGB", (100, 80))
+    assert r.wifi_payloads(reader, im, r.RECOVERY_QR_REGION) == ["WIFI:T:WPA;S:a;P:b;;"]
+
+
+def test_zxing_dependency_floor_covers_the_writer_api():
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    import re as _re
+
+    m = _re.search(r'"zxing-cpp>=(\d+)\.(\d+)', text)
+    assert m and (int(m.group(1)), int(m.group(2))) >= (3, 0)

@@ -390,8 +390,12 @@ static void draw_status(void)
 
     s_line_errs = 0;
     // The QR is shown only where the passphrase text is: AP up, no error banner.
-    bool show_qr = !(s_err_head[0] || s_ap_down || s_net_none || s_net_storage_fail) && s_net_set &&
-                   s_qr_size > 0;
+    bool show_qr = rlcd_qr_visible(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0,
+                                   s_net_storage_fail != 0, s_net_set != 0, s_qr_size);
+    // Hidden area first, so the text (full-width fault bands) paints over it.
+    if (!rlcd_qr_draw_after_text(show_qr) && draw_qr_area(false) != ESP_OK) {
+        s_line_errs++;
+    }
     (void)draw_line(Y_TITLE, TITLE_SCALE, COL_TITLE, COL_BG, "RECOVERY MODE");
     (void)draw_line(Y_SUB, TEXT_SCALE, COL_DIM, COL_BG, "KilnFW recovery image");
 
@@ -470,7 +474,7 @@ static void draw_status(void)
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
     }
 
-    if (draw_qr_area(show_qr) != ESP_OK) {
+    if (rlcd_qr_draw_after_text(show_qr) && draw_qr_area(true) != ESP_OK) {
         s_line_errs++;
     }
 

@@ -79,3 +79,10 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # Single, small HTTP server -- no need for esp-tls's larger
 # receive buffers or many concurrent sockets.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# app_main runs the SoftAP/QR bring-up (recovery_wifi_start -> start_softap ->
+# rqr_encode, ~400 B nested) on the IDF default 3584 B main stack, whose margin
+# was never measured (REVIEW_RECQR LOW-2). 4608 B = +1024 B of internal RAM;
+# recovery_main.c logs the real "stack hwm: app_main min free" for the next
+# bench boot to confirm or trim.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4608

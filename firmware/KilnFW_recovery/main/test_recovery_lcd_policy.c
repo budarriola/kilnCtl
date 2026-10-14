@@ -205,6 +205,8 @@ static void test_lcd_source(const char *path)
         CHECK(chk != NULL && strstr(chk, "s_ready = false") != NULL, "failed draw clears s_ready");
         CHECK(chk != NULL && strstr(chk, "s_draw_failures++") != NULL, "failed draw is counted");
         CHECK(strstr(ds, "RLCD_BG_INVALID") != NULL, "screen has a 'record invalid' state");
+        CHECK(strstr(ds, "rlcd_qr_visible(") != NULL, "draw_status uses the shared QR visibility rule");
+        CHECK(strstr(ds, "rlcd_qr_draw_after_text(") != NULL, "draw_status orders the QR area by the policy");
         free(ds);
     }
     char *burst = fn_body(src, "static bool lcd_bring_up_burst(void)");
@@ -389,10 +391,24 @@ static void test_http_source(const char *path)
     free(src);
 }
 
+static void test_qr_policy(void)
+{
+    CHECK(rlcd_qr_visible(false, false, false, false, true, 29), "QR visible when AP up and set");
+    CHECK(!rlcd_qr_visible(true, false, false, false, true, 29), "QR hidden under an error banner");
+    CHECK(!rlcd_qr_visible(false, true, false, false, true, 29), "QR hidden while the AP is down");
+    CHECK(!rlcd_qr_visible(false, false, true, false, true, 29), "QR hidden with no network");
+    CHECK(!rlcd_qr_visible(false, false, false, true, true, 29), "QR hidden on storage failure");
+    CHECK(!rlcd_qr_visible(false, false, false, false, false, 29), "QR hidden before the network is set");
+    CHECK(!rlcd_qr_visible(false, false, false, false, true, 0), "QR hidden when nothing was encoded");
+    CHECK(rlcd_qr_draw_after_text(true), "visible QR is painted after the text");
+    CHECK(!rlcd_qr_draw_after_text(false), "hidden area is painted before the text");
+}
+
 int main(int argc, char **argv)
 {
     test_schedule();
     test_classify();
+    test_qr_policy();
     if (argc < 3) {
         fprintf(stderr, "usage: %s <recovery_lcd.c> <recovery_http.c>\n", argv[0]);
         return 2;

@@ -57,6 +57,25 @@ static inline bool rlcd_draw_ok(int failed_lines)
     return failed_lines == 0;
 }
 
+// --- Wi-Fi join QR visibility ----------------------------------------------
+
+// The join QR is shown exactly where the passphrase text is: AP up, no error
+// banner, a network configured, and a symbol actually encoded. One predicate
+// so the QR cannot drift from the text branch.
+static inline bool rlcd_qr_visible(bool err_head, bool ap_down, bool net_none, bool storage_fail,
+                                   bool net_set, int qr_size)
+{
+    return !(err_head || ap_down || net_none || storage_fail) && net_set && qr_size > 0;
+}
+
+// A visible symbol is painted after the text (it must not be overdrawn); the
+// hidden (solid background) area is painted BEFORE the text so it cannot cut
+// the right end of a full-width fault band.
+static inline bool rlcd_qr_draw_after_text(bool visible)
+{
+    return visible;
+}
+
 // --- boot_guard record classification ------------------------------------
 
 // Result of nvs_get_blob() for the "bootguard" key, mapped by the caller.

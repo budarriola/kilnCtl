@@ -888,7 +888,15 @@ def parse_wifi_qr(text: str) -> Tuple[str, str]:
     return fields["S"], fields["P"]
 
 
-def _wifi_qr_payloads(img) -> List[str]:
+# Where the recovery screen's own QR sits in a bench camera frame: the panel's
+# top-right corner, i.e. the upper-right quarter of the frame (bench aim
+# 2026-09-24: x ~820..1045 of 1280, y ~70..230 of 720). A foreign WIFI: code
+# (phone, printout) elsewhere in the frame is ignored. Fractions (x0,y0,x1,y1).
+RECOVERY_QR_REGION = (0.5, 0.0, 1.0, 0.5)
+MAX_SSID_BYTES = 32
+
+
+def _wifi_qr_payloads(img, region=None) -> List[str]:
     """Every ``WIFI:`` QR payload in ``img`` (PIL image or HxWx3 array)."""
     try:
         import zxingcpp
@@ -896,13 +904,13 @@ def _wifi_qr_payloads(img) -> List[str]:
         raise ReadError("the zxing-cpp wheel is missing (uv sync in tools/PcTools)") from exc
     if isinstance(img, np.ndarray):
         img = np.clip(img, 0, 255).astype(np.uint8)
-    return wifi_payloads(zxingcpp.read_barcodes, img)
+    return wifi_payloads(zxingcpp.read_barcodes, img, region)
 
 
 QR_UPSCALES = (1, 2, 3, 4)
 
 
-def wifi_payloads(read_barcodes, im) -> List[str]:
+def wifi_payloads(read_barcodes, im, region=None) -> List[str]:
     """WIFI: payloads in a camera frame, retrying at larger scales.
 
     The panel's QR is only about 90 camera px wide, so a decoder given the
@@ -912,8 +920,25 @@ def wifi_payloads(read_barcodes, im) -> List[str]:
     """
     from PIL import Image, ImageOps
 
-    def hits(x):
-        return [r.text for r in read_barcodes(x) if r.text.startswith("WIFI:")]
+    if isinstance(im, np.ndarray):
+        frame_w, frame_h = im.shape[1], im.shape[0]
+    else:
+        frame_w, frame_h = im.size
+
+    def in_region(res, scale):
+        # `region` filters by the symbol centre (fractions of the ORIGINAL
+        # frame); a result without a position (or no region) is kept.
+        pos = getattr(res, "position", None)
+        if region is None or pos is None:
+            return True
+        pts = (pos.top_left, pos.top_right, pos.bottom_right, pos.bottom_left)
+        cx = sum(p.x for p in pts) / 4.0 / scale / frame_w
+        cy = sum(p.y for p in pts) / 4.0 / scale / frame_h
+        return region[0] <= cx <= region[2] and region[1] <= cy <= region[3]
+
+    def hits(x, scale=1):
+        return [res.text for res in read_barcodes(x)
+                if res.text.startswith("WIFI:") and in_region(res, scale)]
 
     found = hits(im)
     if found:
@@ -924,7 +949,7 @@ def wifi_payloads(read_barcodes, im) -> List[str]:
     for scale in QR_UPSCALES:
         base = gray if scale == 1 else gray.resize((gray.width * scale, gray.height * scale))
         for variant in (base, ImageOps.autocontrast(base)):
-            found = hits(variant)
+            found = hits(variant, scale)
             if found:
                 return found
     return []
@@ -932,14 +957,14 @@ def wifi_payloads(read_barcodes, im) -> List[str]:
 
 def read_recovery_qr(img: np.ndarray) -> ApRead:
     """Recovery credentials from the screen's own Wi-Fi QR; ReadError if unusable."""
-    payloads = _wifi_qr_payloads(img)
+    payloads = _wifi_qr_payloads(img, RECOVERY_QR_REGION)
     if not payloads:
         raise ReadError("no WIFI: QR code found on the recovery screen")
     if len(set(payloads)) > 1:
         raise ReadError("more than one distinct WIFI: QR code in the frame")
     ssid, password = parse_wifi_qr(payloads[0])
-    if not ssid:
-        raise ReadError("recovery QR has an empty SSID")
+    if not ssid or len(ssid.encode("utf-8")) > MAX_SSID_BYTES:
+        raise ReadError("recovery QR has an empty or over-long SSID")
     if len(password) != PASS_LEN or any(ch not in PASS_ALPHABET for ch in password):
         raise ReadError("recovery QR passphrase is not 12 characters of the recovery alphabet")
     return ApRead("recovery", ssid, len(password), [password])

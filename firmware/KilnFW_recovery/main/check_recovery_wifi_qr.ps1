@@ -60,7 +60,7 @@ function Build-And-Run {
         throw "cl failed building the $Tag variant (exit $bx)."
     }
     $ErrorActionPreference = "Continue"
-    $ro = cmd /c "`"$exe`" 2>&1"
+    $ro = cmd /c "`"$exe`" `"$($Impls[0])`" `"$(Join-Path $here ..\sdkconfig.defaults)`" 2>&1"
     $rx = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
     return @{ Exit = $rx; Output = ($ro -join "`n") }
@@ -109,11 +109,14 @@ try {
     Test-Mutant -File $qrc -Needle 'put_str(out, cap, &n, ";;", false)' -Replacement 'put_str(out, cap, &n, ";", false)' -Others $others -Tag "tail"
     # Buffer bounds: an overflow must be rejected, not truncated.
     Test-Mutant -File $qrc -Needle '*n + 1 >= cap' -Replacement '*n + 1 > cap' -Others $others -Tag "bound"
-    Test-Mutant -File $qrc -Needle 'memset(out, 0, cap);' -Replacement ';' -Others $others -Tag "nowipe"
+    Test-Mutant -File $qrc -Needle 'rqr_secure_zero(out, cap);' -Replacement ';' -Others $others -Tag "nowipe"
     # Encoder parameters and scratch wipe.
     Test-Mutant -File $qrc -Needle "qrcodegen_Mask_AUTO, true" -Replacement "qrcodegen_Mask_AUTO, false" -Others $others -Tag "boost"
     Test-Mutant -File $qrc -Needle "qrcodegen_Ecc_LOW" -Replacement "qrcodegen_Ecc_HIGH" -Others $others -Tag "ecc"
-    Test-Mutant -File $qrc -Needle "memset(tmp, 0, RQR_BUF_LEN);" -Replacement ";" -Others $others -Tag "tmpwipe"
+    Test-Mutant -File $qrc -Needle "rqr_secure_zero(tmp, RQR_BUF_LEN);" -Replacement ";" -Others $others -Tag "tmpwipe"
+    # Volatile wipe: the helper must zero, and the stack payload must use it.
+    Test-Mutant -File $qrc -Needle "*v++ = 0;" -Replacement "v++;" -Others $others -Tag "securezero_noop"
+    Test-Mutant -File $qrc -Needle "rqr_secure_zero(payload, sizeof(payload));" -Replacement "memset(payload, 0, sizeof(payload));" -Others $others -Tag "payload_memset"
     # Geometry.
     Test-Mutant -File $qrc -Needle "int x0 = RQR_AREA_PX - ext;" -Replacement "int x0 = 0;" -Others $others -Tag "align"
     Test-Mutant -File $qrc -Needle "my = y / RQR_MODULE_PX - RQR_QUIET;" -Replacement "my = y / RQR_MODULE_PX - RQR_QUIET + 1;" -Others $others -Tag "rowoff"
