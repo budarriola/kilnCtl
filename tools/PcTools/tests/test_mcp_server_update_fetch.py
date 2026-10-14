@@ -174,7 +174,7 @@ class StatusTest(_Base):
         self.board._fetch_status = with_heap
         out = msu.update_fetch_status()
         for needle in ("start free=34783", "dma=26995", "rtc=7788", "hop=admitted", "heap settle:",
-                       "free=32339", "after 2 re-samples", "low-water free=13295", "dma=5507",
+                       "lowest free=32339", "most re-samples=2", "worst over all hops", "low-water free=13295", "dma=5507",
                        "largest_block=7936"):
             self.assertIn(needle, out)
 

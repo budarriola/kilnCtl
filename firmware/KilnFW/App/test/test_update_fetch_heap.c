@@ -229,6 +229,14 @@ static void test_pick_pair(void)
     const uint32_t f3[2] = { 40000u, 39000u };
     const uint32_t d3[2] = { 40000u - 7788u, 39000u - 7788u };
     TEST_CHECK(update_fetch_heap_dma_pick_pair(f3, d3, 2) == 1u, "offset tie goes to the lower DMA reading");
+    // UPDFX9 INFO-4: a tie with the lower DMA at the EARLIER index keeps that index (ties go to the lower DMA, not the later pair).
+    const uint32_t f4[2] = { 39000u, 40000u };
+    const uint32_t d4[2] = { 39000u - 7788u, 40000u - 7788u };
+    TEST_CHECK(update_fetch_heap_dma_pick_pair(f4, d4, 2) == 0u, "offset tie with the lower DMA first keeps the first");
+    // UPDFX9 INFO-4: DMA above internal saturates to offset 0 (the strictest), it must not wrap to a huge offset.
+    const uint32_t f5[2] = { 40000u, 30000u };
+    const uint32_t d5[2] = { 40000u - 7788u, 31000u };
+    TEST_CHECK(update_fetch_heap_dma_pick_pair(f5, d5, 2) == 1u, "DMA above internal saturates to offset 0 and wins");
     TEST_CHECK(update_fetch_heap_dma_pick_pair(f, d1, 1) == 0u, "a single pair returns index 0");
 }
 

@@ -198,7 +198,7 @@ check (`-Preset check -PresetArg firmware/KilnFW/App/test/check_sdkconfig_defaul
   margin) and the residual risk with the review's census (profile_exec_status_t 1512 B on about 10 paths,
   diagnostics_http.c 8192 B, the Wi-Fi blob). No internal RAM added.
 - MED-2: the draw margin and MEASURED_DRAW are marked BENCH-PENDING in the header and at the `#define`s: at least
-  5 heap.min_free readings from this build before any further lowering. No numeric change.
+  5 heap.min_free readings from this build before any further lowering. No numeric change. (UPDFX9: the plan doc's WP8 bullets were missed by UPDFX8 and are now marked too.)
 - LOW-1: fixed. `heap_admit()` reads FETCH_DMA_OFFSET_PAIRS (3) back-to-back (internal, DMA) pairs at the first
   admission and `update_fetch_heap_dma_pick_pair()` keeps the smallest offset (the conservative direction). Host
   tests: `test_pick_pair`, `test_rtc_offset_min_of_pairs_updfx8` (scripted per-call DMA readings in the fake).

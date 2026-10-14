@@ -410,6 +410,7 @@ static void test_heap_admission_updfx2(void)
     g_app_route->on_open = hop_dma_one_under;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "hop refused one byte under the derived DMA need");
+    CHECK(strstr(g_rq.resp, "\"hop\":\"refused\"") != NULL, "a hop refused on DMA is reported refused, not admitted (UPDFX9 LOW-2)");
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_app_route->status = 302;
@@ -879,6 +880,48 @@ static void test_rtc_offset_min_of_pairs_updfx8(void)
     expect_claim_balanced("rtc min of pairs");
 }
 
+// UPDFX9 LOW-1: a persistent allocation lands between pair 0's f and DMA reads (offset 7788+1500). It persists, so
+// pairs 1 and 2 read internal free 1500 lower too and their offsets are the true 7788. Reusing pair 0's f for the
+// later pairs, or deriving from pair 0's f, would inflate rtc_free.
+static void test_rtc_offset_persistent_alloc_updfx9(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    const uint32_t low = BENCH_IDLE_FREE - 1500u;
+    g_fr_dma_call_seq[0] = low - T_RTC;
+    g_fr_dma_call_seq[1] = low - T_RTC;
+    g_fr_dma_call_seq[2] = low - T_RTC;
+    g_fr_dma_call_seq_n = 3;
+    g_fr_int_call_after = 1;  /* pair 0's f was read before its DMA reading */
+    g_fr_int_call_seq[0] = low;
+    g_fr_int_call_seq[1] = low;
+    g_fr_int_call_seq_n = 2;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "download with a persistent allocation inside pair 0 completes");
+    CHECK(g_fr_int_call_seq_i == 2, "pairs 1 and 2 each re-read internal free");
+    CHECK(json_heap_num("rtc_free") == (long)T_RTC, "rtc_free comes from the re-read pairs (7788), not pair 0's stale f");
+    CHECK(json_heap_num("min_dma") == (long)(low - T_RTC), "min_dma carries the lowest scripted DMA reading");
+    expect_claim_balanced("rtc persistent alloc");
+}
+
+// UPDFX9 LOW-1: only the THIRD pair is clean (offsets 9288, 9788, 7788), and the lowest DMA reading is pair 1's.
+// A pair count of two, or extra pairs that never reach the low-waters, is visible.
+static void test_rtc_offset_third_pair_clean_updfx9(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_fr_dma_call_seq[0] = BENCH_IDLE_FREE - T_RTC - 1500u;
+    g_fr_dma_call_seq[1] = BENCH_IDLE_FREE - T_RTC - 2000u;
+    g_fr_dma_call_seq[2] = BENCH_IDLE_FREE - T_RTC;
+    g_fr_dma_call_seq_n = 3;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "download with only the third pair clean completes");
+    CHECK(json_heap_num("rtc_free") == (long)T_RTC, "rtc_free is the third (clean) pair's offset");
+    CHECK(json_heap_num("start_dma") == (long)(BENCH_IDLE_FREE - T_RTC), "start_dma is the third pair's DMA reading");
+    CHECK(json_heap_num("min_dma") == (long)(BENCH_IDLE_FREE - T_RTC - 2000u), "min_dma is pair 1's reading (extra pairs are noted)");
+    expect_claim_balanced("rtc third pair clean");
+}
+
 // UPDFX7 LOW-4: a check starting with internal free between the hop need and the start need is refused as a
 // START (an assertion that fails if a start were judged by the hop rule).
 static void test_check_start_between_needs_updfx7(void)
@@ -1289,6 +1332,8 @@ int main(void)
     test_claim_released_on_failures();
     test_heap_admission_updfx2();
     test_rtc_offset_min_of_pairs_updfx8();
+    test_rtc_offset_persistent_alloc_updfx9();
+    test_rtc_offset_third_pair_clean_updfx9();
     test_redirect_hop_frees_first_client();
     test_updlow();
     test_heap_admission_updfx3();

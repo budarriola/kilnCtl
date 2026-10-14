@@ -214,8 +214,8 @@ def get_fetch_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dic
     kind, stage, error, http_status, bytes_done, bytes_total, busy, repo,
     tag, prerelease, app_size, running, commit, sha256, verdict, reason, allowed,
     needs_typed_confirm, zones_cfg_lower, and heap (internal-RAM admission readings, UPDFX7:
-    sampled, rtc_free, start_free, start_dma, hop = none|admitted|refused, hop_free,
-    hop_settle_tries, min_free, min_dma, min_block; min_* are 0 until sampled)."""
+    sampled, rtc_free, start_free, start_dma, hop = none|admitted|refused (the worst over all redirect hops), hop_free (lowest over all hops),
+    hop_settle_tries (most over all hops; the two can come from different hops), min_free, min_dma, min_block; min_* are 0 until sampled)."""
     req = urllib.request.Request(_url(host, FETCH_PATH), method="GET")
     data = _request(req, FETCH_PATH, timeout)
     if "state" not in data or "busy" not in data:

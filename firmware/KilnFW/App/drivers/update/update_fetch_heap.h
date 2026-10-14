@@ -30,7 +30,8 @@
 //   BENCH-PENDING: the margin (1024 B) is under half the observed spread (2.2 KB) of only four runs, and only
 //   benchupd5 ran on this firmware. Do not call these numbers sized, and do not lower ADMISSION further, until at
 //   least 5 heap.min_free readings from this build (GET /api/update/fetch) are in the table.
-//   ADMISSION (held)    31728 B   = ABORT_BELOW + MODEL_DRAW (9216 + 22512). An admitted fetch bottoms out at or
+//   ADMISSION (held)    31728 B   = ABORT_BELOW + MODEL_DRAW (9216 + 22512). If the draw is within MODEL_DRAW
+//                                 (not yet established, see BENCH-PENDING), an admitted fetch bottoms out at or
 //                                 above ABORT_BELOW with the margin to spare.
 //   same before scratch 32752 B   = ADMISSION + SCRATCH (FETCH_HEAP_PRECHECK_MIN: what an idle board must show)
 //   floor check         10240 B   = ADMISSION - MEASURED_DRAW: the worst measured fetch, admitted exactly at the
@@ -82,7 +83,9 @@
 // that starts is a precursor to a download).
 //
 // DMA (LOW-2; UPDFX8 REVIEW_UPDFX7 LOW-1: rtc_free is the smallest offset of FETCH_DMA_OFFSET_PAIRS back-to-back
-// (internal, DMA) pairs, so a concurrent allocation between one pair's two reads cannot lower the DMA floor).
+// (internal, DMA) pairs, so a concurrent allocation between one pair's two reads cannot lower the DMA floor
+// provided at least one pair is clean: a reduction, not a bound. Pair 0 is not back-to-back, its f is read before
+// the largest-block read and the hop-record lock, so it has the widest window; pairs 1 and 2 are).
 // internal free = DMA free + RTC-heap free: with CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP=y the
 // RTC FAST heap (7788 B free on the bench in every pair) is internal but not DMA-capable. The guard no longer
 // hard-codes 7788: heap_admit() derives rtc_free = internal free - DMA free at the job's first admission

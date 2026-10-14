@@ -143,3 +143,20 @@ Result: 5 CAUGHT, 7 MISSED (1 of them equivalent).
 
 UPDFX8's own eight negtests (listed in REVIEW_UPDFX7's fix status) cover the pick helper and the hop fold. They
 do not cover the pair loop's internal reads, which is where LOW-1 sits.
+
+## Fix status (UPDFX9)
+
+- MED-1: fixed (docs only). The plan's WP8 bullets now mark the numbers BENCH-PENDING (at least 5 `heap.min_free`
+  readings from this build), the MAX_STEP sentence calls ABORT_BELOW a sampled backstop and drops the "other tasks
+  between two reads" claim, and the hop fields are described as worst over all hops. REVIEW_UPDFX7's MED-2 line
+  notes the gap.
+- LOW-1: fixed. The fake gained `g_fr_int_call_seq` (scripted internal free per call, from `g_fr_int_call_after`
+  DMA readings on). New tests `test_rtc_offset_persistent_alloc_updfx9` (an allocation persisting between pair 0's
+  reads; `rtc_free` 7788, both re-reads consumed, `min_dma`) and `test_rtc_offset_third_pair_clean_updfx9` (only
+  pair 3 clean, pair 1 lowest DMA). Negtests below.
+- LOW-2: fixed. A hop refused on DMA now sets `hop_result` to refused; `hop_dma_one_under` asserts `"hop":"refused"`.
+- LOW-3: fixed (text). ADMISSION row says "if the draw is within MODEL_DRAW"; the pairs comment says a reduction,
+  not a bound (needs one clean pair), and that pair 0 is not back-to-back.
+- INFO-3: fixed. MCP heap text and the client docstring say hop_free / hop_settle_tries are worst-of values from
+  possibly different hops.
+- INFO-4: fixed. `test_pick_pair` gains a tie with the lower DMA first, and a DMA-above-internal case.

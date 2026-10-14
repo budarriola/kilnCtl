@@ -333,7 +333,8 @@ static const char *heap_admit(const work_t *w, bool hop)
         // LOW-2: the RTC FAST heap is internal but not DMA-capable; derive its free size at the first admission and
         // hold it for every later DMA number. REVIEW_UPDFX7 LOW-1: f and dma are read at different instants, and a
         // concurrent allocation between the two reads would inflate rtc_free and so LOWER the DMA floor for the whole
-        // job. Take FETCH_DMA_OFFSET_PAIRS back-to-back pairs and keep the one with the smallest offset (the
+        // job. Take FETCH_DMA_OFFSET_PAIRS pairs (pairs 1.. are back-to-back; pair 0's f was read earlier, before the largest-block
+        // read, heap_note and the hop-record lock, so it has the widest window) and keep the one with the smallest offset (the
         // conservative direction: a concurrent free can only make the floor stricter).
         if (!s_c->st.heap.rtc_set) {
             uint32_t pf[FETCH_DMA_OFFSET_PAIRS];
@@ -360,6 +361,12 @@ static const char *heap_admit(const work_t *w, bool hop)
         }
         ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u, rtc %u)", (unsigned)dma,
                  (unsigned)update_fetch_heap_dma_need(dl, hop, rtc), (unsigned)rtc);
+        if (hop) {
+            // UPDFX9 LOW-2: the hop record above says admitted (internal verdict only); a DMA refusal overrides it.
+            st_lock();
+            s_c->st.heap.hop_result = HOP_REFUSED;
+            st_unlock();
+        }
         return "low_heap_dma";
     }
     const unsigned need_free = update_fetch_heap_need(dl, hop);

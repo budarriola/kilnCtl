@@ -321,7 +321,8 @@ def _fmt_heap(h: Optional[dict]) -> str:
     text = (f"heap[start free={h.get('start_free')} dma={h.get('start_dma')} rtc={h.get('rtc_free')}; "
             f"hop={h.get('hop')}")
     if h.get("hop") in ("admitted", "refused"):
-        text += f" (heap settle: free={h.get('hop_free')} after {h.get('hop_settle_tries')} re-samples)"
+        text += (f" (heap settle: worst over all hops, not one hop's result; "
+                 f"lowest free={h.get('hop_free')}, most re-samples={h.get('hop_settle_tries')})")
     text += (f"; low-water free={h.get('min_free')} dma={h.get('min_dma')} "
              f"largest_block={h.get('min_block')}]")
     return text
