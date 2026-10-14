@@ -3331,3 +3331,33 @@ Worktree C:\wt\benchupd5_aj4fqn at origin/dev 468f0c5cb. Board 192.168.1.156 hea
 - update_install_staged(confirm=True): tool returned UNKNOWN "board never answered the application API" (same as benchupd4); confirm=False read then got 404 on /api/update/status (neither image's route at that moment). Within the next minutes the application answered: get_fw_version commit b9fa1748e (pre.3), stage blank, recovery_mode False, readiness 20 ok, no trip, no crash, link up. Install and unattended apply SUCCEEDED; only the tool's wait window is too short (second consecutive run). pre.3 heap at uptime 235 s: internal free 30407, min_free 15615, DMA min_free 7827.
 - Return to dev: flash_firmware verified OK, boot_guard cleared. Final: commit 468f0c5cb clean, link up, no trip, readiness unchanged (only safety_commissioned not_done), stage blank, control_get_zones gains/coupling unchanged (z0 tuning_valid=no as before). No recovery involvement, no recovery_exit needed, no safety_clear_trip needed. Dev idle after reflash (uptime 15 s): internal free 34907 B.
 - Takeaway: margin on dev is thin (+535 B at an 8-12 s idle reading; one boot only). Tool follow-up still open: update_install_staged wait window too short to confirm.
+
+## 2026-10-13 benchap1 -- GitHub update over the board's self-hosted AP
+
+Owner-authorized (join script use and fixes, AP update tests). No passphrase
+recorded anywhere; scratch captures deleted.
+
+Recovery AP (SoftAP `kilnctl-recovery`, 192.168.4.1): board staged
+v1.0.0-pre.3 from GitHub itself over the LAN, `recovery_enter`, then
+`join_board_ap.ps1` joined (candidate 1 of 1), `recovery_status` and
+`recovery_apply_staged` (host=192.168.4.1) reported done/ok, stage cleared,
+pre.3 booted and ran on the LAN. PASS. The glyph read failed on 2 of 3 live
+frames ("a glyph does not match any font character closely enough"), so the
+script now retries on a fresh capture (`-ReadAttempts`, default 4).
+
+App AP (`kilnCtl`, `wifi_set_mode ap`, AP-only, no internet): `-Mode normal`
+failed with "no WIFI: QR code found" because the QR is ~90 camera px wide;
+`read_normal` now retries on grayscale 2x-4x upscales and the join worked.
+Over the AP (host=192.168.4.1): `update_status`, `update_fetch_status`,
+`wifi_get_status` ok; `update_stage_upload` of the local JTAG dev image staged
+and verified by read-back (needed `force` + `confirm_downgrade` because the
+running version reads unknown), then `update_stage_clear` verified. After
+`wifi_set_mode home` the board went APSTA: STA connected, AP stayed up while
+the PC was joined (ap_pending_teardown=True), and the AP stayed reachable.
+`update_check` fails `low_heap_free` over the AP AND on the LAN (internal
+free ~29.9 KB on the dev tip), so that is not AP-specific; GitHub reachability
+from the AP-only mode is none by design (no uplink).
+
+Restore: `-Disconnect`, PC back on the LAN, board mode home, STA connected
+192.168.1.156, stage cleared, link up, no trip, no crash, readiness unchanged.
+S6b from the recovery dwell was cleared once after the dev reflash.
