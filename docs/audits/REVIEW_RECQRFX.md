@@ -84,6 +84,16 @@ Fix: drive the text branch from the same predicate (`if (!show_qr) {...}`), or s
 Failure scenario: a refactor drops the region argument at `:960`. A foreign WIFI: QR anywhere in frame, such as a phone held near the bench, is then accepted again. This is the condition LOW-4 of REVIEW_RECQR was fixing, and the tests stay green.
 Fix: add one end-to-end test that renders a decoy WIFI: QR outside the upper-right quarter and runs it through the real `_wifi_qr_payloads`. Add one test with a decoy that decodes only at an upscale.
 
+## Fix status (lowfx10)
+
+- LOW-1 fixed: `draw_status()` takes QR visibility, text mode and both paint phases from `recovery_lcd_policy.h` (`rlcd_qr_visible`, `rlcd_text_mode`, `rlcd_qr_paint`); `test_recovery_lcd_policy.c` scans the `recovery_lcd.c` call sites. The reviewer's four MISSED mutants (`lcd_no_prepaint_hidden`, `lcd_old_postpaint`, `lcd_text_ignores_apdown`, `lcd_qr_shown_while_hidden`) now fail at assertions; check runs 154 assertions.
+- LOW-2 fixed: `draw_line_raw` clips any band reaching a visible QR to `PANEL_W - RQR_AREA_PX` (`rlcd_band_width`); stale comment rewritten.
+- LOW-3 fixed: the text branch uses `rlcd_text_mode`; the QR is visible only in the NET_SET mode, so the `recovery_lcd_policy.h` claim is true. `s_ap_down` mutants die.
+- LOW-4 fixed: `test_lcd_ap_reader.py` decodes real foreign WIFI: codes through `read_recovery_qr` (outside the quarter, y bound at 0.5*H, 1 px modules found only by the upscaled retries); y-range comment at `lcd_ap_reader.py` corrected.
+- Negtest: pytest preset (base `424aecbd4`) region_filter_off, y_bound_dropped, upscaled_unfiltered, upscale_not_divided, region_x_widened, callsite_no_region, region_x_only all CAUGHT; check preset on `check_recovery_lcd_policy.ps1`: qr_shown_while_ap_down, text_branch_ignores_ap_down, qr_always_shown, no_prepaint_hidden, bands_not_clipped, policy_netset_ignores_qr_size all CAUGHT with a failing runtime assertion (each mutant compiled).
+- Internal RAM: 0 B (no new static or heap; two small static functions and a clipped width computed on the stack). Flash cost: see the landing report.
+- INFO items deferred, not touched.
+
 ## INFO
 
 - **INFO-1: the wipe is correct.**

@@ -123,6 +123,15 @@ install request behind.
 
 Fix: use `"FAILED: install refused or lost: HTTP 500 ..."` in that case.
 
+## Fix status (lowfx10)
+
+- LOW-1 fixed: the in-flight answer now begins `BUSY:` and says nothing was sent; RL-D01 treats it as may-have-run and never clears the stage (`mcp_server_update.py`, `cases_release.py`).
+- LOW-2 fixed: `last_install.state=="unreadable"` answers UNKNOWN; docstring updated.
+- LOW-3 fixed: default `wait_s` is the 270 s cap (margin over the ~231-235 s bench return); the post-loop 404 tail does one re-read bounded by `_TAIL_PROBE_S` (2.5 s) and reports "a downgrade?" only when the install route stays absent.
+- LOW-4 fixed: RL-D01 test now pins `HTTP 500`, `HTTP 503` and the BUSY string as may-have-run.
+- Negtest (base `424aecbd4`, pytest preset): unreadable_branch_off, busy_back_to_refused, default_wait_240, tail_reread_off, tail_probe_unbounded, downgrade_sentinel_off, rld01_5xx_treated_definite (the reviewer's MISSED `rl_any_http_definite` class) and rld01_busy_treated_never_sent all CAUGHT at test assertions.
+- INFO items deferred, not touched.
+
 ## INFO
 
 - **INFO-1: hop path without `rtc_set`.**
