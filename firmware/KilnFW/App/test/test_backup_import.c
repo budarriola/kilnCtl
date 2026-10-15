@@ -2977,6 +2977,7 @@ static void test_plan_cap_reports_dropped_lines(void)
     kiln_cfg_plan_t *plan = calloc(1, sizeof(*plan));
     char *out = malloc(KILN_CFG_PLAN_RENDER_CAP);
     TEST_CHECK(plan && out, "alloc");
+    TEST_CHECK(KILN_CFG_PLAN_MAX_LINES >= 40, "cap holds the 30 worst-case kiln_configs lines plus topology/prefs/aux lines");
     for (size_t i = 0; i < KILN_CFG_PLAN_MAX_LINES; i++) {
         kiln_cfg_plan_add(plan, "line %u", (unsigned)i);
     }
