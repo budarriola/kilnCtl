@@ -1,6 +1,7 @@
 // See pref_cfg_fs.h for the full design/rationale.
 #include "pref_cfg_fs.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,6 +13,7 @@
 #include "persist_scratch.h"
 
 static const char *PREF_FS_TAG = "pref_cfg_fs";
+#define PREF_UNKNOWN_PATH_MAX_FWD 64
 
 static pref_cfg_fs_write_fn_t s_write_fn = cfg_fs_write_atomic;
 
@@ -153,9 +155,15 @@ static void raw_buf_put(raw_buf_t *b)
  * (K10-09/K10-10): a caller must then treat the file as possibly holding a newer value and must not
  * overwrite it. An unmounted cfg is ESP_OK / absent, matching the old void API (the normal state on a
  * board without cfg). */
+static void preserve_rejected(const char *rel_path, const uint8_t *raw, size_t len);
+
 static esp_err_t load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
-                               void *out_bytes, uint32_t *out_rev, bool *out_valid, bool quiet)
+                               void *out_bytes, uint32_t *out_rev, bool *out_valid, bool quiet,
+                               bool *out_rejected)
 {
+    if (out_rejected) {
+        *out_rejected = false;
+    }
     if (out_bytes) {
         memset(out_bytes, 0, item_size);
     }
@@ -187,7 +195,14 @@ static esp_err_t load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_
         // zones_config_cfg_fs_load_raw(). ESP_ERR_INVALID_SIZE is a file
         // bigger than any item this build writes: unusable, not unknown.
         // Anything else (I/O failure) leaves the file's state unknown.
-        if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_INVALID_SIZE) {
+        if (err == ESP_ERR_NOT_FOUND) {
+            return ESP_OK;
+        }
+        if (err == ESP_ERR_INVALID_SIZE) {
+            /* persfx4 MED-1: bigger than any item this build writes -> only newer firmware can have written it. */
+            if (out_rejected) {
+                *out_rejected = true;
+            }
             return ESP_OK;
         }
         if (!quiet) {
@@ -200,6 +215,12 @@ static esp_err_t load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_
             ESP_LOGW(PREF_FS_TAG, "%s is %u bytes, expected %u (4-byte rev + %u-byte item) -- ignoring", rel_path,
                      (unsigned)len, (unsigned)(4 + item_size), (unsigned)item_size);
         }
+        if (out_rejected) {
+            /* persfx4 MED-1: present but not this build's layout -- newer firmware or corrupt; the resolve layer
+             * must neither overwrite nor delete it. */
+            *out_rejected = true;
+            preserve_rejected(rel_path, raw, len);
+        }
         raw_buf_put(&rb);
         return ESP_OK;
     }
@@ -210,6 +231,10 @@ static esp_err_t load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_
         if (!quiet) {
             ESP_LOGW(PREF_FS_TAG, "%s (rev %lu) REJECTED by validator -- ignoring file, NVS candidate decides",
                      rel_path, (unsigned long)rev);
+        }
+        if (out_rejected) {
+            *out_rejected = true; /* persfx4 MED-1 */
+            preserve_rejected(rel_path, raw, len);
         }
         raw_buf_put(&rb);
         return ESP_OK;
@@ -222,22 +247,54 @@ static esp_err_t load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_
     return ESP_OK;
 }
 
+/* persfx4 MED-1: keep one copy of a present-but-rejected cfg file as "<path>.bad" before anything else can touch
+ * it. Best effort (a failure is logged; the file itself is never overwritten or deleted by the resolve layer
+ * either way). An identical existing copy is not rewritten, so a file rejected every boot costs no flash wear.
+ * Skipped while a factory reset is in flight. */
+static void preserve_rejected(const char *rel_path, const uint8_t *raw, size_t len)
+{
+    char bad[PREF_UNKNOWN_PATH_MAX_FWD + 8];
+    if (!rel_path || !raw || len == 0 || strlen(rel_path) + 5 > sizeof(bad)) {
+        return;
+    }
+    if (pref_cfg_fs_reset_refuses_write()) {
+        return;
+    }
+    snprintf(bad, sizeof(bad), "%s.bad", rel_path);
+    uint8_t *old = (uint8_t *)persist_scratch_alloc(len);
+    if (old) {
+        size_t olen = 0;
+        bool same = cfg_fs_read(bad, old, len, &olen) == ESP_OK && olen == len && memcmp(old, raw, len) == 0;
+        free(old);
+        if (same) {
+            return;
+        }
+    }
+    esp_err_t err = s_write_fn(bad, raw, len);
+    if (err == ESP_OK) {
+        ESP_LOGE(PREF_FS_TAG, "rejected cfg file %s preserved as %s (%u bytes)", rel_path, bad, (unsigned)len);
+    } else {
+        ESP_LOGE(PREF_FS_TAG, "could not preserve rejected cfg file %s as %s: %s", rel_path, bad,
+                 esp_err_to_name(err));
+    }
+}
+
 esp_err_t pref_cfg_fs_load_raw_checked(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                                        void *out_bytes, uint32_t *out_rev, bool *out_valid)
 {
-    return load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false);
+    return load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false, NULL);
 }
 
 void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                            void *out_bytes, uint32_t *out_rev, bool *out_valid)
 {
-    (void)load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false);
+    (void)load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false, NULL);
 }
 
 void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                                 void *out_bytes, uint32_t *out_rev, bool *out_valid)
 {
-    (void)load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true);
+    (void)load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true, NULL);
 }
 
 bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
@@ -454,6 +511,9 @@ esp_err_t pref_cfg_fs_remove(const char *rel_path)
     /* Absent is the state the caller asked for: report it as success, as the
      * header documents, so a clear of an already-clear store is idempotent. */
     esp_err_t err = cfg_fs_delete(rel_path);
+    if (err == ESP_OK || err == ESP_ERR_NOT_FOUND) {
+        unknown_set(rel_path, false); /* persfx4: a deliberate remove is the way out of a rejected-file refusal */
+    }
     return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
 }
 
@@ -463,7 +523,19 @@ static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_
 {
     uint32_t file_rev = 0;
     bool file_valid = false;
-    esp_err_t rerr = pref_cfg_fs_load_raw_checked(rel_path, item_size, validate, file_bytes, &file_rev, &file_valid);
+    bool rejected = false;
+    esp_err_t rerr =
+        load_raw_impl(rel_path, item_size, validate, file_bytes, &file_rev, &file_valid, false, &rejected);
+    if (rerr == ESP_OK && rejected) {
+        /* persfx4 MED-1/LOW-1: the file EXISTS but this build cannot decode it (a newer layout/version, or
+         * corruption; both look the same here). It is never overwritten from the frozen NVS copy and never
+         * deleted: a copy went to <path>.bad, the path is rev-unknown (saves refused, listed degraded), and the
+         * store runs on the NVS copy in RAM only (adopt variant) or on defaults (retired variant). */
+        ESP_LOGE(PREF_FS_TAG, "%s exists but is not decodable by this firmware (newer version or corrupt) -- file "
+                              "left untouched, saves to it refused this boot%s",
+                 rel_path, adopt_nvs_if_unreadable ? "" : "; stale NVS copy NOT adopted (safe defaults)");
+        rerr = ESP_FAIL;
+    }
     if (rerr != ESP_OK) {
         /* K10-09/10: the file's state is unknown (allocation or I/O failure). It may hold a newer value
          * than the NVS candidate, so nothing is written and saves are refused. M1 keeps a valid NVS copy in

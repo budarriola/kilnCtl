@@ -1570,6 +1570,63 @@ static void test_pcfg_resolve_scratch_oom_leaves_file_untouched(void)
     TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact after boot load");
 }
 
+static void test_pcfg_med2_newer_corrupt_ioerror_file_protected(void)
+{
+    TEST_SECTION("persistfx MED-2: NEWER file fails closed, corrupt file preserved as .bad, read error is not absence");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t stale_nvs = make_stored_profile();
+    strncpy(stale_nvs.name, "StaleNvs", PROFILE_NAME_MAX_LEN);
+    char rel[40], bad[48];
+    profiles_cfg_fs_path(2, rel, sizeof(rel));
+    snprintf(bad, sizeof(bad), "%s.bad", rel);
+    static uint8_t junk[4 + 64];
+    static uint8_t after[4 + 64];
+    size_t got = 0;
+    profile_t out;
+    uint32_t out_rev = 99;
+    bool used_file = true, err = false;
+
+    /* NEWER: version byte above this build's */
+    memset(junk, 0x11, sizeof(junk));
+    junk[0] = 7;
+    junk[1] = junk[2] = junk[3] = 0;
+    junk[4] = (uint8_t)(PROFILE_VERSION + 1);
+    TEST_CHECK(cfg_fs_write_atomic(rel, junk, sizeof(junk)) == ESP_OK, "setup: newer-version file");
+    bool have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    TEST_CHECK(err && !have && !used_file, "MED-2: NEWER file with a valid NVS copy -> error, slot not adopted");
+    TEST_CHECK(cfg_fs_read(rel, after, sizeof(after), &got) == ESP_OK && got == sizeof(junk) &&
+                   memcmp(after, junk, sizeof(junk)) == 0,
+               "MED-2: the NEWER file is byte-identical (NOT overwritten from NVS)");
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, false, 3, &out, &out_rev, &used_file, &err);
+    TEST_CHECK(err && !have, "MED-2: NEWER file with no NVS copy -> error, slot NOT reported free");
+    TEST_CHECK(cfg_fs_read(rel, after, sizeof(after), &got) == ESP_OK && got == sizeof(junk), "MED-2: file not deleted");
+
+    /* CORRUPT: version 0 never valid -> preserved as .bad */
+    junk[4] = 0;
+    TEST_CHECK(cfg_fs_write_atomic(rel, junk, sizeof(junk)) == ESP_OK, "setup: corrupt file");
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    TEST_CHECK(!err && have && !used_file, "MED-2: corrupt file -> NVS candidate decides");
+    TEST_CHECK(cfg_fs_read(bad, after, sizeof(after), &got) == ESP_OK && got == sizeof(junk) &&
+                   memcmp(after, junk, sizeof(junk)) == 0,
+               "MED-2: the corrupt file was preserved as .bad before any fallback");
+    (void)cfg_fs_delete(bad);
+
+    /* I/O error: not absence */
+    profile_t good = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(2, &good, 8) == ESP_OK, "setup: good file");
+    cfg_fs_test_inject_read_error(rel, ESP_FAIL, 8);
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    TEST_CHECK(err && !have, "MED-2: transient read error -> error, not 'file absent' + NVS adoption");
+    profile_t again;
+    TEST_CHECK(pcfg_file_profile(2, &again), "MED-2: the good file is still intact after the read error");
+}
+
 static void test_pcfg_boot_profile_scratch_oom_fails_closed(void)
 {
     TEST_SECTION("boot load: sizeof(profile_t) / 2*sizeof(profile_t) scratch OOM is an error and marks slots unknown (review M2, 794fce57)");
@@ -6577,6 +6634,7 @@ void run_test_profiles_http(void)
     test_pcfg_longer_rev_array_is_known_tail_ignored();
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
+    test_pcfg_med2_newer_corrupt_ioerror_file_protected();
     test_pcfg_boot_profile_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_refuses_on_external_ram_stack();

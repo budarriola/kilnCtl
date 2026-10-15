@@ -95,6 +95,22 @@ kiln_cfg_store_cfg_fs_write_fn_t kiln_cfg_store_cfg_fs_get_write_fn(void);
  * (*out_blob zeroed, *out_rev 0). */
 void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid);
 
+/* persfx4 MED-3: what the file side actually looked like. Only ABSENT lets the NVS candidate decide; the other
+ * non-VALID states mean a file exists (or may exist) that this build cannot use, and it must be neither
+ * overwritten nor replaced from the frozen NVS blob. */
+typedef enum {
+    KILN_CFG_FILE_ABSENT = 0, /* cfg unmounted, or no file */
+    KILN_CFG_FILE_VALID,
+    KILN_CFG_FILE_UNKNOWN,  /* read error or scratch OOM: the file was not examined */
+    KILN_CFG_FILE_NEWER,    /* version above this build's, or larger than any store it writes */
+    KILN_CFG_FILE_REJECTED, /* wrong size or older version without a migration chain (corrupt) */
+} kiln_cfg_file_state_t;
+
+/* load_raw plus the file state; `preserve` copies a REJECTED file to "kiln_configs.json.bad" (resolve passes
+ * true, read-only callers false). */
+void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid,
+                                       kiln_cfg_file_state_t *out_state, bool preserve);
+
 /* Writes `blob` (must already be a valid, current-version struct -- this
  * function does not validate it) to the file at `rev`. No-op returning
  * ESP_ERR_INVALID_STATE if cfg_fs never mounted. */
@@ -119,6 +135,12 @@ esp_err_t kiln_cfg_store_cfg_fs_save(const kiln_cfg_store_blob_t *blob, uint32_t
  * logged and otherwise ignored. */
 bool kiln_cfg_store_cfg_fs_resolve(const kiln_cfg_store_blob_t *nvs_blob, bool nvs_valid, uint32_t nvs_rev,
                                     kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_used_file);
+
+/* resolve() plus the file state. For UNKNOWN/NEWER/REJECTED it writes nothing, zeroes out_blob and returns false
+ * (the caller quarantines the store). */
+bool kiln_cfg_store_cfg_fs_resolve_ex(const kiln_cfg_store_blob_t *nvs_blob, bool nvs_valid, uint32_t nvs_rev,
+                                      kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_used_file,
+                                      kiln_cfg_file_state_t *out_state);
 
 #ifdef __cplusplus
 }

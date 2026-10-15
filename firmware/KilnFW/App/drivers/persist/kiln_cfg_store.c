@@ -630,8 +630,25 @@ static void nvs_load_store_with_cfg_fs(void)
     }
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
-    bool trustworthy =
-        kiln_cfg_store_cfg_fs_resolve(&s_store, nvs_valid, nvs_rev, resolved, &resolved_rev, &used_file);
+    kiln_cfg_file_state_t fstate = KILN_CFG_FILE_ABSENT;
+    bool trustworthy = kiln_cfg_store_cfg_fs_resolve_ex(&s_store, nvs_valid, nvs_rev, resolved, &resolved_rev,
+                                                        &used_file, &fstate);
+    if (fstate == KILN_CFG_FILE_UNKNOWN || fstate == KILN_CFG_FILE_NEWER || fstate == KILN_CFG_FILE_REJECTED) {
+        /* persfx4 MED-3: the cfg file is the store that is written now, and it exists but could not be used
+         * (unreadable / newer than this firmware / corrupt). Quarantine (mutators refused, nothing written) and
+         * run on empty defaults: the frozen legacy NVS blob must neither replace the file nor be shown as if it
+         * were current. Same recovery as the NVS-side H3 cases. */
+        char qmsg[128];
+        snprintf(qmsg, sizeof(qmsg), "kiln config file is %s -- file left untouched",
+                 fstate == KILN_CFG_FILE_NEWER     ? "newer than this firmware"
+                 : fstate == KILN_CFG_FILE_UNKNOWN ? "unreadable at boot"
+                                                   : "corrupt or the wrong size (copy kept as .bad)");
+        reset_to_defaults();
+        set_quarantine(qmsg);
+        s_kiln_cfg_rev = nvs_rev;
+        free(resolved);
+        return;
+    }
     s_kiln_cfg_rev = resolved_rev;
     if (used_file) {
         s_store = *resolved;

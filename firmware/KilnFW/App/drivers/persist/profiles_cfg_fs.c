@@ -67,6 +67,34 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* persfx4 MED-2: keep a copy of a corrupt profile file as "<path>.bad" before any NVS fallback can replace it
+ * (zones_config_cfg_fs.c's rule). An identical existing copy is not rewritten. Returns whether a copy of these
+ * bytes now exists; a failure makes the caller treat the slot as unknown (fail closed) instead of overwriting. */
+static bool preserve_rejected(const char *path, const uint8_t *raw, size_t len)
+{
+    char bad[48];
+    if (len == 0 || snprintf(bad, sizeof(bad), "%s.bad", path) >= (int)sizeof(bad)) {
+        return false;
+    }
+    uint8_t *old = persist_scratch_alloc(len);
+    if (old) {
+        size_t olen = 0;
+        bool same = cfg_fs_read(bad, old, len, &olen) == ESP_OK && olen == len && memcmp(old, raw, len) == 0;
+        free(old);
+        if (same) {
+            return true;
+        }
+    }
+    esp_err_t err = s_write_fn(bad, raw, len);
+    if (err == ESP_OK) {
+        ESP_LOGE(PCFG_FS_TAG, "rejected profile file %s preserved as %s (%u bytes)", path, bad, (unsigned)len);
+    } else {
+        ESP_LOGE(PCFG_FS_TAG, "could not preserve rejected profile file %s as %s: %s", path, bad,
+                 esp_err_to_name(err));
+    }
+    return err == ESP_OK;
+}
+
 void profiles_cfg_fs_load_raw_ex(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid, bool *out_error)
 {
     if (out_error) {
@@ -110,14 +138,24 @@ void profiles_cfg_fs_load_raw_ex(uint8_t id, profile_t *out_profile, uint32_t *o
     esp_err_t err = cfg_fs_read(path, raw, sizeof(ls->raw), &len);
     if (err != ESP_OK) {
         free(ls);
-        /* Absent (never migrated/never saved), oversized, or unreadable --
-         * none of these are "found but bad" on their own; the caller's
-         * resolve() decides whether that's worth a divergence warning. */
+        /* Absent (never saved/migrated) is the only quiet "no file". persfx4 MED-2: an I/O error, or a file
+         * bigger than any profile blob this build writes (only newer firmware can have written it), is a file
+         * whose state is UNKNOWN: report it through *out_error so resolve() never overwrites or frees the slot. */
+        if (err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(PCFG_FS_TAG, "prof%u file read failed (%s) -- file state UNKNOWN (error)", id,
+                     esp_err_to_name(err));
+            if (out_error) {
+                *out_error = true;
+            }
+        }
         return;
     }
     if (len < 5) { /* rev prefix + at least a 1-byte version */
-        ESP_LOGW(PCFG_FS_TAG, "prof%u file is %u bytes, too short to hold a rev + blob -- ignoring", id,
+        ESP_LOGW(PCFG_FS_TAG, "prof%u file is %u bytes, too short to hold a rev + blob -- corrupt", id,
                  (unsigned)len);
+        if (!preserve_rejected(path, raw, len) && out_error) {
+            *out_error = true;
+        }
         free(ls);
         return;
     }
@@ -127,8 +165,21 @@ void profiles_cfg_fs_load_raw_ex(uint8_t id, profile_t *out_profile, uint32_t *o
     profile_t *cand = &ls->cand;
     profile_decode_result_t result = profile_decode_blob(raw + 4, len - 4, cand, &reason);
     if (result != PROFILE_DECODE_OK) {
-        ESP_LOGW(PCFG_FS_TAG, "prof%u file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides", id,
-                 (unsigned long)rev, reason);
+        if (result == PROFILE_DECODE_NEWER) {
+            /* persfx4 MED-2: written by newer firmware -- protected data. Fail closed (slot unknown, never
+             * reported free, never overwritten from NVS), mirroring profiles_http.c's NVS-side NEWER rule. */
+            ESP_LOGE(PCFG_FS_TAG, "prof%u file (rev %lu) is from NEWER firmware: %s -- left untouched, slot unknown",
+                     id, (unsigned long)rev, reason);
+            if (out_error) {
+                *out_error = true;
+            }
+        } else {
+            ESP_LOGW(PCFG_FS_TAG, "prof%u file (rev %lu) REJECTED: %s -- preserved, NVS candidate decides", id,
+                     (unsigned long)rev, reason);
+            if (!preserve_rejected(path, raw, len) && out_error) {
+                *out_error = true; /* no .bad copy: do not let a fallback destroy the only copy */
+            }
+        }
         free(ls);
         return;
     }

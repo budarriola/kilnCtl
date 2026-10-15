@@ -400,7 +400,11 @@ static void test_corrupt_blob_defaults(void)
     aux_outputs_cfg_start(0);
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "bad CRC: fall back to all disabled (never trusted)");
     TEST_CHECK(!aux_outputs_cfg_quarantined(), "a corrupt blob is not a quarantine");
-    TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) == ESP_OK, "and it can be rewritten");
+    /* persistfx MED-1/LOW-1: a present-but-rejected file is preserved and never silently overwritten (it may be
+     * NEWER, not corrupt). Saves are refused until the file is deliberately removed. */
+    TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) != ESP_OK, "persistfx: rejected file is not silently overwritten");
+    TEST_CHECK(pref_cfg_fs_remove(AUX_OUTPUTS_FILE_PATH) == ESP_OK, "persistfx: deliberate remove");
+    TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) == ESP_OK, "and after the remove it can be rewritten");
 
     /* A legacy NVS blob of the wrong size, no cfg file. */
     fresh_board();

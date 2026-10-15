@@ -103,6 +103,14 @@ fault is latched (`zones_config_store.c:468-472`, `:664-676`).
      file's own rev prefix, which is still readable even when the payload is
      not.
 
+**Fixed by (persistfx):** `pref_cfg_fs.c` now flags a file that is present but rejected (validator, wrong size, or
+larger than any item this build writes). It keeps a `<path>.bad` copy when the bytes fit the read buffer, marks the
+path rev-unknown (saves refused, shown in GET /api/cfgfs) and writes nothing. The adopt variant still serves the NVS
+copy in RAM only. `pref_cfg_fs_remove()` clears the refusal as the deliberate way out. Test:
+`test_med1_rejected_file_never_overwritten` in `test_persist_campaign10.c`. Behavior change: a bad-CRC aux_outputs
+file is now preserved and refuses saves until removed (`test_aux_outputs_store.c` updated). A downgrade target
+older than this fix still has the old behavior.
+
 ### MED-2. A rejected profile file is overwritten from frozen NVS, or its slot is reported free
 
 - **Where:**
@@ -133,6 +141,11 @@ fault is latched (`zones_config_store.c:468-472`, `:664-676`).
     `slot_res_err` in `profiles_http.c:1338-1341`): the slot is unknown,
     refused for writes, and never reported free.
   - For CORRUPT, preserve a `.bad` copy before the NVS resync.
+
+**Fixed by (persistfx):** `profiles_cfg_fs_load_raw_ex` now reports through `out_error` a NEWER file (never
+overwritten, slot unknown, mirroring the NVS-side rule), a read error or oversized file (no longer "absent"), and a
+corrupt file whose `.bad` copy could not be kept. A corrupt file is preserved as `<path>.bad` before the NVS
+fallback. Test: `test_pcfg_med2_newer_corrupt_ioerror_file_protected` in `test_profiles_http.c`.
 
 ### MED-3. kiln_configs: file-side failures bypass the H3 quarantine, and the frozen NVS blob overwrites the file
 
@@ -173,6 +186,15 @@ fault is latched (`zones_config_store.c:468-472`, `:664-676`).
      `pref_cfg_fs_resolve_nvs_retired()` does, and retire it once the file is
      adopted.
 
+**Fixed by (persistfx):** `kiln_cfg_store_cfg_fs_load_raw_ex`/`resolve_ex` classify the file as
+ABSENT/VALID/UNKNOWN/NEWER/REJECTED. `nvs_load_store_with_cfg_fs()` quarantines the store (defaults, mutators
+refused, nothing written) for the last three; a wrong-size or older-version file is kept as `kiln_configs.json.bad`.
+Quarantine is cleared only by `kiln_cfg_store_quarantine_clear(confirm)`. Test:
+`test_med3_unusable_file_quarantines_never_absent` in `test_kiln_cfg_store.c` (read error, wrong size, newer and
+older version, with and without an NVS blob). The scratch-OOM branch uses the same state path but has no host
+hook in that executable. Fix item 3 (stop resyncing a valid file from NVS) is not done: existing divergence tests
+define that tie-break and it only applies to a decodable file.
+
 ## LOW
 
 ### LOW-1. NVS-retired pref stores: an undecodable or newer file gives defaults, and the next save overwrites it
@@ -191,6 +213,9 @@ fault is latched (`zones_config_store.c:468-472`, `:664-676`).
 - **Fix:** On a version-newer file, call `unknown_set(rel_path, true)` so
   saves are refused, matching the unreadable-file case at
   `pref_cfg_fs.c:467-486`.
+
+**Fixed by (persistfx):** LOW-1 is covered by the MED-1 change, which applies to `pref_cfg_fs_resolve_nvs_retired()`
+too (tests in the same function: the retired variant returns defaults, leaves the file and sets rev-unknown).
 
 ### LOW-2. The update policy compares only three schema versions
 
