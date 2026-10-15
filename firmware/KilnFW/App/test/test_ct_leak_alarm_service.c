@@ -155,6 +155,26 @@ int main(void)
     run_span(12000);
     CHECK(ct_leak_alarm_is_active());
 
+    /* CT audit 2026-10-14 HIGH-1: the committed zone_ct_channel map
+     * (0x0320-0x0322) drives the channel set even though the Pico back-fills
+     * topology to SUMMED for a split. */
+    fresh();
+    add_u8(CT_LEAK_PARAM_TOPOLOGY, 1, true);
+    add_u8(0x0320u, 0, true); add_u8(0x0321u, 0, true); add_u8(0x0322u, 1, true);
+    s_status.current_a[2] = 5.0f;
+    run_span(30000);
+    CHECK(!ct_leak_alarm_is_active());
+    s_status.current_a[0] = 5.0f;
+    run_span(12000);
+    CHECK(ct_leak_alarm_is_active());
+    /* An incomplete map (one entry unset) falls back to the topology rule. */
+    fresh();
+    add_u8(CT_LEAK_PARAM_TOPOLOGY, 1, true);
+    add_u8(0x0320u, 0, true); add_u8(0x0321u, 0, true); add_u8(0x0322u, 1, false);
+    s_status.current_a[0] = 5.0f;
+    run_span(30000);
+    CHECK(!ct_leak_alarm_is_active());
+
     /* k_ct scales the floor (0.045 A * ref/k) */
     fresh();
     add_f32(CT_LEAK_PARAM_KCT(0), 0.25f); /* floor = 4x reference */

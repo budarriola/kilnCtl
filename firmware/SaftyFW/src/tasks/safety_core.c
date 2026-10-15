@@ -1253,8 +1253,8 @@ static safety_guard_input_t safety_core_build_input(void)
     // existing gate.
     any_current_present =
         any_current_present &&
-        config_store_mask_current_present_to_fitted(current.present, !cts_disabled,
-                                                      cfg_rec.ct_topology);
+        config_store_mask_current_present_to_fitted_mask(
+            current.present, config_store_fitted_channel_mask(&cfg_rec));
 
     // S14 (COMMISSIONING_UX.md section 3.3). amps[ch] comes straight from
     // current_snapshot_t, gated by the SAME freshness fact any_current_
@@ -1286,7 +1286,7 @@ static safety_guard_input_t safety_core_build_input(void)
             // the same contract drifting apart ("reset one side of a pair").
             // !cts_disabled is already established by the loop guard above,
             // so this is the topology half of the predicate only.
-            if (!config_store_ct_channel_fitted((uint8_t)ch, true, cfg_rec.ct_topology)) {
+            if (!config_store_ct_channel_fitted_rec(&cfg_rec, (uint8_t)ch)) {
                 continue;
             }
             // Opus review finding 1: cs_counts_to_amps() (current_sense.c)

@@ -544,12 +544,12 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0305u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->correlation_window_s = value.u16_val; return true;
     case 0x0306u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->stuck_on_time_s = value.u16_val; return true;
     case 0x0307u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_TRIP_VERIFY_MAX_S); rec->trip_verify_s = value.u16_val; return true;
-    case 0x0308u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->k_ct_v_per_a[0] = value.f32_val; return true;
-    case 0x0309u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->k_ct_v_per_a[1] = value.f32_val; return true;
-    case 0x030Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->k_ct_v_per_a[2] = value.f32_val; return true;
-    case 0x030Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[0] = value.f32_val; return true;
-    case 0x030Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[1] = value.f32_val; return true;
-    case 0x030Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[2] = value.f32_val; return true;
+    case 0x0308u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[0] = value.f32_val; return true;
+    case 0x0309u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[1] = value.f32_val; return true;
+    case 0x030Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[2] = value.f32_val; return true;
+    case 0x030Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->gain[0] = value.f32_val; return true;
+    case 0x030Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->gain[1] = value.f32_val; return true;
+    case 0x030Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->gain[2] = value.f32_val; return true;
     case 0x030Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->mains_voltage_v = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAINS_VOLTAGE_V; return true;
     case 0x030Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->power_window_s = value.u16_val; return true;
     case 0x0310u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_GAIN(); rec->ct_cal[0].gain = value.f32_val; return true;
@@ -785,12 +785,12 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     }
     RANGE_F32_FINITE(rec->cj_warn_c, "cj_warn_c");
     RANGE_F32_FINITE(rec->cj_max_c, "cj_max_c");
-    RANGE_F32_FINITE(rec->k_ct_v_per_a[0], "k_ct_v_per_a[0]");
-    RANGE_F32_FINITE(rec->k_ct_v_per_a[1], "k_ct_v_per_a[1]");
-    RANGE_F32_FINITE(rec->k_ct_v_per_a[2], "k_ct_v_per_a[2]");
-    RANGE_F32_FINITE(rec->gain[0], "gain[0]");
-    RANGE_F32_FINITE(rec->gain[1], "gain[1]");
-    RANGE_F32_FINITE(rec->gain[2], "gain[2]");
+    RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[0], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[0]");
+    RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[1], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[1]");
+    RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[2], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[2]");
+    RANGE_F32_RANGE_OR_ZERO(rec->gain[0], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "gain[0]");
+    RANGE_F32_RANGE_OR_ZERO(rec->gain[1], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "gain[1]");
+    RANGE_F32_RANGE_OR_ZERO(rec->gain[2], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "gain[2]");
     RANGE_F32_FINITE(rec->mains_voltage_v, "mains_voltage_v");
     RANGE_F32_FINITE(rec->ct_cal[0].gain, "ct_cal[0].gain");
     RANGE_F32_FINITE(rec->ct_cal[1].gain, "ct_cal[1].gain");

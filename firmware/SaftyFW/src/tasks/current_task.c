@@ -66,8 +66,10 @@ static current_sense_power_t  s_published_power;
 // taskENTER_CRITICAL()/EXIT discipline as s_published_snapshot above when
 // read from current_task_any_current_present(): small fixed fields, no
 // blocking call inside the guarded region.
-static bool    s_ct_installed_effective = true;
-static uint8_t s_ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+// Fitted-channel bitmask (config_store_fitted_channel_mask(): committed
+// zone_ct_channel map when its group bit is set, else ct_topology). Default
+// all three fitted == the old PER_ZONE/installed defaults.
+static uint8_t s_ct_fitted_mask = 0x7u;
 
 // CT_COMMISSIONING_PLAN.md step 2 -- see current_task.h's header comment for
 // why this accumulates incrementally here rather than calling current_
@@ -185,8 +187,8 @@ bool current_task_any_current_present(void)
     // op-amp DC offset floor, never real current information, so it must
     // not be able to contribute to this fact -- see that function's doc
     // comment for the full fail-safe-direction argument.
-    bool any = config_store_mask_current_present_to_fitted(
-        s_published_snapshot.present, s_ct_installed_effective, s_ct_topology);
+    bool any = config_store_mask_current_present_to_fitted_mask(
+        s_published_snapshot.present, s_ct_fitted_mask);
     taskEXIT_CRITICAL();
     return any;
 }
@@ -276,11 +278,9 @@ void current_task_reload_cal(void)
     // reads these two fields under; s_published_snapshot's own critical
     // section above this function's call site is a separate, already-
     // existing guarded region.
-    bool ct_installed_effective =
-        ((rec.fields_set & CONFIG_STORE_SET_CT_INSTALLED) == 0u) || (rec.ct_installed != 0u);
+    uint8_t fitted_mask = config_store_fitted_channel_mask(&rec);
     taskENTER_CRITICAL();
-    s_ct_installed_effective = ct_installed_effective;
-    s_ct_topology = rec.ct_topology;
+    s_ct_fitted_mask = fitted_mask;
     taskEXIT_CRITICAL();
 }
 

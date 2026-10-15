@@ -125,6 +125,15 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // calibrated channel must carry gain > 0.
 #define CONFIG_PARAMS_CT_CAL_GAIN_MAX 10.0f
 
+// k_ct_v_per_a[] / gain[] magnitude bounds (CT audit 2026-10-14, LOW-1).
+// 0 stays storable (uncommissioned default). Any nonzero value must lie in
+// [MIN, MAX]: a denormal/tiny value shrinks the presence threshold ~1000x
+// (false S3 trips) and overflows counts-to-amps to +inf (NaN in the reporting
+// filter); a negative value inverts the reading. Enforced at SET_PARAM time
+// and at load/validate time.
+#define CONFIG_PARAMS_CT_SCALE_MIN 1.0e-4f
+#define CONFIG_PARAMS_CT_SCALE_MAX 1.0e6f
+
 // tc_offset_c magnitude bound (SaftyFW guard review 2026-10-09, F2).
 // tc_offset_c is added to the hot-junction reading before EVERY guard sees
 // it, so an unbounded offset (e.g. -400) rescales S1's abs_max_temp_c

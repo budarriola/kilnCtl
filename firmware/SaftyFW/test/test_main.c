@@ -52,6 +52,7 @@ void run_test_safety_core_ct_calibration_gate(void);
 void run_test_config_store_ct_channel_fitted(void);
 void run_test_config_store_zone_ct_channel(void);
 void run_test_ct_summed_topology_call_sites(void);
+void run_test_ct_split_map_guards(void);
 void run_test_safety_core_unconfigured_armed_backstop(void);
 void run_test_safety_core_trip_logging(void);
 void run_test_update_task_relay_wiring(void);
@@ -123,6 +124,7 @@ int main(void)
     run_test_config_store_ct_channel_fitted();
     run_test_config_store_zone_ct_channel();
     run_test_ct_summed_topology_call_sites();
+    run_test_ct_split_map_guards();
     run_test_safety_core_unconfigured_armed_backstop();
     run_test_safety_core_trip_logging();
     run_test_estop_deenergizes_relay();

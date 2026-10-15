@@ -19,6 +19,16 @@ void ct_leak_alarm_reset(ct_leak_alarm_state_t *s)
 
 static bool channel_relevant(const ct_leak_alarm_input_t *in, int ch)
 {
+    if (in->fitted_map_valid) {
+        /* Committed map is authoritative: a channel is watched iff some zone
+         * reads it. Collapses to the legacy rule for {0,1,2} and {2,2,2}. */
+        for (int z = 0; z < CT_LEAK_CHANNELS; z++) {
+            if (in->zone_ct_channel[z] == (uint8_t)ch) {
+                return true;
+            }
+        }
+        return false;
+    }
     /* Summed topology: one clamp (index 2, GPIO28) sees every zone; the other
      * two inputs are not fitted and are never read. Per-zone: all three. */
     return in->summed ? (ch == CT_LEAK_CHANNELS - 1) : true;

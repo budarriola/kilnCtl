@@ -82,6 +82,7 @@ try {
         (Join-Path $testDir "test_config_store_ct_channel_fitted.c"),
         (Join-Path $testDir "test_config_store_zone_ct_channel.c"),
         (Join-Path $testDir "test_ct_summed_topology_call_sites.c"),
+        (Join-Path $testDir "test_ct_split_map_guards.c"),
         (Join-Path $testDir "test_ct_amps_cal.c"),
         (Join-Path $testDir "test_snapshots.c"),
         (Join-Path $testDir "test_boot_checkin_coverage.c"),

@@ -30,6 +30,7 @@ static const char *TAG = "ct_leak";
  * (F32). Same ids zones_current_sweep_task.c and readiness_http.c read. */
 #define CT_LEAK_PARAM_INSTALLED 0x0109u
 #define CT_LEAK_PARAM_TOPOLOGY 0x031Fu
+#define CT_LEAK_PARAM_ZONE_CT(z) ((uint16_t)(0x0320u + (z)))
 #define CT_LEAK_PARAM_KCT(ch) ((uint16_t)(0x0308u + (ch)))
 
 static kiln_io_t *s_io = NULL;
@@ -47,6 +48,8 @@ static void read_params(ct_leak_alarm_input_t *in)
 {
     in->ct_installed = true; /* unset reads installed: an unknown value must never relax the alarm */
     in->summed = false;
+    in->fitted_map_valid = false;
+    uint8_t map_seen = 0u;
     for (int c = 0; c < CT_LEAK_CHANNELS; c++) {
         in->k_ct_v_per_a[c] = 0.0f;
     }
@@ -62,6 +65,12 @@ static void read_params(ct_leak_alarm_input_t *in)
         } else if (row.param_id == CT_LEAK_PARAM_TOPOLOGY) {
             in->summed = row.value.u8_val != 0u;
         } else {
+            for (int z = 0; z < CT_LEAK_CHANNELS; z++) {
+                if (row.param_id == CT_LEAK_PARAM_ZONE_CT(z)) {
+                    in->zone_ct_channel[z] = row.value.u8_val;
+                    map_seen |= (uint8_t)(1u << z);
+                }
+            }
             for (int c = 0; c < CT_LEAK_CHANNELS; c++) {
                 if (row.param_id == CT_LEAK_PARAM_KCT(c)) {
                     in->k_ct_v_per_a[c] = row.value.f32_val;
@@ -69,6 +78,9 @@ static void read_params(ct_leak_alarm_input_t *in)
             }
         }
     }
+    /* Only an operator-committed map (all three entries set) overrides the
+     * topology rule; a partial map falls back to it. */
+    in->fitted_map_valid = (map_seen == 0x7u);
 }
 
 void ct_leak_alarm_service(SafetyLinkClass *link)

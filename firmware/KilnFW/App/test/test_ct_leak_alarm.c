@@ -167,6 +167,33 @@ void run_test_ct_leak_alarm(void)
     t = 0;
     TEST_CHECK(drive(&s, &in, &t, 20000) && s.channel_mask == 3u, "per-zone: channels 0 and 1 alarm");
 
+    /* CT audit 2026-10-14 HIGH-1: a committed split map (the Pico back-fills
+     * ct_topology to SUMMED for it) is authoritative over `summed`. */
+    ct_leak_alarm_reset(&s);
+    in = base_in(0);
+    in.summed = true;
+    in.fitted_map_valid = true;
+    in.zone_ct_channel[0] = 0; in.zone_ct_channel[1] = 0; in.zone_ct_channel[2] = 1;
+    in.current_a[2] = 1.0f; /* unwired channel 2: ignored */
+    t = 0;
+    TEST_CHECK(!drive(&s, &in, &t, 60000), "split {0,0,1}: unwired channel 2 ignored");
+    in.current_a[0] = 0.30f;
+    TEST_CHECK(drive(&s, &in, &t, 20000) && s.channel_mask == 1u, "split {0,0,1}: channel 0 alarms");
+    ct_leak_alarm_reset(&s);
+    in.current_a[0] = 0.0f;
+    in.current_a[1] = 0.30f;
+    t = 0;
+    TEST_CHECK(drive(&s, &in, &t, 20000) && s.channel_mask == 2u, "split {0,0,1}: channel 1 alarms");
+    /* Legacy maps through the map path match the topology rule. */
+    ct_leak_alarm_reset(&s);
+    in = base_in(0);
+    in.summed = true;
+    in.fitted_map_valid = true;
+    in.zone_ct_channel[0] = 2; in.zone_ct_channel[1] = 2; in.zone_ct_channel[2] = 2;
+    in.current_a[0] = 1.0f;
+    t = 0;
+    TEST_CHECK(!drive(&s, &in, &t, 60000), "map {2,2,2}: channels 0/1 ignored");
+
     /* Floor: at/below it never trips; rescaled by live k_ct. */
     ct_leak_alarm_reset(&s);
     in = base_in(0);
