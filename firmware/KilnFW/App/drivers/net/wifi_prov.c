@@ -450,6 +450,36 @@ static void owner_task(void *arg);
 
 /* ---- Public API --------------------------------------------------------- */
 
+/* Create and start the periodic rescan timer if it is not already running.
+ * Called from wifi_prov_start() and, on failure there, retried by owner_task()
+ * (AUDIT_WIFI LOW-1). Returns true when the timer is running. */
+bool rescan_timer_ensure(void)
+{
+    if (s_wifi.rescan_timer) {
+        return true;
+    }
+    const esp_timer_create_args_t rescan_timer_args = {
+        .callback = &rescan_timer_cb,
+        .name = "wifi_ap_fallback_rescan",
+    };
+    esp_timer_handle_t h = NULL;
+    esp_err_t err = esp_timer_create(&rescan_timer_args, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_create failed: %s -- no periodic AP-fallback rescan (will retry)",
+                 esp_err_to_name(err));
+        return false;
+    }
+    err = esp_timer_start_periodic(h, (uint64_t)WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_start_periodic failed: %s -- no periodic AP-fallback rescan (will retry)",
+                 esp_err_to_name(err));
+        esp_timer_delete(h);
+        return false;
+    }
+    s_wifi.rescan_timer = h;
+    return true;
+}
+
 esp_err_t wifi_prov_start(void)
 {
     if (s_wifi.started) {
