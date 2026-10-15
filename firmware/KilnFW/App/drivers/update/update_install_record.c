@@ -77,6 +77,7 @@ size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_
     out[4] = (uint8_t)REC_VERSION;
     out[5] = r->code;
     out[6] = r->reason;
+    out[7] = (uint8_t)((r->detail & UPD_INST_DETAIL_CODE_MASK) | (r->app_modified ? UPD_INST_DETAIL_MODIFIED_BIT : 0u));
     memcpy(out + 8, r->semver, UPD_INST_SEMVER_LEN);
     memcpy(out + 8 + UPD_INST_SEMVER_LEN, r->id, UPD_INST_ID_LEN);
     put_u32(out + UPD_INST_RES_SIZE - 4, ota_image_crc32(out, UPD_INST_RES_SIZE - 4));
@@ -98,6 +99,8 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
     memset(&r, 0, sizeof(r));
     r.code = buf[5];
     r.reason = buf[6];
+    r.detail = buf[7] & UPD_INST_DETAIL_CODE_MASK;
+    r.app_modified = (buf[7] & UPD_INST_DETAIL_MODIFIED_BIT) != 0;
     memcpy(r.semver, buf + 8, UPD_INST_SEMVER_LEN);
     memcpy(r.id, buf + 8 + UPD_INST_SEMVER_LEN, UPD_INST_ID_LEN);
     if (r.code > UPD_INST_RES_FAIL || r.reason >= UPD_INST_REASON_COUNT || !semver_terminated(r.semver)) {
@@ -127,13 +130,34 @@ const char *update_install_reason_name(uint8_t reason)
     return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
 }
 
+const char *update_install_detail_name(uint8_t detail)
+{
+    // 1..15 mirror recovery_apply_result_name().
+    static const char *const apply[UPD_INST_DETAIL_APPLY_LAST + 1] = {
+        "none",           "bad_arg",        "not_staged",         "bad_stage_header",    "stage_not_verified",
+        "stage_read_failed", "stage_hash_mismatch", "not_a_kilnfw_image", "image_too_big", "app_erase_failed",
+        "app_write_failed", "app_read_failed", "app_readback_mismatch", "app_image_verify_failed",
+        "set_boot_failed", "sha_failed",
+    };
+    if (detail <= UPD_INST_DETAIL_APPLY_LAST) {
+        return apply[detail];
+    }
+    switch (detail) {
+    case UPD_INST_DETAIL_START_NO_MEM: return "start_low_heap";
+    case UPD_INST_DETAIL_START_NO_APP: return "start_no_app";
+    case UPD_INST_DETAIL_START_BUSY: return "start_busy";
+    case UPD_INST_DETAIL_START_FAILED: return "start_failed";
+    default: return "unknown";
+    }
+}
+
 const char *update_install_code_name(uint8_t code)
 {
     return code == UPD_INST_RES_OK ? "ok" : code == UPD_INST_RES_FAIL ? "fail" : "none";
 }
 
-int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
-                                 const char *semver, const uint8_t *id)
+int update_install_record_result_ex(const update_install_ops_t *ops, uint8_t code, uint8_t reason, uint8_t detail,
+                                    bool app_modified, const char *semver, const uint8_t *id)
 {
     if (!ops || !ops->res_write) {
         return -1;
@@ -142,6 +166,8 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
     memset(&r, 0, sizeof(r));
     r.code = code;
     r.reason = reason;
+    r.detail = detail & UPD_INST_DETAIL_CODE_MASK;
+    r.app_modified = app_modified;
     if (semver) {
         strncpy(r.semver, semver, UPD_INST_SEMVER_LEN - 1);
     }
@@ -154,6 +180,34 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
         return -1;
     }
     return ops->res_write(ops->ctx, blob, n);
+}
+
+int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
+                                 const char *semver, const uint8_t *id)
+{
+    return update_install_record_result_ex(ops, code, reason, UPD_INST_DETAIL_NONE, false, semver, id);
+}
+
+update_install_after_t update_install_after_fail(uint8_t reason, bool app_modified, bool app_verifies,
+                                                 bool attempts_left)
+{
+    switch (reason) {
+    case UPD_INST_REASON_NVS_UNAVAILABLE:
+    case UPD_INST_REASON_COUNTER_FAILED:     // the attempt counter did not advance: a restart could loop
+    case UPD_INST_REASON_RESULT_WRITE_FAILED:
+    case UPD_INST_REASON_CLEAR_FAILED:
+    case UPD_INST_REASON_OUTCOME_UNKNOWN:    // the copy may still be running
+        return UPD_INST_AFTER_STAY;
+    default:
+        break;
+    }
+    if (app_verifies && (!app_modified || !attempts_left)) {
+        return UPD_INST_AFTER_EXIT_APP;
+    }
+    if (attempts_left) {
+        return UPD_INST_AFTER_RESTART;
+    }
+    return UPD_INST_AFTER_STAY;
 }
 
 int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void))
@@ -184,13 +238,14 @@ int update_install_post_boot(const update_install_ops_t *ops, const char *semver
     return 0;
 }
 
-static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uint8_t reason,
-                                            const char *semver, const uint8_t *id, update_install_res_t *res_out)
+static update_install_boot_outcome_t refuse_ex(const update_install_ops_t *ops, uint8_t reason, uint8_t detail,
+                                               const char *semver, const uint8_t *id, update_install_res_t *res_out)
 {
     if (res_out) {
         memset(res_out, 0, sizeof(*res_out));
         res_out->code = UPD_INST_RES_FAIL;
         res_out->reason = reason;
+        res_out->detail = detail & UPD_INST_DETAIL_CODE_MASK;
         if (semver) {
             strncpy(res_out->semver, semver, UPD_INST_SEMVER_LEN - 1);
         }
@@ -198,8 +253,15 @@ static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uin
             memcpy(res_out->id, id, UPD_INST_ID_LEN);
         }
     }
-    (void)update_install_record_result(ops, UPD_INST_RES_FAIL, reason, semver, id);
+    // A refusal happens before any erase: the app partition is untouched.
+    (void)update_install_record_result_ex(ops, UPD_INST_RES_FAIL, reason, detail, false, semver, id);
     return UPD_INST_BOOT_REFUSED;
+}
+
+static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uint8_t reason,
+                                            const char *semver, const uint8_t *id, update_install_res_t *res_out)
+{
+    return refuse_ex(ops, reason, UPD_INST_DETAIL_NONE, semver, id, res_out);
 }
 
 update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t *ops,
@@ -252,8 +314,12 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
     if (update_install_req_encode(&req, nb) == 0 || ops->req_write(ops->ctx, nb, UPD_INST_REQ_SIZE) != 0) {
         return refuse(ops, UPD_INST_REASON_COUNTER_FAILED, req.semver, req.sha256, res_out);
     }
-    if (ops->apply_start(ops->ctx) != 0) {
-        return refuse(ops, UPD_INST_REASON_APPLY_FAILED, req.semver, req.sha256, res_out);
+    int sr = ops->apply_start(ops->ctx);
+    if (sr != 0) {
+        uint8_t d = (sr >= (int)UPD_INST_DETAIL_START_NO_MEM && sr < (int)UPD_INST_DETAIL_COUNT)
+                        ? (uint8_t)sr
+                        : (uint8_t)UPD_INST_DETAIL_START_FAILED;
+        return refuse_ex(ops, UPD_INST_REASON_APPLY_FAILED, d, req.semver, req.sha256, res_out);
     }
     if (res_out) {
         res_out->code = UPD_INST_RES_NONE;

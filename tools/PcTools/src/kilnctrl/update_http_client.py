@@ -296,7 +296,9 @@ def sha256_hex(image: bytes) -> str:
 def get_install_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
     """GET /api/update/status. Keys: running_version, stage_busy, staged,
     staged_version, last_install{state (recorded/none/unreadable), code, reason, version,
-    id}. ``id`` is the first 4 bytes of the installed image's sha256 as 8 hex chars
+    id, detail, app_modified}. ``detail`` names the specific apply result (stage_hash_mismatch,
+    start_low_heap, ...) and ``app_modified`` says whether the app partition had been erased when
+    the install failed; both are absent on a board that predates them. ``id`` is the first 4 bytes of the installed image's sha256 as 8 hex chars
     ("00000000" for a legacy record, absent on a board that predates the field)."""
     req = urllib.request.Request(_url(host, INSTALL_STATUS_PATH), method="GET")
     data = _request(req, INSTALL_STATUS_PATH, timeout)

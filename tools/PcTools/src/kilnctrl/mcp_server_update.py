@@ -578,7 +578,9 @@ def _install_line(st: dict) -> str:
     li = st.get("last_install") or {}
     return (f"running={st.get('running_version')!r}, staged={st.get('staged')} "
             f"({st.get('staged_version')!r}), last_install={li.get('state')}/{li.get('code')}"
-            f"/{li.get('reason')}/{li.get('version')!r}")
+            f"/{li.get('reason')}/{li.get('version')!r}"
+            + (f" detail={li.get('detail')} app_modified={li.get('app_modified')}"
+               if li.get("detail") not in (None, "none") else ""))
 
 
 #: Pending install evidence per host, kept across calls so a follow-up

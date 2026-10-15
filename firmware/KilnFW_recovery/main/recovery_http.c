@@ -621,9 +621,15 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
         // last_install goes out as its own fragment: the longest reason name (34 chars) plus a 31-char version
         // is ~125 B and must never share a 200 B fragment with the numeric fields (it was cut short at 14-char versions).
         if (e == ESP_OK) {
-            e = send_frag(req, "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\"}}",
+            e = send_frag(req, "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\"",
                           have_ir ? update_install_code_name(ir.code) : "none",
                           have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver, ir_id);
+        }
+        // detail + app_modified (result blob byte 7) in their own fragment: the longest detail name is 23 chars.
+        if (e == ESP_OK) {
+            e = send_frag(req, ",\"detail\":\"%s\",\"app_modified\":%s}}",
+                          have_ir ? update_install_detail_name(ir.detail) : "none",
+                          (have_ir && ir.app_modified) ? "true" : "false");
         }
     }
     if (e != ESP_OK) {
@@ -1066,6 +1072,23 @@ static int manual_apply_pre_boot(void)
         (void)recovery_install_supersede();
     }
     return rc;
+}
+
+bool recovery_http_app_verifies(void)
+{
+    app_verify_invalidate();
+    const esp_partition_t *app = find_app_partition();
+    return app_has_valid_image(app) && app_image_verified(app);
+}
+
+int recovery_http_select_app_and_restart(void)
+{
+    const esp_partition_t *app = find_app_partition();
+    if (!app || recovery_boot_partition_set_and_verify(app) != ESP_OK) {
+        return -1;
+    }
+    restart_soon(500);
+    return 0;
 }
 
 // Same clear for the unattended-install pre-boot hook (recovery_install.c).

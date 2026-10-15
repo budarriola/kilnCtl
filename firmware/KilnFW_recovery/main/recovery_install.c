@@ -14,12 +14,21 @@
 #include "recovery_http.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
+#include "recovery_pico.h"
 
 static const char *TAG = "rec_install";
 
 #define KILN_NVS_PART "kiln_nvs"
 #define POLL_TASK_STACK RECOVERY_INSTALL_POLL_STACK // shared with recovery_apply_esp.c (recovery_apply_esp.h)
 #define POLL_TASK_PRIO 3
+#define RECOVER_TASK_STACK 8192 // esp_image_verify runs here, same size as the apply task that also runs it
+#define RECOVER_TASK_PRIO 4
+#define RECOVER_RESTART_DELAY_MS 3000 // lets a status poll read the FAIL record before the retry reboot
+
+// recovery_apply_result_t is carried as the result detail code: the numbers must stay in step.
+_Static_assert((int)RECOVERY_APPLY_ERR_STAGE_HASH == (int)UPD_INST_DETAIL_APPLY_STAGE_HASH, "detail mirror");
+_Static_assert((int)RECOVERY_APPLY_ERR_SET_BOOT == (int)UPD_INST_DETAIL_APPLY_SET_BOOT, "detail mirror");
+_Static_assert((int)RECOVERY_APPLY_ERR_SHA == (int)UPD_INST_DETAIL_APPLY_LAST, "detail mirror");
 
 static update_install_res_t s_last;
 static bool s_have_last;
@@ -172,15 +181,22 @@ static int post_boot(void)
     return 0;
 }
 
+// 0 = started, else a UPD_INST_DETAIL_START_* code (the heap floor refusal is START_NO_MEM, not a bare failure).
 static int op_apply_start(void *ctx)
 {
     (void)ctx;
     const esp_partition_t *app =
         esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
     if (app == NULL) {
-        return -1;
+        return UPD_INST_DETAIL_START_NO_APP;
     }
-    return recovery_apply_esp_start(app, pre_boot, post_boot) == ESP_OK ? 0 : -1;
+    esp_err_t e = recovery_apply_esp_start(app, pre_boot, post_boot);
+    if (e == ESP_OK) {
+        return 0;
+    }
+    return e == ESP_ERR_NO_MEM ? UPD_INST_DETAIL_START_NO_MEM
+         : e == ESP_ERR_INVALID_STATE ? UPD_INST_DETAIL_START_BUSY
+                                      : UPD_INST_DETAIL_START_FAILED;
 }
 
 static const update_install_ops_t s_ops = {
@@ -209,8 +225,65 @@ static void show_failure(uint8_t reason)
     recovery_lcd_set_warning(line, NULL);
 }
 
-// Watches the apply. A failed apply does not reboot, so record the failure (the
-// request stays for a bounded retry on the next recovery boot) and exit.
+// ---- leaving recovery after a failed install without a human ----
+
+static struct {
+    uint8_t reason;
+    bool app_modified;
+} s_recover;
+
+// The request is still stored with attempts left (its counter for the failed attempt is already raised
+// and read back, so a reboot advances the bounded retry).
+static bool request_attempts_left(void)
+{
+    uint8_t buf[UPD_INST_REQ_SIZE];
+    size_t n = 0;
+    update_install_req_t rq;
+    return kv_read(UPD_INST_KEY_REQ, buf, sizeof(buf), &n) == 0 && update_install_req_decode(buf, n, &rq) &&
+           rq.attempts < UPD_INST_MAX_ATTEMPTS;
+}
+
+static void recover_task(void *arg)
+{
+    (void)arg;
+    update_install_after_t act = UPD_INST_AFTER_STAY;
+    // Kiln NVS unusable: boot_guard cannot be cleared or verified, so an app/recovery ping-pong could start.
+    bool kiln_ok = (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) == 0;
+    if (kiln_ok && !recovery_pico_busy()) {
+        bool verifies = recovery_http_app_verifies();
+        act = update_install_after_fail(s_recover.reason, s_recover.app_modified, verifies, request_attempts_left());
+    }
+    if (act == UPD_INST_AFTER_EXIT_APP) {
+        // Same order as /api/recovery/exit: boot_guard (verified) first, then drop the request (the FAIL
+        // result stays for the application to read), then the boot target.
+        if (recovery_http_boot_guard_clear() == 0 && kv_clear(UPD_INST_KEY_REQ) == 0 &&
+            recovery_http_select_app_and_restart() == 0) {
+            ESP_LOGW(TAG, "install failed (%s); app verified, booting it", update_install_reason_name(s_recover.reason));
+        } else {
+            ESP_LOGE(TAG, "auto-exit to the application failed; staying in recovery");
+        }
+    } else if (act == UPD_INST_AFTER_RESTART) {
+        ESP_LOGW(TAG, "install failed with the app modified; restarting for the bounded retry");
+        vTaskDelay(pdMS_TO_TICKS(RECOVER_RESTART_DELAY_MS));
+        esp_restart();
+    } else {
+        ESP_LOGW(TAG, "install failed (%s); staying in recovery", update_install_reason_name(s_recover.reason));
+    }
+    vTaskDelete(NULL);
+}
+
+// Starts the one-shot recovery task. A task create failure leaves the board in recovery, as before.
+static void auto_recover(uint8_t reason, bool app_modified)
+{
+    s_recover.reason = reason;
+    s_recover.app_modified = app_modified;
+    if (xTaskCreate(recover_task, "rec_inst_exit", RECOVER_TASK_STACK, NULL, RECOVER_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "recover task create failed; staying in recovery");
+    }
+}
+
+// Watches the apply. A failed apply does not reboot by itself: record the failure with its
+// specific result and the app-modified flag, then leave recovery if that is safe (auto_recover).
 static void poll_task(void *arg)
 {
     (void)arg;
@@ -218,9 +291,12 @@ static void poll_task(void *arg)
         recovery_apply_progress_t p;
         recovery_apply_esp_status(&p);
         if (p.phase == RECOVERY_APPLY_FAILED) {
-            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, s_semver, s_id);
+            update_install_record_result_ex(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED,
+                                            (uint8_t)p.result, p.app_modified, s_semver, s_id);
             load_last();
             show_failure(UPD_INST_REASON_APPLY_FAILED);
+            vTaskDelay(pdMS_TO_TICKS(300)); // the finished apply task releases its stack first
+            auto_recover(UPD_INST_REASON_APPLY_FAILED, p.app_modified);
             break;
         }
         if (p.phase == RECOVERY_APPLY_DONE) {
@@ -261,6 +337,8 @@ void recovery_install_boot(void)
         }
         show_failure(res.reason);
         ESP_LOGE(TAG, "install refused: %s", update_install_reason_name(res.reason));
+        // attempts_exceeded: earlier attempts may have rewritten app, so its state is unknown (treat as modified).
+        auto_recover(res.reason, res.app_modified || res.reason == UPD_INST_REASON_ATTEMPTS_EXCEEDED);
     } else if (o == UPD_INST_BOOT_STARTED) {
         ESP_LOGW(TAG, "install request found; apply started");
         if (xTaskCreate(poll_task, "rec_inst_poll", POLL_TASK_STACK, NULL, POLL_TASK_PRIO, NULL) != pdPASS) {

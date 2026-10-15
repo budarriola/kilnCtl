@@ -528,8 +528,111 @@ static void test_prepare(void)
     TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 500, "request write failure refused 500");
 }
 
+static void test_detail_and_after_fail(void)
+{
+    TEST_SECTION("update_install_record -- result detail, app_modified, post-failure action");
+    update_install_res_t s, d;
+    uint8_t rb[UPD_INST_RES_SIZE];
+    memset(&s, 0, sizeof(s));
+    s.code = UPD_INST_RES_FAIL;
+    s.reason = UPD_INST_REASON_APPLY_FAILED;
+    s.detail = UPD_INST_DETAIL_APPLY_STAGE_HASH;
+    s.app_modified = true;
+    strcpy(s.semver, "1.0.0");
+    TEST_CHECK(update_install_res_encode(&s, rb) == UPD_INST_RES_SIZE, "detail result encodes");
+    TEST_CHECK(rb[6] == UPD_INST_REASON_APPLY_FAILED && rb[7] == (UPD_INST_DETAIL_APPLY_STAGE_HASH | 0x80u),
+               "reason stays apply_failed; detail code in the low 7 bits of byte 7, modified in bit 7");
+    TEST_CHECK(update_install_res_decode(rb, sizeof(rb), &d) && d.detail == UPD_INST_DETAIL_APPLY_STAGE_HASH &&
+                   d.app_modified && d.reason == UPD_INST_REASON_APPLY_FAILED,
+               "detail and app_modified round trip");
+    s.app_modified = false;
+    s.detail = UPD_INST_DETAIL_START_NO_MEM;
+    TEST_CHECK(update_install_res_encode(&s, rb) == UPD_INST_RES_SIZE && rb[7] == UPD_INST_DETAIL_START_NO_MEM &&
+                   update_install_res_decode(rb, sizeof(rb), &d) && d.detail == UPD_INST_DETAIL_START_NO_MEM &&
+                   !d.app_modified,
+               "untouched-app detail round trips with the flag clear");
+    // An older record (byte 7 zero) reads as no detail, app untouched.
+    s.detail = 0;
+    TEST_CHECK(update_install_res_encode(&s, rb) == UPD_INST_RES_SIZE && rb[7] == 0 &&
+                   update_install_res_decode(rb, sizeof(rb), &d) && d.detail == 0 && !d.app_modified,
+               "older record (byte 7 zero) decodes as no detail");
+    TEST_CHECK(strcmp(update_install_detail_name(UPD_INST_DETAIL_APPLY_STAGE_HASH), "stage_hash_mismatch") == 0 &&
+                   strcmp(update_install_detail_name(UPD_INST_DETAIL_APPLY_SET_BOOT), "set_boot_failed") == 0 &&
+                   strcmp(update_install_detail_name(UPD_INST_DETAIL_START_NO_MEM), "start_low_heap") == 0 &&
+                   strcmp(update_install_detail_name(0), "none") == 0 && strcmp(update_install_detail_name(99), "unknown") == 0,
+               "detail names");
+
+    // record_result_ex stores what it is given; the plain variant records no detail.
+    fake_t f;
+    fake_init(&f);
+    update_install_ops_t o = ops_for(&f);
+    TEST_CHECK(update_install_record_result_ex(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED,
+                                               UPD_INST_DETAIL_APPLY_SET_BOOT, true, "1.0.0", NULL) == 0 &&
+                   update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) &&
+                   d.detail == UPD_INST_DETAIL_APPLY_SET_BOOT && d.app_modified,
+               "record_result_ex writes detail and app_modified");
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, "1.0.0", NULL) == 0 &&
+                   update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.detail == 0 && !d.app_modified,
+               "record_result writes no detail");
+
+    // A refused apply_start carries its own detail and leaves app_modified clear (heap floor is not "apply_failed" alone).
+    fake_init(&f);
+    o = ops_for(&f);
+    update_install_res_t out;
+    f.apply_rc = UPD_INST_DETAIL_START_NO_MEM;
+    TEST_CHECK(update_install_boot_run(&o, &out) == UPD_INST_BOOT_REFUSED && out.reason == UPD_INST_REASON_APPLY_FAILED &&
+                   out.detail == UPD_INST_DETAIL_START_NO_MEM && !out.app_modified,
+               "apply_start heap refusal reported with its own detail");
+    TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.detail == UPD_INST_DETAIL_START_NO_MEM &&
+                   !d.app_modified,
+               "apply_start heap refusal persisted with its own detail");
+    fake_init(&f);
+    o = ops_for(&f);
+    f.apply_rc = -1;
+    TEST_CHECK(update_install_boot_run(&o, &out) == UPD_INST_BOOT_REFUSED && out.detail == UPD_INST_DETAIL_START_FAILED,
+               "unclassified apply_start refusal is start_failed");
+    fake_init(&f);
+    o = ops_for(&f);
+    f.apply_rc = 5; // an apply-result number is not a start code
+    TEST_CHECK(update_install_boot_run(&o, &out) == UPD_INST_BOOT_REFUSED && out.detail == UPD_INST_DETAIL_START_FAILED,
+               "an out-of-range apply_start code is start_failed");
+
+    // update_install_after_fail: the unattended-recovery decision.
+    const uint8_t AF = UPD_INST_REASON_APPLY_FAILED;
+    TEST_CHECK(update_install_after_fail(AF, false, true, true) == UPD_INST_AFTER_EXIT_APP,
+               "app untouched and verifies: exit to the app");
+    TEST_CHECK(update_install_after_fail(AF, false, true, false) == UPD_INST_AFTER_EXIT_APP,
+               "app untouched, verifies, no attempts left: exit to the app");
+    TEST_CHECK(update_install_after_fail(AF, false, false, true) == UPD_INST_AFTER_RESTART,
+               "app untouched but does not verify: never boot it; retry while attempts remain");
+    TEST_CHECK(update_install_after_fail(AF, false, false, false) == UPD_INST_AFTER_STAY,
+               "app does not verify and no attempts left: stay in recovery");
+    TEST_CHECK(update_install_after_fail(AF, true, false, true) == UPD_INST_AFTER_RESTART,
+               "app modified, attempts left: restart so the bounded retry advances");
+    TEST_CHECK(update_install_after_fail(AF, true, true, true) == UPD_INST_AFTER_RESTART,
+               "app modified and verifies but attempts remain: retry the switch");
+    TEST_CHECK(update_install_after_fail(AF, true, true, false) == UPD_INST_AFTER_EXIT_APP,
+               "attempts exhausted and the app verifies: exit to it");
+    TEST_CHECK(update_install_after_fail(AF, true, false, false) == UPD_INST_AFTER_STAY,
+               "attempts exhausted and the app does not verify: stay");
+    TEST_CHECK(update_install_after_fail(UPD_INST_REASON_STAGE_NOT_READY, false, true, false) == UPD_INST_AFTER_EXIT_APP &&
+                   update_install_after_fail(UPD_INST_REASON_SHA_MISMATCH, false, true, false) == UPD_INST_AFTER_EXIT_APP &&
+                   update_install_after_fail(UPD_INST_REASON_SIZE_MISMATCH, false, true, false) == UPD_INST_AFTER_EXIT_APP &&
+                   update_install_after_fail(UPD_INST_REASON_RECORD_BAD, false, true, false) == UPD_INST_AFTER_EXIT_APP,
+               "pre-apply refusals with a verified app exit to it");
+    TEST_CHECK(update_install_after_fail(UPD_INST_REASON_ATTEMPTS_EXCEEDED, true, true, false) == UPD_INST_AFTER_EXIT_APP &&
+                   update_install_after_fail(UPD_INST_REASON_ATTEMPTS_EXCEEDED, true, false, false) == UPD_INST_AFTER_STAY,
+               "attempts_exceeded exits only to a verified app");
+    TEST_CHECK(update_install_after_fail(UPD_INST_REASON_NVS_UNAVAILABLE, false, true, true) == UPD_INST_AFTER_STAY &&
+                   update_install_after_fail(UPD_INST_REASON_COUNTER_FAILED, false, true, true) == UPD_INST_AFTER_STAY &&
+                   update_install_after_fail(UPD_INST_REASON_RESULT_WRITE_FAILED, false, true, true) == UPD_INST_AFTER_STAY &&
+                   update_install_after_fail(UPD_INST_REASON_OUTCOME_UNKNOWN, false, true, true) == UPD_INST_AFTER_STAY,
+               "storage failures and an unknown outcome never exit or restart (no loop)");
+}
+
 void run_test_update_install_record(void)
 {
+    test_detail_and_after_fail();
     test_codec();
     test_boot_logic();
     test_pre_boot();

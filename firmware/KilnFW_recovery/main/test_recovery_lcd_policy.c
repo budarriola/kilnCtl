@@ -428,6 +428,16 @@ static void test_http_source(const char *path)
         CHECK(strstr(wr, "recovery_pico_busy()") != NULL, "wifi_reset refuses (409) while a Pico relay runs");
         free(wr);
     }
+    char *sel = fn_body(src, "int recovery_http_select_app_and_restart(");
+    CHECK(sel != NULL && strstr(sel, "recovery_boot_partition_set_and_verify(") != NULL &&
+              strstr(sel, "restart_soon(") != NULL,
+          "auto-exit selects the app with a read-back and restarts");
+    free(sel);
+    char *vf = fn_body(src, "bool recovery_http_app_verifies(");
+    CHECK(vf != NULL && strstr(vf, "app_verify_invalidate()") != NULL && strstr(vf, "app_image_verified(") != NULL,
+          "auto-exit re-verifies app from flash (the cached verify may predate the apply)");
+    free(vf);
+    CHECK(strstr(src, "update_install_detail_name(") != NULL, "status reports the install detail");
     CHECK(strstr(src, "\\\"boot_guard_record\\\"") != NULL, "status reports boot_guard_record");
     CHECK(strstr(src, "rlcd_classify_boot_guard(") != NULL, "http classifies the boot_guard record");
     free(src);
@@ -469,6 +479,48 @@ static void test_install_source(const char *path)
     CHECK(po != NULL && strstr(po, "update_install_post_boot(") != NULL, "post_boot records OK");
     free(po);
     CHECK(strstr(src, "recovery_apply_esp_start(app, pre_boot, post_boot)") != NULL, "post_boot is wired into the apply");
+
+    // HIGH-1 / MED-1: a failed apply records its specific result, then leaves recovery when that is safe.
+    char *as = fn_body(src, "static int op_apply_start(");
+    CHECK(as != NULL, "op_apply_start found");
+    if (as) {
+        CHECK(strstr(as, "UPD_INST_DETAIL_START_NO_MEM") != NULL && strstr(as, "ESP_ERR_NO_MEM") != NULL,
+              "the heap-floor refusal gets its own detail code");
+        free(as);
+    }
+    char *pt = fn_body(src, "static void poll_task(");
+    CHECK(pt != NULL, "poll_task found");
+    if (pt) {
+        const char *rec = strstr(pt, "update_install_record_result_ex(");
+        const char *rcv = strstr(pt, "auto_recover(UPD_INST_REASON_APPLY_FAILED, p.app_modified)");
+        CHECK(rec != NULL && strstr(pt, "(uint8_t)p.result") != NULL && strstr(pt, "p.app_modified") != NULL,
+              "poll_task records the specific apply result and app_modified");
+        CHECK(rcv != NULL && rec != NULL && rcv > rec, "poll_task leaves recovery only after the FAIL result is recorded");
+        free(pt);
+    }
+    char *ib = fn_body(src, "void recovery_install_boot(");
+    CHECK(ib != NULL && strstr(ib, "auto_recover(res.reason") != NULL,
+          "a refused install also leaves recovery when safe");
+    free(ib);
+    char *rt = fn_body(src, "static void recover_task(");
+    CHECK(rt != NULL, "recover_task found");
+    if (rt) {
+        const char *ver = strstr(rt, "recovery_http_app_verifies()");
+        const char *act = strstr(rt, "update_install_after_fail(");
+        const char *bg = strstr(rt, "recovery_http_boot_guard_clear()");
+        const char *rq = strstr(rt, "kv_clear(UPD_INST_KEY_REQ)");
+        const char *sel = strstr(rt, "recovery_http_select_app_and_restart()");
+        const char *rs = strstr(rt, "esp_restart()");
+        CHECK(ver && act && ver < act, "the app is verified before the action is chosen");
+        CHECK(bg && rq && sel && bg < rq && rq < sel, "exit order: boot_guard clear, drop request, select app");
+        CHECK(strstr(rt, "RECOVERY_NVS_FAIL_KILN") != NULL, "no exit or restart while kiln NVS is unavailable");
+        CHECK(strstr(rt, "recovery_pico_busy()") != NULL, "no exit or restart while a Pico relay runs");
+        CHECK(strstr(rt, "UPD_INST_AFTER_EXIT_APP") != NULL && strstr(rt, "UPD_INST_AFTER_RESTART") != NULL,
+              "both actions are handled");
+        CHECK(rs && sel && rs > sel, "the retry restart is in its own branch after the exit branch");
+        CHECK(strstr(rt, "recovery_install_supersede(") == NULL, "auto-exit keeps the FAIL result (no supersede)");
+        free(rt);
+    }
     free(src);
 }
 

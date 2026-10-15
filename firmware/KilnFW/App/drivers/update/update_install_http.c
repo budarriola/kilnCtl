@@ -211,15 +211,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     json_safe(sv, sizeof(sv), staged_ver);
     json_safe(lv, sizeof(lv), have == 1 ? res.semver : "");
 
-    char json[448];
+    char json[512];
     int w = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"running_version\":\"%s\",\"stage_busy\":%s,\"staged\":%s,"
                      "\"staged_version\":\"%s\",\"last_install\":{\"state\":\"%s\",\"code\":\"%s\","
-                     "\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\"}}",
+                     "\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\","
+                     "\"detail\":\"%s\",\"app_modified\":%s}}",
                      rv, busy ? "true" : "false", staged ? "true" : "false", sv,
                      have == 1 ? "recorded" : (have == 0 ? "none" : "unreadable"),
                      have == 1 ? update_install_code_name(res.code) : "none",
-                     have == 1 ? update_install_reason_name(res.reason) : "none", lv, lid);
+                     have == 1 ? update_install_reason_name(res.reason) : "none", lv, lid,
+                     have == 1 ? update_install_detail_name(res.detail) : "none",
+                     (have == 1 && res.app_modified) ? "true" : "false");
     if (w < 0 || (size_t)w >= sizeof(json)) {
         return httpd_resp_send_500(req);
     }

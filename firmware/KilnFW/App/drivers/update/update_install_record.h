@@ -8,6 +8,11 @@
 // next install request replaces it, so GET /api/update/status can always show
 // how the last unattended install ended.
 //
+// Result detail (blob byte 7, zero in older records so an older decoder is unaffected): the low 7 bits
+// are a UPD_INST_DETAIL_* code, bit 7 says the app partition had been modified when the install failed.
+// The reason stays APPLY_FAILED for every apply failure; the detail carries which one, so an unattended
+// client can tell "old app intact, nothing to redo" from "app erased, re-stage".
+//
 // Recovery-side contract (update_install_boot_run): the request stays present
 // until the apply succeeds, so a power cut mid-copy (app erased, otadata at
 // factory) is re-applied on the next recovery boot. Each boot with a request
@@ -72,9 +77,26 @@ typedef enum {
     UPD_INST_REASON_COUNT
 } update_install_reason_t;
 
+#define UPD_INST_DETAIL_MODIFIED_BIT 0x80u
+#define UPD_INST_DETAIL_CODE_MASK 0x7Fu
+typedef enum {
+    UPD_INST_DETAIL_NONE = 0,
+    // 1..15 mirror recovery_apply_result_t (recovery_apply.h); recovery_install.c static-asserts the mirror.
+    UPD_INST_DETAIL_APPLY_STAGE_HASH = 6,
+    UPD_INST_DETAIL_APPLY_SET_BOOT = 14,
+    UPD_INST_DETAIL_APPLY_LAST = 15,
+    UPD_INST_DETAIL_START_NO_MEM = 32,    // apply_start refused: internal heap floor / task create
+    UPD_INST_DETAIL_START_NO_APP = 33,    // apply_start refused: no app partition
+    UPD_INST_DETAIL_START_BUSY = 34,      // apply_start refused: an apply is already running
+    UPD_INST_DETAIL_START_FAILED = 35,    // apply_start refused for any other reason
+    UPD_INST_DETAIL_COUNT
+} update_install_detail_t;
+
 typedef struct {
     uint8_t code;   // update_install_res_code_t
     uint8_t reason; // update_install_reason_t
+    uint8_t detail; // update_install_detail_t (low 7 bits of byte 7); unknown values are kept, named "unknown"
+    bool app_modified; // bit 7 of byte 7: the app partition had been erased/written
     char semver[UPD_INST_SEMVER_LEN];
     uint8_t id[UPD_INST_ID_LEN]; // sha256 prefix of the request this result answers; zeros = none
 } update_install_res_t;
@@ -92,6 +114,7 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
 void update_install_id_hex(const uint8_t id[UPD_INST_ID_LEN], char out[UPD_INST_ID_HEX_LEN]);
 
 const char *update_install_reason_name(uint8_t reason);
+const char *update_install_detail_name(uint8_t detail);
 const char *update_install_code_name(uint8_t code);
 
 // Injected recovery-side IO. Every callback returns 0 on success unless noted.
@@ -108,7 +131,8 @@ typedef struct {
     // Staged image as the stage header describes it. Returns true only when the
     // header decodes and its state is VERIFIED.
     bool (*stage_verified)(void *ctx, uint32_t *image_length, uint8_t sha256[UPD_INST_SHA_LEN]);
-    // Starts the (asynchronous) apply; 0 = started.
+    // Starts the (asynchronous) apply; 0 = started, else the refusal as a UPD_INST_DETAIL_START_* code
+    // (any other nonzero value is recorded as START_FAILED). The app is untouched on a refusal.
     int (*apply_start)(void *ctx);
 } update_install_ops_t;
 
@@ -129,6 +153,23 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 // ``id`` is the request's sha256 prefix (UPD_INST_ID_LEN bytes) or NULL for none.
 int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
                                  const char *semver, const uint8_t *id);
+// Same, with the detail code and the app-modified flag stored in blob byte 7.
+int update_install_record_result_ex(const update_install_ops_t *ops, uint8_t code, uint8_t reason, uint8_t detail,
+                                    bool app_modified, const char *semver, const uint8_t *id);
+
+// What a recovery entry caused by an install request does after the install failed or was refused.
+typedef enum {
+    UPD_INST_AFTER_STAY = 0,  // remain in recovery (nothing safe to boot, or storage unreliable)
+    UPD_INST_AFTER_EXIT_APP,  // boot the verified app now (the FAIL result stays for the app to read)
+    UPD_INST_AFTER_RESTART,   // reboot recovery so the bounded retry advances
+} update_install_after_t;
+// reason: the recorded failure reason. app_modified: the apply had erased/written app (pass true when
+// unknown). app_verifies: app passes the full image verify. attempts_left: the request is still present
+// with attempts < UPD_INST_MAX_ATTEMPTS (the counter for the failed attempt was already raised and read
+// back, so a restart is bounded). Never returns EXIT_APP for an app that does not verify; never returns
+// RESTART without attempts left; always STAY when storage itself failed (a restart or exit could loop).
+update_install_after_t update_install_after_fail(uint8_t reason, bool app_modified, bool app_verifies,
+                                                 bool attempts_left);
 
 // Recovery pre-boot hook body (after the copy verified, before the boot target
 // switch): boot_guard_clear only (nonzero aborts the switch, request kept for the
