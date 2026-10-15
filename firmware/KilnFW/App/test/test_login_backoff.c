@@ -102,6 +102,7 @@ static void test_wrap_safety(void)
         TEST_CHECK(login_backoff_remaining_ms(&s, t0 + 5000u) == 0u, "remaining_ms 0 when not locked");
         TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0x80000000u), "no phantom lock at +2^31 ms");
         TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0x80000001u), "no phantom lock at +2^31+1 ms");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0x80001389u), "no phantom lock just after the window ends 2^31 ms on");
         TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0xFFFFFFFFu), "no phantom lock just before +2^32 ms");
         // An idle slot is swept by the next lookup, so it cannot revive 2^32 ms later.
         login_backoff_cycle_reset_if_due(&s, t0 + 0x40000000u);

@@ -470,7 +470,7 @@ static void test_totp_backoff_tick_wrap(void)
     TEST_SECTION("forgot backoff -- no phantom 429 at +2^31 ms and +2^32 ms after a failure");
     const char *good = "username=admin&code=000000";
     size_t gl = strlen(good);
-    static const uint32_t gaps[] = { 0x80000000u, 0x80000001u, 0xFFFFFFFFu };
+    static const uint32_t gaps[] = { 0x80000000u, 0x80001389u, 0xFFFFFFFFu };
     for (unsigned i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
         fuzz_fresh();
         int st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);

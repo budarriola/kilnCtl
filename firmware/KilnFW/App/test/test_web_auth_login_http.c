@@ -1316,7 +1316,7 @@ static void test_fuzz_login_hostile_bodies(void)
 static void test_lockout_no_phantom_lock_at_tick_wrap(void)
 {
     TEST_SECTION("login lockout -- no phantom 429 at +2^31 ms and +2^32 ms after a failure (MED-1)");
-    static const uint32_t gaps[] = { 0x80000000u, 0x80000001u, 0xFFFFFFFFu };
+    static const uint32_t gaps[] = { 0x80000000u, 0x80001389u, 0xFFFFFFFFu };
     for (unsigned i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
         reset_all();
         set_admin_credential("admin", "correct-horse-battery-staple");

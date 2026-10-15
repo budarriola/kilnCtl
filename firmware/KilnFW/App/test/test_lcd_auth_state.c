@@ -141,7 +141,7 @@ static void test_keypad_submit_outcomes(void)
     // AUDIT_LOGSTORE_TIME MED-2: an expired lock must never read as locked again at
     // 2^31 ms or 2^32 ms after the failure (signed-32-bit lock test, 24.86 days).
     {
-        static const uint32_t offsets[] = { 0x80000000u, 0x80000001u, 0xFFFFFFFFu };
+        static const uint32_t offsets[] = { 0x80000000u, 0x80001389u, 0xFFFFFFFFu };
         for (unsigned oi = 0; oi < sizeof(offsets) / sizeof(offsets[0]); oi++) {
             lcd_keypad_state_t ks;
             lcd_keypad_state_init(&ks);
