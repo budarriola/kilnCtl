@@ -68,7 +68,8 @@ foreach ($e in $tasks) {
     }
 }
 $uart = [IO.File]::ReadAllText((Join-Path $root 'firmware/hwAbstraction/esp/uart/hal_uart_esp.c'))
-if ($uart -notmatch 'vTaskDeleteWithCaps\s*\(') { $bad += 'hal_uart_esp.c: WithCaps task must be deleted with vTaskDeleteWithCaps' }
+$uart = [regex]::Replace($uart, '(?s)/\*.*?\*/|//[^\r\n]*', '')
+if ($uart -notmatch 'vTaskDeleteWithCaps\s*\(' -or $uart -match '\bvTaskDelete\s*\(') { $bad += 'hal_uart_esp.c: WithCaps task must be deleted with vTaskDeleteWithCaps' }
 $defs = [IO.File]::ReadAllText((Join-Path $root 'firmware/KilnFW/sdkconfig.defaults'))
 if ($defs -notmatch '(?m)^CONFIG_SPIRAM_XIP_FROM_PSRAM=y') { $bad += 'sdkconfig.defaults: CONFIG_SPIRAM_XIP_FROM_PSRAM=y missing; PSRAM task stacks are only safe around flash writes with XIP on' }
 if ($bad.Count) { $bad | ForEach-Object { "FAIL: $_" }; exit 1 }
