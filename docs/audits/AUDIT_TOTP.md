@@ -340,3 +340,11 @@ Result: **HIGH 0, MED 1, LOW 6, INFO 8.**
 - Gap 5 (real gesture wiring): `test_gesture_wipes_everything`.
 - Gap 7 (totp_status never leaks the secret): `test_status_never_leaks_secret`.
 - Gap 6 (power loss between enroll writes) is also covered by `test_enroll_commit_write_order`; gap 8 by `test_gesture_cannot_be_overtaken_by_inflight_confirm`.
+
+## Resolution of remaining LOWs (2026-10-15, lowauth)
+
+- **LOW-1, LOW-2:** already fixed by totpfx (see the earlier resolution notes).
+- **LOW-3 fixed.** On a failed `set_web_password`, `/api/auth/reset` re-stores the token (fresh TTL) so the caller can retry without a new `/forgot`. Test: `test_reset_failed_write_keeps_token`; mutant caught.
+- **LOW-4 doc-only.** The RAM-only lockout state is accepted: a reboot grants roughly one more budget of about 20 attempts per boot, and reboot needs physical access or an admin session. Persisting it would add flash writes on every failure.
+- **LOW-5 fixed.** `GET /api/auth/totp_status` now carries `forgot_blocked` (board cap spent, or every per-IP slot in use and locked), so the owner can see a reboot is needed. Test: `test_status_reports_forgot_blocked`; mutant caught.
+- **LOW-6 skipped deliberately.** The weak-password backoff record stays: it throttles probing of the secret check (existing test and the W2/W3 review rationale).

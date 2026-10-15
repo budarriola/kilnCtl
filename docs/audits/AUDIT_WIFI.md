@@ -176,3 +176,10 @@ host test.
   count. Test: source-shape assertions in `test_recovery_health.c`; 3 negtest
   mutants caught.
 - LOW-1..3 remain open.
+
+## Resolution (2026-10-15, lowauth)
+
+- **LOW-1 fixed.** `rescan_timer_ensure()` creates and starts the timer; `wifi_prov_start()` calls it, and `owner_task()` retries it on a rescan-interval queue timeout while the timer is absent (then runs the tick itself). Tests: `test_rescan_timer_ensure`.
+- **LOW-2 fixed.** `IP_EVENT_STA_LOST_IP` is registered; `on_ip_event()` posts `CMD_EV_STA_DISCONNECTED`, whose `reconcile_sta_state()` check ignores it if the lease is still held. Test: `test_lost_ip_event_posts_disconnect_handling`.
+- **LOW-3 fixed.** `do_ap_fallback_tick()` re-arms the one-shot fallback timer when `set_mode(APSTA)` fails. Test: `test_ap_fallback_tick_rearms_on_set_mode_failure`.
+- Negtest: 4 mutants (one per item plus REVIEW_FIXERS LOW-6), all caught by a failing assertion.

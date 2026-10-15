@@ -139,3 +139,7 @@ No mutation was run for the MED-1 race, because no host test exercises the order
 
 - **LOW-3 (ctfx)** fixed: the `safety_commissioned` readiness detail now appends "fitted CT channel(s) N uncalibrated (no k_ct_v_per_a): S9 stays warn-only". The channel set comes from `readiness_uncalibrated_fitted_ct_mask()` (`readiness_http.h`), which mirrors `config_store_ct_channel_fitted_rec()` using the committed zone_ct_channel map. Pure helper tested in `test_readiness_commissioning.c`; the `readiness_http.c` call site is target-build only.
 - **LOW-4 (ctfx)** not changed (accepted, owner-level trade): the sensitive uncalibrated presence fallback is deliberate (S3/S9 false negatives are the dangerous direction; `current_presence_policy.h`). Raising it would risk blinding S3, which the task forbids. The mitigation is LOW-3: readiness now names the uncalibrated channel so commissioning k_ct removes the fallback.
+
+## Resolution (2026-10-15, lowauth)
+
+- **LOW-6 (wififx) fixed.** In `do_rescan_tick()` the association ground-truth check now runs before the deferred-teardown branch, so a missed disconnect is noticed while the AP teardown is deferred. Test: `test_rescan_missed_disconnect_with_deferred_teardown`; mutant caught.
