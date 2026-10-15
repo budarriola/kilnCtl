@@ -323,3 +323,36 @@ There is no CLEAR_TRIP in the recovery image (`recovery_pico.c:18`). The ESP
 side has no other sender of CLEAR_TRIP except the operator routes. Every clear
 observed in this lifecycle goes through `safety_guards_try_clear` and its
 boot_id/trip_seq rules.
+
+## Resolution (2026-10-14)
+
+### MED-1: fixed (recovery image keepalive)
+
+Pico side confirmed: `link_task_handle_raw_frame()` refreshes
+`s_last_valid_frame_tick` for any cleanly decoded frame addressed ESP to
+SAFETY (`link_frame_counts_for_liveness()`), before the command switch. A
+BROADCAST GET_STATUS (0x01) has no dispatch case on the Pico, so it only
+refreshes liveness: it cannot clear a trip, request heat or change state.
+
+`firmware/KilnFW_recovery/main/recovery_keepalive.c` (new) starts right after
+`recovery_io_hold_relays_off()`, before Wi-Fi/HTTP bring-up and
+`recovery_install_boot()`. It owns UART1 and sends that frame every
+`RPP_KEEPALIVE_PERIOD_MS` (2 s). The Pico update relay (`recovery_pico.c`)
+borrows the UART for a transfer through `recovery_keepalive_acquire/release`;
+during a transfer its own frames keep the link up.
+
+Bounded on purpose: the keepalive stops at `RPP_KEEPALIVE_MAX_MS` (15 min)
+of uptime, and it is a separate task that dies with the image, so a wedged or
+restarting recovery image still lets the 120 s S6b hard tier trip. No guard was
+changed or disabled. Limitation: a hang of `app_main` alone (task still
+running) is covered only by the 15 min bound.
+
+### LOW-1: fixed
+
+`recovery_keepalive_start()` drives GPIO6 low (fault de-asserted, the level the
+application latches first), latching the level before switching to output.
+
+Host tests: `test_recovery_pico_proto.c` `test_keepalive` (inert payload,
+ESP to SAFETY BROADCAST that decodes, period inside the tier, bound,
+GPIO6 idle level); five negtest mutants all CAUGHT. The recovery target builds
+(796752 B, 59% of the partition free); the bench is not exercised.
