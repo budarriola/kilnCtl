@@ -4,6 +4,7 @@
 // never commissioned anywhere in src/, so cs_counts_to_amps() always
 // returned 0.0f, and current_any_present() -- which used to compare
 // amps[n] > i_present_a -- could never be true).
+#include <math.h>
 #include "test_common.h"
 #include "../src/current_presence_policy.h"
 
@@ -143,8 +144,28 @@ static void test_uncommissioned_exactly_at_margin_not_present(void)
                "delta == fallback margin + 1 -> flowing");
 }
 
+static void test_filter_recovers_from_nonfinite_sample(void)
+{
+    TEST_SECTION("reporting filter -- non-finite sample is held, and a poisoned state reseeds (AUDIT_CURRENT_SENSE LOW)");
+    float st = 0.0f;
+    bool init = false;
+    const float alpha = 0.1f;
+    current_filter_step(&st, &init, 4.0f, alpha);
+    TEST_CHECK(init && st == 4.0f, "first finite sample seeds the filter directly");
+    current_filter_step(&st, &init, INFINITY, alpha);
+    TEST_CHECK(st == 4.0f, "an inf sample is held out of the filter");
+    current_filter_step(&st, &init, NAN, alpha);
+    TEST_CHECK(st == 4.0f, "a NaN sample is held out of the filter");
+    current_filter_step(&st, &init, 6.0f, alpha);
+    TEST_CHECK(st > 4.0f && st < 6.0f, "a finite sample after a non-finite one still low-pass updates");
+    st = NAN;
+    current_filter_step(&st, &init, 5.0f, alpha);
+    TEST_CHECK(st == 5.0f, "a non-finite filter state reseeds from the next finite sample");
+}
+
 void run_test_current_presence_policy(void)
 {
+    test_filter_recovers_from_nonfinite_sample();
     test_commissioned_below_threshold_not_present();
     test_commissioned_above_threshold_present();
     test_commissioned_zero_counts_offset_applied();

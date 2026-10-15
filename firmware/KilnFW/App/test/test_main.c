@@ -68,6 +68,7 @@ void run_test_readiness_recovery_mode(void);
 void run_test_readiness_cfg_fs(void);
 void run_test_readiness_safety_context(void);
 void run_test_readiness_estop_verification(void);
+void run_test_readiness_uncalibrated_ct(void);
 void run_test_kiln_cfg_store(void);
 void run_test_iter_tune_store(void);
 void run_test_firing_shadow(void);
@@ -207,6 +208,7 @@ int main(void)
     run_test_readiness_cfg_fs();
     run_test_readiness_safety_context();
     run_test_readiness_estop_verification();
+    run_test_readiness_uncalibrated_ct();
     run_test_kiln_cfg_store();
     run_test_iter_tune_store();
     run_test_firing_shadow();

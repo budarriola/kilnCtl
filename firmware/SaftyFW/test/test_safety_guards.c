@@ -1044,6 +1044,35 @@ static void test_s8(void)
         TEST_CHECK(!tripped, "recovering to a normal reading after a bad-read burst does not trip S8");
     }
 
+    /* A11 (guard audit 2026-10-14): a bad read still counts its dt toward the open S8
+     * window, so the window's elapsed time is wall-clock and the rate is not inflated. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in); /* window opens at 20C */
+
+        safety_guard_input_t bad = in;
+        bad.tc_valid = false;
+        bad.tc_c = NAN;
+        bad.cj_c = NAN;
+        bad.dt_s = 30.0f; /* one bad read spanning half the window */
+        safety_guards_tick(&s, &cfg, &bad);
+        TEST_CHECK(s.s8_window_elapsed_s == 30.0f, "A11: a bad read's dt is counted into the open S8 window");
+
+        in.tc_c = 25.0f;
+        in.dt_s = 30.0f; /* wall clock now 60s since the window opened: 5C in 60s */
+        bool t = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!t && s.s8_over_rate_streak == 0, "A11: 5C/min over the true 60s is in bounds");
+        TEST_CHECK(s.s8_window_start_c == 25.0f,
+                   "A11: the window closed on wall-clock time (a skipped bad-read dt would leave it open)");
+    }
+
     /* Latching: once tripped, S8 stays tripped, and safety_guards_clear()
      * un-latches it -- the same contract every other guard in this file
      * gets. */
@@ -3365,6 +3394,41 @@ static void test_try_clear(void)
         at.tc_c = 1300.0f; /* == ceiling is not over */
         TEST_CHECK(safety_guards_try_clear(&s, &cfg, &at), "T1: S1 clear accepted once the reading is back at/under the ceiling");
         TEST_CHECK(!s.is_tripped, "T1: S1 cleared");
+    }
+
+    /* A8 (SAFTYFW_GUARDS audit 2026-10-14): S2 and S11 clears are refused on an
+     * unknown (tc_valid == false) reading, as S1 already does. The latch must stay
+     * on the ORIGINAL reason (a granted clear would re-trip as S5 instead). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        s.is_tripped = true;
+        s.reason = SAFETY_TRIP_OVER_SETPOINT;
+        safety_guard_input_t bad = base_input();
+        bad.context_valid = true;
+        bad.zone_count = 1u;
+        bad.max_zone_setpoint_c = 500.0f;
+        bad.tc_valid = false;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "A8: S2 clear refused on an invalid reading");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVER_SETPOINT, "A8: refused S2 clear leaves the S2 latch untouched");
+        safety_guard_input_t ok = bad;
+        ok.tc_valid = true;
+        ok.tc_c = 100.0f;
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &ok), "A8: S2 clear granted on a valid, in-range reading");
+
+        safety_guards_reset(&s);
+        s.is_tripped = true;
+        s.reason = SAFETY_TRIP_FROZEN_SENSOR;
+        s.s11_window_active = true;
+        s.s11_last_c = 100.0f;
+        safety_guard_input_t bad11 = base_input();
+        bad11.tc_valid = false;
+        bad11.tc_c = 250.0f;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad11), "A8: S11 clear refused on an invalid reading");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "A8: refused S11 clear leaves the S11 latch untouched");
     }
 
     /* T1: S8 -- refused while the tripping window measured against the current

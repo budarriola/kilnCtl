@@ -147,6 +147,8 @@ On every reset, in this order:
    partially-erased slot.
 5. Increment `boot_attempts` (unconfirmed slots only), write metadata, jump to the application.
 
+   **Trade-off: a confirmed slot that later crash-loops (REVIEW_SAFTYFX_PICOFX LOW-5):** because a `VALID` slot skips attempt counting (above), an image that confirmed once and then hard-faults on every boot (for example after a later persisted `SET_PARAM` value or a sensor state breaks its init) is never marked `BAD` and the bootloader never falls back to the other `VALID` slot; the watchdog resets loop. Before AUDIT_PICO_UPDATE HIGH-1 three resets of any slot did switch slots, but that also demoted healthy images on ordinary resets, which was the bug. The failure direction is safe (relays stay de-energized, the ESP sees S6b); the cost is availability, and recovery needs BOOTSEL or SWD. Accepted. A possible later refinement is a separate fault-reset counter incremented only by a watchdog reset.
+
    **Log wrap (MED-1):** the metadata log is 16 records in one 4 K sector. Before the wrap erases that sector, the newest record is copied to the backup sector at `BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET` (0x1C1000) and read back; if the copy does not verify the main sector is not erased and the write fails. Readers use `bootloader_metadata_find_latest_ab()`: the main log wins unless it is empty or the backup is newer, so power loss at any step of the wrap leaves at least one valid record.
    Immediately before the jump `jump_to_app()` arms an **8000 ms watchdog**
    (`BOOTLOADER_APP_WATCHDOG_MS`, `bootloader/main.c`; the RP2040 maximum is

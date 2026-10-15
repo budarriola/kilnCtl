@@ -230,3 +230,7 @@ bounds) and additions to `test_ct_leak_alarm.c` / `test_ct_leak_alarm_service.c`
 (KilnFW). Negtested: all mutants CAUGHT with compiled failing assertions
 except one equivalent mutant (permuting zone indices of the map, which cannot
 change the fitted set).
+
+## Resolution (lowfx, 2026-10-15)
+
+The remaining LOW is fixed: the non-finite reporting-filter reseed now lives in `current_filter_step()` (`current_presence_policy.c`, host-linked). A non-finite sample is held out, and a non-finite filter state reseeds from the next finite sample. Test: `test_filter_recovers_from_nonfinite_sample` in `test_current_presence_policy.c`.

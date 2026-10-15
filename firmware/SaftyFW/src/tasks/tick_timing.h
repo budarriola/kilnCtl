@@ -152,10 +152,21 @@ bool snapshot_is_fresh(uint32_t now_ms, uint32_t timestamp_ms, uint32_t max_age_
 // Guard audit 2026-10-14 A3: STATUS carries no age, so a frozen last-good
 // snapshot would read as live. Fills out[0..2] with in[0..2] when the snapshot
 // is fresh, else NaN (the wire convention for "not valid"; never 0, which the
-// ESP would read as genuine zero current). A NULL in or published==false
-// (nothing ever published) also yields NaN.
+// ESP would read as genuine zero current). A NULL in, published==false
+// or timestamp_ms==0 (the zeroed snapshot before the first publish) also yields NaN.
 void status_amps_for_wire(bool published, uint32_t now_ms, uint32_t timestamp_ms, const float in[3],
                           float out[3]);
+
+// Guard audit 2026-10-14 A7: ceiling for the S16 re-CRC period read from the live
+// RAM record under test. A corrupted huge value must not defer the check for
+// years; 0 keeps its documented "disabled" meaning.
+#define CONFIG_CHECK_PERIOD_MAX_S 3600u
+uint32_t config_check_period_effective_s(uint32_t period_s);
+
+// Guard audit 2026-10-14 A16: true only when a snapshot was published since the
+// one last consumed, so a degraded window (snapshot held, same timestamp) is not
+// folded into the CT auto-zero average a second time.
+bool snapshot_is_new(uint32_t timestamp_ms, uint32_t last_consumed_ms);
 
 // Guard review 2026-10-09 F7: wrap-safe ANNOUNCE_REBOOT grace window.
 // reboot_announce keeps its timestamp for the whole boot, so a bare

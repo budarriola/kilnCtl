@@ -203,6 +203,30 @@ static void test_status_amps_for_wire(void)
     TEST_CHECK(isnan(out[0]) && isnan(out[2]), "never-published amps are NaN");
     status_amps_for_wire(true, 20u, 0xFFFFFFF0u, in, out);
     TEST_CHECK(out[2] == 2.5f, "wraparound age 36ms is fresh");
+    {
+        // LOW-1: zeroed pre-first-publish snapshot (timestamp 0) is not live in the first 2 s.
+        const float zeros[3] = {0.0f, 0.0f, 0.0f};
+        status_amps_for_wire(true, 500u, 0u, zeros, out);
+        TEST_CHECK(isnan(out[0]) && isnan(out[1]) && isnan(out[2]),
+                   "LOW-1: timestamp 0 snapshot at t=500ms is NaN, not 0 A");
+    }
+}
+
+static void test_config_check_period_effective(void)
+{
+    TEST_CHECK(config_check_period_effective_s(0u) == 0u, "A7: 0 stays disabled");
+    TEST_CHECK(config_check_period_effective_s(10u) == 10u, "A7: normal period unchanged");
+    TEST_CHECK(config_check_period_effective_s(CONFIG_CHECK_PERIOD_MAX_S) == CONFIG_CHECK_PERIOD_MAX_S,
+               "A7: ceiling itself passes");
+    TEST_CHECK(config_check_period_effective_s(0xFFFFFFFFu) == CONFIG_CHECK_PERIOD_MAX_S,
+               "A7: a corrupted huge period is clamped to the ceiling");
+}
+
+static void test_snapshot_is_new(void)
+{
+    TEST_CHECK(snapshot_is_new(1000u, 500u), "A16: a newer timestamp is new");
+    TEST_CHECK(!snapshot_is_new(1000u, 1000u), "A16: same timestamp (degraded window) is not new");
+    TEST_CHECK(!snapshot_is_new(0u, 0u), "A16: zeroed never-published snapshot is not new");
 }
 
 void run_test_tick_timing(void)
@@ -220,4 +244,6 @@ void run_test_tick_timing(void)
 
     TEST_SECTION("status_amps_for_wire -- guard audit A3, stale amps go out as NaN");
     test_status_amps_for_wire();
+    test_config_check_period_effective();
+    test_snapshot_is_new();
 }

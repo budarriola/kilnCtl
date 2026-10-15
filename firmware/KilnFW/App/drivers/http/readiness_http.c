@@ -609,6 +609,9 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
          * (zones_current_sweep_task.c) and dashboard_ct_topology_is_summed()
          * (dashboard_status_http.c). */
         uint8_t ct_topology_value = 0;
+        bool k_ct_positive[3] = { false, false, false };
+        uint8_t zone_ct_channel[3] = { 0, 0, 0 };
+        bool zone_ct_map_set = false;
         for (size_t i = 0; i < count; i++) {
             safety_cfg_param_t p;
             if (!safety_cfg_store_get_by_index(i, &p)) {
@@ -618,8 +621,17 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                 ct_installed_value = p.value.u8_val;
             } else if (p.param_id == 0x031Fu && p.set) {
                 ct_topology_value = p.value.u8_val;
+            } else if (p.param_id >= 0x0308u && p.param_id <= 0x030Au) {
+                k_ct_positive[p.param_id - 0x0308u] = p.set && p.value.f32_val > 0.0f;
+            } else if (p.param_id >= 0x0320u && p.param_id <= 0x0322u && p.set) {
+                zone_ct_channel[p.param_id - 0x0320u] = p.value.u8_val;
+                zone_ct_map_set = true;
             }
         }
+        /* ctfx LOW-3: name the fitted-but-uncalibrated CT channel(s) that keep
+         * the Pico's S9 warn-only. */
+        uint8_t uncal_mask = readiness_uncalibrated_fitted_ct_mask(ct_installed_value, ct_topology_value,
+                                                                   zone_ct_map_set, zone_ct_channel, k_ct_positive);
 
         size_t applicable = 0;
         size_t unset = 0;
@@ -656,6 +668,13 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         } else {
             snprintf(detail, sizeof(detail), "%u of %u applicable safety parameters still have no value",
                      (unsigned)unset, (unsigned)applicable);
+        }
+        if (cached_crc != 0 && uncal_mask != 0u) {
+            size_t dl = strlen(detail);
+            snprintf(detail + dl, sizeof(detail) - dl,
+                     "; fitted CT channel%s%s%s%s uncalibrated (no k_ct_v_per_a): S9 stays warn-only",
+                     ((uncal_mask & (uncal_mask - 1u)) != 0u) ? "s" : "", (uncal_mask & 1u) ? " 0" : "",
+                     (uncal_mask & 2u) ? " 1" : "", (uncal_mask & 4u) ? " 2" : "");
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_commissioned", "Safety processor commissioned", st,

@@ -159,3 +159,12 @@ I ran two negtests with `tools/negtest.ps1 -Preset saftyfw-host`. The baseline p
 - **INFO-5:** An A4 refusal returns `false` from `safety_guards_try_clear()` with no distinct CLEAR_TRIP reply reason. The operator sees a generic refusal, not "S9 still verifying".
 - **INFO-6:** Only the pure gate functions are unit-tested: `update_task_reboot_policy_decide` and `update_task_rollback_gate_decide`. The `update_task_s9_latched()` call sites in `update_task.c` cannot be reached from the host tests. The audit doc says so.
 - **INFO-7:** The flash layout, the power-loss ordering and the `FROM_BACKUP` sentinel handling were all verified clean, as described under "What was checked".
+
+## Resolution (lowfx, 2026-10-15)
+
+- **LOW-1** fixed: `status_amps_for_wire()` treats `timestamp_ms == 0` as unpublished, so STATUS sends NaN until the current task publishes. Test in `test_tick_timing.c`.
+- **LOW-2** fixed: `AUDIT_SAFTYFW_GUARDS.md` now cites `0cc88612f`, `ff41e2c23`, `8bfbddf99`, `217ca9659`.
+- **LOW-3** fixed (comment): `flash_layout.h` names the 0x1C1000 backup sector and the real remaining headroom.
+- **LOW-4** fixed (comment): the `SAFETY_LINK_TRIP_REASON_INEFFECTIVE` define and `safety_link_get_diag_trip_reason()` now sit above their own doc, and the diag-flags doc sits above `safety_link_get_diag_flags()`.
+- **LOW-5** documented: trade-off paragraph added to `BOOTLOADER.md` (accepted; availability only).
+- **LOW-6** fixed: the SET_PARAM refusal log line now names the `param_id` and says a value outside the range ceiling is one cause, so an old package that exceeds a ceiling is attributable. Not unit-testable (logging call site in `link_task.c`).

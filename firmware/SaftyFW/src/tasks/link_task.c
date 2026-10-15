@@ -2065,7 +2065,7 @@ static void link_task_config_check_poll(TickType_t now)
     }
 
     s_config_check_elapsed_s++;
-    if (s_config_check_elapsed_s < snap.config_check_period_s) {
+    if (s_config_check_elapsed_s < config_check_period_effective_s(snap.config_check_period_s)) {
         return;
     }
     s_config_check_elapsed_s = 0u;
@@ -2774,7 +2774,14 @@ static void link_task_handle_set_param(const kilnlink_frame_t *frame)
 
     config_store_get_full_record(&s_staging_scratch);
     if (!link_staging_stage(&s_staging, &msg, &s_staging_scratch)) {
-        log_task_log(LOG_LEVEL_WARN, "set_param", "refused, unknown param_id or type mismatch");
+        // Name the param so a refusal (unknown id, type mismatch, or a value
+        // above that param's range ceiling -- e.g. an old kiln-config package
+        // captured before the ceilings, review SAFTYFX LOW-6) is attributable.
+        char refuse_msg[96];
+        snprintf(refuse_msg, sizeof(refuse_msg),
+                 "refused param_id=0x%04X: unknown id, type mismatch, or value outside its range ceiling",
+                 (unsigned)msg.param_id);
+        log_task_log(LOG_LEVEL_WARN, "set_param", refuse_msg);
         return;
     }
     log_task_log(LOG_LEVEL_INFO, "set_param", "staged");

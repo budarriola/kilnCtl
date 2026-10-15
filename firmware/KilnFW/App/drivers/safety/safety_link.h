@@ -1888,10 +1888,6 @@ esp_err_t safety_link_stop(SafetyLinkClass *link);
  * GET_STATUS from. */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out);
 
-/* Narrow DIAG read for safety_cfg_write.c's F3 persisted check: just whether a
- * DIAG was ever received and its flags byte, without copying the whole (large)
- * safety_link_status_t onto a caller's task stack. Same locking as
- * safety_link_get_status(). */
 /* Guard audit 2026-10-14 A1: SAFETY_TRIP_* value for S9 TRIP_INEFFECTIVE (welded
  * K4), SaftyFW safety_guards.h. trip_mask bit is (reason - 1). */
 #define SAFETY_LINK_TRIP_REASON_INEFFECTIVE 10u
@@ -1902,6 +1898,10 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
  * safety_link_get_status() without copying the large status struct. */
 esp_err_t safety_link_get_diag_trip_reason(SafetyLinkClass *link, bool *out_fresh, uint8_t *out_reason);
 
+/* Narrow DIAG read for safety_cfg_write.c's F3 persisted check: just whether a
+ * DIAG was ever received and its flags byte, without copying the whole (large)
+ * safety_link_status_t onto a caller's task stack. Same locking as
+ * safety_link_get_status(). */
 esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
                                      uint32_t *out_diag_applied);
 /* out_diag_applied (may be NULL): stats.diag_applied, a count that advances once per

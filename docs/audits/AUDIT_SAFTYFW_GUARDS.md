@@ -290,7 +290,7 @@ owner decision as the `rate_window_s` item.
 MED findings A1-A5 fixed; all with host tests and negative tests. No kilnlink
 protocol bump, no wire-format change.
 
-- **A1** (`28a446413`, `ee03954e6`): the Pico refuses REBOOT and ROLLBACK while
+- **A1** (`0cc88612f`, `ff41e2c23`): the Pico refuses REBOOT and ROLLBACK while
   S9 TRIP_INEFFECTIVE is latched (`update_task_reboot_policy_decide()` and the
   new `update_task_rollback_gate_decide()`; new reply reasons
   `KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE = 4` and
@@ -299,11 +299,11 @@ protocol bump, no wire-format change.
   /api/sw_reset` refuses with 409 when the last fresh DIAG reports trip reason
   10 (`sw_reset_s9_refusal_needed()`); an unknown or stale DIAG does not block.
   Other trip reasons are unchanged (benign reboot still resumes).
-- **A2** (`4ec84cb64`): `thermo_task.c` and `current_sense.c` stamp snapshots with
+- **A2** (`8bfbddf99`): `thermo_task.c` and `current_sense.c` stamp snapshots with
   `to_ms_since_boot(get_absolute_time())`, the clock `safety_core.c` ages them
   with. New host stub `test/stubs/pico_time_clock` lets tests move the hardware
   clock independently of the FreeRTOS tick.
-- **A3** (`c1ccd70a4`): `link_task_send_status` sends NaN amps for a stale or
+- **A3** (`217ca9659`): `link_task_send_status` sends NaN amps for a stale or
   never-published current snapshot (`status_amps_for_wire()`), and marks TC
   invalid for a stale thermo snapshot, using the shared
   `SNAPSHOT_THERMO_MAX_AGE_MS` / `SNAPSHOT_CURRENT_MAX_AGE_MS` (2000 ms, now in
@@ -326,3 +326,18 @@ protocol bump, no wire-format change.
 Negative tests: every fix has a mutation that the new tests catch (see the
 landing report). `update_task.c`'s two call sites of `update_task_s9_latched()`
 are pico-only and not host-reachable; the pure gates they call are tested.
+
+## Resolution (lowfx, 2026-10-15): LOW findings A6-A16
+
+No protocol change. Each code fix has a host test; negtest results are in the landing report.
+
+- **A6** fixed: `max31856_read()` returns false when all six burst bytes OR to 0 (MISO stuck low), leaving the output in the spi_failed/NaN state. `test_max31856_hal_spi.c` rewritten for the unscripted-read case.
+- **A7** partly fixed: `config_check_period_effective_s()` clamps the S16 period to `CONFIG_CHECK_PERIOD_MAX_S` (3600 s), so a corrupted large value no longer defers the check indefinitely. A corrupted 0 still reads as "disabled" because 0 is the documented disable setting; reading the period from the persisted copy was not done (owner has not said the disable setting can go).
+- **A8** fixed: S2 and S11 clears are refused on `!tc_valid` (as S1 does). Test in `test_safety_guards.c` (`test_try_clear`).
+- **A9** fixed: `safety_core_request_enable(true)` refuses while `s_guard_state.is_tripped`.
+- **A10** fixed: when a post-clear retest re-trips with a different reason, `boot_reason_latch_trip` and the seqlock trip-event capture (new `safety_core_capture_trip_event()`) run again, so trip_seq/TRIP_EVENT carry the new reason. Test: `test_clear_retrip_with_different_reason_republishes`.
+- **A11** fixed: the bad-read branch accumulates S8 `dt_s` into an open window, so intermittent bad reads no longer shorten the effective window.
+- **A12, A13** not changed (accepted): both only matter if a rejected (too-new or range-rejected) record later becomes valid, for example after a firmware change that accepts it; today such a record stays rejected and the lower-seq winner is the correct record. A fix touches the persistence write path (seq floor from rejected records, no-op write seq bookkeeping) and needs its own review and flash-level test; recorded here rather than changed blind.
+- **A14** not changed (accepted): returning NaN for an uncalibrated channel would poison the reporting filter and `snap.amps`, and every caller already gates on `calibrated`/commissioned. Presence detection does not use this value (`current_presence_is_flowing()` has its own uncalibrated path).
+- **A15** fixed: `current_sense_set_cal()`/`set_ct_cal()` write under a critical section and `current_sense_sample()` copies `s_cal` into a local under one, so a gain/offset pair cannot tear. The call sites are Pico-only; no host test reaches them.
+- **A16** fixed: auto-zero accumulates only when the snapshot is new (`snapshot_is_new()`, tested), never folding a stale `counts_avg` during degraded windows. The call site in `current_task.c` is Pico-only; the helper is tested.

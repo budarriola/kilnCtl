@@ -372,6 +372,21 @@ bool max31856_read(max31856_reading_t *out)
         return false;
     }
 
+    // Guard audit 2026-10-14 A6: an all-0x00 burst (MISO stuck low) decodes as
+    // 0 C with no faults. A real chip never returns CJ=0, TC=0 and SR=0
+    // together (CJ is the die temperature), so treat it as a failed read
+    // (out still holds the spi_failed answer set above) instead of waiting for
+    // the ~30 s CR0/CR1 live check. All-0xFF sets OPEN and S5 already catches it.
+    {
+        uint8_t any = 0u;
+        for (size_t i = 0; i < sizeof(buf); i++) {
+            any |= buf[i];
+        }
+        if (any == 0u) {
+            return false;
+        }
+    }
+
     out->cj_temperature_c = max31856_decode_cj(buf[0], buf[1]);
     out->tc_temperature_c = max31856_decode_tc(buf[2], buf[3], buf[4]);
     out->fault_status = buf[5];

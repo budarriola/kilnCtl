@@ -6,6 +6,7 @@
 // load-active detection and a power estimate only -- no guard reads any of
 // this yet (S3/S4/S9 need link_task's relay_recent_mask context, Phase 7).
 #include "current_task.h"
+#include "tick_timing.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -80,6 +81,7 @@ static uint8_t s_ct_fitted_mask = 0x7u;
 #define CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES 200u // >=10s at SAFTYFW_PERIOD_CURRENT_TASK_MS (50ms), CT_COMMISSIONING_PLAN.md step 2's ">= 200 samples at 20 Hz"
 static current_task_auto_zero_state_t s_auto_zero_state = CURRENT_TASK_AUTO_ZERO_IDLE;
 static uint8_t  s_auto_zero_channel = 0;
+static uint32_t s_auto_zero_last_ts_ms = 0; // A16: last snapshot timestamp consumed
 static uint32_t s_auto_zero_sum = 0;
 static uint16_t s_auto_zero_count = 0;
 static uint16_t s_auto_zero_target = CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES;
@@ -136,7 +138,11 @@ static void current_task_fn(void *arg)
         // never a blocking wait. snap.counts_avg[] is this SAME pass's raw,
         // pre-conversion ADC mean (snapshots.h), the identical source
         // SAFETY_CMD_POWER's counts_avg field already publishes.
-        if (s_auto_zero_state == CURRENT_TASK_AUTO_ZERO_IN_PROGRESS) {
+        // A16: a degraded window leaves the snapshot (and its timestamp) unchanged;
+        // fold each published snapshot into the average at most once.
+        bool snap_is_new = snapshot_is_new(snap.timestamp_ms, s_auto_zero_last_ts_ms);
+        s_auto_zero_last_ts_ms = snap.timestamp_ms;
+        if (s_auto_zero_state == CURRENT_TASK_AUTO_ZERO_IN_PROGRESS && snap_is_new) {
             s_auto_zero_sum += snap.counts_avg[s_auto_zero_channel];
             s_auto_zero_count++;
             if (s_auto_zero_count >= s_auto_zero_target) {

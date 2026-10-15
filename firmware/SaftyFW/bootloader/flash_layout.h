@@ -123,10 +123,12 @@ extern "C" {
     (SAFTYFW_CONFIG_STORE_FLASH_OFFSET + SAFTYFW_CONFIG_STORE_FLASH_SIZE)
 #define SAFTYFW_CONFIG_STORE_NUM_SECTORS 2u
 
-// Reserved headroom: 0x1B2000+0x1000 (sector B) ..0x1C2000, 56K, plus
-// 0x1C2000..0x200000, 252K. Not represented by a macro here -- nothing
-// addresses it yet, and giving unclaimed space a name invites something to
-// start using it without a doc update.
+// Reserved headroom: 0x1C2000..0x200000, 252K. The 0x1B3000..0x1C1000 gap and
+// the 0x1C1000 sector are NOT free: 0x1C1000 holds the metadata backup
+// (BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET above), which a torn metadata wrap
+// falls back to. Only 0x1C2000..0x200000 is unclaimed, and it is not
+// represented by a macro -- nothing addresses it yet, and giving unclaimed
+// space a name invites something to start using it without a doc update.
 
 #ifdef __cplusplus
 }
