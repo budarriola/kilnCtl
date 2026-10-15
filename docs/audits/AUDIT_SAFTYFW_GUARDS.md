@@ -284,3 +284,45 @@ owner decision as the `rate_window_s` item.
   fail-closed.
 - MAX31856 fault-bit mapping, injection gating, `discrete_task`.
 - Wrap-safe arithmetic in `tick_timing.c` and `clock_health.c`.
+
+## Resolution (2026-10-14)
+
+MED findings A1-A5 fixed; all with host tests and negative tests. No kilnlink
+protocol bump, no wire-format change.
+
+- **A1** (`28a446413`, `ee03954e6`): the Pico refuses REBOOT and ROLLBACK while
+  S9 TRIP_INEFFECTIVE is latched (`update_task_reboot_policy_decide()` and the
+  new `update_task_rollback_gate_decide()`; new reply reasons
+  `KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE = 4` and
+  `KILNLINK_ROLLBACK_RESULT_REASON_TRIP_INEFFECTIVE = 5`, request-triggered
+  replies, so an older ESP reads them as UNKNOWN). The ESP's `POST
+  /api/sw_reset` refuses with 409 when the last fresh DIAG reports trip reason
+  10 (`sw_reset_s9_refusal_needed()`); an unknown or stale DIAG does not block.
+  Other trip reasons are unchanged (benign reboot still resumes).
+- **A2** (`4ec84cb64`): `thermo_task.c` and `current_sense.c` stamp snapshots with
+  `to_ms_since_boot(get_absolute_time())`, the clock `safety_core.c` ages them
+  with. New host stub `test/stubs/pico_time_clock` lets tests move the hardware
+  clock independently of the FreeRTOS tick.
+- **A3** (`c1ccd70a4`): `link_task_send_status` sends NaN amps for a stale or
+  never-published current snapshot (`status_amps_for_wire()`), and marks TC
+  invalid for a stale thermo snapshot, using the shared
+  `SNAPSHOT_THERMO_MAX_AGE_MS` / `SNAPSHOT_CURRENT_MAX_AGE_MS` (2000 ms, now in
+  `tick_timing.h`, used by `safety_core.c` too). ESP side: the parser already
+  carries NaN; `ct_leak_alarm_tick()` now treats an all-unknown sample as
+  neither quiet nor current, so stale amps can neither raise nor clear an H9
+  alarm (previously a NaN sample counted as a quiet one).
+- **A4**: `safety_guards_try_clear()` refuses CLEAR_TRIP while S9 evidence is
+  accumulating (verify window active with current present, or a non-zero
+  current-present streak).
+- **A5**: SET_PARAM upper bounds in `config_params.c`:
+  `link_dead_hard_s <= 600`, `blind_grace_s <= 300`, `trip_verify_s <= 60`,
+  `cj_max_c <= 125`, `overshoot_margin_c <= 300`, `tc_disagreement_c <= 500`
+  (`CONFIG_PARAMS_*_MAX_*` in `config_params.h`). NOTE: the 2026-10-09 HIGH-1
+  volatile path contains no numeric bounds (it refuses any change while heat is
+  possible), so these ceilings are new, about 5x the compiled defaults; owner
+  may adjust. Set-time only: stored records still load, and `rate_window_s` is
+  left alone pending the owner decision. abs_max is not touched.
+
+Negative tests: every fix has a mutation that the new tests catch (see the
+landing report). `update_task.c`'s two call sites of `update_task_s9_latched()`
+are pico-only and not host-reachable; the pure gates they call are tested.
