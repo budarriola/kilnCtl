@@ -227,6 +227,7 @@ static void test_snapshot_is_new(void)
     TEST_CHECK(snapshot_is_new(1000u, 500u), "A16: a newer timestamp is new");
     TEST_CHECK(!snapshot_is_new(1000u, 1000u), "A16: same timestamp (degraded window) is not new");
     TEST_CHECK(!snapshot_is_new(0u, 0u), "A16: zeroed never-published snapshot is not new");
+    TEST_CHECK(!snapshot_is_new(0u, 500u), "A16: a zeroed snapshot after a published one is not new");
 }
 
 void run_test_tick_timing(void)
