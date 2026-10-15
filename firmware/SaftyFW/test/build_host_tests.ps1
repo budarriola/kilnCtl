@@ -521,7 +521,8 @@ try {
         (Join-Path $srcDir "tasks\link_task_tc_type_gate.c"),
         (Join-Path $srcDir "tasks\tc_type_reapply_policy.c"),
         (Join-Path $srcDir "link_diag_flags.c"),
-        (Join-Path $srcDir "tasks\reboot_announce.c")
+        (Join-Path $srcDir "tasks\reboot_announce.c"),
+        (Join-Path $srcDir "tasks\tick_timing.c")
     ) + @(Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
     $ltSourceArgs = ($ltSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $ltCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
