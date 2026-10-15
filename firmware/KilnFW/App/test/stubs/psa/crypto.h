@@ -131,11 +131,20 @@ static inline void psa_stub_fake_mac(const uint8_t *key, size_t key_len, const u
     }
 }
 
+/* Optional host-test seam: fired once per psa_mac_compute call (re-arm inside
+ * the hook for repeats). Lets a test run "another task" mid-KDF. */
+static void (*g_psa_stub_mac_hook)(void);
+
 static inline psa_status_t psa_mac_compute(mbedtls_svc_key_id_t key, psa_algorithm_t alg,
                                             const uint8_t *input, size_t input_length, uint8_t *mac,
                                             size_t mac_size, size_t *mac_length)
 {
     (void)alg;
+    if (g_psa_stub_mac_hook) {
+        void (*h)(void) = g_psa_stub_mac_hook;
+        g_psa_stub_mac_hook = 0;
+        h();
+    }
     if (mac_size < 32 || key < 1 || key > 4 || !g_psa_stub_keys[key - 1].used) {
         return PSA_ERROR_GENERIC_ERROR;
     }

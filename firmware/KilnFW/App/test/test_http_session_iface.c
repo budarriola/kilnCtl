@@ -500,6 +500,18 @@ static void test_any_ap_session_active(void)
     fake_time_advance_ms(61000); // past the 60s timeout
     TEST_CHECK(!http_auth_any_ap_session_active(false),
                "an expired-but-still-in_use AP-tagged slot does NOT count");
+    {
+        // REVIEW_FIXERS LOW-1 (lockfx): the AP query runs on wifi_prov_owner and
+        // must not write the httpd-owned table (a reap could wipe a login that
+        // is mid-creation). The expired slot is still in_use afterwards.
+        size_t in_use = 0;
+        for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+            if (http_session_table()->slots[i].in_use) {
+                in_use++;
+            }
+        }
+        TEST_CHECK(in_use == 1, "http_auth_any_ap_session_active does not reap (no write from the non-httpd task)");
+    }
 
     // UNREADABLE policy still fails closed toward TRUE, same direction as
     // http_auth_any_session_active().

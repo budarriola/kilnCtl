@@ -968,6 +968,47 @@ static void test_wired_gesture_confirm_window_expired_leaves_store_intact(void)
         "an expired confirm must leave every real, wired credential and the policy intact");
 }
 
+// --- REVIEW_FIXERS LOW-2: a wipe during the KDF must not be overwritten -----
+static void hook_physical_reset_mid_kdf(void)
+{
+    (void)web_auth_store_clear_for_physical_reset();
+}
+
+static void hook_clear_all_mid_kdf(void)
+{
+    (void)web_auth_store_clear_all_credentials();
+}
+
+static void test_set_password_refuses_after_wipe_during_hash(void)
+{
+    TEST_SECTION("set_password: a credential wipe that runs while the KDF hashes is not overwritten");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "OldPassword12", SALT_A, false) == HAL_OK,
+               "setup: admin password configured");
+
+    g_psa_stub_mac_hook = hook_physical_reset_mid_kdf;
+    hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "NewPassword34", SALT_B, false);
+    g_psa_stub_mac_hook = 0;
+    TEST_CHECK(st != HAL_OK, "set_password refuses when a physical reset ran during its hash");
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+               "the reset stands: no administrator password was re-installed");
+    TEST_CHECK(!web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "NewPassword34"),
+               "the new password does not verify");
+
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "OldPassword12", SALT_A, false) == HAL_OK,
+               "setup 2: admin password configured");
+    g_psa_stub_mac_hook = hook_clear_all_mid_kdf;
+    st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "NewPassword34", SALT_B, false);
+    g_psa_stub_mac_hook = 0;
+    TEST_CHECK(st != HAL_OK && !web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+               "clear_all_credentials during the hash is not overwritten either");
+
+    // No wipe in the window: still succeeds.
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "NewPassword34", SALT_B, false) == HAL_OK,
+               "with no wipe in the window the set succeeds");
+}
+
 int main(void)
 {
     test_crc32_vector();
@@ -976,6 +1017,7 @@ int main(void)
     test_hash_properties();
     test_hash_compute_pinned_vectors();
     test_set_verify_password();
+    test_set_password_refuses_after_wipe_during_hash();
     test_username_exactly_max_length();
     test_verify_password_timing_oracle_closed();
     test_set_verify_pin();

@@ -46,10 +46,15 @@ static bool s_singleton_initialized;
 // it cannot interleave with a route's verify/enroll commit. Sessions are ended
 // both before the clear (a held admin session cannot start an enrollment
 // meanwhile) and after it (a login that verified against the old password just
-// before the clear cannot leave a fresh session behind); the request is posted
-// last so a pending secret begun in between is also wiped.
+// before the clear cannot leave a fresh session behind). The wipe request is
+// posted FIRST (REVIEW_FIXERS MED-1): an enroll_confirm waiting on the totp
+// state lock while totp_config_clear() runs gets the lock right after it, and
+// its still_valid guard compares the wipe generation -- so the generation must
+// already differ by then or the commit writes a secret after the reset. It is
+// posted again last so a pending secret begun in between is also wiped.
 static bool auth_reset_gesture_clear_all(void)
 {
+    totp_wipe_request_post();
     web_auth_table_destroy_all(http_session_table());
     bool web_ok = web_auth_store_clear_for_physical_reset();
     bool totp_ok = totp_config_clear();

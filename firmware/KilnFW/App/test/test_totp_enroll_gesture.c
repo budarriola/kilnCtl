@@ -594,6 +594,46 @@ static void test_gesture_cannot_be_overtaken_by_inflight_confirm(void)
     TEST_CHECK(!totp_config_enrolled(), "a secret never lands after the physical reset wiped the board");
 }
 
+// REVIEW_FIXERS MED-1: an enroll_confirm blocked on the state lock gets it the
+// moment the gesture's totp_config_clear() releases it. Its still_valid guard
+// must already read "wiped" by then, so the wipe request must be posted BEFORE
+// the clear's lock take, not only after the clear returns.
+static uint32_t s_race_gen_before;
+static int s_race_takes;
+static int s_race_stale_takes;
+static int s_race_guard_true;
+static void race_take_hook(void)
+{
+    s_race_takes++;
+    if (totp_wipe_request_gen() == s_race_gen_before) {
+        s_race_stale_takes++;
+    }
+    // The waiter's guard, as the commit would run it right after the lock frees.
+    if (security_totp_enroll_still_valid()) {
+        s_race_guard_true++;
+    }
+    g_test_stub_semaphore_take_hook = race_take_hook; // re-arm
+}
+
+static void test_gesture_posts_wipe_before_clear(void)
+{
+    TEST_SECTION("gesture posts the wipe request before totp_config_clear takes the lock (waiting enroll_confirm cannot commit)");
+    fresh();
+    set_admin_credential();
+    uint8_t secret[TOTP_SECRET_LEN];
+    TEST_CHECK(begin_enrollment(secret), "setup: enrollment pending");
+    TEST_CHECK(security_totp_enroll_still_valid(), "setup: pending secret is valid before the gesture");
+    s_race_gen_before = totp_wipe_request_gen();
+    s_race_takes = s_race_stale_takes = s_race_guard_true = 0;
+    g_test_stub_semaphore_take_hook = race_take_hook;
+    TEST_CHECK(run_gesture(), "gesture clear reports success");
+    g_test_stub_semaphore_take_hook = 0;
+    TEST_CHECK(s_race_takes >= 1, "the hook observed the gesture's lock takes");
+    TEST_CHECK(s_race_stale_takes == 0, "the wipe generation already differed at every lock take inside the gesture");
+    TEST_CHECK(s_race_guard_true == 0, "a commit's still_valid guard would have refused at every take");
+    TEST_CHECK(!totp_config_enrolled(), "nothing enrolled afterwards");
+}
+
 // ===========================================================================
 // Gap 7: the totp_status reply never contains the secret
 // ===========================================================================
@@ -643,6 +683,7 @@ int main(void)
     test_state_lock();
     test_gesture_wipes_everything();
     test_gesture_cannot_be_overtaken_by_inflight_confirm();
+    test_gesture_posts_wipe_before_clear();
     test_status_never_leaks_secret();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

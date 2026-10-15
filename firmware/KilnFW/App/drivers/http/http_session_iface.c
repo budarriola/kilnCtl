@@ -304,7 +304,11 @@ bool http_auth_any_ap_session_active(bool ap_station_present) {
     }
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
-    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now);
+    // REVIEW_FIXERS LOW-1 (lockfx): READ-ONLY on purpose. This runs on the
+    // wifi_prov_owner task while httpd creates/resolves sessions in the same
+    // unlocked table; a reap here could wipe a login mid-creation (in_use set,
+    // last_seen_ms not yet written). Expired slots are simply not counted by
+    // web_auth_table_any_ap_session_active(); httpd-context calls reap them.
     if (!web_auth_table_any_ap_session_active(t, timeout.timeout_s, now)) {
         return false;
     }

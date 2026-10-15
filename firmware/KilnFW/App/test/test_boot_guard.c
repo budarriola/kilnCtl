@@ -1025,6 +1025,38 @@ static void test_unreadable_record_not_collapsed_to_zero(void)
                "READ ERROR must not overwrite the stored history with a fabricated count (was collapsed to 0 -> 1)");
 }
 
+/* REVIEW_OTA_BOOT_FIXES LOW-1: a stored blob LARGER than the record (HAL_INVALID_SIZE,
+ * e.g. a downgrade from a build with a bigger layout) is a data state: count 0, and the
+ * record is rewritten so the counter climbs -- not a read error that hides a crash loop. */
+static void test_oversized_record_is_rewritable_and_counter_climbs(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+    {
+        hal_kv_handle_t h;
+        uint8_t big[sizeof(boot_guard_record_t) + 8];
+        memset(big, 0xA5, sizeof(big));
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+                   "setup: open the record namespace");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_REC, big, sizeof(big)) == HAL_OK, "setup: store an oversized blob");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit");
+        hal_kv_close(&h);
+    }
+    uint32_t loaded = 77;
+    TEST_CHECK(load_count(&loaded) && loaded == 0u, "oversized record reads as count 0, not a read error");
+
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(boot_guard_get_boot_count() == 1u, "first boot after the oversized record counts 1");
+    uint32_t persisted = 0;
+    TEST_CHECK(boot_guard_get_persisted_count(&persisted) && persisted == 1u,
+               "the oversized record was rewritten at the correct size");
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(boot_guard_get_boot_count() == 2u, "the counter climbs on the next boot (crash loop not hidden)");
+}
+
 void run_test_boot_guard(void)
 {
     test_recovery_route_decision();
@@ -1047,6 +1079,7 @@ void run_test_boot_guard(void)
     test_boot_confirm_step_waits_for_boot_complete_and_soak();
     test_boot_complete_signal_and_withhold();
     test_unreadable_record_not_collapsed_to_zero();
+    test_oversized_record_is_rewritable_and_counter_climbs();
     test_stuck_counter_escape();
     test_legacy_record_is_read_once_then_retired();
     test_reset_counter_keeps_normal_flashing_under_threshold();

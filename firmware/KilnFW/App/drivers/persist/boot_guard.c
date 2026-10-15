@@ -283,7 +283,10 @@ static bool load_count(uint32_t *out)
         err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
         hal_kv_close(&h);
     }
-    if (err != HAL_OK && err != HAL_NOT_FOUND) {
+    /* REVIEW_OTA_BOOT_FIXES LOW-1: HAL_INVALID_SIZE (a stored blob LARGER than
+     * the record, e.g. after a downgrade) is the "wrong size" data state, not a
+     * read error: count 0, and the persist in boot_guard_init() rewrites it. */
+    if (err != HAL_OK && err != HAL_NOT_FOUND && err != HAL_INVALID_SIZE) {
         return false; /* genuine read error */
     }
     if (err != HAL_OK || len != sizeof(rec)) {
@@ -307,7 +310,7 @@ static bool load_count(uint32_t *out)
             ESP_LOGW(TAG, "boot-guard record read from the LEGACY location '%s'/'%s' -- it will be "
                           "rewritten under '%s'/'%s' (see boot_guard.c's comment on NVS_KEY_REC)",
                      NVS_NAMESPACE_LEGACY, NVS_KEY_REC_LEGACY, NVS_NAMESPACE, NVS_KEY_REC);
-        } else if (err != HAL_OK && err != HAL_NOT_FOUND) {
+        } else if (err != HAL_OK && err != HAL_NOT_FOUND && err != HAL_INVALID_SIZE) {
             return false;
         }
     }
