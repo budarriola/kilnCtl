@@ -54,7 +54,8 @@ $LinkFrameCPath = (Resolve-Path $LinkFrameCPath).Path
 if (-not $DocPaths -or $DocPaths.Count -eq 0) {
     $DocPaths = @(
         (Join-Path $root "..\CLAUDE.md"),
-        (Join-Path $root "..\docs\MCP_SERVERS.md")
+        (Join-Path $root "..\docs\MCP_SERVERS.md"),
+        (Join-Path $root "..\docs\agent_rules\FLASH_OTA.md")
     )
 }
 $DocPaths = $DocPaths | ForEach-Object { (Resolve-Path $_).Path }
