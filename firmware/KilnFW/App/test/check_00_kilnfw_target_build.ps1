@@ -907,6 +907,19 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # point left every run that died earlier with an unreclaimable ~425 MB
     # markerless directory.)
 
+    # PINNED-KEY GUARD (REVIEW_XIPLAND MED-1). ESP-IDF keeps a generated sdkconfig's value over
+    # sdkconfig.defaults, so a stale board config silently builds without the pinned link fixes
+    # (XIP_FROM_PSRAM, UART_ISR_IN_IRAM) and every ELF-reading check then grades that ELF green.
+    # Verify the file we are about to build with, BEFORE copying it, against THIS tree's defaults.
+    # Fail loudly rather than regenerate: a regenerated config would discard board-tuned values
+    # that defaults does not pin.
+    $pinCheck = Join-Path $PSScriptRoot "check_sdkconfig_defaults_applied.ps1"
+    $pinOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $pinCheck -DefaultsPath (Join-Path $repoRoot "firmware\KilnFW\sdkconfig.defaults") -SdkconfigPath $MainSdkconfig 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host $pinOut
+        Fail "refusing to build: $MainSdkconfig disagrees with sdkconfig.defaults on a pinned key (output above), so the build would silently lack a pinned setting. Fix: back up that sdkconfig, delete it and run 'idf.py reconfigure' in its firmware\KilnFW directory (or edit the named keys), then re-run."
+    }
+
     Copy-Item -LiteralPath $MainSdkconfig -Destination $WorktreeSdkconfig -Force
     $mainHash = (Get-FileHash -LiteralPath $MainSdkconfig -Algorithm SHA256).Hash
     $worktreeHash = (Get-FileHash -LiteralPath $WorktreeSdkconfig -Algorithm SHA256).Hash

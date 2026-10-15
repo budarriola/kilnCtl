@@ -9,6 +9,11 @@ The board was not touched. Both target builds below were made for this review wi
 
 Result: HIGH 0, MED 1, LOW 4, INFO 9.
 
+Fix status (xipfx, 2026-10-14): MED-1, LOW-1 and LOW-4 fixed; LOW-2 and LOW-3 not in this batch.
+- MED-1: `check_00_kilnfw_target_build.ps1` runs `check_sdkconfig_defaults_applied.ps1` on the sdkconfig it is about to copy and fails the build on a pinned-key mismatch (fail rather than regenerate: a regenerated config would drop board-tuned values defaults does not pin). The pin check falls back to `build/sdkconfig`, then the main-tree sdkconfig, before it WARNs. `make_release.ps1` verifies the pins before the build and on the published `build/sdkconfig`. `build_kilnfw(target="build")` refuses on a mismatch (`reconfigure` stays reachable as the remedy). New check `check_sdkconfig_pin_guards.ps1`, new tests in `test_build_kilnfw_saftyfw_order.py`. The main-tree sdkconfig itself still needs regenerating (gitignored; coordinator step).
+- LOW-1: `stack_budget_lib.py` keys on zero-size NOTYPE symbols with no FUNC symbol at the address; the name list is gone. Tests: `test_unnamed_zero_size_notype_marker_is_not_a_call_edge`, `test_func_symbol_at_the_same_address_keeps_the_entry_walkable`.
+- LOW-4: `update_fetch_heap.h` draw table now carries the xipland C row (draw 15936 B) and states the "5 readings" rule against the current build. Comment only, no code change.
+
 ## Stack-budget comparison, parent (A) against tip (C)
 
 The lander reported that `check_all_task_stack_budgets.ps1` passes at the tip with 0 of 35 tasks fully measured and all 35 INDETERMINATE. This review built both sides and compared them. The result is the same on both sides, so the xipland batch did not cause it.

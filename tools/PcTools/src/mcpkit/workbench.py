@@ -579,6 +579,47 @@ def _idf_command(inner: str, tool: str = "idf.py") -> str:
             f"if ($null -eq $LASTEXITCODE) {{ exit 98 }}; exit $LASTEXITCODE")
 
 
+def sdkconfig_pin_mismatches(kiln_fw_dir: str) -> "list[str]":
+    """Pinned ``sdkconfig.defaults`` keys the generated ``sdkconfig`` disagrees with.
+
+    ESP-IDF keeps a generated sdkconfig's value over ``sdkconfig.defaults``, so a stale
+    board config silently builds without a pinned setting (REVIEW_XIPLAND MED-1:
+    XIP_FROM_PSRAM / UART_ISR_IN_IRAM). Mirrors
+    ``check_sdkconfig_defaults_applied.ps1``'s comparison: every ``CONFIG_X=v`` and
+    ``# CONFIG_X is not set`` line in defaults must read the same in the generated file
+    (a key absent there counts as a mismatch). No generated sdkconfig (fresh tree) means
+    nothing is stale: returns ``[]``.
+    """
+    live_path = os.path.join(kiln_fw_dir, "sdkconfig")
+    defaults_path = os.path.join(kiln_fw_dir, "sdkconfig.defaults")
+    if not os.path.isfile(live_path) or not os.path.isfile(defaults_path):
+        return []
+
+    def parse(path: str) -> "dict[str, str]":
+        out: "dict[str, str]" = {}
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                t = raw.strip()
+                m = re.match(r"^(CONFIG_[A-Za-z0-9_]+)=(.+)$", t)
+                if m:
+                    out[m.group(1)] = m.group(2).strip()
+                    continue
+                m = re.match(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$", t)
+                if m:
+                    out[m.group(1)] = "(not set)"
+        return out
+
+    want = parse(defaults_path)
+    have = parse(live_path)
+    bad = []
+    for key in sorted(want):
+        if key not in have:
+            bad.append(f"{key}: defaults want {want[key]}, generated sdkconfig lacks it")
+        elif have[key] != want[key]:
+            bad.append(f"{key}: defaults want {want[key]}, generated sdkconfig has {have[key]}")
+    return bad
+
+
 def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False,
                   kiln_fw_root: Optional[str] = None) -> str:
     """Build the ESP32-S3 main firmware (``firmware/KilnFW``) via ESP-IDF.
@@ -666,6 +707,15 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
             return (f"kilnfw: error: derived saftyfw_root {saftyfw_root_arg!r} (sibling of "
                      f"kiln_fw_root) has no CMakeLists.txt -- kiln_fw_root does not look like "
                      f"it is under a normal firmware/KilnFW + firmware/SaftyFW worktree layout")
+    if target == "build":
+        pin_bad = sdkconfig_pin_mismatches(kiln_fw_dir)
+        if pin_bad:
+            lines = "\n".join(f"  {b}" for b in pin_bad)
+            return (f"kilnfw-build: REFUSED -- {os.path.join(kiln_fw_dir, 'sdkconfig')} disagrees with "
+                    f"sdkconfig.defaults on {len(pin_bad)} pinned key(s); ESP-IDF keeps the generated value, "
+                    f"so this build would silently lack a pinned setting (REVIEW_XIPLAND MED-1):\n{lines}\n"
+                    f"Fix: back up that sdkconfig, delete it and run build_kilnfw(target='reconfigure'), "
+                    f"or edit the named keys.")
     saftyfw_report = None
     if target in ("build", "reconfigure") and not skip_saftyfw:
         saftyfw_report = build_saftyfw(jobs, saftyfw_root=saftyfw_root_arg)

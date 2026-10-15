@@ -23,13 +23,22 @@
 //                                   benchupd3  c549a144c  30427   10079      20348      19324
 //                                   benchupd4  36f3ad031  47191   24679      22512      21488  <- maximum
 //                                   benchupd5  468f0c5cb  34783   14115      20668      19644  (UART ISR in IRAM)
+//                                   xipland C  e9b50d8f8  45423   28463      16960      15936  (CURRENT: XIP from PSRAM, ISR not in IRAM)
+//                                 The xipland row is from BENCH_TEST_LOG.md "2026-10-14 xipland": fetch start free
+//                                 (scratch held) 44399 B, low-water 28463 B, so the draw is 44399 - 28463 = 15936 B
+//                                 (idle is the start free plus the 1024 B scratch; the 45.4..45.9 KB idle band there
+//                                 is the same figure). The older rows are history: benchupd2..5 ran firmware with the
+//                                 ISR-in-IRAM or the pre-XIP layout, which this tree no longer builds.
 //   DRAW_MARGIN          1024 B   BENCH-PENDING (UPDFX8, REVIEW_UPDFX7 MED-2): explicit margin over the maximum: the runs spread 19.3..21.5 KB (2.2 KB)
 //                                 because every low-water includes concurrent httpd/MCP/LVGL activity, so no
 //                                 single run is a bound
 //   MODEL_DRAW          22512 B   = MEASURED_DRAW + DRAW_MARGIN
-//   BENCH-PENDING: the margin (1024 B) is under half the observed spread (2.2 KB) of only four runs, and only
-//   benchupd5 ran on this firmware. Do not call these numbers sized, and do not lower ADMISSION further, until at
-//   least 5 heap.min_free readings from this build (GET /api/update/fetch) are in the table.
+//   BENCH-PENDING: the margin (1024 B) is under half the observed spread (2.2 KB) of only five runs, and only ONE
+//   (xipland C) ran on the CURRENT firmware (XIP from PSRAM, ISR not in IRAM); benchupd5 ran the superseded
+//   ISR-in-IRAM build. The "5 readings" rule counts readings from the CURRENT build only (GET /api/update/fetch,
+//   heap.min_free): one is in the table, four more are needed. Do not call these numbers sized, and do not lower
+//   ADMISSION further, until then. The XIP draw (15.9 KB) is smaller than every older one, so MEASURED_DRAW stays the
+//   conservative maximum from benchupd4.
 //   ADMISSION (held)    31728 B   = ABORT_BELOW + MODEL_DRAW (9216 + 22512). If the draw is within MODEL_DRAW
 //                                 (not yet established, see BENCH-PENDING), an admitted fetch bottoms out at or
 //                                 above ABORT_BELOW with the margin to spare.
@@ -38,7 +47,10 @@
 //                                 edge, still ends 2048 B above the 8192 B floor (1024 B above ABORT_BELOW)
 //
 // Idle boards against this rule (admitted when idle >= 32752 B before the scratch):
-//   dev 468f0c5cb with UART_ISR_IN_IRAM (benchupd5)       34783 B  ADMITTED, margin 34783 - 32752 = +2031 B
+//   xipland C e9b50d8f8, XIP from PSRAM (CURRENT build)    45423 B  ADMITTED, margin 45423 - 32752 = +12671 B
+//                                                         (start free 44399 B after the scratch; the
+//                                                         pre-XIP dev tip (A) was refused with low_heap_free)
+//   superseded: 468f0c5cb, UART_ISR_IN_IRAM (benchupd5) 34783 B  ADMITTED, margin 34783 - 32752 = +2031 B
 //                                                         (it was +535 B against the UPDFX6 need of 34248 B)
 //   36f3ad031, before the UART change (benchupd4)         47191 B  ADMITTED (about 14 KB over)
 //   older firmware (sk04 log 2026-10-06; update_check)    29647..31123 B, 29815 B  REFUSED

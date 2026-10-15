@@ -110,17 +110,14 @@ CALLX_RE = re.compile(r"\bcallx(?:0|4|8|12)\b")
 # across a branch target can only ADD an edge, never hide one (the safe
 # direction for this checker).
 # ---------------------------------------------------------------------------
-# Linker section-boundary symbols. objdump captions them like functions, and an
-# l32r of one is a pointer-range comparison literal (spi_flash_cache2phys
-# compares against _stext), never a call. Under CONFIG_SPIRAM_XIP_FROM_PSRAM
-# (2026-10-14) _stext sits at the start of .flash.text, where objdump decodes
-# the literal pool as an `entry` with a 7696 B frame, so a stale register
-# pairing it with a later callx grafted that frame onto ota_confirm, screen_idle
-# and lvgl. These names are never call targets.
-LINKER_BOUNDARY_NAMES = frozenset((
-    "_stext", "_text_start", "_etext", "_iram_text_start", "_iram_text_end",
-    "_rodata_start", "_rodata_end", "_flash_text_start", "_flash_text_end",
-))
+# Linker section-boundary symbols (_stext, _text_start, _instruction_reserved_start, ...) are
+# zero-size NOTYPE symbols. objdump captions them like functions, and an l32r of one is a
+# pointer-range comparison literal (spi_flash_cache2phys compares against _stext), never a
+# call. Under CONFIG_SPIRAM_XIP_FROM_PSRAM (2026-10-14) _stext sits at the start of
+# .flash.text, where objdump decodes the literal pool as an `entry` with a 7696 B frame, so a
+# stale register pairing it with a later callx grafted that frame onto ota_confirm,
+# screen_idle and lvgl. parse() keys on the symbol TYPE (zero_size_marker_addrs()), not on
+# names: three aliases share _stext's address and a name list missed one (REVIEW_XIPLAND LOW-1).
 L32R_RE = re.compile(r"\tl32r\t(a\d+),\s*[0-9a-f]+(?: <[^>]*>)? \(([0-9a-f]+) <([^>]+)>\)")
 CALLX_REG_RE = re.compile(r"\tcallx(?:0|4|8|12)\t(a\d+)")
 _INSN_RE = re.compile(r"^[0-9a-f]+:\t[0-9a-f ]+\t(\S+)\s+(a\d+)\b")
@@ -206,6 +203,24 @@ def symbol_sizes(objdump, elf):
     outside it. A size-0 symbol (hand-written assembly with no `.size`
     directive) stays unbounded exactly as before -- missing information is
     not a reason to start dropping real edges."""
+    return _read_symtab(objdump, elf)[0]
+
+
+def zero_size_marker_addrs(objdump, elf):
+    """Addresses carrying only zero-size NOTYPE symbols (linker section bounds such as
+    ``_stext``, ``_text_start``, ``_instruction_reserved_start``), never a function.
+
+    objdump captions such an address like a function, and the bytes behind it can be a
+    literal pool that decodes as an `entry` with a huge frame (REVIEW_XIPLAND LOW-1). Keyed
+    on the symbol TYPE rather than a name list, so a new alias or a future section bound
+    is covered. An address that also carries a FUNC symbol (sized or not) is excluded:
+    hand-written assembly entries stay walkable."""
+    return _read_symtab(objdump, elf)[1]
+
+
+def _read_symtab(objdump, elf):
+    """(sizes, marker_addrs) from one ``objdump -t`` run; see symbol_sizes() and
+    zero_size_marker_addrs()."""
     try:
         result = subprocess.run([objdump, "-t", elf], capture_output=True, text=True)
     except OSError as exc:
@@ -217,23 +232,32 @@ def symbol_sizes(objdump, elf):
             f"{result.stderr.strip()}"
         )
     sizes = {}
+    func_addrs = set()
+    notype_zero = set()
     for line in result.stdout.splitlines():
         # "42084444 l     F .flash.text\t000001e1 calc_content_width"
         parts = line.split()
-        if len(parts) < 5 or "F" not in parts[1:-3]:
+        if len(parts) < 5:
             continue
+        is_func = "F" in parts[1:-3]
         try:
             addr = int(parts[0], 16)
             size = int(parts[-2], 16)
         except ValueError:
             continue
-        if size <= 0:
+        if is_func:
+            func_addrs.add(addr)
+        elif size == 0 and not any(c in "Ofd" for t in parts[1:-3] for c in t):
+            notype_zero.add(addr)   # no type flag at all: a zero-size NOTYPE label
+        if not is_func or size <= 0:
             continue
         # Aliases can share an address; the larger span is the safe one --
         # it can only ever admit MORE of the real function, never less.
         if size > sizes.get(addr, 0):
             sizes[addr] = size
-    return sizes
+    return sizes, frozenset(notype_zero - func_addrs)
+
+
 
 
 def find_objdump():
@@ -368,7 +392,7 @@ def parse(objdump, elf):
             f"stderr:\n{result.stderr.strip()}"
         )
     out = result.stdout
-    sizes = symbol_sizes(objdump, elf)
+    sizes, marker_addrs = _read_symtab(objdump, elf)
     frames, calls, names, name_addrs, indirect = {}, {}, {}, {}, {}
     pending_lc = {}   # cur -> {(addr, name)}: long-call literals, filtered after the pass
     seen_entry = set()
@@ -381,6 +405,11 @@ def parse(objdump, elf):
         if m:
             cur = int(m.group(1), 16)
             name = m.group(2)
+            if cur in marker_addrs:
+                # A zero-size NOTYPE section bound, not a function: no frame, no edges.
+                cur = None
+                cur_end = None
+                continue
             size = sizes.get(cur)
             cur_end = (cur + size) if size else None
             frames.setdefault(cur, 0)
@@ -424,7 +453,7 @@ def parse(objdump, elf):
     bodyless = {}
     for fn, lits in pending_lc.items():
         for addr, name in lits:
-            if name in LINKER_BOUNDARY_NAMES:
+            if addr in marker_addrs:
                 continue   # a section-bound literal, not a call target
             if addr in frames:
                 calls[fn].add(addr)

@@ -8,6 +8,8 @@ The batch fixes REVIEW_UPDLOWFX.md LOW-1..4 and REVIEW_RECQRFX.md LOW-1..4. The 
 
 Result: HIGH 0, MED 0, LOW 1, INFO 7.
 
+Fix status (xipfx, 2026-10-14): LOW-1 fixed. `update_install_staged` sets the downgrade sentinel only when the follow-up read answers 404; any other error (timeout, failed relogin, 5xx) gets neutral wording. Test: `test_non_404_tail_read_error_is_not_called_a_downgrade` (timeout and 502).
+
 ## Verified claims
 
 - **No new internal RAM.** `recovery_lcd.c` adds no static. The new helpers

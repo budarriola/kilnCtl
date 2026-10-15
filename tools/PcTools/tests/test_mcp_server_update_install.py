@@ -561,6 +561,30 @@ class RecoveryApplyingTests(_Base):
         self.assertTrue(out.startswith("ok"), out)
         self.assertNotIn("downgrade", out)
 
+    def test_non_404_tail_read_error_is_not_called_a_downgrade(self):
+        """REVIEW_LOWFX10 LOW-1: a timeout, failed relogin or 5xx on the follow-up read says nothing
+        about the install route, so the text must not claim "a downgrade?"."""
+        e404 = uhc.UpdateHttpError("GET failed: HTTP 404", 404, "not found")
+        for label, err in (("timeout", uhc.UpdateHttpError("timed out")),
+                           ("5xx", uhc.UpdateHttpError("GET failed: HTTP 502", 502, "bad gateway"))):
+            with self.subTest(label):
+                msu._PENDING_INSTALL.clear()
+                t0 = self.clock.t
+
+                def status(host, timeout=8.0, err=err):
+                    if self.clock.t < t0 + 3:
+                        return _st()
+                    if self.clock.t > t0 + 60:  # only the post-loop re-read runs past the deadline
+                        raise err
+                    raise e404
+
+                with mock.patch.object(uhc, "get_install_status", side_effect=status),                      mock.patch.object(uhc, "start_install", return_value={}):
+                    out = msu.update_install_staged(confirm=True, wait_s=60)
+                self.assertTrue(out.startswith("UNKNOWN"), out)
+                self.assertNotIn("downgrade", out)
+                self.assertNotIn("WITHOUT the install route", out)
+                self.assertIn("follow-up read", out)
+
     def test_tail_reads_are_short_and_bounded(self):
         """UPDLOWFX LOW-3: the post-loop probe and re-read each use the short timeout."""
         e404 = uhc.UpdateHttpError("GET failed: HTTP 404", 404, "not found")

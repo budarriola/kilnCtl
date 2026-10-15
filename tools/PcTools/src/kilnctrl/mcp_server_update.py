@@ -843,14 +843,17 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
             _PENDING_INSTALL.pop(resolved, None)
             return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
         time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+    tail_err = None
+    tail_neutral = None
     if not last and n404 and _read_uptime(resolved, _TAIL_PROBE_S) is not None:
         # The application answers now. It may have come up between the last poll and this probe
         # (a good install lands near the end of the wait), so judge by one more status read, not by
         # the 404 count. Both reads are short and capped, so the call overruns its wait by <~ 8 s.
         try:
             st = uhc.get_install_status(resolved, timeout=_TAIL_PROBE_S)
-        except uhc.UpdateHttpError:
+        except uhc.UpdateHttpError as exc:
             st = None
+            tail_err = exc
         if st is not None:
             last = st
             li = st.get("last_install") or {}
@@ -861,10 +864,17 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
             if _failure_is_this(li, pend):
                 _PENDING_INSTALL.pop(resolved, None)
                 return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
-        else:
+        elif tail_err is not None and tail_err.status == 404:
             n404 = -n404  # sentinel: app answers /api/status but the install route is absent
+        else:
+            # Timeout, failed relogin, 5xx...: the follow-up read says nothing about the route, so
+            # do not claim a downgrade (REVIEW_LOWFX10 LOW-1).
+            tail_neutral = tail_err
     if last:
         tail = _install_line(last)
+    elif tail_neutral is not None:
+        tail = (f"the application answers GET /api/status but the follow-up read of {uhc.INSTALL_STATUS_PATH} "
+                f"failed ({tail_neutral}); the install outcome is not known")
     elif n404 < 0:
         tail = (f"HTTP 404 on {uhc.INSTALL_STATUS_PATH} x{-n404} while GET /api/status answers: the board runs "
                 f"an application WITHOUT the install route (a downgrade?), not the recovery image applying")

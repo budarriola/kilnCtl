@@ -51,6 +51,7 @@ $kilnfwRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $DefaultsPath) {
     $DefaultsPath = Join-Path $kilnfwRoot "sdkconfig.defaults"
 }
+$explicitSdkconfig = [bool]$SdkconfigPath
 if (-not $SdkconfigPath) {
     $SdkconfigPath = Join-Path $kilnfwRoot "sdkconfig"
 }
@@ -144,6 +145,24 @@ if ($wrongValue.Count -gt 0) {
     Write-Host "CHECK FAILED: load-bearing sdkconfig.defaults value changed:" -ForegroundColor Red
     foreach ($m in $wrongValue) { Write-Host "  $m" -ForegroundColor Red }
     throw "$($wrongValue.Count) load-bearing sdkconfig.defaults value(s) are wrong -- see docs/audits/REVIEW_LINKCRC.md LOW-3"
+}
+
+# REVIEW_XIPLAND MED-1: a fresh worktree has no sdkconfig, but a stale one elsewhere is what a build
+# would actually use. Before settling for the WARNING, fall back to the config check_00 publishes
+# (build/sdkconfig), then the main worktree's sdkconfig (what check_00 copies in).
+if (-not $explicitSdkconfig -and -not (Test-Path $SdkconfigPath)) {
+    $cands = New-Object System.Collections.Generic.List[string]
+    $cands.Add((Join-Path $kilnfwRoot "build\sdkconfig"))
+    # Same constant check_00_kilnfw_target_build.ps1 uses for its fallback copy.
+    $mainRoot = if ($env:KILNCTL_MAIN_REPO_ROOT) { $env:KILNCTL_MAIN_REPO_ROOT } else { "C:\Users\budar\OneDrive\Desktop\kilnCtl" }
+    $cands.Add((Join-Path $mainRoot "firmware\KilnFW\sdkconfig"))
+    foreach ($c in $cands) {
+        if (Test-Path $c) {
+            Write-Host "NOTE: no sdkconfig at $SdkconfigPath; checking the pins against $c instead." -ForegroundColor Yellow
+            $SdkconfigPath = $c
+            break
+        }
+    }
 }
 
 if (-not (Test-Path $SdkconfigPath)) {
