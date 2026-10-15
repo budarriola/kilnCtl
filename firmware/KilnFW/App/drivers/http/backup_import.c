@@ -1183,6 +1183,31 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             c->p.on_off_rule_count = rule_i;
         }
 
+        /* MED-1: the ceiling profiles_http_save() will see AFTER this import commits zones, so
+         * resolve it in the commit's own precedence: the backup's own zones[].max_ramp_c_per_hr,
+         * else the target slot when the topology is being applied (the getter below answers
+         * false for a zone past the live thermo_count), else the live value. */
+        float post_import_ramp_ceiling[MAX31856_CHANNEL_COUNT];
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            float cur = 0.0f;
+            if (topo.apply && zi < topo.thermo) {
+                cur = zones_config_peek_slot_max_ramp_c_per_hr(zi);
+            } else {
+                zones_config_get_max_ramp(zi, &cur);
+            }
+            post_import_ramp_ceiling[zi] = cur;
+        }
+        {
+            const char *zarr = backup_json_obj_find(body, "zones");
+            for (const char *ze = backup_json_arr_first(zarr); ze; ze = backup_json_arr_next(ze)) {
+                double zidx, zramp;
+                if (backup_json_field_num(ze, "index", &zidx) && zidx >= 0 && zidx < MAX31856_CHANNEL_COUNT &&
+                    backup_json_field_num(ze, "max_ramp_c_per_hr", &zramp) && zramp >= 0) {
+                    post_import_ramp_ceiling[(uint8_t)zidx] = (float)zramp;
+                }
+            }
+        }
+
         /* Same feasibility rule profiles_http_save() enforces -- duplicated
          * here so it is caught in validation, before any profile in this
          * import has been written. */
@@ -1195,8 +1220,7 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                 if (!(c->p.zone_mask & (1u << zi))) {
                     continue;
                 }
-                float ceiling = 0.0f;
-                zones_config_get_max_ramp(zi, &ceiling);
+                float ceiling = post_import_ramp_ceiling[zi];
                 if (rate > ceiling) {
                     snprintf(err_msg, err_cap,
                             "profile entry %u, segment %u: ramp rate %.1f C/hr exceeds zone %u's %.1f C/hr ceiling",
