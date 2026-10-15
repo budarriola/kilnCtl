@@ -192,3 +192,41 @@ physical floor, e.g. 1e-4 V/A, mirroring the `ct_cal` gain bounds at
 4. No `config_params` test that rejects implausibly small positive
    `k_ct_v_per_a` or `gain` (LOW-1). There is also no test that the
    reporting filter recovers from a non-finite sample.
+
+## Resolution (ctfx, 2026-10-14)
+
+HIGH-1 fixed. `config_store.h` gained `config_store_ct_channel_fitted_rec()`,
+`config_store_fitted_channel_mask()` and
+`config_store_mask_current_present_to_fitted_mask()`: when the
+`CONFIG_STORE_SET_ZONE_CT_CHANNEL` group bit is set the committed map decides
+which channels are fitted (`config_store_ct_channel_fitted_map()`), otherwise the
+old `ct_topology` rule applies unchanged. Routed through them:
+`safety_core.c` (`any_current_present` mask, S14/S15 `amps_valid_for_ct`),
+`current_task.c` (`current_task_any_current_present()`, now caches the fitted
+mask instead of topology plus installed), and
+`config_store_current_sensing_commissioned()` (S9), which now requires `k_ct > 0`
+on every channel fitted under the committed map. ESP H9
+(`ct_leak_alarm.c`/`ct_leak_alarm_service.c`) reads params 0x0320-0x0322 and,
+when all three are set, watches exactly the channels some zone selects.
+Legacy maps ({0,1,2}, {2,2,2}) and an uncommitted map behave as before; the
+change only widens what guards see for split maps.
+
+S9 commissioned semantics: a board with a committed SPLIT/non-legacy map and
+`k_ct` calibrated only on channel 2 (the old gate's only input) is no longer
+"commissioned" (S9 warn-only) until its fitted channels are calibrated. That
+board was already blind on those channels, so nothing is lost; boards on
+identity or {2,2,2} maps (including the bench config, if it is on either) are
+unaffected. Not verified against the live bench record (board not touched).
+
+LOW-1 fixed. `k_ct_v_per_a[0..2]` and `gain[0..2]` accept 0 or a value in
+[1e-4, 1e6] at SET_PARAM and at `config_params_validate()`
+(`CONFIG_PARAMS_CT_SCALE_MIN/MAX`). The non-finite reporting-filter reseed
+(`current_sense.c:409-414`) was not done; the bounds make the overflow
+unreachable from the commit path.
+
+Tests: `test_ct_split_map_guards.c` (SaftyFW; real SET_PARAM -> finalize ->
+back-fill, S3 trip off channel 0, S14/S15 arm, commissioned, legacy maps,
+bounds) and additions to `test_ct_leak_alarm.c` / `test_ct_leak_alarm_service.c`
+(KilnFW). Negtested: all mutants CAUGHT with compiled failing assertions
+except one equivalent mutant (permuting zone indices of the map, which cannot
+change the fitted set).
