@@ -143,6 +143,7 @@ try {
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "ESP_LOGE(TAG, RLCD_NOT_READY_MSG); ESP_LOGI(TAG, `"pw %s`", s_net_pass);" -Tag "passleak"
     Test-Mutant -File "recovery_lcd.c" -Needle "if (a > 0 && rlcd_rereset_allowed(s_expander_err, s_rereset_count)) {" -Replacement "if (a > 0) {" -Tag "burst_ungated"
     Test-Mutant -File "recovery_lcd.c" -Needle "s_bg_state = rlcd_classify_boot_guard(rc, decoded);" -Replacement "s_bg_state = RLCD_BG_NONE;" -Tag "noclassify"
+    Test-Mutant -File "recovery_http.c" -Needle "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (recovery_pico_busy()) {" -Replacement "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (false) {" -Tag "wifi_reset_no_pico_busy"
     Test-Mutant -File "recovery_http.c" -Needle "\`"lcd_ready\`"" -Replacement "\`"lcd_rdy\`"" -Tag "nolcdready"
 
     Write-Host "check_recovery_lcd_policy: PASS ($passCount assertions; negative-test mutants failed as required)"

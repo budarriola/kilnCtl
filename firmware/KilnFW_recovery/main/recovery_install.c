@@ -1,6 +1,7 @@
 // recovery_install.c -- see recovery_install.h.
 #include "recovery_install.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -98,7 +99,9 @@ static int op_req_read(void *ctx, uint8_t *buf, size_t cap, size_t *len)
 {
     (void)ctx;
     if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {
-        return -1;
+        // Request unknown: report "none" so the board stays in normal recovery with the AP usable,
+        // instead of refusing nvs_unavailable on every boot with nothing ever cleared.
+        return 1;
     }
     return kv_read(UPD_INST_KEY_REQ, buf, cap, len);
 }
@@ -135,9 +138,9 @@ static bool op_stage_verified(void *ctx, uint32_t *len, uint8_t sha[UPD_INST_SHA
 }
 
 // Runs in the apply task after the copy verified, before the boot target switch:
-// boot_guard clear, then the request is removed (read back) and the OK result is
-// written. A failure before the request is gone aborts the apply (boot target
-// not changed, request kept for the bounded retry).
+// boot_guard clear only (a failure aborts the apply, boot target not changed). The
+// request is removed and the OK result written by post_boot, only after the switch
+// succeeded; a failed switch keeps the request for the bounded retry.
 static const update_install_ops_t s_ops;
 
 static int guard_clear(void)
@@ -147,9 +150,19 @@ static int guard_clear(void)
 
 static int pre_boot(void)
 {
-    bool ok = false;
-    if (update_install_pre_boot(&s_ops, guard_clear, s_semver, s_id, &ok) != 0) {
+    if (update_install_pre_boot(&s_ops, guard_clear) != 0) {
         ESP_LOGE(TAG, "pre-boot clear failed; not selecting app");
+        return -1;
+    }
+    return 0;
+}
+
+// Runs only after esp_ota_set_boot_partition succeeded: remove the request and record OK.
+static int post_boot(void)
+{
+    bool ok = false;
+    if (update_install_post_boot(&s_ops, s_semver, s_id, &ok) != 0) {
+        ESP_LOGE(TAG, "request clear failed after the boot target was set");
         return -1;
     }
     if (!ok) {
@@ -167,7 +180,7 @@ static int op_apply_start(void *ctx)
     if (app == NULL) {
         return -1;
     }
-    return recovery_apply_esp_start(app, pre_boot) == ESP_OK ? 0 : -1;
+    return recovery_apply_esp_start(app, pre_boot, post_boot) == ESP_OK ? 0 : -1;
 }
 
 static const update_install_ops_t s_ops = {
@@ -189,7 +202,11 @@ static void load_last(void)
 
 static void show_failure(uint8_t reason)
 {
-    recovery_lcd_set_error("INSTALL FAILED", update_install_reason_name(reason));
+    // Warning, not error: the failure is shown but the SoftAP SSID, passphrase and QR stay on screen
+    // (an error banner hides them, and the passphrase is shown nowhere else).
+    char line[28];
+    snprintf(line, sizeof(line), "INSTALL FAILED: %s", update_install_reason_name(reason));
+    recovery_lcd_set_warning(line, NULL);
 }
 
 // Watches the apply. A failed apply does not reboot, so record the failure (the
@@ -218,6 +235,10 @@ static void poll_task(void *arg)
 
 void recovery_install_boot(void)
 {
+    if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {
+        // Warning only: no FAIL result is recorded and the passphrase stays visible.
+        recovery_lcd_set_warning("INSTALL STATE UNREADABLE", NULL);
+    }
     if (!(recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN)) {
         load_last();
         // Remember the requested version for the result records.

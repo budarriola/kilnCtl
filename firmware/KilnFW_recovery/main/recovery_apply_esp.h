@@ -28,11 +28,13 @@ extern "C" {
 // `pre_boot` (may be NULL) runs once, after the copy verified and just before
 // the boot partition is switched, and returns 0 on success -- the caller clears
 // the boot_guard counter there, same order as /api/recovery/exit. On success the
-// task restarts the chip itself when the apply finished.
+// task restarts the chip itself when the apply finished. `post_boot` (may be NULL)
+// runs only after the boot partition switch succeeded (clear the install request,
+// record OK); its failure is logged and does not stop the restart.
 // ESP_ERR_INVALID_STATE: an apply is already running (or finished and the
 // restart is pending). ESP_ERR_NOT_FOUND: no `stage` partition.
 // ESP_ERR_NO_MEM: task creation failed. Nothing is touched on any error return.
-esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(void));
+esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(void), int (*post_boot)(void));
 
 // True while an apply is running or its restart is pending: every other
 // mutating route refuses with 409 meanwhile.

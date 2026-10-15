@@ -422,8 +422,76 @@ static void test_http_source(const char *path)
         CHECK(strstr(st, "\\\"lcd_task_stack_free_bytes\\\"") != NULL, "status reports lcd task stack margin");
         free(st);
     }
+    char *wr = fn_body(src, "static esp_err_t wifi_reset_post(");
+    CHECK(wr != NULL, "wifi_reset handler found");
+    if (wr) {
+        CHECK(strstr(wr, "recovery_pico_busy()") != NULL, "wifi_reset refuses (409) while a Pico relay runs");
+        free(wr);
+    }
     CHECK(strstr(src, "\\\"boot_guard_record\\\"") != NULL, "status reports boot_guard_record");
     CHECK(strstr(src, "rlcd_classify_boot_guard(") != NULL, "http classifies the boot_guard record");
+    free(src);
+}
+
+// recovery_install.c: a failed install is a WARNING (passphrase/QR stay visible), a kiln NVS failure
+// is "request unknown" (not a permanent refusal), and the request is cleared only after set_boot.
+static void test_install_source(const char *path)
+{
+    char *src = slurp(path);
+    CHECK(src != NULL, "recovery_install.c readable");
+    if (!src) {
+        return;
+    }
+    normalize(src);
+    strip_comments(src);
+    CHECK(strstr(src, "recovery_lcd_set_error(") == NULL, "install path never raises the error banner (it hides the passphrase)");
+    char *sf = fn_body(src, "static void show_failure(");
+    CHECK(sf != NULL, "show_failure found");
+    if (sf) {
+        CHECK(strstr(sf, "recovery_lcd_set_warning(") != NULL, "install failure is shown as a warning");
+        free(sf);
+    }
+    char *rr = fn_body(src, "static int op_req_read(");
+    CHECK(rr != NULL, "op_req_read found");
+    if (rr) {
+        CHECK(strstr(rr, "return 1;") != NULL && strstr(rr, "return -1;") == NULL,
+              "kiln NVS failure reads as no request, not a refusal");
+        free(rr);
+    }
+    char *pb = fn_body(src, "static int pre_boot(");
+    CHECK(pb != NULL, "pre_boot found");
+    if (pb) {
+        CHECK(strstr(pb, "update_install_pre_boot(") != NULL && strstr(pb, "update_install_post_boot(") == NULL,
+              "pre_boot does not clear the request or record OK");
+        free(pb);
+    }
+    char *po = fn_body(src, "static int post_boot(");
+    CHECK(po != NULL && strstr(po, "update_install_post_boot(") != NULL, "post_boot records OK");
+    free(po);
+    CHECK(strstr(src, "recovery_apply_esp_start(app, pre_boot, post_boot)") != NULL, "post_boot is wired into the apply");
+    free(src);
+}
+
+// recovery_apply_esp.c: the post-boot hook runs only after the boot partition switch succeeded.
+static void test_apply_esp_source(const char *path)
+{
+    char *src = slurp(path);
+    CHECK(src != NULL, "recovery_apply_esp.c readable");
+    if (!src) {
+        return;
+    }
+    normalize(src);
+    strip_comments(src);
+    char *sb = fn_body(src, "static int cb_set_boot(");
+    CHECK(sb != NULL, "cb_set_boot found");
+    if (sb) {
+        const char *set = strstr(sb, "recovery_boot_partition_set_and_verify(");
+        const char *post = strstr(sb, "a->post_boot()");
+        const char *fail = set ? strstr(set, "return -1;") : NULL;
+        CHECK(set && post && post > set, "post_boot runs after the boot partition switch");
+        CHECK(fail && fail < post, "a failed switch returns before post_boot");
+        free(sb);
+    }
     free(src);
 }
 
@@ -550,6 +618,11 @@ int main(int argc, char **argv)
     // argv[1], argv[2] and every further argument (all recovery .c files): no
     // log/printf call may carry the passphrase.
     for (int i = 1; i < argc; i++) {
+        if (strstr(argv[i], "recovery_install.c")) {
+            test_install_source(argv[i]);
+        } else if (strstr(argv[i], "recovery_apply_esp.c")) {
+            test_apply_esp_source(argv[i]);
+        }
         char *src = slurp(argv[i]);
         CHECK(src != NULL, "source readable for the passphrase log scan");
         if (src) {

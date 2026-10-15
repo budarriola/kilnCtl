@@ -825,6 +825,10 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
     if (recovery_apply_busy()) {
         return refuse_while_applying(req);
     }
+    if (recovery_pico_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE,
                                              &h);
@@ -1123,7 +1127,7 @@ static esp_err_t apply_staged_post(httpd_req_t *req)
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
     app_verify_invalidate(); // `app` is about to be erased
-    esp_err_t e = recovery_apply_esp_start(app, manual_apply_pre_boot);
+    esp_err_t e = recovery_apply_esp_start(app, manual_apply_pre_boot, NULL);
     if (e != ESP_OK) {
         httpd_resp_set_status(req, e == ESP_ERR_INVALID_STATE ? "409 Conflict" : "500 Internal Server Error");
         return httpd_resp_send(req, "could not start the apply", HTTPD_RESP_USE_STRLEN);

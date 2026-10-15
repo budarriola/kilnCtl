@@ -114,7 +114,7 @@ typedef struct {
 
 typedef enum {
     UPD_INST_BOOT_NO_REQUEST = 0, // nothing to do
-    UPD_INST_BOOT_STARTED,        // apply task started; pre-boot hook clears the request
+    UPD_INST_BOOT_STARTED,        // apply task started; post-boot hook clears the request
     UPD_INST_BOOT_REFUSED,        // failure recorded, stay in recovery
 } update_install_boot_outcome_t;
 
@@ -131,12 +131,17 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
                                  const char *semver, const uint8_t *id);
 
 // Recovery pre-boot hook body (after the copy verified, before the boot target
-// switch). Order: boot_guard_clear (nonzero aborts), req_clear (nonzero aborts,
-// request kept for the bounded retry), then the OK result write (failure only
-// logged by the caller: the install is good). Returns 0 to let the switch run,
-// -1 to abort. *result_ok is set to whether the OK result verified.
-int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void),
-                            const char *semver, const uint8_t *id, bool *result_ok);
+// switch): boot_guard_clear only (nonzero aborts the switch, request kept for the
+// bounded retry). Returns 0 to let the switch run, -1 to abort. The request is NOT
+// cleared and no result is written here: a failing esp_ota_set_boot_partition must
+// leave the request for a retry and no OK record behind.
+int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void));
+
+// Recovery post-boot hook body: call only AFTER the boot target switch returned OK.
+// req_clear (nonzero returns -1; the image is already selected), then the OK result
+// write (failure only reported via *result_ok: the install is good).
+int update_install_post_boot(const update_install_ops_t *ops, const char *semver, const uint8_t *id,
+                             bool *result_ok);
 
 // ---- Application side: write the request before the reboot into recovery ----
 // Injected IO for update_install_prepare (the install route's prepare hook).

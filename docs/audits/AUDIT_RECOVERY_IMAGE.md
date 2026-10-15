@@ -59,6 +59,11 @@ Fix:
 - Pin both with a source test next to `test_recovery_lcd_policy.c`: `show_failure()` must not call
   `recovery_lcd_set_error`.
 
+**Fixed by (recfx):** `show_failure()` now uses `recovery_lcd_set_warning("INSTALL FAILED: <reason>")`, so the SSID,
+passphrase and QR stay visible; `op_req_read()` reports "no request" (1) when `RECOVERY_NVS_FAIL_KILN` is set and
+`recovery_install_boot()` shows a non-blocking "INSTALL STATE UNREADABLE" warning, so no FAIL is recorded and no
+refusal loop. Pinned by `test_install_source` in `test_recovery_lcd_policy.c`.
+
 ## LOW
 
 ### LOW-1: `wifi_reset` restarts the image under a running Pico relay
@@ -123,6 +128,17 @@ Fix:
   that is, after `cb_set_boot` returns, before the restart.
 - Record a distinct `set_boot_failed` reason.
 - Correct the comment at `recovery_install.c:195-196`.
+
+**Fixed by (recfx), LOW-1:** `wifi_reset_post` returns 409 when `recovery_pico_busy()`; pinned by `test_http_source`
+(`check_recovery_lcd_policy.ps1` mutant `wifi_reset_no_pico_busy`). The `restart_image_for_wifi()` wait is not changed.
+
+**Fixed by (recfx), LOW-2:** `update_install_pre_boot()` now only runs the boot_guard clear; the new
+`update_install_post_boot()` (request clear, then OK result) runs from `cb_set_boot` only after
+`recovery_boot_partition_set_and_verify()` succeeded (`recovery_apply_esp_start(app, pre_boot, post_boot)`). A failed
+switch leaves the request and no OK record, so the poll task's FAIL `apply_failed` and the retry comment hold. Tests:
+`test_pre_boot` in `test_update_install_record.c`, `test_apply_esp_source`. No new `set_boot_failed` reason code and no
+intermediate `booting` result were added (reason enum is shared with the application/status surface); scenario B now
+re-applies from the kept request, bounded by `UPD_INST_MAX_ATTEMPTS`.
 
 ## INFO
 

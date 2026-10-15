@@ -371,26 +371,32 @@ static void test_result_identity(void)
     g_guard_f = &f;
     g_guard_rc = 0;
     bool ok = false;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "1.0.0-pre.3", id_a, &ok) == 0 && ok &&
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn) == 0 &&
+                   update_install_post_boot(&o, "1.0.0-pre.3", id_a, &ok) == 0 && ok &&
                    update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && memcmp(d.id, id_a, UPD_INST_ID_LEN) == 0,
                "the pre-boot OK result carries the identity");
 }
 
 static void test_pre_boot(void)
 {
-    TEST_SECTION("update_install_record -- recovery pre-boot hook (success path)");
+    TEST_SECTION("update_install_record -- recovery pre/post-boot hooks");
     fake_t f;
     update_install_ops_t o;
     bool ok = false;
 
+    // pre_boot alone never clears the request or writes a result (set_boot may still fail).
     fake_init(&f);
     o = ops_for(&f);
     g_guard_f = &f;
     g_guard_rc = 0;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "1.0.0-pre.3", id_a, &ok) == 0 && ok, "success path returns 0");
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn) == 0, "pre-boot success returns 0");
+    TEST_CHECK(f.have_req == 1 && f.clear_calls == 0 && f.res_writes == 0,
+               "pre-boot keeps the request and writes no result (set_boot not done yet)");
+
+    // post_boot (after set_boot OK): request cleared, then OK result.
+    TEST_CHECK(update_install_post_boot(&o, "1.0.0-pre.3", id_a, &ok) == 0 && ok, "post-boot success returns 0");
     TEST_CHECK(f.have_req == 0 && f.clear_calls == 1, "request cleared on success");
-    TEST_CHECK(f.res_writes == 1 && update_install_res_decode(f.res_blob, sizeof(f.res_blob), &(update_install_res_t){0}),
-               "OK result written");
+    TEST_CHECK(f.res_writes == 1, "OK result written");
     update_install_res_t d;
     TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
                    d.reason == UPD_INST_REASON_NONE && strcmp(d.semver, "1.0.0-pre.3") == 0,
@@ -398,27 +404,33 @@ static void test_pre_boot(void)
     TEST_CHECK(index_of(&f, 99) < index_of(&f, EV_CLEAR) && index_of(&f, EV_CLEAR) < index_of(&f, EV_RES),
                "order: boot guard, request clear, then result");
 
+    // set_boot failed: the caller never runs post_boot, so the request survives with no OK record.
+    fake_init(&f);
+    o = ops_for(&f);
+    g_guard_f = &f;
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn) == 0, "pre-boot ok");
+    /* (set_boot fails here: post_boot is not called) */
+    TEST_CHECK(f.have_req == 1 && f.res_writes == 0, "failed set_boot leaves the request and no OK result");
+
     fake_init(&f);
     f.clear_rc = -1;
     o = ops_for(&f);
-    g_guard_f = &f;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", NULL, &ok) == -1 && !ok, "uncleared request aborts boot switch");
+    TEST_CHECK(update_install_post_boot(&o, "x", NULL, &ok) == -1 && !ok, "uncleared request is reported");
     TEST_CHECK(f.have_req == 1 && f.res_writes == 0, "request kept, no OK result when clear failed");
 
     fake_init(&f);
     o = ops_for(&f);
     g_guard_f = &f;
     g_guard_rc = -1;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", NULL, &ok) == -1 && f.clear_calls == 0 && f.res_writes == 0,
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn) == -1 && f.clear_calls == 0 && f.res_writes == 0,
                "boot guard failure aborts before any clear");
     g_guard_rc = 0;
 
     fake_init(&f);
     f.res_rc = -1;
     o = ops_for(&f);
-    g_guard_f = &f;
-    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", NULL, &ok) == 0 && !ok && f.have_req == 0,
-               "result write failure does not block the switch, reported via result_ok");
+    TEST_CHECK(update_install_post_boot(&o, "x", NULL, &ok) == 0 && !ok && f.have_req == 0,
+               "result write failure does not block the restart, reported via result_ok");
 }
 
 typedef struct {

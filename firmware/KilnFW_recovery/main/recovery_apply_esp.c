@@ -29,6 +29,7 @@ typedef struct {
     const esp_partition_t *stage;
     const esp_partition_t *app;
     int (*pre_boot)(void);
+    int (*post_boot)(void);
     psa_hash_operation_t sha;
     bool sha_active;
 } apply_ctx_t;
@@ -133,7 +134,14 @@ static int cb_set_boot(void *c)
         ESP_LOGE(TAG, "pre-boot hook (boot_guard clear) failed; boot partition NOT changed");
         return -1;
     }
-    return recovery_boot_partition_set_and_verify(a->app) == ESP_OK ? 0 : -1;
+    if (recovery_boot_partition_set_and_verify(a->app) != ESP_OK) {
+        return -1;
+    }
+    // Only now is the install real: the caller clears its request and records OK.
+    if (a->post_boot && a->post_boot() != 0) {
+        ESP_LOGE(TAG, "post-boot hook failed; app already selected");
+    }
+    return 0;
 }
 
 static void cb_yield(void *c)
@@ -186,7 +194,7 @@ static const esp_partition_t *find_stage(void)
     return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, STAGE_LABEL);
 }
 
-esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(void))
+esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(void), int (*post_boot)(void))
 {
     if (!app) {
         return ESP_ERR_INVALID_ARG;
@@ -212,6 +220,7 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     s_ctx.stage = stage;
     s_ctx.app = app;
     s_ctx.pre_boot = pre_boot;
+    s_ctx.post_boot = post_boot;
     s_prog.phase = RECOVERY_APPLY_CHECKING;
     s_prog.result = 0;
     s_prog.done_bytes = 0;
