@@ -718,6 +718,8 @@ void ap_fallback_timer_cb(void *arg)
  * periodic cadence is still worth keeping for its own sake (it re-picks a
  * better candidate rather than retrying the same one), so nothing about the
  * policy changed, only which task executes it. */
+static bool s_connected_unassoc_seen; /* MED-1 debounce, owner task only */
+
 void do_rescan_tick(void)
 {
     /* 2026-09-28 owner request: home Wi-Fi already came back but the AP
@@ -742,6 +744,30 @@ void do_rescan_tick(void)
         }
         return;
     }
+
+    /* AUDIT_WIFI MED-1: a STA_DISCONNECTED event dropped by post_event()'s
+     * full 0-tick queue strands state at CONNECTED forever (the driver emits
+     * ONE event and never reconnects on its own). Ground-truth check: if the
+     * driver says we are not associated on two consecutive ticks (the
+     * debounce, ~one rescan interval, so a momentary blip that its own event
+     * is about to report is not double-handled), run the normal disconnect
+     * handling. One static flag, no new task or buffer. */
+    if (s_wifi.mode == WIFI_PROV_MODE_HOME && s_wifi.state == WIFI_PROV_STATE_CONNECTED &&
+        s_wifi.saved_nets.count > 0) {
+        wifi_ap_record_t ap_chk = { 0 };
+        if (esp_wifi_sta_get_ap_info(&ap_chk) != ESP_OK) {
+            if (s_connected_unassoc_seen) {
+                s_connected_unassoc_seen = false;
+                ESP_LOGW(WIFI_PROV_TAG, "state CONNECTED but station not associated -- missed disconnect event, "
+                                        "running disconnect handling");
+                do_ev_sta_disconnected();
+            } else {
+                s_connected_unassoc_seen = true;
+            }
+            return;
+        }
+    }
+    s_connected_unassoc_seen = false;
 
     if (s_wifi.mode != WIFI_PROV_MODE_HOME || s_wifi.state == WIFI_PROV_STATE_CONNECTED ||
         s_wifi.saved_nets.count == 0) {

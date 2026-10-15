@@ -1463,6 +1463,40 @@ static void test_disconnect_while_fallback_ap_up_waits_for_rescan(void)
     memset(&s_wifi, 0, sizeof(s_wifi));
 }
 
+static void test_rescan_tick_recovers_from_missed_disconnect_while_connected(void)
+{
+    TEST_SECTION("do_rescan_tick -- state CONNECTED but the driver reports not associated (the one "
+                 "STA_DISCONNECTED event was dropped): debounced, then the disconnect path runs "
+                 "(AUDIT_WIFI MED-1)");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.saved_nets.count = 1;
+    s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+    g_stub_wifi_connect_calls = 0;
+
+    g_stub_ap_info_result = ESP_OK; // associated: clears any debounce left by an earlier test
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 0, "associated: no reconnect");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "associated: state untouched");
+
+    g_stub_ap_info_result = ESP_FAIL;
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 0, "first unassociated tick is only debounced");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "first unassociated tick: state untouched");
+
+    g_stub_ap_info_result = ESP_OK; // blip healed before the second tick
+    do_rescan_tick();
+    g_stub_ap_info_result = ESP_FAIL;
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 0, "debounce restarts after an associated tick");
+
+    do_rescan_tick();
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_RECONNECTING, "second consecutive tick: state leaves CONNECTED");
+    TEST_CHECK(g_stub_wifi_connect_calls == 1, "second consecutive tick: esp_wifi_connect() issued");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
 static void test_reconcile_sta_state_drops_ap_when_link_regained(void)
 {
     TEST_SECTION("reconcile_sta_state -- IP lost then regained without a fresh GOT_IP event (e.g. a dropped "
@@ -2342,6 +2376,7 @@ void run_test_wifi_prov(void)
     test_rescan_tick_retries_deferred_teardown_until_session_ends();
     test_ap_fallback_tick_leaves_running_ap_alone();
     test_disconnect_while_fallback_ap_up_waits_for_rescan();
+    test_rescan_tick_recovers_from_missed_disconnect_while_connected();
     test_reconcile_sta_state_drops_ap_when_link_regained();
     test_reconcile_sta_state_defers_ap_drop_while_session_active();
     test_reconcile_sta_state_no_ap_action_when_state_already_agreed();

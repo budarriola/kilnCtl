@@ -188,7 +188,7 @@ static void test_wifi_source(const char *path)
         const char *act = stop_case ? strstr(stop_case, "rhealth_ap_stop_action(") : NULL;
         CHECK(sd && act && sd < act, "AP_STOP during shutdown is ignored before any action");
     }
-    CHECK(count_of(src, "recovery_health_clear_wifi();") == 3,
+    CHECK(count_of(src, "recovery_health_clear_wifi();") == 4,
           "wifi count cleared on stability and on both stay-down paths");
     {
         const char *dec = stop_case ? strstr(stop_case, "rhealth_ap_stop_action(") : NULL;
@@ -221,6 +221,25 @@ static void test_wifi_source(const char *path)
         CHECK(failwait && strstr(failwait, "return false;") && strstr(failwait, "\"softap_fail\""),
               "no AP_START in time: softap_fail and return false");
         free(failwait);
+    }
+    {
+        // AUDIT_WIFI MED-2: a failed first SoftAP start feeds the capped restart path.
+        char *st = between(strstr(src, "void recovery_wifi_start(void)"), "bool recovery_wifi_is_up(void)");
+        CHECK(st != NULL, "recovery_wifi_start() found");
+        if (st) {
+            const char *fail = strstr(st, "if (!start_softap(pass))");
+            const char *dec = fail ? strstr(fail, "rhealth_ap_reraise_failed_action(recovery_health_wifi_restarts())") : NULL;
+            const char *rst = dec ? strstr(dec, "restart_image_for_wifi();") : NULL;
+            const char *nonet = rst ? strstr(rst, "recovery_lcd_set_no_network();") : NULL;
+            CHECK(fail && dec && rst && nonet && strstr(dec, "RHEALTH_AP_RESTART_IMAGE") != NULL,
+                  "failed first SoftAP start: capped restart decision, then restart, before the no-network fallback");
+            const char *stop = rst ? strstr(rst, "esp_wifi_stop()") : NULL;
+            CHECK(stop && nonet && stop < nonet,
+                  "stay-down path stops the radio so a late AP_START cannot leave an unjoinable AP");
+            const char *clr = nonet ? strstr(nonet, "recovery_health_clear_wifi();") : NULL;
+            CHECK(clr != NULL, "stay-down clears the wifi restart count after the decision");
+        }
+        free(st);
     }
     // M2: a distinct error string for every bring-up failure path.
     static const char *const errs[] = {"netif_init_fail", "event_loop_fail", "wifi_init_fail",
