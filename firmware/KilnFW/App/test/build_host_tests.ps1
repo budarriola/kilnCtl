@@ -1532,6 +1532,16 @@ try {
             "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
     Invoke-HostTestExe -Name "kiln_io_sx_fake" -ExePath $exeKsx -BuildCmd $cmdKsx
 
+    # ---- test_sx1509_reset_first.c: SX1509_start() pulses ~RESET before any I2C (boot audit MED-2)
+    $exeSrf = Join-Path $outDir "kilnctl_host_tests_sx1509_reset_first.exe"
+    $srfObjDir = Join-Path $outDir "srf"
+    New-Item -ItemType Directory -Force -Path $srfObjDir | Out-Null
+    $cmdSrf = "cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_SX1509_I2C_ADDR=0x3E " +
+            "/Fo:`"$srfObjDir\\`" /Fe:`"$exeSrf`" " +
+            "`"$(Join-Path $testDir 'test_sx1509_reset_first.c')`" " +
+            "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+    Invoke-HostTestExe -Name "sx1509_reset_first" -ExePath $exeSrf -BuildCmd $cmdSrf
+
     # ---- test_dashboard_http_relay.c: dashboard_set_relay() mapping + dashboard_http_get_safety_trip() (R2-E)
     $exeDhr = Join-Path $outDir "kilnctl_host_tests_dashboard_http_relay.exe"
     $dhrObjDir = Join-Path $outDir "dhr"

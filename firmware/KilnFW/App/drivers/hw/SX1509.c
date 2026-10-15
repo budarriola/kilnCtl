@@ -528,9 +528,41 @@ esp_err_t SX1509_deinit(SX1509Class *e)
     return err;
 }
 
+esp_err_t SX1509_pulse_reset_pin(int gpio)
+{
+    if (gpio < 0) return ESP_OK;
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio)) return ESP_ERR_INVALID_ARG;
+    /* Level register first so ~RESET never glitches low on the way to an output. */
+    gpio_set_level((gpio_num_t)gpio, 1);
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << gpio,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "~RESET GPIO%d config failed: %s -- expander not reset", gpio,
+                 esp_err_to_name(err));
+        return err;
+    }
+    gpio_set_level((gpio_num_t)gpio, 0);
+    esp_rom_delay_us(SX1509_RESET_PULSE_US);
+    gpio_set_level((gpio_num_t)gpio, 1);
+    vTaskDelay(pdMS_TO_TICKS(SX1509_RESET_RECOVERY_MS));
+    return ESP_OK;
+}
+
 esp_err_t SX1509_start(SX1509Class *e, i2c_master_bus_handle_t bus)
 {
     if (!e || !bus) return ESP_ERR_INVALID_ARG;
+
+    /* Hardware reset FIRST, before any I2C access: if the probe below misses
+     * (a slave wedged mid-transfer, one timeout) the expander would otherwise
+     * keep the relay latches a previous run left energized for the whole boot
+     * (docs/audits/AUDIT_BOOT_SEQUENCE.md MED-2). Needs no bus. */
+    (void)SX1509_pulse_reset_pin(SX1509_RESET_IO);
 
     /* Probe before committing to the address: an absent part turns every
      * subsequent transfer into a NACK that i2c_owner answers with a bus reset

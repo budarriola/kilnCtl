@@ -373,6 +373,9 @@ void main_boot_early(main_boot_ctx_t *ctx)
         ESP_LOGE(MAIN_TAG, "i2c_new_master_bus failed: %s -- no expander, no relays, no display",
                  esp_err_to_name(i2c_err));
         ctx->i2c_bus = NULL;
+        // No bus means SX1509_start() never runs, so pulse ~RESET here: a warm
+        // restart must not leave relays latched ON (AUDIT_BOOT_SEQUENCE MED-2).
+        (void)SX1509_pulse_reset_pin(SX1509_RESET_IO);
     }
 
     // --- SX1509 expander + the board layer over it -------------------------

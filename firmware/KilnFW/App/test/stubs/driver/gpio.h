@@ -70,9 +70,19 @@ static inline int gpio_get_level(gpio_num_t gpio)
  * needs -- no cross-TU definition to link. */
 static int g_stub_gpio_set_level_calls = 0;
 
+/* Optional observer for a test that must see gpio_set_level() calls in order
+ * against other events (test_sx1509_reset_first.c). selectany merges the one
+ * definition across every TU, so tests that never set it need no extra link
+ * input. */
+#ifdef _MSC_VER
+__declspec(selectany) void (*g_stub_gpio_level_hook)(int gpio, int level) = 0;
+#else
+__attribute__((weak)) void (*g_stub_gpio_level_hook)(int gpio, int level) = 0;
+#endif
+
 static inline esp_err_t gpio_set_level(gpio_num_t gpio, int level)
 {
-    (void)gpio; (void)level;
+    if (g_stub_gpio_level_hook) g_stub_gpio_level_hook((int)gpio, level);
     g_stub_gpio_set_level_calls++;
     return ESP_OK;
 }
