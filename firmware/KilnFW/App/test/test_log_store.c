@@ -423,6 +423,26 @@ static void test_torn_manifest_recovers_from_other_copy(void)
     TEST_CHECK(log_store_segment_count(kind) == 0, "an unterminated (half-written) copy is not trusted");
 }
 
+// With both copies complete, the higher sequence number wins in either slot.
+static void test_manifest_highest_sequence_wins(void)
+{
+    TEST_SECTION("log_store: both manifest copies valid -- the higher sequence wins (LOW-4)");
+    const char *base = "log_store_test_manifest_seq";
+    log_store_kind_t kind = LOG_STORE_KIND_FIRING;
+    reset_scratch_dir(base, kind, 13);
+    char pa[600], pb[600];
+    snprintf(pa, sizeof(pa), "%s/firing.manifest.a", base);
+    snprintf(pb, sizeof(pb), "%s/firing.manifest.b", base);
+    write_raw(pa, "0 0 1 5 #\n", 10);
+    write_raw(pb, "0 2 1 9 #\n", 10);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "init");
+    TEST_CHECK(log_store_segment_count(kind) == 3, "copy b (seq 9) wins over copy a (seq 5)");
+    write_raw(pa, "0 2 1 9 #\n", 10);
+    write_raw(pb, "0 0 1 5 #\n", 10);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "re-init");
+    TEST_CHECK(log_store_segment_count(kind) == 3, "copy a (seq 9) wins over copy b (seq 5)");
+}
+
 // ---------------------------------------------------------------------
 // AUDIT_LOGSTORE_TIME LOW-5: a torn tail must never have records appended after it.
 // ---------------------------------------------------------------------
@@ -474,6 +494,7 @@ static void test_torn_tail_starts_new_segment(void)
 void run_test_log_store(void)
 {
     test_torn_manifest_recovers_from_other_copy();
+    test_manifest_highest_sequence_wins();
     test_torn_tail_starts_new_segment();
     test_rotation_bounds_size();
     test_full_filesystem_degrades_safely();
