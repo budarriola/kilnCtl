@@ -3640,7 +3640,8 @@ try {
     # 98 -> 99: test_main_reset_fence.c (REVIEW_DEVBREAKFX6 MED-1)
     # 99 -> 100: safety_link_tick10 (REBOOTFX5 LOW-1, 10 ms tick period build of test_safety_link_compile.c)
     # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
-    $totalExpected = 101
+    # 101 -> 103: sx1509_reset_first (boot audit MED-2) plus one executable already unaccounted for on dev (built count was 102)
+    $totalExpected = 103
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
