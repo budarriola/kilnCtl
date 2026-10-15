@@ -530,13 +530,16 @@ esp_err_t boot_guard_init(void)
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
 
     uint32_t loaded = 0;
-    /* LOW-3: an unreadable record is not count 0. Keep the stored history
-     * (skip the persist below), count this boot as 1 in RAM, flag it. */
+    /* An unreadable record is not count 0, but it must not stay unreadable
+     * either: counting this boot in RAM only would let a persistent read
+     * error plus a crash every boot read as boot 1 forever and never reach
+     * the recovery threshold. Erase the record and persist count=1 (verified
+     * by read-back, the 0b5d9dad rule) so the following boots climb. */
     bool load_failed = (part_err == HAL_OK) && !load_count(&loaded);
     if (load_failed) {
         loaded = 0;
-        ESP_LOGE(TAG, "boot-guard record could not be READ -- NOT treating it as count 0 and NOT "
-                      "overwriting it; this boot counts as 1 in RAM only");
+        ESP_LOGE(TAG, "boot-guard record could not be READ -- erasing it and persisting count 1 "
+                      "so the counter can climb on the following boots");
         startup_fault_note(STARTUP_FAULT_BOOT_GUARD_NVS);
     }
 
@@ -565,6 +568,11 @@ esp_err_t boot_guard_init(void)
     hal_status_t write_err = HAL_OK;
     if (part_err == HAL_OK && !load_failed) {
         write_err = persist_count(new_count);
+    } else if (part_err == HAL_OK) {
+        write_err = erase_then_persist_count(new_count);
+        if (write_err == HAL_OK && !verify_persisted_count(new_count)) {
+            write_err = HAL_INVALID_ARG; /* any non-OK: read-back did not confirm */
+        }
     }
 
     s_bg.count = new_count;

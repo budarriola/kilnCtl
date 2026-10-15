@@ -109,3 +109,29 @@ from a test assertion failing, not from a build failure.
   A10 republish, A11 bad-read S8 accounting and A15 calibration copy are correct and covered by
   tests. The boot_guard soak gate (30 s after boot complete), the HAL_INVALID_SIZE rewrite, the
   autotune measurement abort and `pid_reseed_derivative` were also checked and look correct.
+
+## Resolution (rvallfx)
+
+- **M1 fixed** (boot_guard.c `boot_guard_init`): an unreadable record is now erased and count=1 is
+  persisted through `erase_then_persist_count()`, verified by `verify_persisted_count()` read-back (the
+  0b5d9dad rule), so a persistent read error plus a crash every boot climbs to the recovery threshold.
+  Test: `test_unreadable_record_not_collapsed_to_zero` now asserts persisted==1 and boot 2 counts 2.
+- **L1 fixed** (web_auth_store.c): a store mutex covers the final epoch re-check plus the NVS write in
+  `set_password`, and the whole bump/impl/bump of both wipes. The KDF stays outside the lock.
+- **L2 fixed**: `set_pin` captures the epoch before loading and re-checks it under the same lock.
+  Test: `test_setters_recheck_epoch_under_store_lock`.
+- **L3 fixed** (http_session_iface.c): every table access first measures the 64-bit `hal_time_now_ms()`
+  gap since the previous access. A gap of 2^31 ms or more with a finite timeout clears the table (the
+  read-only AP check treats it as no active session), so a 32-bit tick wrap can no longer revive a session.
+  Test: `test_session_expired_after_idle_longer_than_tick_wrap`.
+- **L4 fixed** (MAX31856.c): the SPI_ERROR path no longer clears `live_suspect`; it now matches the
+  lock-failure path (suspect kept across transient errors). Test extended in `test_max31856_hal_spi.c`.
+- **L5 not changed, documented.** `vTaskDeleteWithCaps(NULL)` is required for the PSRAM-stack tasks (a
+  plain `vTaskDelete` would free the stack with the wrong allocator). A pre-allocated reaper cannot be
+  injected into the IDF 6.0.2 self-delete path, and blocking forever would leak the task and its stack.
+  The cleanup task needs only a `configMINIMAL_STACK_SIZE` stack plus a TCB from internal RAM, far below the
+  owner-set 8 KB internal-RAM floor (heap_internal min_free >= 8192), so under that floor the create
+  cannot fail; below the floor the board is already in the shed-load regime. Most sites are
+  defensive/one-shot.
+
+Negtest (rvallfx): compiled mutants for M1, L1, L2, L3, L4 each CAUGHT by a failing assertion. Removing the store lock itself is not detectable in the single-threaded host build; the epoch re-check under it is what the tests pin.

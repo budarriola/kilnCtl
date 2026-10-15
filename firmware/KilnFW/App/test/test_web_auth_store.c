@@ -1009,6 +1009,42 @@ static void test_set_password_refuses_after_wipe_during_hash(void)
                "with no wipe in the window the set succeeds");
 }
 
+// REVIEW_ALL_FIXES L1/L2: a wipe that lands after the KDF but before the setter
+// takes the store lock (the old unlocked check-then-write window) and a PIN
+// set racing a wipe must both be refused.
+static void test_setters_recheck_epoch_under_store_lock(void)
+{
+    TEST_SECTION("set_password/set_pin: wipe between KDF and write is refused (epoch re-checked under the lock)");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "OldPassword12", SALT_A, false) == HAL_OK,
+               "setup: admin password configured");
+    g_web_auth_store_test_pre_lock_hook = hook_clear_all_mid_kdf;
+    hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "NewPassword34", SALT_B, false);
+    g_web_auth_store_test_pre_lock_hook = NULL;
+    TEST_CHECK(st != HAL_OK && !web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+               "password: a wipe landing at the lock is not overwritten");
+
+    reset_all();
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "13579", SALT_A) == HAL_OK, "setup: pin set");
+    g_psa_stub_mac_hook = hook_clear_all_mid_kdf;
+    st = web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "24680", SALT_B);
+    g_psa_stub_mac_hook = 0;
+    TEST_CHECK(st != HAL_OK, "set_pin refuses when a wipe ran during its hash");
+    TEST_CHECK(!web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "the wipe stands: no PIN re-installed");
+    TEST_CHECK(!web_auth_store_verify_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "24680"), "the new PIN does not verify");
+
+    reset_all();
+    g_web_auth_store_test_pre_lock_hook = hook_clear_all_mid_kdf;
+    st = web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "24680", SALT_B);
+    g_web_auth_store_test_pre_lock_hook = NULL;
+    TEST_CHECK(st != HAL_OK && !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+               "pin: a wipe landing at the lock is not overwritten");
+
+    reset_all();
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "24680", SALT_B) == HAL_OK, "no wipe: PIN set succeeds");
+    TEST_CHECK(s_cred_store_busy == 0u, "the store lock is released after every path");
+}
+
 int main(void)
 {
     test_crc32_vector();
@@ -1018,6 +1054,7 @@ int main(void)
     test_hash_compute_pinned_vectors();
     test_set_verify_password();
     test_set_password_refuses_after_wipe_during_hash();
+    test_setters_recheck_epoch_under_store_lock();
     test_username_exactly_max_length();
     test_verify_password_timing_oracle_closed();
     test_set_verify_pin();

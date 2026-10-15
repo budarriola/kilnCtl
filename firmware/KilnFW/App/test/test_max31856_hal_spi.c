@@ -202,10 +202,16 @@ static void test_live_check_reconfig(MAX31856BusClass *bus, MAX31856Class *ch)
     t += MAX31856_LIVE_CHECK_INTERVAL_MS + MAX31856_LIVE_RECHECK_MS;
     script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
     TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "mismatch again -> SUSPECT (not stale-confirmed)");
+    /* REVIEW_ALL_FIXES L4: an unreadable re-check keeps the suspect stage (as the
+     * lock-failure path does), so the next mismatch confirms instead of restarting. */
     t += MAX31856_LIVE_RECHECK_MS;
+    fake_spi_inject_enqueue_timeout(&bus->hal_bus, 1);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SPI_ERROR, "re-check with a failed SPI read -> SPI_ERROR");
+    TEST_CHECK(ch->live_suspect, "an SPI error keeps the suspect stage");
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS; /* the error rescheduled the next check a full interval out */
     n = fake_spi_transfer_count();
     script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
-    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "second consecutive mismatch -> reconfigured");
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "mismatch after an SPI error still confirms (suspect survived the error) -> reconfigured");
     TEST_CHECK(ch->live_mismatch_count == 1u, "mismatch counted");
     TEST_CHECK(fake_spi_transfer_count() == n + 1 + 4, "one read-back plus stop/CR1/MASK/CR0 writes");
     const fake_spi_transfer_record_t *last = fake_spi_transfer(n + 4);

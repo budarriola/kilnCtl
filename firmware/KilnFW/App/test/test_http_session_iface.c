@@ -594,7 +594,28 @@ static void test_expired_session_does_not_revive_after_tick_wrap(void)
                "touch cannot resurrect it at +2^32 ms");
 }
 
+// REVIEW_ALL_FIXES L3: a table idle ~50 days (past the 32-bit ms wrap) must not
+// treat an expired session as fresh again.
+static void test_session_expired_after_idle_longer_than_tick_wrap(void)
+{
+    TEST_SECTION("session idle 2^32 ms + 2 s (32-bit ms wrapped) is not revived");
+    reset_all();
+    set_policy_timeout(3600);
+    make_session("tok-wrap-1", WEB_AUTH_SESSION_ROLE_USER, 0);
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    uint32_t last_seen = 0, timeout_s = 0;
+    TEST_CHECK(http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "the session is valid while fresh (also records the access time)");
+    /* Idle 2^32 ms + 2 s: the wrapped 32-bit elapsed time is only 2 s, inside the 3600 s timeout. */
+    fake_time_advance_ms(0x7FFFFFFFu);
+    fake_time_advance_ms(0x7FFFFFFFu);
+    fake_time_advance_ms(2002u);
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "after a tick-wrap-length idle the session is expired, not revived by the wrapped 32-bit difference");
+}
+
 void run_test_http_session_iface(void) {
+    test_session_expired_after_idle_longer_than_tick_wrap();
     test_expired_session_does_not_revive_after_tick_wrap();
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();

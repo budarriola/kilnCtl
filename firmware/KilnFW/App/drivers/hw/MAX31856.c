@@ -1477,7 +1477,8 @@ MAX31856LiveCheckResult MAX31856_live_check(MAX31856Class *ch, uint32_t now_ms)
     uint8_t live[3]; /* CR0, CR1, MASK */
     esp_err_t err = max31856_read_burst(ch, MAX31856_REG_CR0, live, sizeof(live));
     if (err != ESP_OK) {
-        ch->live_suspect = false; /* an unreadable re-check confirms nothing */
+        /* REVIEW_ALL_FIXES L4: an unreadable re-check confirms nothing, but it also refutes
+         * nothing: keep the suspect stage, same as the lock-failure path above. */
         max31856_unlock(ch);
         return MAX31856_LIVE_SPI_ERROR;
     }

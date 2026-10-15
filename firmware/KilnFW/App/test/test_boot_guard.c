@@ -1030,9 +1030,12 @@ static void test_unreadable_record_not_collapsed_to_zero(void)
     boot_guard_init();
     TEST_CHECK(boot_guard_get_boot_count() == 1u, "unreadable record: counted as 1 in RAM only");
     uint32_t after = 0;
-    TEST_CHECK(boot_guard_get_persisted_count(&after), "record readable again");
-    TEST_CHECK(after == 2u,
-               "READ ERROR must not overwrite the stored history with a fabricated count (was collapsed to 0 -> 1)");
+    TEST_CHECK(boot_guard_get_persisted_count(&after), "record readable again"); printf("DBG after=%lu ok\n",(unsigned long)after);
+    TEST_CHECK(after == 1u,
+               "READ ERROR: the record is erased and count 1 persisted so the counter can climb (was RAM-only)");
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(boot_guard_get_boot_count() == 2u, "the counter climbs after an unreadable-record boot");
 }
 
 /* REVIEW_OTA_BOOT_FIXES LOW-1: a stored blob LARGER than the record (HAL_INVALID_SIZE,
