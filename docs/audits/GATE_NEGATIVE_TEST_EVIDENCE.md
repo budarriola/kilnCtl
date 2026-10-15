@@ -85,6 +85,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_safety_fault_hold_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | 300u to 350u | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_safety_link_status_producers.ps1` | NEGATIVE-TESTED | rest-10-08 | new field added to the struct | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_sdkconfig_defaults_applied.ps1` | NEGATIVE-TESTED | rest-10-08 | fabricated sdkconfig with stale RX_BA_WIN FAIL; defaults missing watched key FAIL; real sdkconfig PASS | hand test |
+| `firmware/KilnFW/App/test/check_sdkconfig_pin_guards.ps1` | NEGATIVE-TESTED | xipfx-10-14 | negtest.ps1 -Preset check: dropped check_00 pin call, dropped pin-check main/build fallback, dropped make_release pre/post asserts: each CAUGHT by a FAIL case | negtest.ps1 |
 | `firmware/KilnFW/App/test/check_setup_wizard_step_count_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | SETUP_WIZARD_STEP_COUNT 12 to 13 | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_setup_wizard_zones_post_helper.ps1` | NEGATIVE-TESTED | rest-10-08 | second fetch(/api/zones line added | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_sim_iter_tune_bars.ps1` | REVIEWED, NOT MUTATED | 09-18 | left alone as settled (A8 cross-profile bar deliberately outside its exit code) | no mutation |
