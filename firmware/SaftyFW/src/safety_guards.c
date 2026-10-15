@@ -401,6 +401,19 @@ bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg
         return false;
     }
 
+    /* SAFETYFW_GUARDS audit 2026-10-14 A4: refuse while S9's evidence is still
+     * accumulating. K4 has been commanded open (s9_verify_active) and a calibrated
+     * current chain still sees current, or the consecutive-tick streak toward the
+     * unclearable latch has already started. Granting the clear here would leave the
+     * tripped path before S9 finishes, re-arming a possibly welded K4. Independent of
+     * the latched reason; refusal only, so it can only keep a guard watching. An
+     * uncommissioned or disabled chain is excluded (S9 only warns there, see below). */
+    if (state->is_tripped && !in->current_sensing_disabled &&
+        ((state->s9_verify_active && in->any_current_present && in->current_sensing_commissioned) ||
+         state->s9_current_present_streak > 0u)) {
+        return false;
+    }
+
     /* Refuse before touching any accumulator at all, for the guards whose
      * trip condition is a plain level this tick's `in` (and, for S11, the
      * not-yet-zeroed `state`) already answers -- see

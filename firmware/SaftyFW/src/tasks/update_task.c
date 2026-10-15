@@ -1466,6 +1466,15 @@ static void update_task_confirm_tick(void)
     }
 }
 
+// Guard audit 2026-10-14 A1: S9 TRIP_INEFFECTIVE (welded K4) latched? A reboot clears
+// every latch at boot, so REBOOT/ROLLBACK refuse while this is true.
+static bool update_task_s9_latched(void)
+{
+    safety_trip_t reason = SAFETY_TRIP_NONE;
+    safety_core_get_diag_status(&reason, NULL, NULL, NULL);
+    return reason == SAFETY_TRIP_INEFFECTIVE;
+}
+
 // --- Explicit rollback (SAFETY_CMD_ROLLBACK, 0x17) --------------------------
 //
 // tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
@@ -1499,14 +1508,9 @@ bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_c
     // is armed.
     bool relay_energized = false;
     safety_core_get_output_status(&relay_energized, NULL);
-    if (relay_energized) {
-        if (out_reason) {
-            *out_reason = "refused: relay is ARMED, rollback is refused while ARMED "
-                          "(same gate as config writes)";
-        }
-        if (out_reason_code) {
-            *out_reason_code = KILNLINK_ROLLBACK_RESULT_REASON_ARMED;
-        }
+    // Guard audit 2026-10-14 A1: also refuse while S9 TRIP_INEFFECTIVE is latched.
+    if (!update_task_rollback_gate_decide(relay_energized, update_task_s9_latched(), out_reason,
+                                          out_reason_code)) {
         return false;
     }
 
@@ -1641,7 +1645,7 @@ bool update_task_reboot_allowed(const char **out_reason, uint8_t *out_reason_cod
     // Refusing costs the operator one retry after the update finishes;
     // accepting costs a half-written firmware slot.
     return update_task_reboot_policy_decide(relay_energized, update_task_transfer_active(),
-                                            out_reason, out_reason_code);
+                                            update_task_s9_latched(), out_reason, out_reason_code);
 }
 
 void update_task_reboot_now(void)

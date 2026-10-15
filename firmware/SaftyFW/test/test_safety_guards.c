@@ -5257,8 +5257,92 @@ static void test_s8_clear_followups(void)
     }
 }
 
+/* SAFETYFW guard audit 2026-10-14 A4: a clear must not land while S9's evidence is still
+ * accumulating (K4 commanded open, calibrated chain still sees current). */
+static void test_a4_clear_refused_during_s9_evidence(void)
+{
+    TEST_SECTION("A4: CLEAR_TRIP refused while S9 evidence accumulates");
+    /* Early: K4 open for 3 ticks, current present, trip_verify_s not yet elapsed. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.any_current_present = true;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 3; i++) {
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(s.is_tripped && !s.trip_ineffective, "precondition: tripped, S9 not yet latched");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &v),
+                   "A4: clear refused while K4 open and current present (verify window running)");
+        TEST_CHECK(s.is_tripped, "A4: refused clear leaves the trip latched");
+    }
+    /* Inside the streak: verify window elapsed, streak started but not yet at the latch. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.any_current_present = true;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 10; i++) { /* 10 s == trip_verify_s default */
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(s.is_tripped && !s.trip_ineffective && s.s9_current_present_streak > 0u,
+                   "precondition: inside the S9 streak, not yet latched");
+        safety_guard_input_t gone = v;
+        gone.any_current_present = false; /* current vanishes the instant the clear arrives */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &gone),
+                   "A4: clear refused while the S9 streak counter is non-zero");
+    }
+    /* Controls: no current -> clear granted; uncommissioned chain -> not blocked by A4. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 12; i++) {
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &v), "A4 control: K4 open, no current -> clear granted");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.any_current_present = true;
+        v.current_sensing_commissioned = false;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 3; i++) {
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &v),
+                   "A4 control: uncommissioned chain (S9 only WARNs) is not blocked by the A4 refusal");
+    }
+}
+
 void run_test_safety_guards(void)
 {
+    test_a4_clear_refused_during_s9_evidence();
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
     test_test_clear_s8_streak_zero_elapsed();
