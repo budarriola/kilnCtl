@@ -973,6 +973,7 @@ static void test_soak_elapsed_ms_saturates(void)
     TEST_CHECK(boot_guard_soak_elapsed_ms(5u, 0xFFFFFFFBu, 1u) == 10, "SOAK ELAPSED: tick wrap is a small delta");
     TEST_CHECK(boot_guard_soak_elapsed_ms(0x90000000u, 1u, 1u) == INT32_MAX, "SOAK ELAPSED: >24.8 d saturates, never negative");
     TEST_CHECK(boot_guard_soak_elapsed_ms(1000000u, 0u, 10u) == 10000000, "SOAK ELAPSED: tick_ms scales");
+    TEST_CHECK(boot_guard_soak_elapsed_ms(500000000u, 0u, 10u) == INT32_MAX, "SOAK ELAPSED: tick_ms product past 2^32 saturates, never wraps");
 }
 
 static void test_boot_complete_signal_and_withhold(void)
