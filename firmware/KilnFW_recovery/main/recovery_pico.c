@@ -17,8 +17,10 @@
 //    application is, by definition, not what we just replaced.)
 //  - Recovery never sends CLEAR_TRIP; a refusal (relay closed, trip pending,
 //    too hot) is reported with its reason and nothing else.
-//  - GPIO6 is never driven. UART1 uses only TX GPIO5 / RX GPIO4 and is
-//    installed for the length of a transfer, then deleted and the pins reset.
+//  - GPIO6 (fault line) is driven low at boot by recovery_keepalive.c. UART1
+//    (TX GPIO5 / RX GPIO4) is owned by recovery_keepalive.c, which sends a
+//    periodic inert frame between transfers; this relay borrows it for a
+//    transfer (recovery_keepalive_acquire/release).
 #include "recovery_pico.h"
 
 #include <stdarg.h>
@@ -36,6 +38,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "recovery_keepalive.h"
 #include "recovery_pico_proto.h"
 
 static const char *TAG = "rec_pico";
@@ -446,37 +449,16 @@ static bool send_chunk_paced(relay_t *r, uint32_t index)
 
 // --- UART ---------------------------------------------------------------------
 
+// UART1 is owned by recovery_keepalive.c for the image's lifetime (it feeds the
+// Pico's S6b link-dead timer between transfers); the relay borrows it.
 static bool uart_open(void)
 {
-    uart_config_t cfg = {
-        .baud_rate = PICO_BAUD,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    if (uart_driver_install(PICO_UART, PICO_RX_BUF, 0, 0, NULL, 0) != ESP_OK) {
-        return false;
-    }
-    if (uart_param_config(PICO_UART, &cfg) != ESP_OK ||
-        uart_set_pin(PICO_UART, PICO_TX_GPIO, PICO_RX_GPIO, UART_PIN_NO_CHANGE,
-                     UART_PIN_NO_CHANGE) != ESP_OK) {
-        uart_driver_delete(PICO_UART);
-        return false;
-    }
-    uart_flush_input(PICO_UART);
-    return true;
+    return recovery_keepalive_acquire();
 }
 
 static void uart_close(void)
 {
-    uart_wait_tx_done(PICO_UART, pdMS_TO_TICKS(200));
-    uart_driver_delete(PICO_UART);
-    // Back to plain high-impedance inputs, as the board boots. GPIO6 is never
-    // configured by this module.
-    gpio_reset_pin(PICO_TX_GPIO);
-    gpio_reset_pin(PICO_RX_GPIO);
+    recovery_keepalive_release();
 }
 
 // --- the transfer -----------------------------------------------------------------

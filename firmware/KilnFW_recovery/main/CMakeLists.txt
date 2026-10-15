@@ -20,6 +20,7 @@ idf_component_register(
         "recovery_upload.c"
         "recovery_pico_proto.c"
         "recovery_pico.c"
+        "recovery_keepalive.c"
         "recovery_lcd.c"
         "recovery_io.c"
         "recovery_text.c"

@@ -207,6 +207,16 @@ size_t rpp_pack_get_status(uint8_t *payload)
     return 1;
 }
 
+size_t rpp_pack_keepalive(uint8_t *payload)
+{
+    return rpp_pack_get_status(payload);
+}
+
+bool rpp_keepalive_active(uint32_t uptime_ms)
+{
+    return uptime_ms < RPP_KEEPALIVE_MAX_MS;
+}
+
 size_t rpp_pack_begin(uint8_t *payload, uint32_t length, uint32_t crc32, const char *version)
 {
     // 36-byte header, ota_pico_relay.c's layout: magic "SAFU" u32 LE, target 1
