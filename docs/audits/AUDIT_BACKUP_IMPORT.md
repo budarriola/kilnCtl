@@ -175,3 +175,17 @@ Verified sound, no finding:
    (LOW-2).
 4. A profile save, aux POST or update-settings POST while `s_backup_restore_in_flight`
    is set, expecting 409 (LOW-3).
+
+## Resolution
+
+- **MED-1 fixed** (2026-10-14). Pass 1a in `backup_import.c` now builds a per-zone
+  `post_import_ramp_ceiling[]` before the ramp feasibility loop: the backup's own
+  `zones[].max_ramp_c_per_hr` first, else the target slot's stored value when the topology is being
+  applied (new `zones_config_peek_slot_max_ramp_c_per_hr()`, modeled on
+  `zones_config_peek_slot_max_temp_c()`), else the live value. No other import behavior changed;
+  the Pico `abs_max` ceiling path is untouched.
+- **Test.** `test_backup_ramp_precheck_uses_post_import_ceiling` in `test_backup_import.c` uses
+  differing ceilings: backup raises above live (accepted), backup lowers below its own profile
+  (clean 400, no writes), v7 restore onto an unconfigured board (accepted), slot ceiling 80 vs 30,
+  live fallback when the backup is silent. Negative tests (dropping the backup override, the slot
+  step, the live step) are each CAUGHT by compiled mutants with failing assertions.
