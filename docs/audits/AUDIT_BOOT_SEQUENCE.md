@@ -237,3 +237,43 @@ failure costs one count, not a brick.
    `check_*.ps1` source-order guard like `test_flash_worker_boot_order.c` would do.
 5. `monitor_task_start()` failure is not covered as a reset-loop cause anywhere (MED-1,
    scenario 1).
+
+## Resolution (bootfx, 2026-10-14)
+
+MED-1 fixed. `boot_confirm_step()` (drivers/persist/boot_guard.c) gained a sixth injected op,
+`ms_since_boot_complete`. It returns a negative value until `boot_guard_boot_complete()` is true,
+then the ms since the confirm task first saw that. Until it reaches `BOOT_CONFIRM_SOAK_MS`
+(30000) the step stays PENDING: no mark-valid and no `boot_guard_mark_healthy()` clear. The
+existing health conditions, the otadata read-back retry and the verified-clear logic are
+unchanged. A NULL op fails closed (PENDING forever).
+
+- Signal: `boot_guard_boot_complete_signal()` is the last statement of `main_bridges_bringup()`,
+  after `main_heap_stage("app_main_done")`, so kiln_cfg_store_init, uart_owner,
+  monitor_task_start and the bridges have all run.
+- Withhold: when `monitor_task_start()` fails, `main_network_http.c` calls
+  `boot_guard_confirm_withhold()`; `boot_guard_boot_complete()` is then false for the whole boot,
+  so the image is never confirmed. Nothing feeds the RTC watchdog in that case, the chip resets
+  about 20 s after arming, the boot_guard counter keeps climbing and the board reaches recovery
+  at `RECOVERY_MODE_BOOT_THRESHOLD`. Both flags are cleared by `boot_guard_init()`.
+- Soak: 30 s. `RTC_WATCHDOG_TIMEOUT_MS` is 20000 (rtc_watchdog.h, armed in main_boot_early.c,
+  fed only by monitor_task), so 30 s leaves a 10 s margin: a boot that lost its feeder resets
+  before the confirm can run. The test pins `BOOT_CONFIRM_SOAK_MS > 20000`.
+- Untouched: the `flash_firmware` externally triggered `boot_guard_reset` route.
+- recovery_enter / recovery_exit / post-update first boot: `recovery_exit` and the explicit reset
+  route still call the counter clear directly. A factory-partition boot still skips mark-valid but
+  now also waits for boot-complete plus soak before clearing the counter, so the clear lands about
+  30 s after app_main instead of at the first healthy poll. KilnFW_recovery is not touched.
+
+LOW-3 fixed. `load_count()` now returns bool and false only for a genuine read error (open or
+get error other than not-found, including the legacy namespace). Missing, wrong-size and
+bad-CRC records are still count 0 with a true return. On a read error `boot_guard_init()` logs
+an error, notes `STARTUP_FAULT_BOOT_GUARD_NVS`, does not call `persist_count()` (the stored
+history is kept intact) and counts this boot as 1 in RAM only.
+
+Tests (`test_boot_guard.c`): `test_boot_confirm_step_waits_for_boot_complete_and_soak`,
+`test_boot_complete_signal_and_withhold` (includes the monitor-start-failure case),
+`test_unreadable_record_not_collapsed_to_zero`. Negtested via `tools/negtest.ps1` (-Only
+boot_guard command, because the full kilnfw-host baseline on dev fails a hardcoded
+`$totalExpected = 101` vs 102 built): gate removed, soak removed, soak off by one, withhold
+ignored, init keeps flags, read error as zero, persist over unreadable record all CAUGHT by a
+failing assertion; removing the NULL-op guard is caught only by a crash.
