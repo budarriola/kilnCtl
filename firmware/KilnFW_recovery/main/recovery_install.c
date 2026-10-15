@@ -253,6 +253,10 @@ static void recover_task(void *arg)
         bool verifies = recovery_http_app_verifies();
         act = update_install_after_fail(s_recover.reason, s_recover.app_modified, verifies, request_attempts_left());
     }
+    // The verify took seconds: an operator apply or a Pico relay may have started meanwhile. Never switch or reset under it.
+    if (recovery_apply_busy() || recovery_pico_busy()) {
+        act = UPD_INST_AFTER_STAY;
+    }
     if (act == UPD_INST_AFTER_EXIT_APP) {
         // Same order as /api/recovery/exit: boot_guard (verified) first, then drop the request (the FAIL
         // result stays for the application to read), then the boot target.

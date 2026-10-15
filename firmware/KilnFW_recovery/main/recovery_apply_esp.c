@@ -183,7 +183,7 @@ static void apply_task(void *arg)
         esp_restart();
     }
     ESP_LOGE(TAG, "apply FAILED: %s (app %s)", recovery_apply_result_name(r),
-             s_prog.app_modified ? "was modified: stays in recovery, apply again" : "untouched");
+             s_prog.app_modified ? "was modified: install recovery restarts or exits" : "untouched");
     // Failure: stay in recovery with the stage intact. Allow a retry.
     s_running = false;
     vTaskDelete(NULL);
