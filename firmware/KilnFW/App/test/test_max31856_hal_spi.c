@@ -39,6 +39,7 @@ int g_test_count = 0;
 
 #include "MAX31856.h"
 #include "fake_spi.h"
+#include "control/thermo_channel_read.h"
 
 #define EXACT 0.0
 
@@ -87,6 +88,135 @@ static void check_channel(MAX31856BusClass *bus, MAX31856Class *ch, uint8_t i)
                  (unsigned)i, rec->cs_pin, cs_gpio);
         TEST_CHECK(rec->cs_pin == cs_gpio, msg);
     }
+}
+
+
+// ---- AUDIT_THERMOCOUPLE MED-1 --------------------------------------------
+
+static bool s_drdy_asserted;
+static bool test_drdy_provider(uint8_t channel, bool *out_asserted, void *ctx)
+{
+    (void)channel; (void)ctx;
+    *out_asserted = s_drdy_asserted;
+    return true;
+}
+
+static MAX31856Reading good_reading(void)
+{
+    MAX31856Reading r;
+    memset(&r, 0, sizeof(r));
+    r.tc_temperature_c = 500.0f;
+    r.cj_temperature_c = 25.0f;
+    r.continuous = true;
+    r.age_ms = 100u;
+    return r;
+}
+
+static void test_reading_ok_staleness(void)
+{
+    MAX31856Reading r = good_reading();
+    TEST_CHECK(thermo_reading_ok(&r), "fresh continuous reading is ok");
+    r.age_ms = MAX31856_CONTROL_MAX_AGE_MS;
+    TEST_CHECK(thermo_reading_ok(&r), "age exactly at the control bound is still ok");
+    r.age_ms = MAX31856_CONTROL_MAX_AGE_MS + 1u;
+    TEST_CHECK(!thermo_reading_ok(&r), "continuous reading older than the bound is NOT ok (frozen part)");
+    r.age_ms = MAX31856_READING_AGE_UNKNOWN;
+    TEST_CHECK(!thermo_reading_ok(&r), "continuous reading with no good conversion yet is NOT ok");
+    r.continuous = false;
+    TEST_CHECK(thermo_reading_ok(&r), "a normally-off/one-shot channel is not judged by age");
+    r = good_reading(); r.spi_failed = true;
+    TEST_CHECK(!thermo_reading_ok(&r), "spi_failed is not ok");
+    r = good_reading(); r.tc_temperature_c = NAN;
+    TEST_CHECK(!thermo_reading_ok(&r), "NaN is not ok");
+    r = good_reading(); r.fault_status = THERMO_FAULT_OPEN;
+    TEST_CHECK(!thermo_reading_ok(&r), "OPEN fault is not ok");
+}
+
+static void script_cfg_readback(MAX31856Class *ch, uint8_t cr0, uint8_t cr1, uint8_t mask)
+{
+    uint8_t rx[4] = { 0x00, cr0, cr1, mask };
+    TEST_CHECK(fake_spi_script_rx(&ch->dev, rx, sizeof(rx)) == HAL_OK, "script CR0..MASK read-back");
+}
+
+static void script_temp_burst(MAX31856Class *ch)
+{
+    uint8_t rx[7] = { 0x00, 0x19, 0x00, 0x3E, 0x80, 0x00, 0x00 };
+    TEST_CHECK(fake_spi_script_rx(&ch->dev, rx, sizeof(rx)) == HAL_OK, "script temperature burst");
+}
+
+static void test_live_check_reconfig(MAX31856BusClass *bus, MAX31856Class *ch)
+{
+    (void)bus;
+    MAX31856Config cfg;
+    MAX31856_config_default(&cfg);
+    cfg.auto_convert = true;
+    TEST_CHECK(MAX31856_configure(ch, &cfg) == ESP_OK, "configure channel (auto convert)");
+    TEST_CHECK(MAX31856_set_fault_mask(ch, MAX31856_DEFAULT_FAULT_MASK) == ESP_OK, "set fault mask");
+    TEST_CHECK(MAX31856_set_drdy_provider(bus, test_drdy_provider, NULL) == ESP_OK, "install DRDY provider");
+    const uint8_t c0 = ch->cr0_shadow, c1 = ch->cr1_shadow, m = ch->mask_shadow;
+    TEST_CHECK((c0 & MAX31856_CR0_CMODE) != 0, "shadow is auto-convert");
+
+    size_t n = fake_spi_transfer_count();
+    TEST_CHECK(MAX31856_live_check(ch, 1000u) == MAX31856_LIVE_NOT_DUE, "first call only arms the cadence");
+    TEST_CHECK(MAX31856_live_check(ch, 1000u + MAX31856_LIVE_CHECK_INTERVAL_MS - 1u) == MAX31856_LIVE_NOT_DUE,
+               "not due before the interval");
+    TEST_CHECK(fake_spi_transfer_count() == n, "no SPI traffic while not due");
+
+    uint32_t t = 1000u + MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, c0, c1, m);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_OK, "matching read-back -> OK");
+    TEST_CHECK(fake_spi_transfer_count() == n + 1, "exactly one read-back burst");
+    const fake_spi_transfer_record_t *rec = fake_spi_transfer(n);
+    TEST_CHECK(rec && rec->tx[0] == MAX31856_REG_CR0 && rec->tx_len == 4, "read-back burst starts at CR0, 3 registers");
+
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, (uint8_t)(c0 | MAX31856_CR0_ONESHOT | MAX31856_CR0_FAULTCLR), c1, (uint8_t)(m ^ 0xC0u));
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_OK,
+               "self-clearing CR0 bits and reserved MASK bits are not a mismatch");
+
+    /* A healthy channel with a fresh conversion on record before the reset. */
+    {
+        MAX31856Reading pre;
+        s_drdy_asserted = true;
+        script_temp_burst(ch);
+        TEST_CHECK(MAX31856_read(ch, &pre) == ESP_OK && thermo_reading_ok(&pre) && ch->has_good_result,
+                   "healthy channel reads ok with a good conversion on record");
+    }
+
+    /* Part power-on-reset: CR0 = 00h (normally off), CR1 = 03h, MASK = FFh. */
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    n = fake_spi_transfer_count();
+    script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "CR0 mismatch -> reconfigured");
+    TEST_CHECK(ch->live_mismatch_count == 1u, "mismatch counted");
+    TEST_CHECK(fake_spi_transfer_count() == n + 1 + 4, "one read-back plus stop/CR1/MASK/CR0 writes");
+    const fake_spi_transfer_record_t *last = fake_spi_transfer(n + 4);
+    TEST_CHECK(last && last->tx[0] == (0x80u | MAX31856_REG_CR0) && last->tx[1] == c0,
+               "final write restores CR0 (CMODE back on) from the shadow");
+    const fake_spi_transfer_record_t *w1 = fake_spi_transfer(n + 1);
+    TEST_CHECK(w1 && w1->tx[0] == (0x80u | MAX31856_REG_CR0) && (w1->tx[1] & MAX31856_CR0_CMODE) == 0,
+               "first write stops conversions");
+    TEST_CHECK(ch->cr0_shadow == c0 && ch->cr1_shadow == c1 && ch->mask_shadow == m, "shadows unchanged");
+
+    /* Invalid until a fresh post-reconfigure conversion. */
+    MAX31856Reading r;
+    s_drdy_asserted = false;
+    script_temp_burst(ch);
+    TEST_CHECK(MAX31856_read(ch, &r) == ESP_OK, "read after reconfigure");
+    TEST_CHECK(r.age_ms == MAX31856_READING_AGE_UNKNOWN, "age UNKNOWN until a fresh conversion");
+    TEST_CHECK(!thermo_reading_ok(&r), "reading is NOT ok before a fresh post-reconfigure conversion");
+    s_drdy_asserted = true;
+    script_temp_burst(ch);
+    TEST_CHECK(MAX31856_read(ch, &r) == ESP_OK, "read with DRDY asserted");
+    TEST_CHECK(thermo_reading_ok(&r), "reading is ok again after a fresh conversion");
+
+    /* CR1 and MASK mismatches alone also trigger it. */
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, c0, (uint8_t)(c1 ^ 0x10u), m);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "CR1 mismatch -> reconfigured");
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, c0, c1, (uint8_t)(m ^ 0x01u));
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "MASK mismatch -> reconfigured");
 }
 
 int main(void)

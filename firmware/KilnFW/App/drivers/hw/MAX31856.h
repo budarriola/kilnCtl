@@ -226,6 +226,11 @@ typedef struct {
      * This is the number a USER-FACING layer should judge freshness by --
      * see KILN_TEMP_STALE_AGE_MS below. */
     uint32_t age_ms;
+    /* True when the channel is in automatic (CMODE) conversion, i.e. a healthy
+     * part produces a new result every MAX31856_conversion_time_ms(). Control
+     * consumers apply MAX31856_CONTROL_MAX_AGE_MS only when this is set: a
+     * normally-off/one-shot channel legitimately goes without new results. */
+    bool continuous;
 } MAX31856Reading;
 
 /* "No new conversion this poll" vs "this number is too old to trust" are two
@@ -245,6 +250,25 @@ typedef struct {
  * times the slowest configured conversion, so a healthy kiln never trips it
  * and a genuinely wedged sensor trips it quickly. */
 #define KILN_TEMP_STALE_AGE_MS 10000u
+
+/* CONTROL's freshness bound (AUDIT_THERMOCOUPLE MED-1), deliberately much
+ * tighter than the UI's KILN_TEMP_STALE_AGE_MS. A continuously converting
+ * part yields a result every 100 ms (one sample) up to 410 ms (50 Hz, 16
+ * samples, the slowest steady-state figure here), and the first conversion
+ * after a reconfigure takes up to 785 ms (one-shot timing, 16 samples,
+ * 50 Hz). 3 s is > 3.8x the slowest of those, so a healthy channel never
+ * trips it, while a part that has power-on-reset into normally-off mode (and
+ * therefore reports a frozen number forever) is rejected within 3 s instead of
+ * open-loop heating for the dashboard's 10 s or longer. age_ms only advances
+ * on a fresh, non-NaN conversion, so a reader polling slower than the part
+ * converts is not penalized. */
+#define MAX31856_CONTROL_MAX_AGE_MS 3000u
+
+/* How often MAX31856_live_check() actually reads CR0/CR1/MASK back. The
+ * freshness bound above already makes a reset part read invalid within 3 s;
+ * this interval only bounds how long the channel then stays invalid before the
+ * part is reconfigured. 5 s costs one 4-byte SPI burst per channel per 5 s. */
+#define MAX31856_LIVE_CHECK_INTERVAL_MS 5000u
 
 /* age_ms when no good conversion has ever been seen -- deliberately far past
  * KILN_TEMP_STALE_AGE_MS so "never read" and "too old" need no special case
@@ -316,6 +340,12 @@ struct MAX31856Class {
      * last GOT. has_good_result is false until the first one. */
     bool has_good_result;
     TickType_t last_good_tick;
+
+    /* MAX31856_live_check() cadence/bookkeeping. live_armed is false until the
+     * first call, which only arms the clock (no SPI). */
+    bool live_armed;
+    uint32_t live_next_due_ms;
+    uint32_t live_mismatch_count; /* cumulative CR0/CR1/MASK mismatches seen */
 
     /* Last SR value that produced a WARN, so a permanently open thermocouple
      * logs once instead of once per auto-report tick. */
@@ -530,6 +560,29 @@ bool MAX31856_fault_pin_asserted(const MAX31856Class *ch);
  * (longer) 1-shot / first-auto-conversion figure over the steady-state
  * automatic one. Useful for pacing a poll loop or waiting out a one-shot. */
 uint32_t MAX31856_conversion_time_ms(MAX31856Class *ch, bool one_shot);
+
+/* Periodic configuration read-back (AUDIT_THERMOCOUPLE MED-1; modeled on
+ * SaftyFW's max31856_live_check.c). A MAX31856 that power-on-resets mid-run
+ * reverts to CR0 = 00h (normally off), MASK = FFh and stops converting, while
+ * this driver's shadows still describe the old configuration. Call with a
+ * monotonic millisecond clock; the first call per channel only arms the
+ * cadence, later calls do nothing until MAX31856_LIVE_CHECK_INTERVAL_MS has
+ * elapsed. When due it reads CR0/CR1/MASK in one burst and compares them with
+ * the shadows (self-clearing CR0 bits and the reserved MASK bits ignored). On
+ * a mismatch it rewrites the shadowed configuration (stop, CR1, MASK, CR0
+ * restored) and clears the channel's "good result" history, so readings carry
+ * age_ms = MAX31856_READING_AGE_UNKNOWN (and control treats them as not ok)
+ * until a fresh post-reconfigure conversion arrives. Holds only this
+ * channel's leaf lock, never a caller's module lock. An SPI error on the
+ * read-back is not a mismatch (the read path reports it). */
+typedef enum {
+    MAX31856_LIVE_NOT_DUE = 0,
+    MAX31856_LIVE_OK,
+    MAX31856_LIVE_RECONFIGURED,
+    MAX31856_LIVE_RECONFIG_FAILED,
+    MAX31856_LIVE_SPI_ERROR,
+} MAX31856LiveCheckResult;
+MAX31856LiveCheckResult MAX31856_live_check(MAX31856Class *ch, uint32_t now_ms);
 
 /* --- Raw register access (the wire's debug subcommands) ---------------- */
 
