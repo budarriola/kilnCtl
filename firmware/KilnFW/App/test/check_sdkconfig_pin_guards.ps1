@@ -83,8 +83,8 @@ $iPin = $c00.IndexOf("check_sdkconfig_defaults_applied.ps1")
 $iCopy = $c00.IndexOf("Copy-Item -LiteralPath `$MainSdkconfig")
 Expect "check_00 runs the pin check on `$MainSdkconfig before copying it" ($iPin -ge 0 -and $iCopy -gt $iPin -and $c00 -match '-SdkconfigPath \$MainSdkconfig')
 $rel = Get-Content -Raw -LiteralPath (Join-Path $repo "tools\make_release.ps1")
-Expect "make_release verifies the pins before the build" ($rel -match 'Assert-SdkconfigPins \$preSdk')
-Expect "make_release verifies the pins on the published build\sdkconfig" ($rel -match 'Assert-SdkconfigPins \$builtSdk')
+Expect "make_release verifies the pins before the build" ($rel -match 'if \(Test-Path -LiteralPath \$preSdk\) \{ Assert-SdkconfigPins \$preSdk')
+Expect "make_release verifies the pins on the published build/sdkconfig" ($rel -match 'if \(Test-Path -LiteralPath \$builtSdk\) \{ Assert-SdkconfigPins \$builtSdk')
 
 if ($failures.Count -gt 0) { Write-Host "CHECK FAILED: $($failures.Count) case(s)" -ForegroundColor Red; exit 1 }
 Write-Host "sdkconfig pin guards check passed"
