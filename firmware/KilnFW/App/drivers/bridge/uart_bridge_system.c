@@ -208,13 +208,16 @@ esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *ow
      * pointer past this function returning, and reads through it fresh on
      * every report (see stack_margin.h), so it must outlive the call. */
     static TaskHandle_t s_system_bridge_task_handle;
-    BaseType_t created = xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", 4096, &ctx, 5,
-                                                  &s_system_bridge_task_handle, tskNO_AFFINITY);
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(system_bridge_task, "system_uart_bridge", 4096, &ctx, 5,
+                                                         &s_system_bridge_task_handle, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_SYSTEM);
         return ESP_ERR_NO_MEM;
     }
-    /* Internal-only (plain xTaskCreatePinnedToCore(), no MALLOC_CAP_SPIRAM).
+    /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md): the factory-reset path
+     * writes flash but never mmaps (esp_core_dump_image_erase is an erase, not
+     * an image check). Pinned by tools/check_psram_task_stacks.ps1.
      * 4096 B, sized from a measured deepest path (3216 B, see
      * check_system_uart_bridge_stack_budget.py); the create literal and this
      * one are cross-checked by check_stack_margin_registration.ps1. */

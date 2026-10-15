@@ -359,3 +359,21 @@ stale-rule cleanup, not a breach.
   PSRAM httpd stack.
 
 **Counts:** HIGH 0, MED 4, LOW 5, INFO 4.
+
+## Resolution (2026-10-14, psramstk)
+
+Code-only change; no sdkconfig edits (another agent owns those). Bench not touched.
+
+**Task stacks moved to PSRAM** (`xTaskCreate...WithCaps`, `MALLOC_CAP_SPIRAM`, sizes unchanged; deleted with `vTaskDeleteWithCaps`): profile_executor 6144, profile_exec_wdt 6144, kiln_cfg_swap_worker 8192, screen_idle 6144, wifi_prov owner 4096, danger_mode 3072, system UART bridge 4096, two UART event tasks 3072 each (`hal_uart_esp.c`). Total about 43.9 KB (44,960 B) of internal heap stack no longer taken.
+
+**OTA chunk buffers merged:** `s_ota_pico_chunk` removed; the Pico staging path borrows `ota_http_esp_chunk_buf()` (requires capacity >= 4096). Both users run on the single httpd task and the Pico relay task never touches the buffer. Saves 4096 B of static internal bss.
+
+**mmap hazard:** only reachable path from a moved task was the dashboard's lazy flash-facts read. `dashboard_prime_flash_facts()` now runs from `app_main` before `main_boot_early()` and from `dashboard_http_start`; `dashboard_get_status()` no longer reads flash lazily (facts read unknown until primed).
+
+**Tooling:** `check_internal_alloc_allowlist.ps1` regex now also catches `heap_caps_*(... MALLOC_CAP_INTERNAL)`; allowlist regenerated with reasons. New `tools/check_psram_task_stacks.ps1` pins the 8 moved entry points to PSRAM creation and `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`.
+
+**Left internal, and why:** OTA/update tasks (ota_pico_relay, update_fetch, install/apply paths) reach `esp_ota_*`/`esp_image_*`; httpd_worker, bx_flash_worker and http_async_job can reach mmap-class calls via handlers; tasks whose stacks carry DMA buffers; core-dump related paths. Where reachability was unclear the task stays internal.
+
+**Numbers (KilnCtrl.elf, this tree):** `.dram0.data` 24,802 B + `.dram0.bss` 76,696 B. No same-base before ELF exists (older checkbuild ELFs predate the XIP change), so the static delta attributable here is the 4096 B chunk buffer; the stack savings are heap (runtime) and are not visible in `size`. Verify on the bench: `heap_internal` min_free must stay >= 8192 B, and executor timing with a PSRAM stack.
+
+**Follow-ups:** Wi-Fi TX buffer count (sdkconfig, other agent); the explicit `MALLOC_CAP_INTERNAL` heap sites now listed in the allowlist are candidates for a `persist_scratch_alloc` style PSRAM fallback; bench check of executor/UART latency.

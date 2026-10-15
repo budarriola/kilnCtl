@@ -780,7 +780,7 @@ TASKS = [
              r'xTaskCreatePinnedToCoreWithCaps\(task_entry,\s*"autotune_engine",\s*(\d+)')),
     dict(name="profile_exec_wdt", root="watchdog_task_entry",
          stack=lambda: extract_int_literal("drivers/control/profile_executor_start.c",
-             r'xTaskCreatePinnedToCore\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
     dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_esp.c",
              r'xTaskCreate\(ota_rollback_reboot_task,\s*"ota_rollback_reboot",\s*(\d+)')),
@@ -895,7 +895,7 @@ TASKS = [
              r'xTaskCreatePinnedToCoreWithCaps\(telemetry_log_task,\s*"telemetry_log",\s*(\d+)')),
     dict(name="danger_mode", root="danger_mode_task",
          stack=lambda: extract_int_literal("drivers/safety/danger_mode.c",
-             r'xTaskCreate\(danger_mode_task,\s*"danger_mode",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(danger_mode_task,\s*"danger_mode",\s*(\d+)')),
     dict(name="safety_owner_evt", root="hal_uart_esp_event_task",
          stack=lambda: extract_sdkconfig_macro("drivers/safety/safety_link.c",
              r'uart_owner_init\(&link->owner,.*?UART_OWNER_STACK_SIZE',
@@ -950,7 +950,7 @@ TASKS = [
          extra_roots=_LVGL_ROOTS),
     dict(name="screen_idle", root="screen_idle_task",
          stack=lambda: extract_int_literal("drivers/ui/screen_idle.c",
-             r'xTaskCreatePinnedToCore\(screen_idle_task,\s*"screen_idle",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(screen_idle_task,\s*"screen_idle",\s*(\d+)')),
     dict(name="uart_owner_evt_task", root="hal_uart_esp_event_task",
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
              r'uart_owner_init\(&ctx->uart_owner,.*?UART_OWNER_STACK_SIZE',
@@ -971,7 +971,7 @@ TASKS = [
          # reaches the whole deep path with no indirect-dispatch gap to model.
          stack=lambda: extract_local_macro("drivers/persist/kiln_cfg_swap_worker.c",
              r'#define SWAP_WORKER_STACK_BYTES\s+(\d+)',
-             r'xTaskCreate\(swap_worker_task,\s*"kiln_cfg_swap",\s*SWAP_WORKER_STACK_BYTES')),
+             r'xTaskCreatePinnedToCoreWithCaps\(swap_worker_task,\s*"kiln_cfg_swap",\s*SWAP_WORKER_STACK_BYTES')),
     dict(name="wifi_prov_owner", root="owner_task", expect_path="wifi_prov.c",
          # Registered 5cd11231 (2026-09-28): the ONE task that ever writes
          # s_wifi, created once in wifi_prov_start() and never torn down (a
@@ -982,7 +982,7 @@ TASKS = [
          # symbol, so `expect_path` disambiguates the same way those two rows
          # do.
          stack=lambda: extract_int_literal("drivers/net/wifi_prov.c",
-             r'xTaskCreatePinnedToCore\(owner_task,\s*"wifi_prov_owner",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(owner_task,\s*"wifi_prov_owner",\s*(\d+)')),
     dict(name="dns_hijack", root="dns_hijack_task",
          # Registered for stack-margin reporting by the Wi-Fi batch (864ef649c,
          # WIFI_REVIEW LOW-6) after a stale "self-deletes" exemption; the task is

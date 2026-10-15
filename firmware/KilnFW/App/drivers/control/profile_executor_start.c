@@ -9,7 +9,9 @@
 
 #include <math.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/idf_additions.h"
 
 #include "adaptive_tune.h"
 #include "autotune_engine.h"
@@ -67,22 +69,18 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * 4096: MAX31856_read_all/pid_update_terms/thermal_guard_tick/
      * kiln_io_set_relay_mask/safety_link_set_fault_source all run on this
      * stack, now looped up to MAX31856_CHANNEL_COUNT times per tick. */
-    /* INTERNAL stack, deliberately. A 2026-08-22 pass moved this to PSRAM on
-     * the reasoning that every flash-touching call was made by
-     * profile_executor_run()/_halt()/_pause() from whichever task called
-     * them, never from this loop. That reasoning was WRONG and the board
-     * crashed on the bench the first time a real firing was started:
-     * the tick path itself calls run_state_note() (RUNNING/FAULTED/DONE
-     * breadcrumbs, ~line 1516) and relay_cycles_maybe_persist() (~line 1481),
-     * both of which write NVS. A task whose stack lives in PSRAM cannot be
-     * running when the flash cache is disabled -- ESP-IDF asserts
-     * esp_task_stack_is_sane_cache_disabled() in
-     * spi_flash_disable_interrupts_caches_and_other_cpu() and panics.
-     *
-     * Do not move this back without first removing every flash write from
-     * the tick path, which is not a stack-placement question but a design
-     * one: the run-state breadcrumb exists precisely so a power loss mid-tick
-     * is recoverable.
+    /* PSRAM stack (2026-10-14, docs/audits/AUDIT_INTERNAL_RAM_XIP.md). The
+     * 2026-08-22 bench crash that forced this onto an internal stack was a
+     * flash write (run_state_note(), relay_cycles_maybe_persist()) from the
+     * tick path asserting esp_task_stack_is_sane_cache_disabled() while the
+     * cache was frozen. Under CONFIG_SPIRAM_XIP_FROM_PSRAM the cache stays on
+     * for flash erase/write (SPI_FLASH_CACHE_NO_DISABLE), so that is gone.
+     * What still freezes the cache is mmap (esp_ota_*, esp_image_*,
+     * esp_partition_mmap, esp_core_dump_*): nothing reachable from this task
+     * calls those (traced 2026-10-14; the only lazy one,
+     * dashboard_get_status()'s flash facts, is now primed on app_main).
+     * tools/check_psram_task_stacks.ps1 pins this placement. Do not add an
+     * mmap-path call under this task without moving it back.
      *
      * 4096 -> 6144 (2026-09-24, owner-authorized per CLAUDE.md's 2026-09-21
      * decision: "task stack SIZES may be raised without asking when measured
@@ -97,8 +95,9 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * regression to fix by moving locals off it (there is no new deep call
      * chain here since the 2026-09-10 fix -- see
      * check_executor_task_stack_budget.py's own CEILING_BYTES history). */
-    BaseType_t ok = xTaskCreatePinnedToCore(executor_task_entry, "profile_executor", 6144, NULL, 5,
-                                            &s_exec.task, tskNO_AFFINITY);
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(executor_task_entry, "profile_executor", 6144, NULL, 5,
+                                                    &s_exec.task, tskNO_AFFINITY,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_executor) failed");
         vSemaphoreDelete(s_exec.lock);
@@ -117,12 +116,10 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * the control task cannot be trusted to notice its own death. Same
      * priority as the control task it's watching.
      *
-     * INTERNAL stack, for the same reason as executor_task_entry() above and
-     * with the same bench crash behind it. The claim that this task "only
-     * reads status and forces relays off" missed run_state_note() on its own
-     * abort path (~line 1728): when the safety link goes silent it aborts the
-     * firing AND persists why. That is exactly the moment this task must not
-     * fail, so its stack must be reachable with the flash cache disabled.
+     * PSRAM stack since 2026-10-14, for the same reason as executor_task_entry()
+     * below (XIP keeps the cache on during flash writes). This task persists
+     * why on its abort path (run_state_note()); that is a plain NVS write, not
+     * an mmap call, so it is safe from a PSRAM stack under XIP.
      *
      * 2560 -> 4096 (DRAM_PSRAM_PLAN.md sec 9, 2026-09-02): the live board's
      * 3.1 baseline measured this task's own worst case at 368 B free of
@@ -203,8 +200,9 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * produced four stack-smash panics on profile_executor: +2 KB buys >= 512 B of
      * margin under the same worst case. Read the real high-water mark with
      * get_stack_margin after forcing a K4 re-request mid-firing and tighten then. */
-    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 6144, NULL, 5,
-                                 &s_exec.watchdog_task, tskNO_AFFINITY);
+    ok = xTaskCreatePinnedToCoreWithCaps(watchdog_task_entry, "profile_exec_wdt", 6144, NULL, 5,
+                                         &s_exec.watchdog_task, tskNO_AFFINITY,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
         startup_fault_note(STARTUP_FAULT_EXEC_WATCHDOG);

@@ -111,7 +111,7 @@ static uint32_t s_flash_partition_size = 0;
 static bool s_flash_used_known = false;
 static uint32_t s_flash_used = 0;
 
-static void read_flash_facts_once(void)
+void dashboard_prime_flash_facts(void)
 {
     if (s_flash_facts_read) {
         return;
@@ -570,15 +570,15 @@ void dashboard_get_status(dashboard_status_t *out)
      * same accessor esp_ota_* uses internally to validate an image. All
      * fixed for the life of this boot (same reasoning ui_page_diagnostics.c's
      * own build_firmware_statics() doc comment gives for reading these once,
-     * not on every refresh) -- computed once here rather than on every
-     * dashboard_get_status() call (Opus review 2026-08-27: this was walking
+     * not on every refresh) -- primed once at boot by
+     * dashboard_prime_flash_facts() (never lazily here: the mmap would assert
+     * on a PSRAM-stack caller), not on every dashboard_get_status() call (Opus review 2026-08-27: this was walking
      * the image's segment headers via real flash reads from inside the httpd
      * handler on every single /api/status poll). Left at their zero-init
      * default (caught by flash_*_known below) if the one-time read ever
      * fails -- chip-size/partition/image-header reads are all "should never
      * fail on real hardware" but none is worth a fabricated number if one
      * ever does. */
-    read_flash_facts_once();
     out->flash_size_known = s_flash_size_known;
     out->flash_size = s_flash_size;
     out->flash_partition_size = s_flash_partition_size;
@@ -993,8 +993,8 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     /* Prime the flash facts here, on the app_main task, so no later caller
      * -- least of all rules_task, whose stack is a candidate to move to
      * PSRAM -- can be the one that performs a cache-disabling flash read.
-     * See read_flash_facts_once()'s own comment. */
-    read_flash_facts_once();
+     * See dashboard_prime_flash_facts()'s own comment. */
+    dashboard_prime_flash_facts();
 
     ESP_LOGI(DASH_TAG, "dashboard API up (io_ready=%d, thermo_ready=%d, safety_ready=%d)", s_dash.io != NULL,
              s_dash.thermo_bus != NULL && s_dash.thermo_bus->initialized, s_dash.safety != NULL);

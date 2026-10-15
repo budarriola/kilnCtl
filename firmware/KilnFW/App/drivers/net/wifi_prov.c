@@ -81,6 +81,7 @@
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_reply_results below */
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -710,10 +711,14 @@ esp_err_t wifi_prov_start(void)
      * this function, same pattern as every other registered task
      * (boot_button.c's s_task_handle, etc.). */
     static TaskHandle_t s_owner_task_handle;
-    BaseType_t task_created =
-        xTaskCreatePinnedToCore(owner_task, "wifi_prov_owner", 4096, NULL, 5, &s_owner_task_handle, tskNO_AFFINITY);
+    /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md): NVS writes no longer
+     * freeze the cache under XIP and nothing here reaches an mmap call.
+     * Pinned by tools/check_psram_task_stacks.ps1. */
+    BaseType_t task_created = xTaskCreatePinnedToCoreWithCaps(owner_task, "wifi_prov_owner", 4096, NULL, 5,
+                                                              &s_owner_task_handle, tskNO_AFFINITY,
+                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_created != pdPASS) {
-        ESP_LOGE(WIFI_PROV_TAG, "xTaskCreatePinnedToCore(wifi_prov_owner) failed");
+        ESP_LOGE(WIFI_PROV_TAG, "xTaskCreatePinnedToCoreWithCaps(wifi_prov_owner) failed");
         vQueueDelete(s_wifi_cmd_queue);
         s_wifi_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;

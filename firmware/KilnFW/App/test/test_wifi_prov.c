@@ -939,6 +939,7 @@ static void test_wifi_prov_start_sets_ram_storage(void)
 
     reset_state();
 
+    g_stub_task_create_result = pdPASS; /* owner task is now a WithCaps create (PSRAM stack) */
     esp_err_t err = wifi_prov_start();
 
     TEST_CHECK(err == ESP_OK, "wifi_prov_start() succeeds against the host stubs");

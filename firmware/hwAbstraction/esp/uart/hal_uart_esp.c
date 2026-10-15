@@ -48,8 +48,10 @@
 #include <string.h>
 
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
@@ -216,13 +218,19 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
     char task_name[16];
     snprintf(task_name, sizeof(task_name), "hal_uart%d_evt", (int)impl->port);
 
-    BaseType_t task_created = xTaskCreatePinnedToCore(hal_uart_esp_event_task,
-                                                       task_name,
-                                                       stack_depth,
-                                                       impl,
-                                                       task_priority,
-                                                       &impl->event_task_handle,
-                                                       core_id);
+    /* PSRAM stack (2026-10-14, docs/audits/AUDIT_INTERNAL_RAM_XIP.md): this task
+     * only blocks on the driver's event queue and flushes/counts; the UART ISR
+     * is no longer in IRAM (CONFIG_UART_ISR_IN_IRAM off) and runs on no task
+     * stack, and flash writes no longer freeze the cache under XIP. Torn down
+     * with vTaskDeleteWithCaps() below. */
+    BaseType_t task_created = xTaskCreatePinnedToCoreWithCaps(hal_uart_esp_event_task,
+                                                              task_name,
+                                                              stack_depth,
+                                                              impl,
+                                                              task_priority,
+                                                              &impl->event_task_handle,
+                                                              core_id,
+                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_created != pdPASS) {
         ESP_LOGE(TAG, "uart%d: failed to create hal_uart event task", impl->port);
         uart_driver_delete(impl->port);
@@ -250,7 +258,7 @@ hal_status_t hal_uart_deinit(hal_uart_t *u) {
      * freed underneath it by uart_driver_delete(), same ordering
      * uart_owner_deinit() uses for the same reason. */
     if (impl->event_task_handle) {
-        vTaskDelete(impl->event_task_handle);
+        vTaskDeleteWithCaps(impl->event_task_handle);
     }
 
     uart_driver_delete(impl->port);
