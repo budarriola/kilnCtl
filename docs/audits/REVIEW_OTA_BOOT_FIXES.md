@@ -85,3 +85,7 @@ If an `update_post_boot` failure is ever widened, an app-side "clear a request w
 - RTC stuck-counter marker against the NVS count: `boot_guard_reset_counter()` and the healthy path both arm the marker after a verified clear, so the two stay together.
 - Install request against the stage: one pair is split by design. The stage is cleared by the app's stale check, and the request only by recovery or install-POST failure. That gap is LOW-4.
 - Recovery Wi-Fi restart counter (RTC) against the install attempt counter (NVS): independent, and neither derives from the other.
+
+## Resolution (2026-10-15, rvfix)
+
+- LOW-1: fixed. `load_count()` treats `HAL_INVALID_SIZE` (oversized stored record, current and legacy namespace) as the wrong-size data state: count 0, not a read error, so `boot_guard_init()` rewrites the record and the counter climbs. Genuine open/get errors still return false. Test `test_oversized_record_is_rewritable_and_counter_climbs` (test_boot_guard.c); mutant restoring the read-error path CAUGHT by assertion.

@@ -127,3 +127,10 @@ How they were run:
 - SaftyFW: `-Preset saftyfw-host` with `-ExpectPattern "FAIL .*\.c:\d+|SAFTYFW HOST TESTS: FAILED"`.
 
 No mutation was run for the MED-1 race, because no host test exercises the ordering between the gesture and a commit. That gap is part of the finding.
+
+## Resolution (2026-10-15, rvfix)
+
+- MED-1 (totpfx): fixed. `auth_reset_gesture_clear_all()` now posts the wipe request FIRST (and again last), so a waiting `enroll_confirm`'s `still_valid` guard already reads "wiped" when it gets the state lock after `totp_config_clear()`. Test `test_gesture_posts_wipe_before_clear` (test_totp_enroll_gesture.c); negtest mutant "wipe not posted first" CAUGHT by assertion.
+- LOW-2 (totpfx): fixed in the store, covering every password setter. `web_auth_store` keeps a credential-wipe epoch bumped before and after `clear_for_physical_reset` / `clear_all_credentials`; `web_auth_store_set_password` captures it before loading and refuses (HAL_BUSY) if it moved after hashing, before the write. Test `test_set_password_refuses_after_wipe_during_hash` (uses a new `g_psa_stub_mac_hook` seam to run a wipe mid-KDF); mutants "no epoch recheck" and "clear_all does not move epoch" CAUGHT. A sub-microsecond window between the re-check and the write remains.
+- LOW-1 (lockfx): fixed by making `http_auth_any_ap_session_active()` read-only (no `web_auth_table_reap_expired`); expired slots are already not counted. Test in test_http_session_iface.c; mutant "AP query reaps again" CAUGHT.
+- Other LOWs (ctfx, tcfx, ...) not in this batch.
