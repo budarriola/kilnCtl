@@ -41,7 +41,9 @@ void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
      * hold/climb split) reproduces the old -ff_u floor byte-for-byte;
      * ff_hold==ff_u==0.0f (no feedforward model) reduces this further to the
      * original >= 0 floor. */
-    float integral_floor = (cfg->ki > 0.0f) ? (-ff_hold / cfg->ki) : 0.0f;
+    /* A negative hold (coupling correction larger than the zone's own hold)
+     * must never become a POSITIVE floor: clamp the hold at 0. */
+    float integral_floor = (cfg->ki > 0.0f) ? (-fmaxf(ff_hold, 0.0f) / cfg->ki) : 0.0f;
     if (integral_needed < integral_floor) {
         integral_needed = integral_floor;
     }
@@ -167,7 +169,7 @@ float pid_update_terms(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
      * already pinned at the 0 rail with error still negative, so this floor
      * is rarely even the thing that bites in that case. */
     float i_term = cfg->ki * state->integral;
-    float i_floor = -ff_hold;
+    float i_floor = -fmaxf(ff_hold, 0.0f); /* never a positive floor from a negative hold */
     if (i_term < i_floor) {
         i_term = i_floor;
         state->integral = (cfg->ki > 0.0f) ? i_floor / cfg->ki : 0.0f;

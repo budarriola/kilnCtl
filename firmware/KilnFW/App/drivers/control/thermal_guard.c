@@ -107,6 +107,25 @@ void thermal_guard_reset(thermal_guard_state_t *state)
     memset(state, 0, sizeof(*state));
 }
 
+void thermal_guard_restart_windows(thermal_guard_state_t *state)
+{
+    state->progress_window_active = false;
+    state->progress_window_start_c = 0.0f;
+    state->progress_window_elapsed_s = 0.0f;
+    state->progress_window_min_c = 0.0f;
+    state->progress_window_max_c = 0.0f;
+    state->off_window_active = false;
+    state->off_window_elapsed_s = 0.0f;
+    state->runaway_baseline_c = 0.0f;
+    state->runaway_rate_baseline_valid = false;
+    state->runaway_rate_baseline_c = 0.0f;
+    state->runaway_rate_elapsed_s = 0.0f;
+    state->at_setpoint_elapsed_s = 0.0f;
+    state->frozen_window_active = false;
+    state->frozen_last_c = 0.0f;
+    state->frozen_elapsed_s = 0.0f;
+}
+
 void thermal_guard_clear(thermal_guard_state_t *state)
 {
     thermal_guard_reset(state);

@@ -2322,6 +2322,42 @@ static void test_pause_keeps_claim_resume_reclaims_it(void)
               "resume() must reclaim RELAY_OWNER_PROFILE over the same mask");
 }
 
+/* AUDIT_CONTROL_EXECUTOR MED-1: resume() restarts each active zone's guard windows, keeps a latched trip. */
+static void test_resume_restarts_thermal_guard_windows(void)
+{
+    TEST_SECTION("profile_executor_resume() restarts thermal-guard windows (AUDIT MED-1), keeps a latched trip");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x01;
+    memset(&s_exec.zones[0].guard_state, 0, sizeof(s_exec.zones[0].guard_state));
+    memset(&s_exec.zones[1].guard_state, 0, sizeof(s_exec.zones[1].guard_state));
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].guard_state.progress_window_active = true;
+    s_exec.zones[0].guard_state.progress_window_start_c = 600.0f;
+    s_exec.zones[0].guard_state.progress_window_elapsed_s = 250.0f;
+    s_exec.zones[0].guard_state.frozen_window_active = true;
+    s_exec.zones[0].guard_state.at_setpoint_elapsed_s = 90.0f;
+    s_exec.zones[1].active = true;
+    s_exec.zones[1].guard_state.is_tripped = true;
+    s_exec.zones[1].guard_state.reason = THERMAL_GUARD_TRIP_HEATING_FAILED;
+    s_exec.zones[1].guard_state.progress_window_active = true;
+
+    TEST_CHECK(profile_executor_pause(), "pause from RUNNING");
+    TEST_CHECK(profile_executor_resume(), "resume from PAUSED");
+    TEST_CHECK(!s_exec.zones[0].guard_state.progress_window_active &&
+                   s_exec.zones[0].guard_state.progress_window_elapsed_s == 0.0f,
+               "resume drops the stale guard 1/2 progress window");
+    TEST_CHECK(!s_exec.zones[0].guard_state.frozen_window_active && s_exec.zones[0].guard_state.at_setpoint_elapsed_s == 0.0f,
+               "resume drops the guard 7 window and guard 4 excursion clock");
+    TEST_CHECK(s_exec.zones[1].guard_state.is_tripped && s_exec.zones[1].guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "resume never clears a latched trip");
+    s_exec.zones[0].active = false;
+    s_exec.zones[1].active = false;
+    memset(&s_exec.zones[0].guard_state, 0, sizeof(s_exec.zones[0].guard_state));
+    memset(&s_exec.zones[1].guard_state, 0, sizeof(s_exec.zones[1].guard_state));
+}
+
 /* REVIEW_LD01_WWFIX MED-1: resume shares the start gate. A down/unconfirmed/unreadable link refuses and
  * leaves the run PAUSED with no heat request; the same call succeeds once the link is positively up. */
 static void test_resume_refuses_unless_link_positively_up(void)
@@ -3240,6 +3276,44 @@ static void test_io_seg_finish_leave_on_honored_only_on_done(void)
                                         "leave_on_at_end -- the safe default wins over the segment's own "
                                         "preference on an abnormal stop");
     TEST_CHECK(g_last_relay_write_value == 0, "the force-off write commands it OFF");
+}
+
+/* AUDIT_CONTROL_EXECUTOR MED-2: a pause forces the output off but an unfinished non-blocking segment resumes. */
+static void test_io_seg_nonblocking_survives_pause_resume(void)
+{
+    TEST_SECTION("io_segs_pause_all_off()/io_segs_resume_pending() -- non-blocking segment survives pause (AUDIT MED-2)");
+    reset_io_seg_test_state();
+
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 2;
+    seg.io_state = 1;
+    seg.io_blocking = 0;
+    seg.dwell_min = 60;
+    io_seg_start(0, &seg);
+    s_exec.io_segs[0].remaining_s = 3000.0f; /* ten minutes in */
+    int writes_before = g_relay_write_calls;
+
+    io_segs_pause_all_off();
+    TEST_CHECK(g_relay_write_calls == writes_before + 1 && g_last_relay_write_value == 0, "pause forces the relay OFF");
+    TEST_CHECK(!s_exec.io_segs[0].active, "output no longer driven while paused");
+    io_segs_pause_all_off(); /* every PAUSED tick */
+    TEST_CHECK(g_relay_write_calls == writes_before + 1, "repeated PAUSED sweeps do not rewrite");
+    TEST_CHECK(s_exec.io_segs[0].resume_pending && s_exec.io_segs[0].remaining_s == 3000.0f,
+               "the unfinished segment is remembered with its remaining time");
+
+    io_segs_resume_pending(false);
+    TEST_CHECK(s_exec.io_segs[0].active && !s_exec.io_segs[0].resume_pending, "resume restarts the segment");
+    TEST_CHECK(g_last_relay_write_value != 0, "...driving the relay ON again");
+    TEST_CHECK(s_exec.io_segs[0].remaining_s == 3000.0f, "...with the remaining time, not the full dwell");
+
+    /* A halt/fault while paused must cancel it for good. */
+    io_segs_pause_all_off();
+    io_segs_force_all_off(false);
+    int w = g_relay_write_calls;
+    io_segs_resume_pending(false);
+    TEST_CHECK(!s_exec.io_segs[0].active && g_relay_write_calls == w, "a non-pause stop cancels the remembered segment");
 }
 
 static void test_io_segs_force_all_off_sweeps_general_io_too(void)
@@ -13065,6 +13139,7 @@ void run_test_profile_executor_prestart(void)
     test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone();
     test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run();
     test_pause_keeps_claim_resume_reclaims_it();
+    test_resume_restarts_thermal_guard_windows();
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
@@ -13092,6 +13167,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
+    test_io_seg_nonblocking_survives_pause_resume();
     test_run_refuses_while_zone_sweep_is_active();
     test_run_refuses_slot_being_deleted();
     test_run_decodes_fault_sources_instead_of_hex();

@@ -990,6 +990,7 @@ static bool s_stub_set_pid_result = false;
  * unaffected. */
 static bool s_probe_reserve_during_set_pid = false;
 static bool s_probe_reserve_during_set_pid_result = true;
+static bool s_probe_other_zone_run_during_set_pid = false;
 /* Fake zone gain store + call count: a stand-in for "what zones config now
  * holds", so a refused accept() can be proven to have written nothing. */
 static float s_fake_zone_kp = 0.0f, s_fake_zone_ki = 0.0f, s_fake_zone_kd = 0.0f;
@@ -1004,6 +1005,11 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     }
     if (s_probe_reserve_during_set_pid) {
         s_probe_reserve_during_set_pid_result = autotune_engine_reserve_zone_for_external_write(zone_index);
+    }
+    if (s_probe_other_zone_run_during_set_pid) {
+        /* AUDIT MED-4: stand in for a start on another zone landing in accept()'s unlocked setter window. */
+        s_at.state = AUTOTUNE_ENGINE_SETTLING;
+        s_at.zone_index = 1;
     }
     return s_stub_set_pid_result;
 }
@@ -7363,6 +7369,37 @@ static void test_reserve_refused_while_a_run_is_live_on_the_zone(void)
     TEST_CHECK(!s_at.external_write_reserved, "a refused reserve() must not leave the flag set");
 }
 
+/* AUDIT_CONTROL_EXECUTOR MED-4: a reservation on ANY zone refuses a start on another zone. */
+static void test_reserve_blocks_a_start_on_another_zone(void)
+{
+    reserve_race_test_setup_idle_zone0();
+    TEST_CHECK(autotune_engine_reserve_zone_for_external_write(0), "reserve() zone 0");
+    char err[128] = {0};
+    bool ok = autotune_engine_run(1, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, "MED-4: a start on zone 1 is refused while zone 0 holds the reservation");
+    TEST_CHECK(strstr(err, "gain write is in progress") != NULL, "MED-4: refusal names the reservation");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "MED-4: a refused start leaves state IDLE");
+    autotune_engine_release_zone_for_external_write(0);
+}
+
+/* AUDIT_CONTROL_EXECUTOR MED-4: accept() must not overwrite a state a run on another zone now owns. */
+static void test_accept_does_not_idle_a_run_started_meanwhile(void)
+{
+    reserve_race_test_setup_idle_zone0();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_RELAY;
+    s_at.relay.valid = true;
+    s_stub_set_pid_result = true;
+    s_probe_other_zone_run_during_set_pid = true;
+    bool accepted = autotune_engine_accept(NULL, NULL);
+    s_probe_other_zone_run_during_set_pid = false;
+    TEST_CHECK(accepted, "MED-4: accept itself succeeds");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING && s_at.zone_index == 1,
+               "MED-4: accept must leave the run another zone started meanwhile untouched, not write IDLE");
+    s_at.state = AUTOTUNE_ENGINE_IDLE;
+    s_stub_set_pid_result = false;
+}
+
 static void test_run_starts_after_release(void)
 {
     reserve_race_test_setup_idle_zone0();
@@ -7637,6 +7674,8 @@ void run_test_autotune_engine_prestart(void)
     test_reserve_blocks_a_fresh_start_and_names_the_reason();
     test_reserve_refused_while_a_run_is_live_on_the_zone();
     test_run_starts_after_release();
+    test_reserve_blocks_a_start_on_another_zone();
+    test_accept_does_not_idle_a_run_started_meanwhile();
     test_accept_is_gated_by_the_reservation_too();
 
     // 2026-09-24 "never hold a module lock across a producer call" fix.

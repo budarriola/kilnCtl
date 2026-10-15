@@ -416,6 +416,15 @@ typedef struct {
 
 void thermal_guard_reset(thermal_guard_state_t *state);
 
+/* AUDIT_CONTROL_EXECUTOR MED-1: re-baselines the rolling windows after a pause. While paused the guard
+ * is not ticked, so the kiln may have cooled; a window carried across would read that cooling as
+ * "heating failed" / "wrong direction". This drops the guard 1/2 progress window, the guard 3 off-window
+ * and rate baselines, the guard 4 excursion clock and the guard 7 frozen window, so each restarts from
+ * the first post-resume sample at the current temperature. Same thresholds, nothing disabled: a latched
+ * trip (is_tripped/reason/detail), the guard 4 settled latch and idle backstop, the guard 6 streak and
+ * the guard 8 clock are all KEPT, and every guard evaluates from the first post-resume tick. */
+void thermal_guard_restart_windows(thermal_guard_state_t *state);
+
 /* Explicit operator acknowledgement -- the only way out of a latched trip
  * (TODO.md 6A.3: "no auto-recovery when the condition clears"). Resets
  * every window too, so the zone starts the next run clean. */

@@ -575,8 +575,12 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
          *
          * The gains above are the entire result of this run. */
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
-        clear_block_if_any();
-        s_at.state = AUTOTUNE_ENGINE_IDLE;
+        /* AUDIT_CONTROL_EXECUTOR MED-4: only finish what this accept still owns. A start on another
+         * zone during the unlocked setter window has replaced the state; leave it alone. */
+        if (s_at.state == AUTOTUNE_ENGINE_DONE && s_at.zone_index == zone) {
+            clear_block_if_any();
+            s_at.state = AUTOTUNE_ENGINE_IDLE;
+        }
         xSemaphoreGive(s_at.lock);
         ESP_LOGI(AT_TAG, "autotune zone %u: relay-test gains accepted (no plant model written -- a relay test "
                       "measures none; any model from a previous step test is left untouched)", zone);
@@ -868,8 +872,11 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     }
 
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
-    clear_block_if_any();
-    s_at.state = AUTOTUNE_ENGINE_IDLE;
+    /* AUDIT_CONTROL_EXECUTOR MED-4: see the relay-method block above. */
+    if (s_at.state == AUTOTUNE_ENGINE_DONE && s_at.zone_index == zone) {
+        clear_block_if_any();
+        s_at.state = AUTOTUNE_ENGINE_IDLE;
+    }
     xSemaphoreGive(s_at.lock);
     if (!m.settled) {
         ESP_LOGW(AT_TAG, "autotune zone %u: LOW-CONFIDENCE gains accepted and written to zone config "

@@ -720,4 +720,26 @@ void run_test_pid(void)
         TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
                    "ki-blowup guard (rescale path, negative side): pid_rescale_integral_for_new_ki() must clamp a compounding rescale to the guard's bound on the negative side too");
     }
+    /* AUDIT_CONTROL_EXECUTOR MED-3: a NEGATIVE feedforward hold (coupling
+     * correction larger than the zone's own hold) must never become a
+     * positive integral floor. */
+    {
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.02f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        const float setpoint = 60.0f;
+        pid_update_terms(&s, &cfg, setpoint, setpoint, 1.0f, 0.0f, -0.28f, NULL);
+        pid_terms_t terms;
+        float u = pid_update_terms(&s, &cfg, setpoint, setpoint, 1.0f, 0.0f, -0.28f, &terms);
+        TEST_CHECK_NEAR(terms.i, 0.0f, 1e-6f, "MED-3: negative ff_hold, error 0 -> I term is 0, not +|hold|");
+        TEST_CHECK_NEAR(u, 0.0f, 1e-6f, "MED-3: negative ff_hold, error 0 -> output 0");
+        TEST_CHECK(s.integral <= 1e-6f, "MED-3: integral not forced positive by a negative hold");
+    }
+    {
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.02f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        pid_seed_bumpless(&s, &cfg, 60.0f, 60.0f, /*u_desired=*/0.0f, /*ff_u=*/0.0f, /*ff_hold=*/-0.28f);
+        TEST_CHECK(s.integral <= 1e-6f, "MED-3: pid_seed_bumpless with negative hold seeds no positive integral floor");
+    }
 }

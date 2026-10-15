@@ -737,6 +737,12 @@ typedef struct {
     float remaining_s;    /* counts down from dwell_min*60 while active && !blocking;
                             * meaningless for a blocking segment, which is finished by the
                             * segment-stepping block itself, not by io_segs_tick() */
+    /* AUDIT_CONTROL_EXECUTOR MED-2: a PAUSE forces the output OFF (io_segs_pause_all_off()) but must
+     * not cancel a still-running non-blocking segment. resume_pending marks such a segment (active is
+     * false while paused); remaining_s keeps the unfinished time and resume_on the requested state.
+     * io_segs_resume_pending() restarts it on the first RUNNING tick. Cleared by every other stop path. */
+    bool resume_pending;
+    bool resume_on;
 } io_seg_runtime_t;
 
 typedef struct {
@@ -1327,6 +1333,8 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);
 void io_segs_tick(float dt_s);
+void io_segs_pause_all_off(void);                    /* PAUSED tick: force off, keep unfinished non-blocking segments */
+void io_segs_resume_pending(bool pico_tripped);      /* RUNNING tick: restart segments kept by a pause */
 void io_segs_retry_on(bool pico_tripped);
 /* Sets s_exec.state and clears the per-run scratch flags (dwelling,
  * ramp_lock_held) that only mean anything inside RUNNING/PAUSED -- see the

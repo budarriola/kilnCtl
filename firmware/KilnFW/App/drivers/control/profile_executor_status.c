@@ -417,6 +417,12 @@ bool profile_executor_resume(void)
             seed_bumpless_with_ff(z, zi, 0.0f);
             z->fuzzy_prev_effective_ki = z->pid_cfg.ki; /* see reload_zone_config()'s same reasoning */
         }
+        /* AUDIT_CONTROL_EXECUTOR MED-1: the guards were not ticked while PAUSED and the kiln may have
+         * cooled. Restart their rolling windows from the first post-resume sample; the guards stay fully
+         * armed (same thresholds) and any latched trip is kept. */
+        if (z->active) {
+            thermal_guard_restart_windows(&z->guard_state);
+        }
     }
     s_exec.state = PROFILE_EXEC_RUNNING;
     s_exec.pause_reason[0] = '\0';
