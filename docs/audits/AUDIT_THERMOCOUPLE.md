@@ -16,7 +16,7 @@ reading from a part that has lost its configuration (MED-1). A wrong-zone
 reading never reaches the ESP's own control loop, which combines channels by
 `thermo_mask`. It does reach the Pico's context frame (LOW-1).
 
-HIGH 0, MED 1, LOW 3, INFO 5
+HIGH 0, MED 1 (fixed, see Resolution), LOW 3, INFO 5
 
 ## Findings
 
@@ -178,3 +178,33 @@ sampling DRDY. Host test: none.
   guard 7 bypass).
 - No test of the context frame or the dashboard with a non-identity
   `thermo_mask` (LOW-1, LOW-2).
+
+## Resolution
+
+MED-1 fixed (LOW-1 and LOW-2 untouched).
+
+- `thermo_channel_read.c`: `ok` now comes from `thermo_reading_ok()`, which also
+  requires `age_ms <= MAX31856_CONTROL_MAX_AGE_MS` (3000 ms) on a channel in
+  automatic conversion (`MAX31856Reading.continuous`). 3000 ms is more than 3.8x
+  the slowest figure the driver can produce (410 ms steady-state, 785 ms first
+  conversion after a reconfigure), so a healthy part never trips it, while a
+  frozen part is rejected within 3 s instead of the dashboard's 10 s.
+  Keyed on `age_ms`, not `stale`, as the S13 note above advises. Normally-off
+  and one-shot channels are exempt: they legitimately go without new results.
+- `MAX31856_live_check()` (modeled on SaftyFW's `max31856_live_check.c`),
+  called from `MAX31856_read_all()` for each channel: every 5 s
+  (`MAX31856_LIVE_CHECK_INTERVAL_MS`) it reads CR0/CR1/MASK in one burst and
+  compares with the shadows (self-clearing CR0 bits and reserved MASK bits
+  ignored). On mismatch it counts, logs, drops the good-result history (so
+  `age_ms` is UNKNOWN and the channel not ok until a fresh post-reconfigure
+  conversion) and rewrites CR0 (stopped), CR1, MASK, CR0. It takes only the
+  channel's leaf lock; no module lock is held across SPI. No new task, no new
+  buffers (3-byte stack array).
+- Fail-safe path unchanged: a not-ok channel is dropped by `thermo_combine()`;
+  an all-invalid zone gives `sensor_ok=false`, no PID duty, and the debounced
+  thermal_guard guard 6 trip. Thresholds untouched. A reset part is invalid for
+  up to roughly 3 s (age bound) plus the 5 s check interval, so guard 6 may trip
+  on such an event; that is the existing fail-safe behaviour.
+- Tests: `test_max31856_hal_spi.c` (`test_reading_ok_staleness`,
+  `test_live_check_reconfig`), 106/106. Negtest: 10 mutants, all CAUGHT by a
+  compiled build with failing assertions.
