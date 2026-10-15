@@ -208,3 +208,9 @@ MED-1 fixed (LOW-1 and LOW-2 untouched).
 - Tests: `test_max31856_hal_spi.c` (`test_reading_ok_staleness`,
   `test_live_check_reconfig`), 106/106. Negtest: 10 mutants, all CAUGHT by a
   compiled build with failing assertions.
+
+### lowfx11 (2026-10-15)
+
+- LOW-1 fixed: the safety context frame takes each zone's measured_c and validity from the zone thermo mask (`thermo_zone_raw_from_readings`, mean of the masked channels), not channel index. Host test: `test_max31856_hal_spi.c` `test_zone_helpers`.
+- LOW-2 fixed: the dashboard applies the per-channel calibration only when `thermo_channel_cal_applies` (identity mask); a combined or remapped zone shows the raw value.
+- LOW-3: not in scope of this pass.

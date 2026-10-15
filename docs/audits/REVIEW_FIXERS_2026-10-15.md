@@ -143,3 +143,7 @@ No mutation was run for the MED-1 race, because no host test exercises the order
 ## Resolution (2026-10-15, lowauth)
 
 - **LOW-6 (wififx) fixed.** In `do_rescan_tick()` the association ground-truth check now runs before the deferred-teardown branch, so a missed disconnect is noticed while the AP teardown is deferred. Test: `test_rescan_missed_disconnect_with_deferred_teardown`; mutant caught.
+
+### lowfx11 (2026-10-15)
+
+- LOW-5 (tcfx) fixed: `MAX31856_live_check` returns `MAX31856_LIVE_SUSPECT` on the first mismatching read-back and changes nothing; the re-check runs after `MAX31856_LIVE_RECHECK_MS` (100 ms) and only a second consecutive mismatch reconfigures. A matching or unreadable re-check clears the suspicion. Negative test: removing the suspect stage is caught by `test_max31856_hal_spi`.

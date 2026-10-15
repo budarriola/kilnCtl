@@ -378,3 +378,10 @@ transition, and the worst case is one delayed transition. No action needed.
 - The aux rule checks in `profiles_validate.c`.
 
 Their outputs reach persistence only through the validating setters.
+
+### lowfx11 (2026-10-15)
+
+- LOW-1 fixed: `profile_executor_resume()` resets the on/off trigger state, `on_off_actuated_on` and the actuation hold, as a fresh run does (aux outputs deliberately keep their state across a pause).
+- LOW-2 fixed in the autotune engine: a blocked heat write while STEPPING/RELAY_* latches `blocked_during_measure`, and finalize then ABORTS ("heat was blocked during the measurement") instead of DONE. The thermal-guard zero-duty feed part of the finding is skipped (separate guard path, no safe host test).
+- LOW-3 fixed: `pid_reseed_derivative` on the first valid sample after a sensor outage, so there is no derivative kick.
+- INFO-1 (aux NaN temperature term): not done, optional.

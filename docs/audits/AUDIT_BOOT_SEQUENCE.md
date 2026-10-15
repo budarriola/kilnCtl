@@ -282,3 +282,8 @@ failing assertion; removing the NULL-op guard is caught only by a crash.
 
 - LOW-1: documented as intended in `boot_guard.h` (above `boot_confirm_is_healthy`). A radio or httpd fault that persists across 3 boots is the case in which the operator must reach the recovery image, and web/OTA reachability is what proves an update usable; splitting the criterion needs an owner decision. The truth table stays pinned in `test_boot_guard.c`.
 - LOW-2: documented, not moved (comment at `boot_guard_init()` in `main_boot_early.c`). The counter must come after the relays are latched off so a recovery reboot never leaves a relay driven, and moving only the increment earlier needs a bench proof of that ordering. The bootloader rollback still covers a PENDING_VERIFY image.
+
+### lowfx11 (2026-10-15)
+
+- SX1509: `SX1509_i2c_bus_clear` (up to 9 SCL clocks, then STOP, only when SDA reads low) runs in `main_boot_early.c` before `i2c_new_master_bus`; `SX1509_start` retries the probe once after 10 ms. Host tests in `test_sx1509_reset_first.c`; negative tests for clock count, STOP, idle short-circuit and retry all caught.
+- Doc-only: a host test of the no-bus branch of `main_boot_early.c` is not feasible (the file is the whole boot sequence and cannot be linked into a host test).
