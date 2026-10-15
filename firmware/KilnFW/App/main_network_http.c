@@ -226,7 +226,8 @@ static int32_t main_ota_ms_since_boot_complete(void *c)
             sc->complete_tick = 1;
         }
     }
-    return (int32_t)((xTaskGetTickCount() - sc->complete_tick) * portTICK_PERIOD_MS);
+    return boot_guard_soak_elapsed_ms((uint32_t)xTaskGetTickCount(), (uint32_t)sc->complete_tick,
+                                      (uint32_t)portTICK_PERIOD_MS);
 }
 
 static bool main_ota_clear_counter(void *c)
@@ -291,6 +292,8 @@ static void main_ota_rollback_confirm_task(void *arg)
                 /* OT-G06: only now (marked valid, boot_guard cleared) drop a stage that is the
                  * image we are running. Uses OUR mark-valid result. Never gates anything. */
                 (void)update_http_stale_stage_check(st.mark_valid_done);
+                /* LOW-4: a leftover install request must not replay at a later recovery entry. */
+                (void)update_install_http_drop_stale_request();
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
             }

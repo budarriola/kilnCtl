@@ -190,6 +190,13 @@ static int op_apply_start(void *ctx)
     if (app == NULL) {
         return UPD_INST_DETAIL_START_NO_APP;
     }
+    // AUDIT_UPDATE_FAULTS LOW-1: prove the boot_guard clear works BEFORE the first erase of `app` (the manual
+    // route does the same); a clear that fails after the copy would leave `app` rewritten but never selected.
+    if (guard_clear() != 0) {
+        return UPD_INST_DETAIL_START_FAILED;
+    }
+    // LOW-2: `app` is about to change, so a verify cached by a status GET in the start window is stale.
+    recovery_http_app_verify_invalidate();
     esp_err_t e = recovery_apply_esp_start(app, pre_boot, post_boot);
     if (e == ESP_OK) {
         return 0;
@@ -220,8 +227,8 @@ static void show_failure(uint8_t reason)
 {
     // Warning, not error: the failure is shown but the SoftAP SSID, passphrase and QR stay on screen
     // (an error banner hides them, and the passphrase is shown nowhere else).
-    char line[28];
-    snprintf(line, sizeof(line), "INSTALL FAILED: %s", update_install_reason_name(reason));
+    char line[41]; // 40 columns on the 480 px panel at scale 2; the reason is the short LCD form
+    snprintf(line, sizeof(line), "INSTALL FAILED: %s", update_install_reason_lcd(reason));
     recovery_lcd_set_warning(line, NULL);
 }
 

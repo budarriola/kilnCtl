@@ -664,6 +664,12 @@ boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok
     return is_factory_partition ? BOOT_CONFIRM_SKIP_FACTORY : BOOT_CONFIRM_CONFIRM_OTA_SLOT;
 }
 
+int32_t boot_guard_soak_elapsed_ms(uint32_t now_ticks, uint32_t start_ticks, uint32_t tick_ms)
+{
+    uint64_t ms = (uint64_t)(uint32_t)(now_ticks - start_ticks) * (uint64_t)tick_ms;
+    return ms > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)ms;
+}
+
 boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boot_confirm_ops_t *ops)
 {
     if (!st || !ops || !ops->resample_nvs || !ops->mark_valid || !ops->clear_counter ||

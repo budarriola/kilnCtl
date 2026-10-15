@@ -130,6 +130,14 @@ const char *update_install_reason_name(uint8_t reason)
     return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
 }
 
+const char *update_install_reason_lcd(uint8_t reason)
+{
+    if (reason == UPD_INST_REASON_OUTCOME_UNKNOWN) {
+        return "unknown, keep power on";
+    }
+    return update_install_reason_name(reason);
+}
+
 const char *update_install_detail_name(uint8_t detail)
 {
     // 1..15 mirror recovery_apply_result_name().
@@ -238,6 +246,17 @@ int update_install_post_boot(const update_install_ops_t *ops, const char *semver
     return 0;
 }
 
+int update_install_drop_stale(bool claimed, int (*req_erase)(void))
+{
+    if (!claimed) {
+        return 1;
+    }
+    if (!req_erase) {
+        return -1;
+    }
+    return req_erase() == 0 ? 0 : -1;
+}
+
 static update_install_boot_outcome_t refuse_ex(const update_install_ops_t *ops, uint8_t reason, uint8_t detail,
                                                const char *semver, const uint8_t *id, update_install_res_t *res_out)
 {
@@ -264,6 +283,18 @@ static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uin
     return refuse_ex(ops, reason, UPD_INST_DETAIL_NONE, semver, id, res_out);
 }
 
+// A refusal that drops the request: if the clear itself fails the request would replay at the next entry,
+// so say CLEAR_FAILED (STAY) instead of the specific reason (REVIEW_OTA_BOOT_FIXES recfx leftovers).
+static update_install_boot_outcome_t refuse_dropping(const update_install_ops_t *ops, uint8_t reason,
+                                                     const char *semver, const uint8_t *id,
+                                                     update_install_res_t *res_out)
+{
+    if (ops->req_clear(ops->ctx) != 0) {
+        return refuse(ops, UPD_INST_REASON_CLEAR_FAILED, semver, id, res_out);
+    }
+    return refuse(ops, reason, semver, id, res_out);
+}
+
 update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t *ops,
                                                       update_install_res_t *res_out)
 {
@@ -286,27 +317,22 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
     }
     update_install_req_t req;
     if (!update_install_req_decode(blob, len, &req)) {
-        (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_RECORD_BAD, NULL, NULL, res_out);
+        return refuse_dropping(ops, UPD_INST_REASON_RECORD_BAD, NULL, NULL, res_out);
     }
     // Refusals below leave the app untouched, so the request is dropped.
     if (req.attempts >= UPD_INST_MAX_ATTEMPTS) {
-        (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_ATTEMPTS_EXCEEDED, req.semver, req.sha256, res_out);
+        return refuse_dropping(ops, UPD_INST_REASON_ATTEMPTS_EXCEEDED, req.semver, req.sha256, res_out);
     }
     uint32_t stage_len = 0;
     uint8_t stage_sha[UPD_INST_SHA_LEN];
     if (!ops->stage_verified(ops->ctx, &stage_len, stage_sha)) {
-        (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_STAGE_NOT_READY, req.semver, req.sha256, res_out);
+        return refuse_dropping(ops, UPD_INST_REASON_STAGE_NOT_READY, req.semver, req.sha256, res_out);
     }
     if (stage_len != req.image_length) {
-        (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_SIZE_MISMATCH, req.semver, req.sha256, res_out);
+        return refuse_dropping(ops, UPD_INST_REASON_SIZE_MISMATCH, req.semver, req.sha256, res_out);
     }
     if (memcmp(stage_sha, req.sha256, UPD_INST_SHA_LEN) != 0) {
-        (void)ops->req_clear(ops->ctx);
-        return refuse(ops, UPD_INST_REASON_SHA_MISMATCH, req.semver, req.sha256, res_out);
+        return refuse_dropping(ops, UPD_INST_REASON_SHA_MISMATCH, req.semver, req.sha256, res_out);
     }
     // Raise the attempt counter (read back) BEFORE any erase can happen.
     req.attempts++;

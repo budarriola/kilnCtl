@@ -20,6 +20,10 @@ extern "C" {
 // Registers both routes. Call after update_http_start() (needs the stager).
 esp_err_t update_install_http_start(void);
 
+// Healthy confirmed boot: erase a leftover install request (never while an install/update claim is held).
+// 0 = erased or none, 1 = skipped (claim busy), -1 = erase failed.
+int update_install_http_drop_stale_request(void);
+
 #ifdef __cplusplus
 }
 #endif

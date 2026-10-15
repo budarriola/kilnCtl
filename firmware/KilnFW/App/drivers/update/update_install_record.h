@@ -114,6 +114,10 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
 void update_install_id_hex(const uint8_t id[UPD_INST_ID_LEN], char out[UPD_INST_ID_HEX_LEN]);
 
 const char *update_install_reason_name(uint8_t reason);
+// Short form for the recovery LCD (<= UPD_INST_REASON_LCD_MAX chars, so "INSTALL FAILED: <x>" fits the
+// 40-column warning line); equals the plain name except for the long outcome_unknown reason.
+#define UPD_INST_REASON_LCD_MAX 24
+const char *update_install_reason_lcd(uint8_t reason);
 const char *update_install_detail_name(uint8_t detail);
 const char *update_install_code_name(uint8_t code);
 
@@ -183,6 +187,12 @@ int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_cl
 // write (failure only reported via *result_ok: the install is good).
 int update_install_post_boot(const update_install_ops_t *ops, const char *semver, const uint8_t *id,
                              bool *result_ok);
+
+// Application, healthy confirmed boot (REVIEW_OTA_BOOT_FIXES LOW-4, AUDIT_UPDATE_FAULTS LOW-3): drop a
+// leftover install request so it cannot replay at a later recovery entry. `claimed` is whether the
+// update claim was taken (an install POST in flight holds it; then nothing is erased). Result:
+// 0 = erased (or nothing to do), 1 = skipped, claim busy, -1 = erase failed.
+int update_install_drop_stale(bool claimed, int (*req_erase)(void));
 
 // ---- Application side: write the request before the reboot into recovery ----
 // Injected IO for update_install_prepare (the install route's prepare hook).

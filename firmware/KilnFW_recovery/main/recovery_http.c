@@ -118,14 +118,29 @@ static bool app_has_valid_image(const esp_partition_t *part)
 // esp_image_verify() on `app` reads the whole image (~2.5 MB of flash) and
 // hashes it, so it must never run per status GET. The result is cached and
 // invalidated when an upload starts or ends; the next status/exit read refills
-// it lazily. httpd is effectively single-task here, so no lock is needed.
+// it lazily. The cache is also touched from other tasks (recovery_http_app_verifies() from the
+// install recover task, recovery_http_app_verify_invalidate() from the apply start), so every
+// access takes s_verify_mux and a verify only publishes its result if no invalidate ran meanwhile
+// (generation counter; REVIEW_OTA_BOOT_FIXES recfx leftover).
+static portMUX_TYPE s_verify_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_verify_known;
 static bool s_verify_valid;
 static uint32_t s_verify_image_len; // meta.image_len of the last successful verify, else 0
+static uint32_t s_verify_gen;
 
 static void app_verify_invalidate(void)
 {
+    portENTER_CRITICAL(&s_verify_mux);
     s_verify_known = false;
+    s_verify_valid = false;
+    s_verify_image_len = 0;
+    s_verify_gen++;
+    portEXIT_CRITICAL(&s_verify_mux);
+}
+
+void recovery_http_app_verify_invalidate(void)
+{
+    app_verify_invalidate();
 }
 
 static bool app_image_verified(const esp_partition_t *part)
@@ -133,14 +148,25 @@ static bool app_image_verified(const esp_partition_t *part)
     if (!part) {
         return false;
     }
-    if (!s_verify_known) {
-        const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
-        esp_image_metadata_t meta;
-        s_verify_valid = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK;
-        s_verify_image_len = s_verify_valid ? meta.image_len : 0;
+    portENTER_CRITICAL(&s_verify_mux);
+    bool known = s_verify_known;
+    bool cached = s_verify_valid;
+    uint32_t gen = s_verify_gen;
+    portEXIT_CRITICAL(&s_verify_mux);
+    if (known) {
+        return cached;
+    }
+    const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
+    esp_image_metadata_t meta;
+    bool valid = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK;
+    portENTER_CRITICAL(&s_verify_mux);
+    if (gen == s_verify_gen) {
+        s_verify_valid = valid;
+        s_verify_image_len = valid ? meta.image_len : 0;
         s_verify_known = true;
     }
-    return s_verify_valid;
+    portEXIT_CRITICAL(&s_verify_mux);
+    return valid;
 }
 
 // Bytes of the image esp_image_verify() accepted (header + segments + padding +
@@ -148,7 +174,10 @@ static bool app_image_verified(const esp_partition_t *part)
 // app_image_verified(), which fills the cache.
 static uint32_t app_image_len(void)
 {
-    return s_verify_valid ? s_verify_image_len : 0;
+    portENTER_CRITICAL(&s_verify_mux);
+    uint32_t len = s_verify_valid ? s_verify_image_len : 0;
+    portEXIT_CRITICAL(&s_verify_mux);
+    return len;
 }
 
 static bool clear_boot_guard(char *msg, size_t cap);
@@ -1202,7 +1231,7 @@ static esp_err_t apply_status_get(httpd_req_t *req)
 
 esp_err_t recovery_http_start(void)
 {
-    // Handlers' static buffers (send_frag's frag, s_verify_*) assume every
+    // Handlers' static buffers (send_frag's frag) assume every
     // handler runs on this ONE httpd task. Starting a second server would
     // silently break that, so refuse it outright. Set only once a start
     // succeeds, so a failed attempt (which stops its server) can be retried.

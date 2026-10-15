@@ -45,7 +45,7 @@ $realHttp = Join-Path $here "recovery_http.c"
 # $Header: header to build against (copied beside a copy of the test so the
 # quoted include resolves to it); $LcdSrc/$HttpSrc: the sources to scan.
 function Build-And-Run {
-    param([string]$Header, [string]$LcdSrc, [string]$HttpSrc, [string]$Tag)
+    param([string]$Header, [string]$LcdSrc, [string]$HttpSrc, [string]$Tag, [string]$ExtraName = "", [string]$ExtraPath = "")
     $dir = Join-Path $work $Tag
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     Copy-Item $Header (Join-Path $dir "recovery_lcd_policy.h")
@@ -68,7 +68,7 @@ function Build-And-Run {
     }
     $ErrorActionPreference = "Continue"
     # Every other recovery source is scanned too (no log/printf may carry the passphrase).
-    $extra = (Get-ChildItem $here -Filter "recovery_*.c" | Where-Object { $_.Name -ne "recovery_lcd.c" -and $_.Name -ne "recovery_http.c" } | ForEach-Object { "`"" + $_.FullName + "`"" }) -join " "
+    $extra = (Get-ChildItem $here -Filter "recovery_*.c" | Where-Object { $_.Name -ne "recovery_lcd.c" -and $_.Name -ne "recovery_http.c" } | ForEach-Object { $p = $_.FullName; if ($ExtraName -ne "" -and $_.Name -eq $ExtraName) { $p = $ExtraPath }; "`"" + $p + "`"" }) -join " "
     $ro = cmd /c "`"$exe`" `"$LcdSrc`" `"$HttpSrc`" $extra 2>&1"
     $rx = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
@@ -89,8 +89,11 @@ function Test-Mutant {
         $bad = Build-And-Run -Header $mpath -LcdSrc $realLcd -HttpSrc $realHttp -Tag $Tag
     } elseif ($File -eq "recovery_lcd.c") {
         $bad = Build-And-Run -Header $realHeader -LcdSrc $mpath -HttpSrc $realHttp -Tag $Tag
-    } else {
+    } elseif ($File -eq "recovery_http.c") {
         $bad = Build-And-Run -Header $realHeader -LcdSrc $realLcd -HttpSrc $mpath -Tag $Tag
+    } else {
+        # any other recovery_*.c is a scanned extra source: swap it in by name
+        $bad = Build-And-Run -Header $realHeader -LcdSrc $realLcd -HttpSrc $realHttp -Tag $Tag -ExtraName $File -ExtraPath $mpath
     }
     if ($bad.Exit -eq 0) {
         throw "NEGATIVE TEST FAILED ($Tag): the mutant still passed -- the host test is vacuous for it."
@@ -145,6 +148,11 @@ try {
     Test-Mutant -File "recovery_lcd.c" -Needle "s_bg_state = rlcd_classify_boot_guard(rc, decoded);" -Replacement "s_bg_state = RLCD_BG_NONE;" -Tag "noclassify"
     Test-Mutant -File "recovery_http.c" -Needle "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (recovery_pico_busy()) {" -Replacement "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (false) {" -Tag "wifi_reset_no_pico_busy"
     Test-Mutant -File "recovery_http.c" -Needle "\`"lcd_ready\`"" -Replacement "\`"lcd_rdy\`"" -Tag "nolcdready"
+
+    Test-Mutant -File "recovery_http.c" -Needle "gen == s_verify_gen" -Replacement "true" -Tag "verify_publish_ungated"
+    Test-Mutant -File "recovery_http.c" -Needle "portENTER_CRITICAL(&s_verify_mux)" -Replacement "(void)s_verify_mux" -Tag "verify_unlocked"
+    Test-Mutant -File "recovery_install.c" -Needle "recovery_http_app_verify_invalidate();" -Replacement "(void)0;" -Tag "apply_no_invalidate"
+    Test-Mutant -File "recovery_install.c" -Needle "if (guard_clear() != 0) {" -Replacement "if (0) {" -Tag "apply_guard_unchecked"
 
     Write-Host "check_recovery_lcd_policy: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0

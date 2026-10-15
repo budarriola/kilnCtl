@@ -329,7 +329,18 @@ bool boot_guard_counter_is_stuck(uint32_t rtc_magic, uint32_t rtc_marked_healthy
  * ota_routes_ok is the new half replacing the safety-link check: "the OTA
  * HTTP routes this whole recovery mechanism depends on actually came up" is
  * a real precondition for "safe to update again", where "an isolated
- * safety-processor link happens to be wired up and answering" never was. */
+ * safety-processor link happens to be wired up and answering" never was.
+ *
+ * Deliberate trade-off (AUDIT_BOOT_SEQUENCE LOW-1, 2026-10-15): web_ok and
+ * ota_routes_ok are REQUIRED to clear the counter even though control, the
+ * safety link and the LCD do not depend on them. A board whose radio or
+ * httpd fails on every boot therefore reaches RECOVERY_MODE_BOOT_THRESHOLD
+ * after 3 power cycles and boots the recovery image. That is intended:
+ * "the web/OTA surface is reachable" is what proves an update usable, and a
+ * persistent radio fault is exactly the state in which the operator must
+ * reach the recovery image (and its own AP) to repair or re-update. Do not
+ * split the criterion without an owner decision; the truth table is pinned
+ * in test_boot_guard.c. */
 bool boot_confirm_is_healthy(bool nvs_ok, bool web_ok, bool ota_routes_ok);
 
 /* What ota_rollback_confirm_task() (main.c) should do this poll, given the
@@ -391,6 +402,10 @@ typedef struct {
  * monitor_task_start() (the only rtc_watchdog_feed() caller) resets the chip ~20 s after
  * arming, so 30 s leaves a 10 s margin. */
 #define BOOT_CONFIRM_SOAK_MS 30000
+
+/* Elapsed ms between two 32-bit tick counts (wrap-safe), saturating at INT32_MAX so the
+ * value never goes negative on a board that stays unhealthy for weeks (REVIEW_OTA_BOOT_FIXES LOW-3). */
+int32_t boot_guard_soak_elapsed_ms(uint32_t now_ticks, uint32_t start_ticks, uint32_t tick_ms);
 
 /* boot_guard_boot_complete_signal(): end of main_bridges_bringup(). boot_guard_confirm_withhold():
  * sticky for the boot, called when monitor_task_start() failed. Both cleared by boot_guard_init(). */

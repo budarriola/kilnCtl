@@ -407,7 +407,15 @@ void main_boot_early(main_boot_ctx_t *ctx)
     // to be true; a boot with no expander is still a boot worth counting).
     // Nothing before this point can plausibly run long enough to trip
     // either mechanism, and everything after it can, so this is the
-    // earliest and latest-safe place for both:
+    // earliest and latest-safe place for both. Known limit
+    // (AUDIT_BOOT_SEQUENCE LOW-2, 2026-10-15): a deterministic PANIC in the
+    // inits above (wifi_prov_start loading a malformed persisted blob, say)
+    // loops without incrementing the counter, because the counter must come
+    // after the relays are latched off: a recovery reboot must never leave a
+    // relay driven. The bootloader rollback still covers a PENDING_VERIFY
+    // image. Moving only the increment earlier needs bench proof of the
+    // relay-off ordering, so it is left as is:
+
     //   - boot_guard_init() increments the persisted "unconfirmed boot"
     //     counter and decides THIS boot's recovery_mode -- see boot_guard.h.
     //     Read once into ctx->recovery_mode, consulted further down (this

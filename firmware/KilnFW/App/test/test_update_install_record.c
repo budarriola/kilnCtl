@@ -377,6 +377,56 @@ static void test_result_identity(void)
                "the pre-boot OK result carries the identity");
 }
 
+/* recfx leftover: a refusal whose request clear fails reports CLEAR_FAILED (STAY), not the specific reason. */
+static void test_refusal_clear_failure(void)
+{
+    fake_t f;
+    update_install_res_t res;
+    fake_init(&f);
+    f.stage_ok = false;
+    f.clear_rc = -1;
+    update_install_ops_t o = ops_for(&f);
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED && f.clear_calls == 1 &&
+                   res.reason == UPD_INST_REASON_CLEAR_FAILED && f.apply_calls == 0,
+               "REFUSAL CLEAR: failed request clear is reported as clear_failed");
+    fake_init(&f);
+    f.stage_ok = false;
+    o = ops_for(&f);
+    TEST_CHECK(update_install_boot_run(&o, &res) == UPD_INST_BOOT_REFUSED &&
+                   res.reason == UPD_INST_REASON_STAGE_NOT_READY && f.have_req == 0,
+               "REFUSAL CLEAR: a working clear keeps the specific reason");
+}
+
+static int g_erase_calls;
+static int g_erase_rc;
+static int stale_erase(void) { g_erase_calls++; return g_erase_rc; }
+
+/* recfx leftover: the LCD warning line (40 columns) holds "INSTALL FAILED: " plus the reason. */
+static void test_reason_lcd_fits(void)
+{
+    for (uint8_t r = 0; r < UPD_INST_REASON_COUNT; r++) {
+        TEST_CHECK(strlen(update_install_reason_lcd(r)) <= UPD_INST_REASON_LCD_MAX, "LCD REASON: fits the warning line");
+    }
+    TEST_CHECK(strstr(update_install_reason_lcd(UPD_INST_REASON_OUTCOME_UNKNOWN), "power") != NULL,
+               "LCD REASON: outcome_unknown keeps the do-not-power-cycle hint");
+    TEST_CHECK(strcmp(update_install_reason_lcd(UPD_INST_REASON_SHA_MISMATCH), "sha_mismatch") == 0,
+               "LCD REASON: ordinary reasons unchanged");
+}
+
+/* LOW-4: a leftover request/* LOW-4: a leftover request is dropped on a healthy boot, never while the update claim is held. */
+static void test_drop_stale(void)
+{
+    g_erase_calls = 0;
+    g_erase_rc = 0;
+    TEST_CHECK(update_install_drop_stale(true, stale_erase) == 0 && g_erase_calls == 1,
+               "DROP STALE: claimed -> request erased");
+    TEST_CHECK(update_install_drop_stale(false, stale_erase) == 1 && g_erase_calls == 1,
+               "DROP STALE: claim busy -> nothing erased");
+    g_erase_rc = -1;
+    TEST_CHECK(update_install_drop_stale(true, stale_erase) == -1, "DROP STALE: erase failure reported");
+    TEST_CHECK(update_install_drop_stale(true, NULL) == -1, "DROP STALE: no erase op fails closed");
+}
+
 static void test_pre_boot(void)
 {
     TEST_SECTION("update_install_record -- recovery pre/post-boot hooks");
@@ -636,6 +686,9 @@ void run_test_update_install_record(void)
     test_codec();
     test_boot_logic();
     test_pre_boot();
+    test_drop_stale();
+    test_reason_lcd_fits();
+    test_refusal_clear_failure();
     test_result_identity();
     test_prepare();
 }

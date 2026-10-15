@@ -147,7 +147,25 @@ static void install_undo(void)
     }
 }
 
-static esp_err_t install_post_handler(httpd_req_t *req)
+static int stale_req_erase(void)
+{
+    return kv_erase_verified(UPD_INST_KEY_REQ);
+}
+
+int update_install_http_drop_stale_request(void)
+{
+    bool claimed = ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP);
+    int rc = update_install_drop_stale(claimed, stale_req_erase);
+    if (claimed) {
+        ota_http_update_end();
+    }
+    if (rc != 0) {
+        ESP_LOGW(TAG, "stale install request not dropped (rc=%d)", rc);
+    }
+    return rc;
+}
+
+static esp_err_t install_post_handler(static esp_err_t install_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > INSTALL_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");

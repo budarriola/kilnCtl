@@ -412,6 +412,13 @@ static void test_http_source(const char *path)
     }
     normalize(src);
     strip_comments(src);
+    char *av = fn_body(src, "static bool app_image_verified(");
+    CHECK(av != NULL, "app_image_verified found");
+    if (av) {
+        CHECK(strstr(av, "portENTER_CRITICAL(&s_verify_mux)") != NULL && strstr(av, "gen == s_verify_gen") != NULL,
+              "the verify cache is lock-guarded and a verify racing an invalidate is not published");
+        free(av);
+    }
     char *st = fn_body(src, "static esp_err_t recovery_status_get(");
     CHECK(st != NULL, "status handler found");
     if (st) {
@@ -486,6 +493,11 @@ static void test_install_source(const char *path)
     if (as) {
         CHECK(strstr(as, "UPD_INST_DETAIL_START_NO_MEM") != NULL && strstr(as, "ESP_ERR_NO_MEM") != NULL,
               "the heap-floor refusal gets its own detail code");
+        const char *gc = strstr(as, "guard_clear()");
+        const char *inv = strstr(as, "recovery_http_app_verify_invalidate()");
+        const char *st = strstr(as, "recovery_apply_esp_start(");
+        CHECK(gc && st && gc < st, "the boot_guard clear is proven before the first erase of app");
+        CHECK(inv && st && inv < st, "the app verify cache is dropped before the apply starts");
         free(as);
     }
     char *pt = fn_body(src, "static void poll_task(");

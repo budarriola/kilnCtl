@@ -38,6 +38,8 @@ int recovery_http_boot_guard_clear(void);
 // recovery_http_app_verifies(): `app` holds a valid image AND passes the full esp_image_verify. It drops the
 // cached verify result first (an apply may have rewritten `app` since it was cached).
 bool recovery_http_app_verifies(void);
+// Drops the cached verify result (call before `app` is erased or rewritten by a non-httpd task).
+void recovery_http_app_verify_invalidate(void);
 // Selects `app` as the boot target (set + read back) and schedules the restart. 0 = done; nonzero = nothing
 // changed or the switch failed (stay in recovery). The caller clears boot_guard and the request first.
 int recovery_http_select_app_and_restart(void);

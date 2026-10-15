@@ -134,7 +134,7 @@ static char s_err_head[24];   // generic fatal error (e.g. "HTTP FAILED"), "" = 
 static char s_err_detail[28];
 // Warning line drawn IN ADDITION to the network section (SSID/passphrase stay visible), cleared by the
 // 1 Hz task once s_warn_active() reports false. Never carries a credential.
-static char s_warn[28];
+static char s_warn[41]; // 40 columns (480 px / 12 px per scale-2 glyph)
 static bool (*s_warn_active)(void);
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 
