@@ -51,6 +51,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "pico/time.h" // to_ms_since_boot(): snapshot stamps must use the clock safety_core.c ages them with (A2)
 
 #include "hal_adc.h"
 
@@ -364,7 +365,7 @@ void current_sense_sample(void)
     }
 
     current_snapshot_t snap = {0};
-    snap.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    snap.timestamp_ms = to_ms_since_boot(get_absolute_time()); /* guard audit 2026-10-14 A2: same clock safety_core.c compares against */
     snap.calibrated = s_cal.calibrated;
 
     for (int n = 0; n < 3; n++) {

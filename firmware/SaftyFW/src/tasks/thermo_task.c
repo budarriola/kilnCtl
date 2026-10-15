@@ -24,6 +24,7 @@
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "task.h"
+#include "pico/time.h" // to_ms_since_boot(): snapshot stamps must use the clock safety_core.c ages them with (A2)
 
 #include "hardware/gpio.h" // permanent holdout: DRDY, one of the two raw GPIO IRQ owners (shared per-core dispatcher, a second registrant would clobber it) -- see firmware/hwAbstraction/README.md "Permanent holdouts"
 
@@ -343,7 +344,7 @@ bool thermo_task_inject_reading(bool tc_valid, float tc_c, float cj_c, uint8_t f
         return false;
     }
 
-    s_inject_snapshot.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    s_inject_snapshot.timestamp_ms = to_ms_since_boot(get_absolute_time()); /* guard audit 2026-10-14 A2: same clock safety_core.c compares against */
     s_inject_snapshot.valid = tc_valid;
     // Same "NaN when !valid, never 0, never stale" contract every producer
     // in this codebase follows for thermo_snapshot_t (this file's own
@@ -568,7 +569,7 @@ static void thermo_task_fn(void *arg)
         uint32_t notifications = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeout_ms));
 
         thermo_snapshot_t snap;
-        snap.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        snap.timestamp_ms = to_ms_since_boot(get_absolute_time()); /* guard audit 2026-10-14 A2: same clock safety_core.c compares against */
 
         // SAFTYFW_THERMO_ASSUME_DRDY: treat the elapsed wait as proof that a
         // conversion finished, rather than as proof the part is dead. See that

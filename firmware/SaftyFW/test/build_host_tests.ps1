@@ -233,6 +233,7 @@ try {
         # pulled in above for relay_owner.c) plus fake_adc.c as its backend --
         # no new stub file, unlike relay_owner.c's task-creation surface.
         (Join-Path $srcDir "current_sense.c"),
+        (Join-Path $testDir "test_pico_time_clock.c"), # A2: settable hardware-timer clock for current_sense.c's snapshot stamp
         (Join-Path $hwAbstractionHostDir "fake_adc.c"),
         # current_task.c's current_task_start() is now exercised too (hal_adc_
         # init()/hal_adc_gpio_enable() x3, then xTaskCreate) -- reuses the same
@@ -279,6 +280,7 @@ try {
     $rspContent = "/nologo /MP$clMpN /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" /I `"$hwAbstractionPicoSpiDir`" " +
         "/I `"$hardwareGpioMinStubDir`" " +
+        "/I `"$testDir\stubs\pico_time_clock`" " +
         "/I `"$spiOwnerStubDir`" " +
         "/Fo:`"$outDir\obj_main\\`" /Fe:`"$exe`" " +
         (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")
@@ -595,7 +597,7 @@ try {
     $thermoTaskSourceArgs = ($thermoTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $thermoTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
         "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
-        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir\stubs\pico_time_clock`" /I `"$testDir`" " +
         "/Fo:`"$thermoTaskObjDir\\`" /Fe:`"$thermoTaskExe`" $thermoTaskSourceArgs"
     Add-HostBuild -Name "thermo_task_tests.exe" -ExePath $thermoTaskExe -BuildCmd $thermoTaskCmd
 
