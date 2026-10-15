@@ -89,6 +89,8 @@ HIGH 0, MED 4, LOW 3, INFO 5.
   trip within one window.
 - Found independently by two reviewers.
 
+Fixed by ctlfx: `thermal_guard_restart_windows()` (latched trips kept) called from `profile_executor_resume()` for every active zone; tests `test_resume_restarts_thermal_guard_windows` and the thermal_guard restart variants.
+
 ### MED-2: a pause permanently cancels a running non-blocking relay/IO segment
 
 - **Where:**
@@ -121,6 +123,8 @@ HIGH 0, MED 4, LOW 3, INFO 5.
   - If this behaviour is intended instead, document it and surface it in
     status.
   - Host test: pause and resume during a non-blocking segment.
+
+Fixed by ctlfx: PAUSED sweeps with `io_segs_pause_all_off()` (remembers remaining time), `io_segs_resume_pending()` restarts through the gated start path; every other stop still cancels; tests `test_io_seg_nonblocking_survives_pause_resume`, `test_paused_tick_uses_pause_aware_io_sweep`.
 
 ### MED-3: a negative feedforward hold becomes a positive integral floor
 
@@ -158,6 +162,8 @@ HIGH 0, MED 4, LOW 3, INFO 5.
   change the duty breakdown, so floor at the use site. Host test: a negative
   hold with error 0 must let I reach 0 and output 0.
 
+Fixed by ctlfx: `pid.c` clamps the feedforward hold to be non-negative in both the bumpless seed and the update floor; MED-3 block in `test_pid.c`.
+
 ### MED-4: autotune accept overwrites state with IDLE and can orphan a concurrent run on another zone
 
 - **Where:**
@@ -194,6 +200,8 @@ HIGH 0, MED 4, LOW 3, INFO 5.
   - Make `autotune_begin_run_locked` refuse while any `external_write_reserved`
     is set, whatever the zone. That closes the window entirely.
   - Host test: a start for another zone during accept is refused.
+
+Fixed by ctlfx: accept writes IDLE only while it still owns DONE on its zone (both blocks) and a start is refused on any reservation; tests `test_reserve_blocks_a_start_on_another_zone`, `test_accept_does_not_idle_a_run_started_meanwhile`, `test_accept_step_method_does_not_idle_a_run_started_meanwhile`.
 
 ### LOW-1: ON_OFF actuation state is not reset by pause/resume, contrary to ON_OFF_ZONE.md sec 5
 
