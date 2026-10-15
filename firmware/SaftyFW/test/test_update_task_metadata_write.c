@@ -29,7 +29,7 @@ static bool f_prog(void *c, uint32_t o, const uint8_t *d, size_t n)
 }
 
 static uint8_t bk_mem[REC];
-static bool bk_fail_program;
+static bool bk_fail_program, bk_corrupt_program;
 static bool bk_erase(void *c) { (void)c; memset(bk_mem, 0xFF, sizeof bk_mem); return true; }
 static bool bk_read(void *c, uint32_t o, uint8_t *b, size_t n) { (void)c; memcpy(b, bk_mem + o, n); return true; }
 static bool bk_prog(void *c, uint32_t o, const uint8_t *d, size_t n)
@@ -37,6 +37,7 @@ static bool bk_prog(void *c, uint32_t o, const uint8_t *d, size_t n)
     (void)c;
     if (bk_fail_program) return false;
     for (size_t i = 0; i < n; i++) bk_mem[o + i] &= d[i];
+    if (bk_corrupt_program) bk_mem[o + 5] ^= 0x01u;
     return true;
 }
 
@@ -110,5 +111,14 @@ void run_test_update_task_metadata_write(void)
         TEST_CHECK(b.erases == 0 && memcmp(b.mem + 3 * REC, rec, REC) == 0,
                    "failed backup never erases the main sector");
         bk_fail_program = false;
+
+        memset(b.mem, 0xFF, sizeof b.mem);
+        memcpy(b.mem + 3 * REC, rec, REC);
+        bk_corrupt_program = true; // program "succeeds" but lands wrong bytes
+        b.erases = 0;
+        TEST_CHECK(update_task_metadata_write_ab(&io, true, 0, rec, REC, 3 * REC) == UPDATE_METADATA_WRITE_BACKUP_FAILED &&
+                       b.erases == 0,
+                   "backup that fails read-back refuses to erase main");
+        bk_corrupt_program = false;
     }
 }
