@@ -257,3 +257,11 @@ undriven in recovery) being fixed.
 - No test rejecting a DATA frame past `s_header.length` (LOW-2).
 - `bootloader_persist_metadata` and `bootloader/main.c` have no host
   coverage at all (LOW-3, LOW-4).
+
+## Resolution (2026-10-14, picofx)
+
+- HIGH-1 fixed. `bootloader_decide_boot` no longer counts attempts for a `VALID` active slot (and clears a stale nonzero count with one write, never marks it `BAD`); `confirm_tick` now uses `bootloader_metadata_apply_confirm()` which sets `VALID` and clears `boot_attempts`. An unconfirmed (PENDING_VERIFY) slot keeps the 3-attempt rollback. Side effect: no per-boot metadata write for a confirmed slot, so the wrap window is hit far less often.
+- MED-1 fixed with a backup sector instead of a second adjacent sector (the sector after 0x10000 is slot A): `BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET` 0x1C1000 in the previously free headroom, no existing offset moves. Before a wrap erase, the newest record is copied to the backup and verified (bootloader `persist.c` and the app's `update_task_metadata_write_ab`); a failed backup refuses the erase. Boot, recovery and app all read through `bootloader_metadata_find_latest_ab`. No protocol bump.
+- LOW-3 partly addressed: `bootloader_persist_metadata` now returns bool (read-back against XIP); the recovery END path sends `STATUS_ERR_INTERNAL` and reverts the target slot on failure. `bootloader/main.c` boot-path persist result still only logged.
+- Tests: `test_bootloader_metadata.c` (multi-reset-after-confirm, find_latest_ab), new `test_bootloader_persist.c` (power loss torn at every flash op of the wrap, failed and silently corrupt backup, torn mid-log program), `test_update_task_metadata_write.c` (backup cases). Negtest, 8 mutants, all CAUGHT by assertion failures.
+- Not done: existing boards need a bootloader reflash for the backup logic (app-side changes alone are harmless); `bootloader/main.c` has no host coverage.
