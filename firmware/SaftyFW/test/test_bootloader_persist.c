@@ -20,6 +20,7 @@ extern uint8_t g_fake_flash[FAKE_FLASH_SIZE];
 extern int g_flash_op_limit;
 extern int g_flash_ops;
 extern bool g_power_lost;
+extern bool g_corrupt_backup_program;
 
 static const uint8_t *main_sector(void) { return &g_fake_flash[BOOTLOADER_METADATA_FLASH_OFFSET]; }
 static const uint8_t *backup_sector(void)
@@ -139,6 +140,25 @@ static void test_backup_failure_keeps_main(void)
                "main sector left intact with its newest record");
 }
 
+static void test_silently_corrupt_backup_keeps_main(void)
+{
+    TEST_SECTION("MED-1 -- backup that silently fails read-back never erases main");
+
+    memset(g_fake_flash, 0xFF, sizeof(g_fake_flash));
+    power_up();
+    bootloader_metadata_t m = base_meta();
+    size_t latest = fill_log(BOOTLOADER_METADATA_SLOTS_PER_SECTOR, &m);
+    uint32_t seq_before = m.seq;
+    g_corrupt_backup_program = true;
+    bootloader_metadata_t w = m;
+    bool ok = bootloader_persist_metadata(&w, latest);
+    g_corrupt_backup_program = false;
+    bootloader_metadata_t got;
+    size_t idx = bootloader_metadata_find_latest_ab(main_sector(), backup_sector(), &got);
+    TEST_CHECK(!ok, "persist refuses when the backup read-back differs");
+    TEST_CHECK(idx == latest && got.seq == seq_before, "main sector not erased");
+}
+
 static void test_persist_reports_unverified_program(void)
 {
     TEST_SECTION("LOW-3 -- persist returns false when the record does not read back");
@@ -163,5 +183,6 @@ void run_test_bootloader_persist(void)
 {
     test_wrap_power_loss_every_step();
     test_backup_failure_keeps_main();
+    test_silently_corrupt_backup_keeps_main();
     test_persist_reports_unverified_program();
 }

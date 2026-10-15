@@ -37,6 +37,8 @@ uint64_t time_us_64(void) { return 0u; }
 int g_flash_op_limit = -1;
 int g_flash_ops = 0;
 bool g_power_lost = false;
+// Silent corruption: programs into the metadata backup sector land with one bit flipped.
+bool g_corrupt_backup_program = false;
 
 static bool flash_op_begin(bool *torn)
 {
@@ -77,6 +79,9 @@ void flash_range_program(uint32_t flash_offs, const uint8_t *data, size_t count)
     size_t n = torn ? count / 2u : count;
     for (size_t i = 0; i < n; i++) {
         g_fake_flash[flash_offs + i] &= data[i];
+    }
+    if (g_corrupt_backup_program && flash_offs == BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET) {
+        g_fake_flash[flash_offs + 9] ^= 0x01u;
     }
 }
 
