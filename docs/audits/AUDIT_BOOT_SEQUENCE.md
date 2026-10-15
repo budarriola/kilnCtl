@@ -122,6 +122,22 @@ the datasheet minimum and release it, independent of I2C. Alternatively, have
 Host test: none for this path. `test_kiln_io_sx_fake.c`/`test_kiln_io_owner*.c` start from an
 expander that answers.
 
+**Resolution (2026-10-14, sxfx).** Fixed. New `SX1509_pulse_reset_pin(gpio)` (`SX1509.c`,
+declared in `SX1509_internal.h`) drives `~RESET` high, makes it an output, pulses it low for
+10 us (datasheet t_PULSE minimum 200 ns, `hardware/datasheets/mainBoard_SX1509/SX1509.pdf`
+electrical characteristics, p.8) and waits 5 ms (t_RESET max 2.5 ms, same table) with no I2C
+access. `SX1509_start()` calls it as its first step, before `i2c_master_probe()`, so a probe miss
+or an init failure still resets the part. `main_boot_early.c` calls it when `i2c_new_master_bus()`
+fails (no bus, so `SX1509_start()` never runs). `~RESET` is GPIO10 (`IO_Expander_RST` net,
+`hardware/mainBoard/MainControler.kicad_sch`; `CONFIG_KILNCTL_SX1509_RESET_IO` default 10);
+GPIO10 is not an ESP32-S3 strapping pin (0/3/45/46) and nothing else in the firmware uses it
+(only `gpio_probe_denylist.h`/`uart_bridge_info.c` list it). Relay-command and guard logic are
+untouched; the later `SX1509_reset(e, hard)` in `SX1509_start()` is kept. Test:
+`test_sx1509_reset_first.c` (new host exe `sx1509_reset_first`) asserts low-then-high precedes
+the first I2C access on a probe miss and on an init failure; gap 2 below is closed for the pulse
+(a latched-relay fake model is still absent). The `main_boot_early.c` no-bus branch is covered by
+the target build only. Not done: the optional 9-clock SCL bus clear plus one probe retry.
+
 ### LOW-1: a persistent web/OTA route failure walks a board with working control into recovery after 3 power cycles
 
 Evidence:
