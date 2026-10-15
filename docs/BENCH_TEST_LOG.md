@@ -3429,3 +3429,29 @@ the admitted path. `heap_admit()` now records the refusing reading; host test
 `test_update_fetch` covers it. Negtest: dropping the write is CAUGHT by the new
 assertion (test_update_fetch.c:777); the four sdkconfig-pin mutants are CAUGHT by
 `check_sdkconfig_defaults_applied.ps1`.
+
+## 2026-10-14 benchap4: update over the board AP, then JTAG wedge (BLOCKED)
+
+Board: XIP dev build, then pre.3 (b9fa1748e). Owner authorized the AP join script
+and testing updates over the self-hosted AP.
+
+| Step | Result |
+|---|---|
+| backup_export | PASS |
+| LCD navigate to Network page (LCD auth off) | PASS |
+| `join_board_ap.ps1 -Mode normal` | PASS (candidate 1 of 1) |
+| Keep AP up alongside STA uplink (3 attempts) | BLOCKED by design: AP torn down at GOT_IP, mode=ap has no uplink |
+| `update_stage_release` pre.3 over LAN (fetch admitted on XIP heap), link counters flat | PASS |
+| `update_install_start` over the AP | board came up on pre.3 (commit b9fa1748e); job UNKNOWN after 600 s |
+| Rejoin home Wi-Fi (`wifi_set_mode home`, STA 192.168.1.156) | PASS |
+| Build dev tip 153c12cf5 in worktree | PASS (2002 s, machine heavily loaded) |
+| `flash_firmware` dev tip back | FAIL x3: erase of 2965504 B completes, write then fails |
+| `debug_reset` after that | FAIL: `esp_usb_jtag: IN buffer overflow` |
+| Recovery-AP path, release suite, coredump | NOT RUN: board has no app and JTAG is wedged |
+
+The install job ended UNKNOWN because the pre.3 app has no `/api/update/status`
+(404 x23); the board answering on pre.3 is the confirmation. Board state at the
+end: app partition erased, no Wi-Fi, no link; needs a physical USB power cycle
+(the flash tool's own hint), then a flash of the dev tip. No firmware bug is
+proven; the wedge looks like the flash-write-protect-stuck state or a USB-JTAG
+fault.
