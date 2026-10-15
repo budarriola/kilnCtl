@@ -18,10 +18,12 @@ static const char *const kPartitions[NVS_REPORT_MAX_SECTIONS] = {
 
 void nvs_report_capture(void)
 {
-    s_count = 0;
-    for (size_t i = 0; kPartitions[i] != NULL && s_count < NVS_REPORT_MAX_SECTIONS; i++) {
+    /* Re-runnable (boot-confirm re-samples it): s_count is published only at the end so a
+     * concurrent nvs_report_get() never sees a transient 0. */
+    size_t n = 0;
+    for (size_t i = 0; kPartitions[i] != NULL && n < NVS_REPORT_MAX_SECTIONS; i++) {
         const char *name = kPartitions[i];
-        nvs_report_section_t *sec = &s_sections[s_count++];
+        nvs_report_section_t *sec = &s_sections[n++];
         sec->name = name;
 
         const esp_partition_t *part = esp_partition_find_first(
@@ -47,6 +49,7 @@ void nvs_report_capture(void)
             ESP_LOGW(TAG, "partition '%s' present but not mounted: %s", name, hal_status_to_name(err));
         }
     }
+    s_count = n;
 }
 
 const nvs_report_section_t *nvs_report_get(size_t *out_count)

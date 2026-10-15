@@ -826,6 +826,74 @@ static void test_recovery_route_decision(void)
                "at the real threshold with a valid image -> switch");
 }
 
+/* MED-3: boot_confirm_step() re-samples nvs_ok and retries mark-valid / the guard clear. */
+typedef struct {
+    int  nvs_calls, mark_calls, clear_calls;
+    int  nvs_false_polls;  /* resample reports false for this many calls, then true */
+    int  mark_fail_polls;  /* mark-valid fails this many calls, then succeeds */
+    int  clear_fail_polls;
+} step_fake_t;
+
+static bool step_nvs(void *c) { step_fake_t *f = c; return f->nvs_calls++ >= f->nvs_false_polls; }
+static bool step_mark(void *c) { step_fake_t *f = c; return f->mark_calls++ >= f->mark_fail_polls; }
+static bool step_clear(void *c) { step_fake_t *f = c; return f->clear_calls++ >= f->clear_fail_polls; }
+
+static int step_run(boot_confirm_state_t *st, step_fake_t *f, int max_polls)
+{
+    boot_confirm_ops_t ops = { f, step_nvs, step_mark, step_clear };
+    for (int i = 1; i <= max_polls; i++) {
+        if (boot_confirm_step(st, &ops) == BOOT_CONFIRM_STEP_DONE) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void test_boot_confirm_step_resamples_nvs(void)
+{
+    step_fake_t f = { .nvs_false_polls = 3 };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true, .nvs_ok = false };
+    TEST_CHECK(step_run(&st, &f, 10) == 4, "transient NVS fault: confirms on the poll after it clears");
+    TEST_CHECK(f.mark_calls == 1 && f.clear_calls == 1, "mark-valid and clear not called while unhealthy");
+    TEST_CHECK(st.mark_valid_done && st.clear_done, "state records both confirmations");
+}
+
+static void test_boot_confirm_step_retries_mark_valid(void)
+{
+    step_fake_t f = { .mark_fail_polls = 2 };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    TEST_CHECK(step_run(&st, &f, 10) == 3, "mark-valid failing twice: DONE only on the third poll");
+    TEST_CHECK(f.mark_calls == 3, "mark-valid retried until it succeeded");
+    TEST_CHECK(f.clear_calls == 1, "guard clear verified once and not repeated");
+}
+
+static void test_boot_confirm_step_retries_clear(void)
+{
+    step_fake_t f = { .clear_fail_polls = 2 };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    TEST_CHECK(step_run(&st, &f, 10) == 3, "clear failing twice: DONE on the third poll");
+    TEST_CHECK(f.mark_calls == 1, "mark-valid not repeated once it succeeded");
+}
+
+static void test_boot_confirm_step_never_confirms_unhealthy(void)
+{
+    step_fake_t f = { .nvs_false_polls = 1000 };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    TEST_CHECK(step_run(&st, &f, 20) == -1, "persistently unhealthy: never DONE");
+    TEST_CHECK(f.mark_calls == 0 && f.clear_calls == 0, "no mark-valid and no counter clear while unhealthy");
+    step_fake_t g = {0};
+    boot_confirm_state_t st2 = { .is_factory = false, .web_ok = false, .ota_ok = true };
+    TEST_CHECK(step_run(&st2, &g, 5) == -1 && g.clear_calls == 0, "web_ok false: never confirms");
+}
+
+static void test_boot_confirm_step_factory_skips_mark_valid(void)
+{
+    step_fake_t f = {0};
+    boot_confirm_state_t st = { .is_factory = true, .web_ok = true, .ota_ok = true };
+    TEST_CHECK(step_run(&st, &f, 5) == 1, "factory boot confirms on first healthy poll");
+    TEST_CHECK(f.mark_calls == 0 && f.clear_calls == 1, "factory: no mark-valid, counter cleared");
+}
+
 void run_test_boot_guard(void)
 {
     test_recovery_route_decision();
@@ -838,6 +906,11 @@ void run_test_boot_guard(void)
     test_corrupted_record_is_treated_as_count_zero();
     test_boot_confirm_is_healthy();
     test_boot_confirm_decide();
+    test_boot_confirm_step_resamples_nvs();
+    test_boot_confirm_step_retries_mark_valid();
+    test_boot_confirm_step_retries_clear();
+    test_boot_confirm_step_never_confirms_unhealthy();
+    test_boot_confirm_step_factory_skips_mark_valid();
     test_stuck_counter_escape();
     test_legacy_record_is_read_once_then_retired();
     test_reset_counter_keeps_normal_flashing_under_threshold();

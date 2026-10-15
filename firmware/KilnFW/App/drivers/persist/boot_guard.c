@@ -610,6 +610,29 @@ boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok
     return is_factory_partition ? BOOT_CONFIRM_SKIP_FACTORY : BOOT_CONFIRM_CONFIRM_OTA_SLOT;
 }
 
+boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boot_confirm_ops_t *ops)
+{
+    if (!st || !ops || !ops->resample_nvs || !ops->mark_valid || !ops->clear_counter) {
+        return BOOT_CONFIRM_STEP_PENDING;
+    }
+    if (!st->mark_valid_done || !st->clear_done) {
+        /* Re-sampled every poll until confirmed: a false reading never sticks. */
+        st->nvs_ok = ops->resample_nvs(ops->ctx);
+    }
+    boot_confirm_action_t action = boot_confirm_decide(st->is_factory, st->nvs_ok, st->web_ok, st->ota_ok);
+    if (action == BOOT_CONFIRM_SKIP_NOT_HEALTHY) {
+        return BOOT_CONFIRM_STEP_PENDING;
+    }
+    if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT && !st->mark_valid_done) {
+        st->mark_valid_done = ops->mark_valid(ops->ctx);
+    }
+    if (!st->clear_done) {
+        st->clear_done = ops->clear_counter(ops->ctx);
+    }
+    bool mark_ok = (action == BOOT_CONFIRM_SKIP_FACTORY) || st->mark_valid_done;
+    return (mark_ok && st->clear_done) ? BOOT_CONFIRM_STEP_DONE : BOOT_CONFIRM_STEP_PENDING;
+}
+
 /* Shared by boot_guard_mark_healthy() and boot_guard_reset_counter(): does
  * the actual NVS work (write, verify, one bounded erase-then-retry) and
  * returns whether the clear is CONFIRMED in flash. Caller holds s_bg.lock

@@ -365,6 +365,37 @@ typedef enum {
 boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok, bool web_ok,
                                            bool ota_routes_ok);
 
+/* First-boot confirm, re-sampled (audit AUDIT_UPDATE_FAULTS MED-3). The health inputs
+ * used to be fixed at boot and mark-valid was tried once, so a transient fault in the
+ * boot-time NVS snapshot or one failed esp_ota_mark_app_valid_cancel_rollback() left
+ * the image PENDING_VERIFY for the whole boot; the next reset then rolled back into
+ * recovery. boot_confirm_step() is called every poll: it re-samples nvs_ok through the
+ * injected callback, and on an OTA slot retries mark-valid until it reports success.
+ * boot_guard clear is only ever called from here, behind the health decision (never
+ * from an unconditional boot path). DONE only when everything required has verified. */
+typedef struct {
+    void *ctx;
+    bool (*resample_nvs)(void *ctx); /* re-run the NVS check, true = all mounted */
+    bool (*mark_valid)(void *ctx);   /* true = esp_ota_mark_app_valid_cancel_rollback() == ESP_OK */
+    bool (*clear_counter)(void *ctx);/* true = boot_guard_mark_healthy() verified */
+} boot_confirm_ops_t;
+
+typedef struct {
+    bool is_factory;
+    bool web_ok;
+    bool ota_ok;
+    bool nvs_ok;           /* last resampled value */
+    bool mark_valid_done;  /* OTA slot: mark-valid succeeded (sticky) */
+    bool clear_done;       /* boot_guard clear verified (sticky) */
+} boot_confirm_state_t;
+
+typedef enum {
+    BOOT_CONFIRM_STEP_PENDING = 0, /* call again next poll */
+    BOOT_CONFIRM_STEP_DONE,
+} boot_confirm_step_result_t;
+
+boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boot_confirm_ops_t *ops);
+
 #ifdef __cplusplus
 }
 #endif
