@@ -1,1 +1,0 @@
-cl @"C:wtrvallfx_out\host_tests_common_flags.rsp" /std:c11 /experimental:c11atomics /Fo:"C:wtrvallfx_out\obj_main\\" /Fe:"C:wtrvallfx_out\kilnctl_host_tests.exe" @"C:wtrvallfx_out\host_tests_main_sources.rsp"
