@@ -285,6 +285,9 @@ int main(void)
                "original bus's channels -- adopted and original share one underlying slot, not "
                "two independent SPI owners on one physical bus");
 
+    test_reading_ok_staleness();
+    test_live_check_reconfig(&bus, &chs[1]);
+
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;
 }
