@@ -18,6 +18,7 @@
 #ifndef SAFTYFW_BOOTLOADER_PERSIST_H
 #define SAFTYFW_BOOTLOADER_PERSIST_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "metadata.h"
@@ -33,7 +34,14 @@ extern "C" {
 // the flash write with interrupts disabled -- callers on the recovery-mode
 // UART1 RX path must expect the link to go silent for that window, same as
 // every other flash operation in this bootloader.
-void bootloader_persist_metadata(bootloader_metadata_t *meta, size_t latest_slot_index);
+//
+// Returns true only if the new record read back identical from flash
+// (AUDIT_PICO_UPDATE LOW-3). Power-loss safety (MED-1): when the write wraps
+// the log, the newest record is first saved to the backup sector
+// (BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET) and verified; if that fails the
+// main sector is NOT erased and false is returned. Readers use
+// bootloader_metadata_find_latest_ab().
+bool bootloader_persist_metadata(bootloader_metadata_t *meta, size_t latest_slot_index);
 
 #ifdef __cplusplus
 }

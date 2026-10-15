@@ -543,6 +543,7 @@ try {
     $blRecoverySources = @(
         (Join-Path $testDir "test_bootloader_recovery_update_main.c"),
         (Join-Path $testDir "test_bootloader_recovery_update.c"),
+        (Join-Path $testDir "test_bootloader_persist.c"),
         (Join-Path $bootDir "persist.c"),
         (Join-Path $bootDir "metadata.c"),
         (Join-Path $bootDir "crc32.c"),

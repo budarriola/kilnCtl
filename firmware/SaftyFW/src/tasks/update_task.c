@@ -477,18 +477,20 @@ static bool update_task_ensure_flash_region(void)
 static size_t update_task_read_latest_metadata(bootloader_metadata_t *out_meta)
 {
     const void *sector_ptr = NULL;
+    const void *backup_ptr = NULL;
     if (!update_task_ensure_flash_region() ||
         hal_flash_map(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET,
-                       BOOTLOADER_METADATA_FLASH_SIZE, &sector_ptr) != HAL_OK) {
-        // Matches the old bare-XIP-pointer path's own failure mode: XIP reads
-        // never actually failed before (the region was always addressable
-        // memory), so this branch is new, but bootloader_metadata_find_latest()
-        // already treats "not a single valid record" as an ordinary, expected
-        // outcome (BOOTLOADER_METADATA_NO_SLOT) -- an unmappable region gets
-        // exactly that same answer rather than a distinct error path.
+                       BOOTLOADER_METADATA_FLASH_SIZE, &sector_ptr) != HAL_OK ||
+        hal_flash_map(&s_flash_region, BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET,
+                       BOOTLOADER_METADATA_BACKUP_FLASH_SIZE, &backup_ptr) != HAL_OK) {
+        // An unmappable region gets the same answer as "no valid record"
+        // (BOOTLOADER_METADATA_NO_SLOT), exactly as before.
         return BOOTLOADER_METADATA_NO_SLOT;
     }
-    return bootloader_metadata_find_latest((const uint8_t *)sector_ptr, out_meta);
+    // MED-1: the backup sector holds the newest record only in the window of
+    // a torn wrap; find_latest_ab prefers the main log otherwise.
+    return bootloader_metadata_find_latest_ab((const uint8_t *)sector_ptr,
+                                               (const uint8_t *)backup_ptr, out_meta);
 }
 
 // Same as above, but fills `*out_meta` with a fresh, empty-slots default
@@ -521,6 +523,7 @@ _Static_assert(BOOTLOADER_METADATA_RECORD_LEN <= UPDATE_METADATA_MAX_RECORD,
 typedef struct {
     size_t next_write_slot;
     bool needs_erase;
+    uint32_t backup_src_offset; // UPDATE_METADATA_NO_BACKUP unless this write wraps the log
     uint8_t record[BOOTLOADER_METADATA_RECORD_LEN];
     hal_status_t result; // 2026-09-06 review fix: the inner erase/program status
                           // must survive the callback -- see this struct's
@@ -540,6 +543,28 @@ static bool update_meta_io_erase(void *ctx)
     (void)ctx;
     return hal_flash_erase(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET,
                            BOOTLOADER_METADATA_FLASH_SIZE) == HAL_OK;
+}
+
+static bool update_meta_io_erase_backup(void *ctx)
+{
+    (void)ctx;
+    return hal_flash_erase(&s_flash_region, BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET,
+                           BOOTLOADER_METADATA_BACKUP_FLASH_SIZE) == HAL_OK;
+}
+
+static bool update_meta_io_read_backup(void *ctx, uint32_t offset, uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    return hal_flash_read(&s_flash_region, BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET + offset, buf,
+                          len) == HAL_OK;
+}
+
+static bool update_meta_io_program_backup(void *ctx, uint32_t offset, const uint8_t *data,
+                                          size_t len)
+{
+    (void)ctx;
+    return hal_flash_program(&s_flash_region, BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET + offset,
+                             data, len) == HAL_OK;
 }
 
 static bool update_meta_io_read(void *ctx, uint32_t offset, uint8_t *buf, size_t len)
@@ -568,10 +593,13 @@ static void update_metadata_write_cb(void *param)
         .read = update_meta_io_read,
         .program = update_meta_io_program,
         .ctx = NULL,
+        .erase_backup = update_meta_io_erase_backup,
+        .read_backup = update_meta_io_read_backup,
+        .program_backup = update_meta_io_program_backup,
     };
-    update_metadata_write_result_t r = update_task_metadata_write_verified(
+    update_metadata_write_result_t r = update_task_metadata_write_ab(
         &io, a->needs_erase, (uint32_t)a->next_write_slot * BOOTLOADER_METADATA_RECORD_LEN,
-        a->record, BOOTLOADER_METADATA_RECORD_LEN);
+        a->record, BOOTLOADER_METADATA_RECORD_LEN, a->backup_src_offset);
     a->result = (r == UPDATE_METADATA_WRITE_OK) ? HAL_OK : HAL_IO;
 }
 
@@ -605,6 +633,9 @@ static bool update_task_persist_metadata(bootloader_metadata_t *meta, size_t lat
     update_metadata_write_args_t args;
     args.next_write_slot = bootloader_metadata_next_write_slot(latest_slot_index);
     args.needs_erase = bootloader_metadata_next_write_needs_erase(latest_slot_index);
+    args.backup_src_offset = bootloader_metadata_wrap_needs_backup(latest_slot_index)
+                                 ? (uint32_t)latest_slot_index * BOOTLOADER_METADATA_RECORD_LEN
+                                 : UPDATE_METADATA_NO_BACKUP;
     bootloader_metadata_pack(meta, args.record);
 
     args.result = HAL_NOT_READY; // overwritten by the callback if it ever runs
@@ -1422,7 +1453,9 @@ static void update_task_confirm_tick(void)
     if (latest == BOOTLOADER_METADATA_NO_SLOT || s_own_slot >= BOOTLOADER_SLOT_COUNT) {
         return; // nothing to mutate -- retry on a later tick
     }
-    meta.slots[s_own_slot].state = BOOTLOADER_SLOT_VALID;
+    // HIGH-1: check-in marks VALID AND clears boot_attempts (BOOTLOADER.md),
+    // so later ordinary resets never accumulate against a confirmed slot.
+    bootloader_metadata_apply_confirm(&meta, s_own_slot);
     if (update_task_persist_metadata(&meta, latest)) {
         s_confirm_pending = false; // confirmed -- nothing further to do, ever, this boot
     } else {

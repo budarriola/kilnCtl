@@ -66,6 +66,13 @@ extern "C" {
 // Sentinel: no record slot chosen / nothing found.
 #define BOOTLOADER_METADATA_NO_SLOT ((size_t)-1)
 
+// Sentinel (AUDIT_PICO_UPDATE MED-1): the newest record was recovered from
+// the backup sector (BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET), not from the
+// main log. It is "a record exists" (!= NO_SLOT) but has no index in the main
+// sector; the next write must erase the main sector first (it may be torn)
+// and program slot 0.
+#define BOOTLOADER_METADATA_FROM_BACKUP ((size_t)-2)
+
 #define BOOTLOADER_METADATA_MAGIC   0x4B4C4E31u // "KLN1", distinct from any
                                                  // kilnlink/link_frame magic
 #define BOOTLOADER_METADATA_FORMAT_VERSION 1u
@@ -168,6 +175,21 @@ bool bootloader_metadata_unpack(const uint8_t in[BOOTLOADER_METADATA_RECORD_LEN]
 size_t bootloader_metadata_find_latest(const uint8_t sector[BOOTLOADER_METADATA_FLASH_SIZE],
                                         bootloader_metadata_t *out_meta);
 
+// Like bootloader_metadata_find_latest() but also consults the backup sector
+// (a copy of the last log record, written before every main-sector wrap
+// erase -- see persist.c). Returns the main-sector index when the main log
+// holds the newest valid record, BOOTLOADER_METADATA_FROM_BACKUP when only
+// the backup holds a (strictly newer or the only) valid record, else
+// BOOTLOADER_METADATA_NO_SLOT. Either way `*out_meta` is filled on success.
+size_t bootloader_metadata_find_latest_ab(const uint8_t main_sector[BOOTLOADER_METADATA_FLASH_SIZE],
+                                           const uint8_t backup_sector[BOOTLOADER_METADATA_FLASH_SIZE],
+                                           bootloader_metadata_t *out_meta);
+
+// True iff writing the next record requires first saving the current latest
+// record (a real main-sector index) into the backup sector, i.e. the log is
+// full and the next write erases the main sector.
+bool bootloader_metadata_wrap_needs_backup(size_t latest_slot_index);
+
 // Given the slot index bootloader_metadata_find_latest() returned (or
 // BOOTLOADER_METADATA_NO_SLOT if the sector has never held a valid record),
 // returns the index the NEXT write should target. Wraps to 0 when the
@@ -185,6 +207,11 @@ size_t bootloader_metadata_next_write_slot(size_t latest_slot_index);
 // returned requires a sector erase first -- i.e. the log was full and wrapped,
 // as opposed to this being the sector's first-ever write.
 bool bootloader_metadata_next_write_needs_erase(size_t latest_slot_index);
+
+// The app's check-in (docs/BOOTLOADER.md: boot_attempts "cleared on check-in",
+// AUDIT_PICO_UPDATE HIGH-1): marks `slot` VALID and clears boot_attempts.
+// Pure so the host tests drive the exact transition update_task.c applies.
+void bootloader_metadata_apply_confirm(bootloader_metadata_t *meta, uint8_t slot);
 
 // --- Boot decision ---------------------------------------------------------
 

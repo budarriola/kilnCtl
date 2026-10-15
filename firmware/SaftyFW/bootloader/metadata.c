@@ -196,8 +196,43 @@ size_t bootloader_metadata_find_latest(const uint8_t sector[BOOTLOADER_METADATA_
     return best_slot;
 }
 
+size_t bootloader_metadata_find_latest_ab(const uint8_t main_sector[BOOTLOADER_METADATA_FLASH_SIZE],
+                                           const uint8_t backup_sector[BOOTLOADER_METADATA_FLASH_SIZE],
+                                           bootloader_metadata_t *out_meta)
+{
+    size_t idx = bootloader_metadata_find_latest(main_sector, out_meta);
+    if (backup_sector == NULL || out_meta == NULL) {
+        return idx;
+    }
+    bootloader_metadata_t b;
+    if (bootloader_metadata_find_latest(backup_sector, &b) == BOOTLOADER_METADATA_NO_SLOT) {
+        return idx;
+    }
+    if (idx == BOOTLOADER_METADATA_NO_SLOT || b.seq > out_meta->seq) {
+        *out_meta = b;
+        return BOOTLOADER_METADATA_FROM_BACKUP;
+    }
+    return idx;
+}
+
+bool bootloader_metadata_wrap_needs_backup(size_t latest_slot_index)
+{
+    return latest_slot_index != BOOTLOADER_METADATA_NO_SLOT &&
+           latest_slot_index != BOOTLOADER_METADATA_FROM_BACKUP &&
+           (latest_slot_index + 1) >= BOOTLOADER_METADATA_SLOTS_PER_SECTOR;
+}
+
+void bootloader_metadata_apply_confirm(bootloader_metadata_t *meta, uint8_t slot)
+{
+    meta->slots[slot].state = BOOTLOADER_SLOT_VALID;
+    meta->boot_attempts = 0;
+}
+
 size_t bootloader_metadata_next_write_slot(size_t latest_slot_index)
 {
+    if (latest_slot_index == BOOTLOADER_METADATA_FROM_BACKUP) {
+        return 0;
+    }
     if (latest_slot_index == BOOTLOADER_METADATA_NO_SLOT) {
         return 0;
     }
@@ -212,6 +247,9 @@ bool bootloader_metadata_next_write_needs_erase(size_t latest_slot_index)
 {
     if (latest_slot_index == BOOTLOADER_METADATA_NO_SLOT) {
         return false; // never written -- slot 0 may already be erased, don't assume otherwise
+    }
+    if (latest_slot_index == BOOTLOADER_METADATA_FROM_BACKUP) {
+        return true; // main sector held no valid record: possibly torn, erase before slot 0
     }
     return (latest_slot_index + 1) >= BOOTLOADER_METADATA_SLOTS_PER_SECTOR;
 }
@@ -253,6 +291,17 @@ bootloader_boot_decision_t bootloader_decide_boot(const bootloader_metadata_t *m
 {
     uint8_t active = meta->active_slot;
     uint8_t other = (active == BOOTLOADER_SLOT_A) ? BOOTLOADER_SLOT_B : BOOTLOADER_SLOT_A;
+
+    // AUDIT_PICO_UPDATE HIGH-1: boot_attempts only guards a slot that has not
+    // yet checked in. A VALID slot already did (the app's confirm sets it VALID
+    // and clears the count, bootloader_metadata_apply_confirm), so ordinary
+    // resets must neither count against it nor cost a metadata write. A stale
+    // nonzero count left by an older image is cleared here (one write).
+    if (active < BOOTLOADER_SLOT_COUNT && meta->slots[active].state == BOOTLOADER_SLOT_VALID) {
+        bootloader_boot_decision_t d = decision_boot(meta, active, /*switched=*/false, 0);
+        d.needs_metadata_update = (meta->boot_attempts != 0);
+        return d;
+    }
 
     if (meta->boot_attempts >= BOOTLOADER_MAX_BOOT_ATTEMPTS) {
         // docs/BOOTLOADER.md section 3 step 3: mark BAD, switch if the other

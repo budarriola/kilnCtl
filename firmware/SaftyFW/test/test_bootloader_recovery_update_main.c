@@ -11,10 +11,12 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 void run_test_bootloader_recovery_update(void);
+void run_test_bootloader_persist(void);
 
 int main(void)
 {
     run_test_bootloader_recovery_update();
+    run_test_bootloader_persist();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
