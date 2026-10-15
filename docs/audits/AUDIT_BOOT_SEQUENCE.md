@@ -277,3 +277,8 @@ boot_guard command, because the full kilnfw-host baseline on dev fails a hardcod
 `$totalExpected = 101` vs 102 built): gate removed, soak removed, soak off by one, withhold
 ignored, init keeps flags, read error as zero, persist over unreadable record all CAUGHT by a
 failing assertion; removing the NULL-op guard is caught only by a crash.
+
+## Resolution (otalow, 2026-10-15)
+
+- LOW-1: documented as intended in `boot_guard.h` (above `boot_confirm_is_healthy`). A radio or httpd fault that persists across 3 boots is the case in which the operator must reach the recovery image, and web/OTA reachability is what proves an update usable; splitting the criterion needs an owner decision. The truth table stays pinned in `test_boot_guard.c`.
+- LOW-2: documented, not moved (comment at `boot_guard_init()` in `main_boot_early.c`). The counter must come after the relays are latched off so a recovery reboot never leaves a relay driven, and moving only the increment earlier needs a bench proof of that ordering. The bootloader rollback still covers a PENDING_VERIFY image.

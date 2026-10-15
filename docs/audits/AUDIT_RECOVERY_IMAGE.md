@@ -201,3 +201,7 @@ re-applies from the kept request, bounded by `UPD_INST_MAX_ATTEMPTS`.
   relay (`recovery_http.c:751`).
 
 **Follow-up (recfx, 2026-10-14):** the set_boot failure now records `set_boot_failed` as the detail code of the `apply_failed` result (result blob byte 7), with `app_modified` set; see `AUDIT_UPDATE_FAULTS.md` MED-1 and HIGH-1.
+
+## Resolution (otalow, 2026-10-15)
+
+LOW-1 and LOW-2 were already fixed by recfx. The leftover items (refusal paths ignoring the `req_clear` return, the 28-character LCD line, the verify-cache write from a non-httpd task) are fixed, see AUDIT_UPDATE_FAULTS "Resolution (otalow, 2026-10-15)".

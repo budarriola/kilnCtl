@@ -331,3 +331,12 @@ MED-3 (the app-side first-boot confirm) is handled by a separate agent; `main_ne
 | Cut between `set_boot` and stage header erase | new app boots, stale stage auto-cleared | yes | yes |
 | New app not confirmed on its first boot, then any reset | rollback into recovery | **no** (MED-3) | **no** (MED-3) |
 | 3 attempts used up | `attempts_exceeded`, stays in recovery | no (by design) | yes |
+
+## Resolution (otalow, 2026-10-15)
+
+- LOW-1: fixed. `op_apply_start` (recovery_install.c) now calls `guard_clear()` before `recovery_apply_esp_start()` and returns `UPD_INST_DETAIL_START_FAILED` when the clear fails, so `app` is never erased on an unproved boot_guard clear.
+- LOW-2: fixed. `op_apply_start` calls the new `recovery_http_app_verify_invalidate()` before the apply starts. The verify cache is now guarded by `s_verify_mux` plus a generation counter: `app_image_verified` verifies outside the lock and publishes only if the generation is unchanged, so a non-httpd task invalidating the cache cannot be overwritten by a stale verify. Pinned in `test_recovery_lcd_policy.c` (source order, lock and generation test); `check_recovery_lcd_policy.ps1` mutants `apply_guard_unchecked`, `apply_no_invalidate`, `verify_publish_ungated`, `verify_unlocked` all fail as required (the script now swaps any `recovery_*.c` mutant in as a scanned source).
+- LOW-3: fixed (app side). The confirm task drops a leftover request on a healthy confirmed boot, see REVIEW_OTA_BOOT_FIXES LOW-4.
+- Refusal paths: `update_install_boot_run` refusals that drop the request now go through `refuse_dropping()`; a failing `req_clear` is reported as `clear_failed` (STAY) instead of being ignored. Test `test_refusal_clear_failure`; negtest CAUGHT.
+- LCD truncation: `s_warn` and the failure line buffer grew from 28 to 41 bytes; `update_install_reason_lcd()` names the reason, and `test_reason_lcd_fits` pins `UPD_INST_REASON_LCD_MAX` (24). Negtest (over-long text) CAUGHT.
+- MED-3: still open, skipped. The 48-byte result blob has no spare byte (magic 4, version 1, code, reason, detail, semver 32, id 4, CRC 4); a "confirmed healthy" marker would have to reuse a detail bit or the semver tail, which old decoders would misread as an unknown detail or a bad semver. It needs a deliberate record version bump on both images, so it is left for its owner.

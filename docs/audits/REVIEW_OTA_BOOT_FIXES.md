@@ -89,3 +89,10 @@ If an `update_post_boot` failure is ever widened, an app-side "clear a request w
 ## Resolution (2026-10-15, rvfix)
 
 - LOW-1: fixed. `load_count()` treats `HAL_INVALID_SIZE` (oversized stored record, current and legacy namespace) as the wrong-size data state: count 0, not a read error, so `boot_guard_init()` rewrites the record and the counter climbs. Genuine open/get errors still return false. Test `test_oversized_record_is_rewritable_and_counter_climbs` (test_boot_guard.c); mutant restoring the read-error path CAUGHT by assertion.
+
+## Resolution (otalow, 2026-10-15)
+
+- LOW-1: not touched (another agent owns it).
+- LOW-2: documented, not shortened. `BOOT_CONFIRM_SOAK_MS` stays 30000: the RTC watchdog is 20000 ms, so only 10 s of margin exists and a shorter soak would let a boot that lost its feeder confirm before the watchdog resets it. The window is intended; the recovery path (`recovery_exit` or a new install) is the recovery.
+- LOW-3: fixed. `boot_guard_soak_elapsed_ms()` (boot_guard.c) does the tick delta in uint32 and the product with `portTICK_PERIOD_MS` in uint64, saturating at INT32_MAX; `main_ota_ms_since_boot_complete` uses it. Test `test_soak_elapsed_ms_saturates` (plain delta, tick wrap, 24.8 d saturation, tick_ms scaling, product past 2^32). Negtested: 32-bit product (CAUGHT after adding the past-2^32 case, the first run MISSED it) and removed saturation (CAUGHT), both by a failing `SOAK ELAPSED` assertion in a compiled mutant.
+- LOW-4: fixed. `update_install_drop_stale(claimed, req_erase)` (update_install_record.c) and `update_install_http_drop_stale_request()` (takes the update claim, erases the `upd_inst` request, releases the claim). The confirm task calls it right after `update_http_stale_stage_check()`, i.e. only on a healthy confirmed boot, and a busy claim leaves an in-flight install POST alone. Tests `test_drop_stale` (busy claim erases nothing, erase failure reported, no erase op). Negtested: unclaimed erase and ignored erase failure both CAUGHT by failing assertions.
