@@ -47,9 +47,11 @@
  * nothing retries it. Every event this module consumes self-heals:
  *   - a dropped STA_START: the join it would have kicked off is retried by
  *     rescan_timer_cb() within WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS.
- *   - a dropped STA_DISCONNECTED: the driver keeps emitting disconnect
- *     events while the link is down, and the rescan timer independently
- *     re-picks a candidate and reconnects.
+ *   - a dropped STA_DISCONNECTED: while not CONNECTED the rescan timer
+ *     re-picks a candidate and reconnects. While CONNECTED the driver emits
+ *     only ONE event, so do_rescan_tick() checks esp_wifi_sta_get_ap_info()
+ *     and, after two consecutive unassociated ticks, runs the disconnect
+ *     handling itself (AUDIT_WIFI MED-1).
  *   - a dropped GOT_IP: state stays CONNECTING/RECONNECTING one beat too
  *     long (the AP is left up -- the SAFE direction, never "reports
  *     connected when it isn't"); the next got-ip, disconnect, or rescan tick

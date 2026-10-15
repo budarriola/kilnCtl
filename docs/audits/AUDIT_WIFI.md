@@ -160,3 +160,19 @@ host test.
    (MED-2). The late AP_START case leaves no up-but-unjoinable AP (MED-2).
 4. Rescan timer start failure in `wifi_prov_start()` (LOW-1).
 5. `do_ap_fallback_tick()` when `set_mode(APSTA)` fails (LOW-3).
+
+## Resolution (2026-10-14, wififx)
+
+- MED-1 fixed: `do_rescan_tick()` (`wifi_prov_link.c`) now asks
+  `esp_wifi_sta_get_ap_info()` while HOME + CONNECTED; two consecutive
+  unassociated ticks (about 30 s debounce, one static bool, no new task or
+  buffer) run `do_ev_sta_disconnected()`. The `wifi_prov.c` header comment is
+  corrected. Test: `test_rescan_tick_recovers_from_missed_disconnect_while_connected`
+  (`test_wifi_prov.c`); 4 negtest mutants caught.
+- MED-2 fixed: a failed first `start_softap()` in `recovery_wifi_start()` now
+  goes through `rhealth_ap_reraise_failed_action()` and
+  `restart_image_for_wifi()`; with the cap used up it stops the radio (so a
+  late AP_START cannot leave an unjoinable AP), shows no-network and clears the
+  count. Test: source-shape assertions in `test_recovery_health.c`; 3 negtest
+  mutants caught.
+- LOW-1..3 remain open.
