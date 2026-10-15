@@ -77,6 +77,18 @@ Counts: HIGH 1, MED 3, LOW 3, INFO 4.
   - If kiln NVS is unavailable (boot_guard clear is "n/a"): stay, so an
     app/recovery ping-pong cannot start.
 
+**Fixed by (recfx), HIGH-1:** `recovery_install.c` `auto_recover()` runs a one-shot task after a failed apply (`poll_task`,
+after the FAIL result is recorded) and after a refused install (`recovery_install_boot`). The decision is the pure
+`update_install_after_fail(reason, app_modified, app_verifies, attempts_left)`: EXIT_APP only when `app` passes the full
+image verify (re-run from flash via `recovery_http_app_verifies()`, which drops the cached verify first) and is either
+unmodified or out of attempts; RESTART (so the bounded retry advances) while attempts remain; STAY otherwise. It always
+STAYs when kiln NVS is unavailable, when the attempt counter did not advance (`counter_failed`), when the result write or
+request clear failed, and when the outcome is unknown, so no app/recovery ping-pong can start. Exit order matches
+`/api/recovery/exit`: verified boot_guard clear, drop the request (the FAIL result stays for the app), set the boot target
+with read-back, restart. It is skipped while the Pico relay runs. Tests: `test_update_install_record.c`
+`test_detail_and_after_fail` (decision matrix) and `test_recovery_lcd_policy.c` `test_install_source` (glue, ordering,
+gates). Residual: if the verify task cannot be created for lack of heap the board stays in recovery, as before.
+
 ## MED
 
 ### MED-1: the result record cannot tell "old app intact" from "app erased", and reports a heap refusal as `apply_failed`
@@ -101,6 +113,13 @@ Counts: HIGH 1, MED 3, LOW 3, INFO 4.
     partially written, app written but not selected.
   - Give the `apply_start` refusal its own reason (`apply_start_refused` or
     `low_heap`).
+
+**Fixed by (recfx), MED-1:** result blob byte 7 (unused before) now carries a detail code in its low 7 bits and an
+`app_modified` flag in bit 7; the reason stays `apply_failed`, so an older decoder reads the record unchanged. Detail
+1..15 mirror `recovery_apply_result_t` (static-asserted in `recovery_install.c`); the `apply_start` refusals get
+`start_low_heap` (ESP_ERR_NO_MEM, the heap floor), `start_no_app`, `start_busy` and `start_failed`, always with
+`app_modified` false. `GET /api/update/install` and the recovery status page carry `detail` and `app_modified` in
+`last_install`, and the MCP install line prints them. Tests: `test_detail_and_after_fail`.
 
 ### MED-2: the request is consumed and "ok" is written before the boot target switch, so a cut or `set_boot` failure strands a good app
 
@@ -138,6 +157,12 @@ Counts: HIGH 1, MED 3, LOW 3, INFO 4.
     "finish the switch": set_and_verify `app` and restart.
   For (b), retry `set_and_verify` once before giving up, and record
   `set_boot_failed`.
+
+**Fixed by (recfx), MED-2:** the request is no longer cleared and "ok" is no longer written before the switch.
+`update_install_pre_boot()` only clears boot_guard; the new `update_install_post_boot()` clears the request and writes the
+OK result, and `recovery_apply_esp` calls it only after `recovery_boot_partition_set_and_verify()` succeeded. A
+`set_boot` failure therefore leaves the request and a retryable state (the poll task records `set_boot_failed` with
+`app_modified` set). Tests: `test_pre_boot`, `test_install_source`, `test_apply_esp_source`.
 
 ### MED-3: the new app's first-boot confirm uses boot-time-fixed flags, so a transient fault leaves it pending, and the rollback to recovery is recorded as "ok"
 
@@ -178,6 +203,8 @@ Counts: HIGH 1, MED 3, LOW 3, INFO 4.
     image to FAIL/`rolled_back`.
   - Optionally auto-exit once if `app` verifies, bounded by a recovery-side
     counter, so a really bad release cannot loop.
+
+MED-3 (the app-side first-boot confirm) is handled by a separate agent; `main_network_http.c` was not touched here.
 
 ## LOW
 
