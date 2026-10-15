@@ -136,6 +136,19 @@ void auth_totp_http_clear_reset_tokens(void)
     totp_reset_token_table_init(reset_tokens());
 }
 
+// AUDIT_TOTP MED-1: apply the LCD gesture's posted wipe request (see
+// totp_http_core.h) on the httpd worker, before the token table is read.
+static uint32_t s_atp_wipe_seen_gen;
+
+static void auth_totp_http_apply_wipe_request(void)
+{
+    uint32_t gen = totp_wipe_request_gen();
+    if (gen != s_atp_wipe_seen_gen) {
+        s_atp_wipe_seen_gen = gen;
+        auth_totp_http_clear_reset_tokens();
+    }
+}
+
 // --- Board-wide failed-forgot-attempt cap (plan section 4) ------------------
 
 // TOTP_FORGOT_BOARD_CAP and the blocked/record logic live in
@@ -322,6 +335,7 @@ static esp_err_t totp_status_get_handler(httpd_req_t *req)
 
 static esp_err_t forgot_post_handler(httpd_req_t *req)
 {
+    auth_totp_http_apply_wipe_request();
     time_sync_status_t st;
     if (!sntp_ready(&st)) {
         return send_service_unavailable_clock(req);
@@ -448,6 +462,7 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
+    auth_totp_http_apply_wipe_request();
     time_sync_status_t st;
     if (!sntp_ready(&st)) {
         return send_service_unavailable_clock(req);

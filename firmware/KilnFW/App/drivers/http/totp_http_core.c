@@ -124,3 +124,23 @@ void totp_forgot_board_cap_record(totp_forgot_board_cap_t *c, bool verified)
         c->failures++;
     }
 }
+
+static volatile uint32_t s_wipe_request_gen;
+
+void totp_wipe_request_post(void)
+{
+#if defined(__GNUC__)
+    (void)__atomic_add_fetch(&s_wipe_request_gen, 1u, __ATOMIC_SEQ_CST);
+#else
+    s_wipe_request_gen++; /* host (MSVC) tests are single-threaded */
+#endif
+}
+
+uint32_t totp_wipe_request_gen(void)
+{
+#if defined(__GNUC__)
+    return __atomic_load_n(&s_wipe_request_gen, __ATOMIC_SEQ_CST);
+#else
+    return s_wipe_request_gen;
+#endif
+}

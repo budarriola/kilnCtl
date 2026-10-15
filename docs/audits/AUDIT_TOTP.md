@@ -122,6 +122,8 @@ Result: **HIGH 0, MED 1, LOW 6, INFO 8.**
 
 ## LOW
 
+**Fixed by (totpfx):** `auth_reset_gesture_wiring.c` now runs the full wipe: ends every web session before and after the credential clear, clears the credential store and the TOTP secret (`totp_config_clear`), and posts a wipe request (`totp_wipe_request_post`, `totp_http_core.c`). `security_http.c` and `auth_totp_http.c` apply that request at handler entry, dropping the pending enrollment and the reset tokens, and the enroll commit re-checks it under the state lock. Tests: `test_gesture_wipes_everything`, `test_gesture_cannot_be_overtaken_by_inflight_confirm` in `test_totp_enroll_gesture.c`.
+
 ### LOW-1: no lock on `totp_config`'s RAM counter cache, and the LCD gesture clears it from another task
 
 - **Where:**
@@ -140,6 +142,8 @@ Result: **HIGH 0, MED 1, LOW 6, INFO 8.**
 - **Fix:** add a mutex in `totp_config`, or route the gesture's clear through
   the httpd task (same fix as MED-1).
 
+**Fixed by (totpfx):** `totp_config.c` has a state mutex; every public entry point takes it exactly once and the internals are `_nl` helpers. Test: `test_state_lock`.
+
 ### LOW-2: enroll-confirm persists in two NVS writes, so a power loss in between leaves counter 0
 
 - **Where:** `security_http.c:335-336`. `totp_config_set_secret()` writes the
@@ -152,6 +156,8 @@ Result: **HIGH 0, MED 1, LOW 6, INFO 8.**
   reboot. Impact is negligible, and the outcome is never worse than "enrolled".
 - **Fix:** write the counter to `matched` before the secret, or store the
   counter inside the secret blob as a single write.
+
+**Fixed by (totpfx):** `totp_config_enroll_commit()` writes the counter first, then the secret, under the state lock, so a power cut leaves "not enrolled", never counter 0 with the used code replayable. Tests: `test_enroll_commit_write_order`, `test_enroll_commit_guard`, `test_enroll_persist_failure_rollback`.
 
 ### LOW-3: `/forgot` spends the TOTP step before the token exists, and `/reset` spends the token before the password write
 
@@ -212,6 +218,7 @@ Result: **HIGH 0, MED 1, LOW 6, INFO 8.**
   test pins the behavior on purpose (`test/test_auth_totp_http_fuzz.c:451`).
 - **Fix:** do not record a failure for a weak-password refusal. The check runs
   before the token lookup, so it reveals nothing.
+
 
 ## INFO
 
@@ -326,3 +333,10 @@ Result: **HIGH 0, MED 1, LOW 6, INFO 8.**
     one request earlier put the bench IP on the 5 s ladder step. A 429 still
     proves the route was reached without a session, but the 400 paths were
     never exercised. A 6 s gap before TP-R03 would make the case meaningful.
+
+## Fixed by totpfx: test gaps
+
+- Gap 1 (enroll begin/confirm/disable): `test_enroll_flow`.
+- Gap 5 (real gesture wiring): `test_gesture_wipes_everything`.
+- Gap 7 (totp_status never leaks the secret): `test_status_never_leaks_secret`.
+- Gap 6 (power loss between enroll writes) is also covered by `test_enroll_commit_write_order`; gap 8 by `test_gesture_cannot_be_overtaken_by_inflight_confirm`.

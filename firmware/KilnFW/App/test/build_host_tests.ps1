@@ -2694,6 +2694,30 @@ try {
 
     Invoke-HostTestExe -Name "auth_totp_http_fuzz" -ExePath $exeTf -BuildCmd $cmdTf
 
+    # ---- test_totp_enroll_gesture.c: AUDIT_TOTP fixes (MED-1, LOW-1, LOW-2, gaps 1/5/7) ----
+    # security_http.c + auth_totp_http.c #include'd directly; the REAL
+    # auth_reset_gesture_wiring.c, web_auth_store, totp_config and session
+    # table over fake_kv, so the gesture's wipe is asserted against real state.
+    $exeTg = Join-Path $outDir "kilnctl_host_tests_totp_enroll_gesture.exe"
+    $atgObjDir = Join-Path $outDir "tg"
+    New-Item -ItemType Directory -Force -Path $atgObjDir | Out-Null
+    $cmdTg = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$atgObjDir\\`" /Fe:`"$exeTg`" `"$(Join-Path $testDir 'test_totp_enroll_gesture.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_session_iface.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'net/auth_reset_gesture.c')`" `"$(Join-Path $driversDir 'net/auth_reset_gesture_wiring.c')`" " +
+            "`"$(Join-Path $driversDir 'http/security_http_core.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'net/login_backoff.c')`" `"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
+            "`"$(Join-Path $driversDir 'http/login_ip_scope.c')`" `"$(Join-Path $driversDir 'net/totp.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/totp_config.c')`" `"$(Join-Path $driversDir 'http/totp_http_core.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "totp_enroll_gesture" -ExePath $exeTg -BuildCmd $cmdTg
+
     # ---- test_aux_outputs_http_handlers.c: campaign 8 handler matrix ----
     # Real aux_outputs_cfg/_http_core/_http #include'd; fake relay board.
     $exeAh = Join-Path $outDir "kilnctl_host_tests_aux_outputs_http_handlers.exe"

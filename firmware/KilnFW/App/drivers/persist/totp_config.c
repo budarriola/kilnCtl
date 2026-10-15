@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#include "freertos/semphr.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 
@@ -34,6 +37,34 @@ typedef struct {
 } totp_secret_blob_t;
 _Static_assert(offsetof(totp_secret_blob_t, crc32) == 28u, "totp_secret_blob_t: crc32 must follow 28 packed bytes");
 _Static_assert(sizeof(totp_secret_blob_t) == 32u, "totp_secret_blob_t: no trailing padding expected");
+
+// --- State lock ---------------------------------------------------------------
+// AUDIT_TOTP LOW-1: the RAM counter cache and the secret/counter NVS keys are
+// touched by the httpd worker (verify_and_consume, enroll commit, disable) AND
+// by the LCD reset gesture on the LVGL task (totp_config_clear). One static
+// mutex (no heap) serialises every public entry point that writes or reads the
+// cache; the *_nl helpers below assume it is held, so nothing takes it twice.
+// Created lazily under a portMUX claim (create is non-blocking, no allocation).
+static StaticSemaphore_t s_state_lock_storage;
+static SemaphoreHandle_t s_state_lock;
+static portMUX_TYPE s_state_lock_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void state_lock_take(void)
+{
+    portENTER_CRITICAL(&s_state_lock_mux);
+    if (s_state_lock == NULL) {
+        s_state_lock = xSemaphoreCreateMutexStatic(&s_state_lock_storage);
+    }
+    portEXIT_CRITICAL(&s_state_lock_mux);
+    // portMAX_DELAY never times out on target; the result is deliberately not
+    // looped on (the host stub's Take returns pdFALSE by default).
+    (void)xSemaphoreTake(s_state_lock, portMAX_DELAY);
+}
+
+static void state_lock_give(void)
+{
+    (void)xSemaphoreGive(s_state_lock);
+}
 
 // --- CRC32 (IEEE 802.3 / zlib polynomial), table-less -----------------------
 // Identical construction to web_auth_store.c's crc32_compute() / boot_guard.c's
@@ -155,7 +186,10 @@ bool totp_config_enrolled(void)
     return ok;
 }
 
-bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
+static bool set_last_counter_nl(uint32_t counter);
+
+// Writes + read-back-verifies ONLY the secret blob (no counter touch).
+static bool write_secret_blob_nl(const uint8_t secret[TOTP_SECRET_LEN])
 {
     totp_secret_blob_t blob;
     memset(&blob, 0, sizeof(blob));
@@ -169,14 +203,6 @@ bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
         return false;
     }
 
-    // A freshly-enrolled secret has never accepted a code -- reset the
-    // replay counter to 0 so a stale counter from a previous enrollment
-    // (e.g. re-enrolling after disabling) can never be inherited. This is
-    // the one place both keys are written together, deliberately.
-    if (!totp_config_set_last_counter(0)) {
-        return false;
-    }
-
     // Read-back verify the secret itself landed, never trust set_blob_verified
     // alone for the field content (same discipline as web_auth_store.c).
     uint8_t check[TOTP_SECRET_LEN];
@@ -186,7 +212,48 @@ bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
     return same;
 }
 
+bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN])
+{
+    state_lock_take();
+    bool ok = write_secret_blob_nl(secret);
+    // A freshly-enrolled secret has never accepted a code -- reset the
+    // replay counter to 0 so a stale counter from a previous enrollment
+    // (e.g. re-enrolling after disabling) can never be inherited.
+    if (ok) {
+        ok = set_last_counter_nl(0);
+    }
+    state_lock_give();
+    return ok;
+}
+
+// AUDIT_TOTP LOW-2: the counter is written BEFORE the secret, so no single
+// power cut can leave an enrolled secret whose confirming code is replayable:
+// cut after write 1 = counter set, no secret (not enrolled); cut after write 2
+// = both present. The reverse order (secret, then counter) left counter 0.
+bool totp_config_enroll_commit(const uint8_t secret[TOTP_SECRET_LEN], uint32_t counter, bool (*still_valid)(void))
+{
+    state_lock_take();
+    bool ok = (still_valid == NULL) || still_valid();
+    if (ok) {
+        ok = set_last_counter_nl(counter) && write_secret_blob_nl(secret);
+    }
+    state_lock_give();
+    return ok;
+}
+
+static bool clear_nl(void);
+
 bool totp_config_clear(void)
+{
+    state_lock_take();
+    bool ok = clear_nl();
+    state_lock_give();
+    return ok;
+}
+
+static void ram_reset_nl(void);
+
+static bool clear_nl(void)
 {
     // Secret first, and stop if it fails: erasing the counter while the
     // secret survives would reset the replay guard for a still-live secret.
@@ -195,7 +262,7 @@ bool totp_config_clear(void)
         return false;
     }
     hal_status_t ctr_err = erase_key(TOTP_KEY_LAST_CTR);
-    totp_config_ram_reset();
+    ram_reset_nl();
     if (ctr_err != HAL_OK) {
         return false;
     }
@@ -235,7 +302,7 @@ totp_config_load_status_t totp_config_load_last_counter(uint32_t *out)
     return TOTP_CONFIG_LOAD_OK;
 }
 
-bool totp_config_set_last_counter(uint32_t counter)
+static bool set_last_counter_nl(uint32_t counter)
 {
     hal_status_t err = set_blob_verified(TOTP_KEY_LAST_CTR, &counter, sizeof(counter));
     if (err != HAL_OK) {
@@ -246,7 +313,15 @@ bool totp_config_set_last_counter(uint32_t counter)
     return true;
 }
 
-bool totp_config_ram_last_counter(uint32_t *out)
+bool totp_config_set_last_counter(uint32_t counter)
+{
+    state_lock_take();
+    bool ok = set_last_counter_nl(counter);
+    state_lock_give();
+    return ok;
+}
+
+static bool ram_last_counter_nl(uint32_t *out)
 {
     if (!s_ram_loaded) {
         uint32_t counter;
@@ -260,18 +335,33 @@ bool totp_config_ram_last_counter(uint32_t *out)
     return true;
 }
 
-void totp_config_ram_reset(void)
+bool totp_config_ram_last_counter(uint32_t *out)
+{
+    state_lock_take();
+    bool ok = ram_last_counter_nl(out);
+    state_lock_give();
+    return ok;
+}
+
+static void ram_reset_nl(void)
 {
     s_ram_loaded = false;
     s_ram_last_counter = 0;
 }
 
+void totp_config_ram_reset(void)
+{
+    state_lock_take();
+    ram_reset_nl();
+    state_lock_give();
+}
+
 // --- Verify-and-consume ------------------------------------------------------
 
-totp_consume_result_t totp_config_verify_and_consume(const char *code, uint64_t unix_time_s)
+static totp_consume_result_t verify_and_consume_nl(const char *code, uint64_t unix_time_s)
 {
     uint32_t last = 0;
-    if (!totp_config_ram_last_counter(&last)) {
+    if (!ram_last_counter_nl(&last)) {
         return TOTP_CONSUME_UNAVAILABLE; // unreadable counter: never treat as 0
     }
 
@@ -294,8 +384,16 @@ totp_consume_result_t totp_config_verify_and_consume(const char *code, uint64_t 
         return TOTP_CONSUME_UNAVAILABLE; // cannot be recorded, so cannot be accepted
     }
     // Record the step as used BEFORE reporting success.
-    if (!totp_config_set_last_counter((uint32_t)matched)) {
+    if (!set_last_counter_nl((uint32_t)matched)) {
         return TOTP_CONSUME_UNAVAILABLE;
     }
     return TOTP_CONSUME_OK;
+}
+
+totp_consume_result_t totp_config_verify_and_consume(const char *code, uint64_t unix_time_s)
+{
+    state_lock_take();
+    totp_consume_result_t r = verify_and_consume_nl(code, unix_time_s);
+    state_lock_give();
+    return r;
 }

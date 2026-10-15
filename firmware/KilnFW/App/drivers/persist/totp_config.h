@@ -21,11 +21,12 @@
 // stack (the httpd worker, as web_auth_store's writers already do) or
 // dispatch it to the flash worker. Reads carry no such restriction.
 //
-// CONCURRENCY: no internal lock. The RAM counter cache and the
-// verify-then-set_last_counter sequence assume one caller at a time (the
-// single httpd worker plus the LCD reset-gesture's clear). A caller that
-// can race another verifier must serialise verify + set itself, or two
-// requests could both accept the same code before either persists it.
+// CONCURRENCY: one internal mutex (static storage, no heap) serialises every
+// public entry point below -- the httpd worker's verify/enroll/disable and the
+// LCD reset gesture's totp_config_clear() on the LVGL task cannot interleave
+// (AUDIT_TOTP LOW-1). verify_and_consume() holds it across verify + persist,
+// so two requests cannot both accept the same code. Never call back into this
+// module from the still_valid callback of totp_config_enroll_commit().
 #ifndef KILNCTL_TOTP_CONFIG_H
 #define KILNCTL_TOTP_CONFIG_H
 
@@ -64,6 +65,16 @@ bool totp_config_enrolled(void);
 // touches both keys, so a caller enrolling a new secret can never leave a
 // stale counter from a previous enrollment behind.
 bool totp_config_set_secret(const uint8_t secret[TOTP_SECRET_LEN]);
+
+// Enrollment commit (AUDIT_TOTP LOW-2). Under the state lock: if `still_valid`
+// is non-NULL it is called first and a false return aborts with nothing written
+// (the enroll-confirm handler uses it to re-check the pending secret and the
+// physical-reset wipe request atomically against totp_config_clear()). Then
+// writes the replay counter (`counter`, the step the confirming code used) and
+// only afterwards the secret, each read-back-verified, so a power cut between
+// the writes leaves "not enrolled", never an enrolled secret with counter 0.
+// The caller is expected to have established that no secret is enrolled.
+bool totp_config_enroll_commit(const uint8_t secret[TOTP_SECRET_LEN], uint32_t counter, bool (*still_valid)(void));
 
 // Erases BOTH totp_secret and totp_last_ctr and read-back-verifies the
 // erasure. Used by: (a) the enrollment "disable" action (proves the current
