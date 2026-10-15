@@ -122,3 +122,14 @@ HIGH 0, MED 2, LOW 5, INFO 6
 - `test_web_auth.c`: no `last_seen + 2^32` revival case (LOW-1) and no LRU-after-wrap case (LOW-2).
 - `ota_pico_relay.c` `relay_wait_for_states`: no deadline test near the wrap (LOW-3).
 - `log_store`: no host tests for a truncated or empty manifest (LOW-4) or a torn final record followed by another append (LOW-5).
+
+## Resolution notes (lockfx, 2026-10-14)
+
+Time source: kept the uint32 ms tick and switched to unsigned elapsed arithmetic. Every duration involved is at most 300 s (lock ladder) or 60 min (session), far below 2^32 ms, so `(uint32_t)(now - start) < dur` is exact across the wrap and needs no 64-bit counter or new struct width.
+
+- **MED-1 fixed.** `login_backoff_state_t` now stores `lock_start_ms` + `lock_dur_ms` (`lock_dur_ms == 0` = not locked). `login_backoff_is_locked()` is the unsigned elapsed test; new `login_backoff_remaining_ms()` replaces the `locked_until_ms - now` arithmetic in `web_auth_login_http.c` and `ui_lcd_keypad.c`. `login_backoff_cycle_reset_if_due()` (run by every slot lookup) also drops an expired lock window, so an idle slot cannot alias back to locked after 2^32 ms.
+- **MED-2 fixed.** `auth_totp_http.c` now uses the shared `login_backoff` ladder (private copy deleted). The LCD keypad inherits the shared fix.
+- **LOW-1 fixed.** New `web_auth_table_reap_expired()` frees expired session slots; `http_session_iface.c` calls it before every table lookup (`resolve`, `status`, `touch`, `any_session_active`, `any_ap_session_active`). Residual: a stale slot that no request or periodic AP poll touches for 49.7 days is not reaped; in practice the AP-teardown poll runs continuously.
+- **LOW-3 fixed.** `relay_wait_for_states()` tests `(uint32_t)(now_ms() - since_ms) >= timeout_ms` instead of a precomputed deadline.
+- **Left open:** LOW-2 (LRU raw compare), LOW-4, LOW-5 (log_store). `ota_auth.c` still has the signed `locked_until_ms` test (same pattern, not in this audit's list; the AP-HMAC scheme it served is retired).
+- **Tests:** `test_login_backoff.c` (wrap at 2^31, 2^31+window, 2^32-1, wrap-straddling starts), `test_lcd_auth_state.c`, `test_web_auth_login_http.c`, `test_auth_totp_http_fuzz.c` (end-to-end 429 then no phantom 429 after the gaps), `test_http_session_iface.c`, `test_web_auth.c` (reap), `test_ota_pico_relay.c` (wait across the wrap). Negtested: signed lock test, no sweep, non-wrap-safe remaining, per-handler signed gate + no sweep (TOTP, login, LCD), no session reap, reap never frees, relay deadline form: all CAUGHT by a failing assertion. One mutant (TOTP gate alone reverted to signed) was equivalent because the shared sweep already clears the lock before the gate; it was replaced by the combined mutant.
