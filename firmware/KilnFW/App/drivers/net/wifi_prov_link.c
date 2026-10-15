@@ -690,6 +690,10 @@ void do_ap_fallback_tick(void)
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(APSTA) failed: %s", esp_err_to_name(err));
+        /* AUDIT_WIFI LOW-3: the timer is one-shot, so without a re-arm a
+         * transient driver failure leaves the board with no AP and no further
+         * fallback attempt until some unrelated event happens. Try again. */
+        start_ap_fallback_timer();
     } else {
         apply_ap_config();
         s_wifi.ap_fallback_active = true;
@@ -731,20 +735,6 @@ void do_rescan_tick(void)
      * must run even though state == CONNECTED, which is why it is checked
      * and returned from before the early-return below that skips everything
      * else while connected. */
-    if (s_wifi.state == WIFI_PROV_STATE_CONNECTED && s_wifi.ap_pending_teardown) {
-        if (ap_teardown_should_defer()) {
-            return; /* still logged in / still a client on the AP -- try again next tick */
-        }
-        s_wifi.ap_pending_teardown = false;
-        s_wifi.ap_fallback_active = false;
-        ESP_LOGI(WIFI_PROV_TAG, "no user logged in (or no AP client) any more -- dropping deferred fallback AP");
-        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
-        }
-        return;
-    }
-
     /* AUDIT_WIFI MED-1: a STA_DISCONNECTED event dropped by post_event()'s
      * full 0-tick queue strands state at CONNECTED forever (the driver emits
      * ONE event and never reconnects on its own). Ground-truth check: if the
@@ -769,6 +759,23 @@ void do_rescan_tick(void)
     }
     s_connected_unassoc_seen = false;
 
+    /* AUDIT_WIFI LOW-6 (wififx review): the deferred-teardown early return used
+     * to run BEFORE the association ground-truth check above, so a missed
+     * disconnect while the AP teardown was deferred was never noticed. */
+    if (s_wifi.state == WIFI_PROV_STATE_CONNECTED && s_wifi.ap_pending_teardown) {
+        if (ap_teardown_should_defer()) {
+            return; /* still logged in / still a client on the AP -- try again next tick */
+        }
+        s_wifi.ap_pending_teardown = false;
+        s_wifi.ap_fallback_active = false;
+        ESP_LOGI(WIFI_PROV_TAG, "no user logged in (or no AP client) any more -- dropping deferred fallback AP");
+        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+        }
+        return;
+    }
+
     if (s_wifi.mode != WIFI_PROV_MODE_HOME || s_wifi.state == WIFI_PROV_STATE_CONNECTED ||
         s_wifi.saved_nets.count == 0) {
         return;
@@ -792,6 +799,36 @@ void rescan_timer_cb(void *arg)
 {
     (void)arg;
     post_event(CMD_TMR_RESCAN);
+}
+
+/* Create and start the periodic rescan timer if it is not already running.
+ * Called from wifi_prov_start() and, on failure there, retried by owner_task()
+ * (AUDIT_WIFI LOW-1). Returns true when the timer is running. */
+bool rescan_timer_ensure(void)
+{
+    if (s_wifi.rescan_timer) {
+        return true;
+    }
+    const esp_timer_create_args_t rescan_timer_args = {
+        .callback = &rescan_timer_cb,
+        .name = "wifi_ap_fallback_rescan",
+    };
+    esp_timer_handle_t h = NULL;
+    esp_err_t err = esp_timer_create(&rescan_timer_args, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_create failed: %s -- no periodic AP-fallback rescan (will retry)",
+                 esp_err_to_name(err));
+        return false;
+    }
+    err = esp_timer_start_periodic(h, (uint64_t)WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_start_periodic failed: %s -- no periodic AP-fallback rescan (will retry)",
+                 esp_err_to_name(err));
+        esp_timer_delete(h);
+        return false;
+    }
+    s_wifi.rescan_timer = h;
+    return true;
 }
 
 void start_ap_fallback_timer(void)
@@ -1171,6 +1208,14 @@ void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)arg;
     (void)base;
     (void)data;
+    if (id == IP_EVENT_STA_LOST_IP) {
+        /* AUDIT_WIFI LOW-2: losing the lease with the association intact emits
+         * no STA_DISCONNECTED. Run the normal disconnect handling, whose
+         * reconcile_sta_state() ground-truth check ignores it if the lease is
+         * in fact still held. */
+        post_event(CMD_EV_STA_DISCONNECTED);
+        return;
+    }
     if (id != IP_EVENT_STA_GOT_IP) {
         return;
     }

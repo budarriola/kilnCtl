@@ -397,6 +397,23 @@ static void test_lockout_is_per_ip_not_global(void)
                "the unaffected IP's correct login still succeeds and mints a session cookie");
 }
 
+// AUDIT_LOGSTORE_TIME LOW-2: LRU victim is the largest unsigned elapsed time.
+static void test_login_lru_wrap(void)
+{
+    TEST_SECTION("login lockout table -- LRU eviction across the tick wrap (AUDIT_LOGSTORE_TIME LOW-2)");
+    reset_all();
+    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        login_lockout_slot_t *s = &s_login_lockouts[i];
+        memset(s, 0, sizeof(*s));
+        s->in_use = true;
+        snprintf(s->ip, sizeof(s->ip), "10.4.0.%u", i + 1);
+        s->last_activity_ms = 5u + i;
+    }
+    s_login_lockouts[2].last_activity_ms = 0xFFFFFF00u;
+    login_lockout_slot_t *s = login_lockout_slot_for("10.9.9.9", 100u);
+    TEST_CHECK(s == &s_login_lockouts[2], "the slot idle across the wrap is evicted, not a fresh post-wrap one");
+}
+
 static void test_lockout_table_is_bounded(void)
 {
     // Finding 4's second half: the per-IP table must not grow without
@@ -1337,6 +1354,7 @@ void run_test_web_auth_login_http(void)
     test_lockout_no_phantom_lock_at_tick_wrap();
     test_lockout_is_per_ip_not_global();
     test_lockout_table_is_bounded();
+    test_login_lru_wrap();
     test_lockout_eviction_never_evicts_a_locked_slot();
     test_lockout_eviction_still_works_for_unlocked_slots();
     test_login_body_split_across_recv_calls();

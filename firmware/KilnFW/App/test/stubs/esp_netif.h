@@ -46,6 +46,7 @@ extern int g_stub_dns_set_calls;
 /* IP_EVENT (the event base) is declared in esp_event.h, which wifi_prov.c
  * always includes first -- only the event ID constant belongs here. */
 #define IP_EVENT_STA_GOT_IP 0
+#define IP_EVENT_STA_LOST_IP 1
 
 static inline esp_err_t esp_netif_init(void) { return ESP_OK; }
 

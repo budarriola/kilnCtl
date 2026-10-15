@@ -576,6 +576,7 @@ esp_err_t wifi_prov_start(void)
 
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL, NULL);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &on_ip_event, NULL, NULL);
 
     const esp_timer_create_args_t timer_args = {
         .callback = &ap_fallback_timer_cb,
@@ -594,21 +595,7 @@ esp_err_t wifi_prov_start(void)
      * cheap wakeup every WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS regardless of
      * state -- negligible next to the AP/STA radio work it occasionally
      * triggers. */
-    const esp_timer_create_args_t rescan_timer_args = {
-        .callback = &rescan_timer_cb,
-        .name = "wifi_ap_fallback_rescan",
-    };
-    err = esp_timer_create(&rescan_timer_args, &s_wifi.rescan_timer);
-    if (err != ESP_OK) {
-        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_create failed: %s -- no periodic AP-fallback rescan", esp_err_to_name(err));
-        s_wifi.rescan_timer = NULL;
-    } else {
-        err = esp_timer_start_periodic(s_wifi.rescan_timer, (uint64_t)WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS * 1000);
-        if (err != ESP_OK) {
-            ESP_LOGW(WIFI_PROV_TAG, "esp_timer_start_periodic failed: %s -- no periodic AP-fallback rescan",
-                     esp_err_to_name(err));
-        }
-    }
+    (void)rescan_timer_ensure(); /* on failure owner_task() retries (AUDIT_WIFI LOW-1) */
 
     /* esp_wifi_set_config() fails with ESP_ERR_WIFI_MODE if the driver's
      * current mode doesn't already include the target interface -- right
@@ -826,7 +813,14 @@ static void owner_task(void *arg)
 
     for (;;) {
         wifi_cmd_t cmd;
-        if (xQueueReceive(s_wifi_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) {
+        /* AUDIT_WIFI LOW-1: with no rescan timer (creation failed at start) wake
+         * on a timeout, retry creating it and run the tick ourselves. */
+        TickType_t wait = s_wifi.rescan_timer ? portMAX_DELAY : pdMS_TO_TICKS(WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS);
+        if (xQueueReceive(s_wifi_cmd_queue, &cmd, wait) != pdTRUE) {
+            if (!s_wifi.rescan_timer) {
+                (void)rescan_timer_ensure();
+                do_rescan_tick();
+            }
             continue;
         }
 

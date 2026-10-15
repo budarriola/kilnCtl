@@ -199,7 +199,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
 {
     int free_idx = -1;
     int lru_idx = -1;
-    uint32_t lru_time = UINT32_MAX;
+    uint32_t lru_age = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         login_lockout_slot_t *s = &s_login_lockouts[i];
         login_backoff_cycle_reset_if_due(&s->backoff, now);
@@ -210,8 +210,10 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
-        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) && s->last_activity_ms < lru_time) {
-            lru_time = s->last_activity_ms;
+        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
+            (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
+            /* largest unsigned elapsed wins: wrap-safe LRU */
+            lru_age = (uint32_t)(now - s->last_activity_ms);
             lru_idx = (int)i;
         }
     }

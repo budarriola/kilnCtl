@@ -92,6 +92,25 @@ static void test_lru_eviction(void)
                "the 9th (newest) session is present");
 }
 
+// AUDIT_LOGSTORE_TIME LOW-2: eviction must be wrap-safe.
+static void test_lru_eviction_across_tick_wrap(void)
+{
+    TEST_SECTION("web_auth_table -- LRU eviction across the 2^32 tick wrap (AUDIT_LOGSTORE_TIME LOW-2)");
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+    uint8_t hashes[WEB_AUTH_WEB_SLOT_COUNT + 1][WEB_AUTH_TOKEN_HASH_LEN];
+    for (int i = 0; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        make_hash(hashes[i], (uint8_t)(60 + i));
+        /* slot 3 was last seen before the wrap; all others just after it */
+        uint32_t seen = (i == 3) ? 0xFFFFFF00u : (uint32_t)(10 + i);
+        web_auth_table_create_session(&t, hashes[i], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, seen);
+    }
+    make_hash(hashes[WEB_AUTH_WEB_SLOT_COUNT], 251);
+    web_auth_table_create_session(&t, hashes[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 100);
+    TEST_CHECK(web_auth_table_find_by_token(&t, hashes[3]) == -1, "the slot idle across the wrap is evicted");
+    TEST_CHECK(web_auth_table_find_by_token(&t, hashes[0]) != -1, "a fresh post-wrap slot survives");
+}
+
 static void test_touch_updates_lru_order(void)
 {
     TEST_SECTION("web_auth_table -- touch changes eviction order");
@@ -520,6 +539,7 @@ void run_test_web_auth(void)
     test_table_init_and_lookup();
     test_unknown_token_effective_role();
     test_lru_eviction();
+    test_lru_eviction_across_tick_wrap();
     test_touch_updates_lru_order();
     test_destroy_session_and_role();
     test_expiry_boundaries();

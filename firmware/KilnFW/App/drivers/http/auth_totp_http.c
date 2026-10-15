@@ -178,7 +178,7 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
 {
     int free_idx = -1;
     int lru_idx = -1;
-    uint32_t lru_time = UINT32_MAX;
+    uint32_t lru_age = 0;
     for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
         totp_lockout_slot_t *s = &s_totp_lockouts[i];
         login_backoff_cycle_reset_if_due(&s->backoff, now);
@@ -189,8 +189,10 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
-        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) && s->last_activity_ms < lru_time) {
-            lru_time = s->last_activity_ms;
+        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
+            (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
+            /* largest unsigned elapsed wins: wrap-safe LRU */
+            lru_age = (uint32_t)(now - s->last_activity_ms);
             lru_idx = (int)i;
         }
     }
@@ -281,14 +283,40 @@ static void totp_backoff_record(const char *ip, bool ip_known, bool ok)
 
 // --- ADMIN: GET /api/auth/totp_status ---------------------------------------
 
+// AUDIT_TOTP LOW-5: true when /forgot is refused board-wide until reboot -- the
+// board failure cap is spent, or every per-IP slot is in_use and locked (a new
+// client can get no slot). Lets the owner see that a reboot is needed.
+static bool totp_forgot_blocked_snapshot(void)
+{
+    bool blocked = false;
+    if (xSemaphoreTake(s_totp_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        uint32_t now = now_ms();
+        blocked = totp_forgot_board_cap_blocked(&s_forgot_board_cap);
+        if (!blocked) {
+            bool all_locked = true;
+            for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
+                totp_lockout_slot_t *s = &s_totp_lockouts[i];
+                if (!s->in_use || !login_backoff_is_locked(&s->backoff, now)) {
+                    all_locked = false;
+                    break;
+                }
+            }
+            blocked = all_locked;
+        }
+        xSemaphoreGive(s_totp_lock);
+    }
+    return blocked;
+}
+
 static esp_err_t totp_status_get_handler(httpd_req_t *req)
 {
     time_sync_status_t st;
     time_sync_get_status(&st);
-    char body[128];
-    snprintf(body, sizeof(body), "{\"enrolled\":%s,\"board_time_utc\":%lld,\"sntp_synced\":%s}",
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"enrolled\":%s,\"board_time_utc\":%lld,\"sntp_synced\":%s,\"forgot_blocked\":%s}",
              totp_config_enrolled() ? "true" : "false", (long long)st.now_epoch,
-             st.ever_synced ? "true" : "false");
+             st.ever_synced ? "true" : "false", totp_forgot_blocked_snapshot() ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, body);
 }
@@ -502,7 +530,6 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     }
 
     totp_reset_token_result_t tr = totp_reset_token_consume(reset_tokens(), reset_token, username, now_ms());
-    totp_secure_zero(reset_token, sizeof(reset_token));
     bool ok = false;
     // A token only proves a code was valid when /api/auth/forgot minted it
     // (up to TOTP_RESET_TOKEN_TTL_MS ago). Re-check, at the moment of use,
@@ -526,8 +553,13 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         ok = (serr == SECURITY_OK);
         if (ok) {
             web_auth_table_destroy_all(http_session_table());
+        } else {
+            /* AUDIT_TOTP LOW-3: the write failed and changed nothing, so give the
+             * caller the token back (fresh TTL) instead of forcing a new /forgot. */
+            totp_reset_token_store(reset_tokens(), reset_token, username, now_ms());
         }
     }
+    totp_secure_zero(reset_token, sizeof(reset_token));
     totp_secure_zero(new_password, sizeof(new_password));
     totp_backoff_record(ip, ip_known, ok);
 
