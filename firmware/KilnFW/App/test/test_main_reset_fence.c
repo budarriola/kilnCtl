@@ -23,7 +23,9 @@ typedef struct { int unused; } main_boot_ctx_t;
 // Likewise kiln_io.h / safety_link.h / profile_executor.h drag in uart_protocol.h; main.c only passes these types
 // through main_kiln_enter_safe_state(), which this test never calls.
 #define KILN_IO_H
+#define KILN_IO_RELAY_COUNT 4u /* mirrors kiln_io.h; the real header is faked out above */
 #define PROFILE_EXECUTOR_H
+typedef struct { int unused; } profile_exec_status_t; /* dashboard_http.h prototype only */
 #define UART_LOG_BRIDGE_H
 void uart_log_bridge_early_init(void);
 #include "esp_err.h"
@@ -77,6 +79,7 @@ uint32_t safety_link_get_fault_sources(SafetyLinkClass *link) { (void)link; retu
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io) { (void)io; return ESP_OK; }
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *l, uint32_t s, bool on) { (void)l; (void)s; (void)on; return ESP_OK; }
 void profile_executor_note_external_app_hold(void) {}
+void dashboard_prime_flash_facts(void) {}
 size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 100000; }
 size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; return 100000; }
 
