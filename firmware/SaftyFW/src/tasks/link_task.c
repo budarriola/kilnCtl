@@ -46,6 +46,7 @@
 // commands it), and this file never names the word this comment is
 // otherwise avoiding. See safety_core.h's doc comment on that function for
 // the exact bit semantics.
+#include "tick_timing.h" // A3: SNAPSHOT_*_MAX_AGE_MS, status_amps_for_wire()
 #include "link_task.h"
 
 #include <math.h>
@@ -865,6 +866,13 @@ static void link_task_send_status(void)
     // (snapshots.h's contract); the ternaries below only cover the
     // th_present == false case (nothing published yet), where *out is
     // documented as zeroed rather than NaN.
+    // Guard audit 2026-10-14 A3: STATUS has no age field, so a thermo snapshot whose
+    // publish got stuck (producer alive, snapshot frozen) must not read as live on the
+    // wire: apply the same max age safety_core.c uses (tick_timing.h).
+    uint32_t status_now_ms = to_ms_since_boot(get_absolute_time());
+    if (th_present && !snapshot_is_fresh(status_now_ms, th.timestamp_ms, SNAPSHOT_THERMO_MAX_AGE_MS)) {
+        th_present = false;
+    }
     bool temp_valid = th_present && th.valid;
     float tc_c = temp_valid ? th.tc_c : NAN;
     // cj_valid is tracked INDEPENDENTLY of temp_valid (2026-09-08,
@@ -879,6 +887,9 @@ static void link_task_send_status(void)
 
     current_snapshot_t cur;
     current_task_get_snapshot(&cur);
+    // A3: stale/never-published amps go out as NaN, not as the last (or zeroed) value.
+    float status_amps[3];
+    status_amps_for_wire(true, status_now_ms, cur.timestamp_ms, cur.amps, status_amps);
 
     bool estop = discrete_task_estop_pressed();
 
@@ -946,7 +957,7 @@ static void link_task_send_status(void)
     bool enabled_bit = false;
     safety_core_get_output_status(&energized_bit, &enabled_bit);
     size_t len = link_frame_pack_status(payload, estop, energized_bit, enabled_bit, temp_valid, tc_c, cj_c,
-                                         fault_bits, cur.amps[0], cur.amps[1], cur.amps[2],
+                                         fault_bits, status_amps[0], status_amps[1], status_amps[2],
                                          tc_not_installed, tc_injected,
                                          peer_supports_status_v2, tx_dropped_sat,
                                          peer_supports_status_v3, is_borrowed, borrowed_zone_index_wire,

@@ -53,13 +53,17 @@ bool ct_leak_alarm_tick(ct_leak_alarm_state_t *s, const ct_leak_alarm_input_t *i
 
     uint8_t mask = 0;
     float worst = 0.0f;
+    bool unknown = false;
     for (int ch = 0; ch < CT_LEAK_CHANNELS; ch++) {
         if (!channel_relevant(in, ch)) {
             continue;
         }
         float a = in->current_a[ch];
         if (isnan(a)) {
-            continue; /* no number at all: unknown, not evidence of current */
+            /* No number at all: unknown, not evidence of current. The Pico sends NaN
+             * amps when its current snapshot is stale (guard audit 2026-10-14 A3). */
+            unknown = true;
+            continue;
         }
         if (isinf(a)) {
             /* A saturated/overflowed CT channel with every relay off is a
@@ -74,6 +78,14 @@ bool ct_leak_alarm_tick(ct_leak_alarm_state_t *s, const ct_leak_alarm_input_t *i
                 worst = a;
             }
         }
+    }
+    if (mask == 0u && unknown) {
+        /* Every readable channel is unknown and none shows current: that is no
+         * evidence of quiet either. Hold state, progress nothing, so a stale
+         * (NaN) reading can neither raise nor CLEAR a standing alarm (A3). */
+        s->above_run = false;
+        s->below_run = false;
+        return false;
     }
     s->channel_mask = mask;
 

@@ -208,7 +208,7 @@
 // inside S5's blind_grace_s default of 60.0s (safety_guards.c
 // BLIND_GRACE_S_DEFAULT) -- see this file's own comment where tc_valid is
 // set for what tripping tc_valid = false actually does.
-#define THERMO_MAX_AGE_MS 2000u
+#define THERMO_MAX_AGE_MS SNAPSHOT_THERMO_MAX_AGE_MS
 
 // CURRENT_MAX_AGE_MS: current_task publishes every SAFTYFW_PERIOD_CURRENT_
 // TASK_MS = 50ms (task_priorities.h). 2000ms mirrors update_task.c's own
@@ -218,7 +218,7 @@
 // the already-reviewed number rather than inventing a second one for the
 // identical fact. See this file's own comment at the any_current_present
 // computation for what a stale current reading is made to mean.
-#define CURRENT_MAX_AGE_MS 2000u
+#define CURRENT_MAX_AGE_MS SNAPSHOT_CURRENT_MAX_AGE_MS
 
 // Mirrors safety_guards.c's own CORRELATION_WINDOW_S_DEFAULT (safety_
 // guards.h's cfg field doc comment: "0 -> correlation_window_s=150.0s") --

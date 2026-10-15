@@ -205,6 +205,23 @@ void run_test_ct_leak_alarm(void)
     t = 0;
     TEST_CHECK(drive(&s, &in, &t, 20000), "a negative-infinite reading raises too");
 
+    /* A3: stale (NaN) amps are not a quiet sample: a latched alarm must not clear on them. */
+    ct_leak_alarm_reset(&s);
+    in = base_in(0);
+    in.current_a[1] = 0.2f;
+    t = 0;
+    TEST_CHECK(drive(&s, &in, &t, 20000), "alarm raised before the NaN stretch");
+    in.current_a[0] = NAN;
+    in.current_a[1] = NAN;
+    in.current_a[2] = NAN;
+    drive(&s, &in, &t, 600000);
+    TEST_CHECK(s.alarm, "a latched alarm survives a long run of NaN (stale) amps instead of clearing");
+    in.current_a[1] = 0.0f;
+    in.current_a[0] = 0.0f;
+    in.current_a[2] = 0.0f;
+    drive(&s, &in, &t, 600000);
+    TEST_CHECK(!s.alarm, "real quiet readings still clear it");
+
     /* A dip below the floor restarts the debounce. */
     ct_leak_alarm_reset(&s);
     in = base_in(0);

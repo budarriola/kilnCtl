@@ -190,6 +190,21 @@ static void test_reboot_grace_expires_once_no_wrap_rearm(void)
                "a genuinely new announcement is honoured after an expiry");
 }
 
+static void test_status_amps_for_wire(void)
+{
+    const float in[3] = {1.5f, 0.0f, 2.5f};
+    float out[3];
+    status_amps_for_wire(true, 1500u, 1000u, in, out);
+    TEST_CHECK(out[0] == 1.5f && out[1] == 0.0f && out[2] == 2.5f, "fresh amps pass through unchanged");
+    status_amps_for_wire(true, 1000u + SNAPSHOT_CURRENT_MAX_AGE_MS, 1000u, in, out);
+    TEST_CHECK(isnan(out[0]) && isnan(out[1]) && isnan(out[2]),
+               "amps at max age are NaN (not the frozen value, not 0)");
+    status_amps_for_wire(false, 1500u, 1000u, in, out);
+    TEST_CHECK(isnan(out[0]) && isnan(out[2]), "never-published amps are NaN");
+    status_amps_for_wire(true, 20u, 0xFFFFFFF0u, in, out);
+    TEST_CHECK(out[2] == 2.5f, "wraparound age 36ms is fresh");
+}
+
 void run_test_tick_timing(void)
 {
     TEST_SECTION("tick_dt_compute_s -- 2026-08-27 audit item 1, measured (not compile-time-"
@@ -202,4 +217,7 @@ void run_test_tick_timing(void)
 
     TEST_SECTION("reboot_grace_evaluate -- guard review F7, wrap-safe expire-once");
     test_reboot_grace_expires_once_no_wrap_rearm();
+
+    TEST_SECTION("status_amps_for_wire -- guard audit A3, stale amps go out as NaN");
+    test_status_amps_for_wire();
 }
