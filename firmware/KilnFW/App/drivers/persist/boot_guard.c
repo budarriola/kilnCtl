@@ -141,6 +141,9 @@ typedef struct {
  * the magic check below. */
 RTC_NOINIT_ATTR static boot_guard_rtc_t s_bg_rtc;
 
+static volatile bool s_boot_complete;
+static volatile bool s_confirm_withheld;
+
 /* True if the previous boot verified a clear (and therefore the counter
  * this boot just loaded should have been 0). Pure predicate over the two
  * inputs so test_boot_guard.c can exercise every combination directly. */
@@ -260,20 +263,29 @@ static hal_status_t persist_count(uint32_t count)
     return err;
 }
 
-/* Loads the persisted count, or 0 if there is nothing valid to load --
- * missing (first boot), wrong size (a build with a different layout), wrong
- * version, or a bad CRC all collapse to the same "count 0" answer. */
-static uint32_t load_count(void)
+/* Loads the persisted count into *out. Returns false ONLY when the record
+ * could not be READ (an NVS open or get error other than "not found"):
+ * AUDIT_BOOT_SEQUENCE LOW-3 -- an unreadable store must not be folded into
+ * "count 0", because that erases a crash-looping board's history on every
+ * boot whose read fails and the board never reaches the threshold.
+ * "Nothing valid to load" is still count 0 with a true return: missing
+ * (first boot / HAL_NOT_FOUND), wrong size (a build with a different
+ * layout), wrong version, or a bad CRC -- those are data states, not read
+ * errors, and the next write heals them. */
+static bool load_count(uint32_t *out)
 {
+    *out = 0;
     hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return 0;
-    }
     boot_guard_record_t rec;
     size_t len = sizeof(rec);
-    err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
-    hal_kv_close(&h);
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_OK) {
+        err = hal_kv_get_blob(&h, NVS_KEY_REC, &rec, &len);
+        hal_kv_close(&h);
+    }
+    if (err != HAL_OK && err != HAL_NOT_FOUND) {
+        return false; /* genuine read error */
+    }
     if (err != HAL_OK || len != sizeof(rec)) {
         /* Nothing at the current location yet -- either a board that has
          * never run this firmware, or the first boot after the 2026-09-08
@@ -282,8 +294,11 @@ static uint32_t load_count(void)
         hal_kv_handle_t lh;
         hal_status_t lopen = hal_kv_open(&lh, NVS_NAMESPACE_LEGACY, HAL_KV_MODE_READ_ONLY,
                                           KILN_NVS_PARTITION);
+        if (lopen == HAL_NOT_FOUND) {
+            return true; /* never written */
+        }
         if (lopen != HAL_OK) {
-            return 0;
+            return false;
         }
         len = sizeof(rec);
         err = hal_kv_get_blob(&lh, NVS_KEY_REC_LEGACY, &rec, &len);
@@ -292,18 +307,21 @@ static uint32_t load_count(void)
             ESP_LOGW(TAG, "boot-guard record read from the LEGACY location '%s'/'%s' -- it will be "
                           "rewritten under '%s'/'%s' (see boot_guard.c's comment on NVS_KEY_REC)",
                      NVS_NAMESPACE_LEGACY, NVS_KEY_REC_LEGACY, NVS_NAMESPACE, NVS_KEY_REC);
+        } else if (err != HAL_OK && err != HAL_NOT_FOUND) {
+            return false;
         }
     }
     if (err != HAL_OK || len != sizeof(rec)) {
-        return 0;
+        return true; /* absent or wrong layout: count 0 */
     }
     if (!record_is_valid(&rec)) {
         ESP_LOGW(TAG, "boot-guard record failed its version/CRC check -- treating as count 0 "
                       "(this either loses one boot's worth of recovery-tracking accuracy, or is "
                       "flash corruption worth knowing about)");
-        return 0;
+        return true;
     }
-    return rec.boot_count;
+    *out = rec.boot_count;
+    return true;
 }
 
 /* Strict read-back for boot_guard_mark_healthy()'s verification: unlike
@@ -508,7 +526,16 @@ esp_err_t boot_guard_init(void)
 
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
 
-    uint32_t loaded = (part_err == HAL_OK) ? load_count() : 0;
+    uint32_t loaded = 0;
+    /* LOW-3: an unreadable record is not count 0. Keep the stored history
+     * (skip the persist below), count this boot as 1 in RAM, flag it. */
+    bool load_failed = (part_err == HAL_OK) && !load_count(&loaded);
+    if (load_failed) {
+        loaded = 0;
+        ESP_LOGE(TAG, "boot-guard record could not be READ -- NOT treating it as count 0 and NOT "
+                      "overwriting it; this boot counts as 1 in RAM only");
+        startup_fault_note(STARTUP_FAULT_BOOT_GUARD_NVS);
+    }
 
     /* See the STUCK-COUNTER ESCAPE comment above. Read the RTC marker
      * BEFORE it is overwritten for this boot, and drop the loaded count to
@@ -533,7 +560,7 @@ esp_err_t boot_guard_init(void)
     uint32_t new_count = next_boot_count(loaded, &recovery_mode);
 
     hal_status_t write_err = HAL_OK;
-    if (part_err == HAL_OK) {
+    if (part_err == HAL_OK && !load_failed) {
         write_err = persist_count(new_count);
     }
 
@@ -541,6 +568,8 @@ esp_err_t boot_guard_init(void)
     s_bg.recovery_mode = recovery_mode;
     s_bg.healthy_marked = false;
     s_bg.initialized = true;
+    s_boot_complete = false;
+    s_confirm_withheld = false;
     xSemaphoreGive(s_bg.lock);
 
     if (write_err != HAL_OK) {
@@ -591,6 +620,28 @@ uint32_t boot_guard_get_boot_count(void)
     return s_bg.count;
 }
 
+/* Boot-complete gate (AUDIT_BOOT_SEQUENCE MED-1). Written by the app_main
+ * task (signal/withhold), read by the ota_confirm task: single-word flags. */
+void boot_guard_boot_complete_signal(void)
+{
+    s_boot_complete = true;
+}
+
+void boot_guard_confirm_withhold(void)
+{
+    s_confirm_withheld = true;
+}
+
+bool boot_guard_boot_complete(void)
+{
+    return s_boot_complete && !s_confirm_withheld;
+}
+
+bool boot_guard_confirm_is_withheld(void)
+{
+    return s_confirm_withheld;
+}
+
 bool boot_confirm_is_healthy(bool nvs_ok, bool web_ok, bool ota_routes_ok)
 {
     /* Pure logic, no I/O, no safety-link term -- see boot_guard.h's doc
@@ -612,7 +663,8 @@ boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok
 
 boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boot_confirm_ops_t *ops)
 {
-    if (!st || !ops || !ops->resample_nvs || !ops->mark_valid || !ops->clear_counter) {
+    if (!st || !ops || !ops->resample_nvs || !ops->mark_valid || !ops->clear_counter ||
+        !ops->ms_since_boot_complete) {
         return BOOT_CONFIRM_STEP_PENDING;
     }
     if (!st->mark_valid_done || !st->clear_done) {
@@ -621,6 +673,12 @@ boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boo
     }
     boot_confirm_action_t action = boot_confirm_decide(st->is_factory, st->nvs_ok, st->web_ok, st->ota_ok);
     if (action == BOOT_CONFIRM_SKIP_NOT_HEALTHY) {
+        return BOOT_CONFIRM_STEP_PENDING;
+    }
+    /* MED-1: nothing is confirmed (mark-valid or guard clear) before boot has
+     * completed and survived the soak. A withheld confirm reports < 0 forever. */
+    int32_t since = ops->ms_since_boot_complete(ops->ctx);
+    if (since < 0 || since < BOOT_CONFIRM_SOAK_MS) {
         return BOOT_CONFIRM_STEP_PENDING;
     }
     if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT && !st->mark_valid_done) {

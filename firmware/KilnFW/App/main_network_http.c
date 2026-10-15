@@ -158,6 +158,7 @@ static TaskHandle_t s_ota_confirm_task;
 typedef struct {
     bool rollback_cancel_ok;
     bool link_up;
+    TickType_t complete_tick; /* 0 until boot_guard_boot_complete() first seen true */
 } main_ota_confirm_step_ctx_t;
 
 static bool main_ota_resample_nvs(void *c)
@@ -211,6 +212,23 @@ static bool main_ota_read_valid(void *c)
     return true;
 }
 
+/* MED-1: ms since boot_guard_boot_complete() first read true; -1 while not complete or withheld.
+ * The first-seen tick lives in the step ctx, so the soak counts from when this task saw completion. */
+static int32_t main_ota_ms_since_boot_complete(void *c)
+{
+    main_ota_confirm_step_ctx_t *sc = (main_ota_confirm_step_ctx_t *)c;
+    if (!boot_guard_boot_complete()) {
+        return -1;
+    }
+    if (sc->complete_tick == 0) {
+        sc->complete_tick = xTaskGetTickCount();
+        if (sc->complete_tick == 0) {
+            sc->complete_tick = 1;
+        }
+    }
+    return (int32_t)((xTaskGetTickCount() - sc->complete_tick) * portTICK_PERIOD_MS);
+}
+
 static bool main_ota_clear_counter(void *c)
 {
     (void)c;
@@ -249,7 +267,8 @@ static void main_ota_rollback_confirm_task(void *arg)
                                          .resample_nvs = main_ota_resample_nvs,
                                          .mark_valid = main_ota_mark_valid,
                                          .read_valid = main_ota_read_valid,
-                                         .clear_counter = main_ota_clear_counter };
+                                         .clear_counter = main_ota_clear_counter,
+                                         .ms_since_boot_complete = main_ota_ms_since_boot_complete };
     boot_confirm_state_t        st   = { .is_factory = is_factory, .web_ok = ctx.web_ok,
                                          .ota_ok = ctx.ota_ok, .nvs_ok = ctx.nvs_ok };
     if (is_factory) {
@@ -950,6 +969,10 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (monitor_task_start(&monitor) != pdPASS) {
         ESP_LOGE(MAIN_TAG, "Failed to start heartbeat monitor task");
         startup_fault_note(STARTUP_FAULT_HEARTBEAT_MONITOR);
+        /* MED-1: no heartbeat monitor means nothing feeds the RTC watchdog and the chip
+         * resets ~20 s after boot. Never confirm such a boot, so the boot_guard counter
+         * climbs and the board reaches recovery instead of reset-looping. */
+        boot_guard_confirm_withhold();
     }
 
     // --- PC link -----------------------------------------------------------

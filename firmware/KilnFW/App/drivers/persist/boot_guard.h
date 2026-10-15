@@ -380,7 +380,24 @@ typedef struct {
     bool (*read_valid)(void *ctx);   /* true = otadata state read back as VALID (never trust one mmap read:
                                         XIP-from-PSRAM audit MED-1); NULL = no read-back available */
     bool (*clear_counter)(void *ctx);/* true = boot_guard_mark_healthy() verified */
+    int32_t (*ms_since_boot_complete)(void *ctx); /* MED-1 gate: < 0 = boot not complete or confirm
+                                        withheld; else ms since the end of main_bridges_bringup().
+                                        Required: NULL keeps boot_confirm_step() PENDING forever. */
 } boot_confirm_ops_t;
+
+/* MED-1 (docs/audits/AUDIT_BOOT_SEQUENCE.md): neither mark-valid nor the guard clear may run
+ * until app_main has finished AND this soak has elapsed after it. The soak must exceed
+ * RTC_WATCHDOG_TIMEOUT_MS (20000 ms, rtc_watchdog.h, armed in main_boot_early.c): a failed
+ * monitor_task_start() (the only rtc_watchdog_feed() caller) resets the chip ~20 s after
+ * arming, so 30 s leaves a 10 s margin. */
+#define BOOT_CONFIRM_SOAK_MS 30000
+
+/* boot_guard_boot_complete_signal(): end of main_bridges_bringup(). boot_guard_confirm_withhold():
+ * sticky for the boot, called when monitor_task_start() failed. Both cleared by boot_guard_init(). */
+void boot_guard_boot_complete_signal(void);
+void boot_guard_confirm_withhold(void);
+bool boot_guard_boot_complete(void);       /* signalled and not withheld */
+bool boot_guard_confirm_is_withheld(void);
 
 typedef struct {
     bool is_factory;

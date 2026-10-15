@@ -482,7 +482,8 @@ static void test_legacy_record_is_read_once_then_retired(void)
     TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "legacy-record helper commits");
     hal_kv_close(&h);
 
-    TEST_CHECK(load_count() == (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD,
+    uint32_t legacy_loaded = 0;
+    TEST_CHECK(load_count(&legacy_loaded) && legacy_loaded == (uint32_t)RECOVERY_MODE_BOOT_THRESHOLD,
                "load_count() falls back to the legacy key, so an upgrade does not forget the "
                "counter history");
 
@@ -833,16 +834,20 @@ typedef struct {
     int  mark_fail_polls;  /* mark-valid fails this many calls, then succeeds */
     int  clear_fail_polls;
     int  read_calls, read_false_polls; /* read-back says not VALID for this many calls */
+    bool    gated;         /* MED-1: when true, step_since() returns since_ms instead of 'soaked' */
+    int32_t since_ms;
 } step_fake_t;
 
 static bool step_nvs(void *c) { step_fake_t *f = c; return f->nvs_calls++ >= f->nvs_false_polls; }
 static bool step_mark(void *c) { step_fake_t *f = c; return f->mark_calls++ >= f->mark_fail_polls; }
 static bool step_read(void *c) { step_fake_t *f = c; return f->read_calls++ >= f->read_false_polls; }
 static bool step_clear(void *c) { step_fake_t *f = c; return f->clear_calls++ >= f->clear_fail_polls; }
+/* Default: boot complete and fully soaked, so the pre-MED-1 tests are unaffected. */
+static int32_t step_since(void *c) { step_fake_t *f = c; return f->gated ? f->since_ms : BOOT_CONFIRM_SOAK_MS; }
 
 static int step_run(boot_confirm_state_t *st, step_fake_t *f, int max_polls)
 {
-    boot_confirm_ops_t ops = { f, step_nvs, step_mark, step_read, step_clear };
+    boot_confirm_ops_t ops = { f, step_nvs, step_mark, step_read, step_clear, step_since };
     for (int i = 1; i <= max_polls; i++) {
         if (boot_confirm_step(st, &ops) == BOOT_CONFIRM_STEP_DONE) {
             return i;
@@ -917,6 +922,109 @@ static void test_boot_confirm_step_factory_skips_mark_valid(void)
     TEST_CHECK(f.mark_calls == 0 && f.clear_calls == 1, "factory: no mark-valid, counter cleared");
 }
 
+/* MED-1: nothing is confirmed before boot completes and soaks. */
+static void test_boot_confirm_step_waits_for_boot_complete_and_soak(void)
+{
+    for (int factory = 0; factory <= 1; factory++) {
+        step_fake_t a = { .gated = true, .since_ms = -1 };
+        boot_confirm_state_t sa = { .is_factory = factory, .web_ok = true, .ota_ok = true };
+        TEST_CHECK(step_run(&sa, &a, 20) == -1, "BOOT-COMPLETE GATE: boot not complete -> never DONE");
+        TEST_CHECK(a.mark_calls == 0 && a.clear_calls == 0,
+                   "BOOT-COMPLETE GATE: no mark-valid and no guard clear before boot completes");
+
+        step_fake_t b = { .gated = true, .since_ms = 0 };
+        boot_confirm_state_t sb = { .is_factory = factory, .web_ok = true, .ota_ok = true };
+        TEST_CHECK(step_run(&sb, &b, 5) == -1 && b.mark_calls == 0 && b.clear_calls == 0,
+                   "SOAK GATE: boot complete but zero soak -> nothing confirmed");
+
+        step_fake_t c = { .gated = true, .since_ms = BOOT_CONFIRM_SOAK_MS - 1 };
+        boot_confirm_state_t sc = { .is_factory = factory, .web_ok = true, .ota_ok = true };
+        TEST_CHECK(step_run(&sc, &c, 5) == -1 && c.mark_calls == 0 && c.clear_calls == 0,
+                   "SOAK GATE: one ms short of the soak -> nothing confirmed");
+
+        step_fake_t d = { .gated = true, .since_ms = BOOT_CONFIRM_SOAK_MS };
+        boot_confirm_state_t sd = { .is_factory = factory, .web_ok = true, .ota_ok = true };
+        TEST_CHECK(step_run(&sd, &d, 5) == 1 && d.clear_calls == 1,
+                   "boot complete and soak elapsed -> confirmed");
+        TEST_CHECK(factory || d.mark_calls == 1, "OTA slot: mark-valid issued after the gate opens");
+    }
+    TEST_CHECK(BOOT_CONFIRM_SOAK_MS > 20000,
+               "the soak must exceed RTC_WATCHDOG_TIMEOUT_MS (20000 ms)");
+    /* A missing gate op fails closed. */
+    step_fake_t e = {0};
+    boot_confirm_ops_t ops = { &e, step_nvs, step_mark, step_read, step_clear, NULL };
+    boot_confirm_state_t se = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    TEST_CHECK(boot_confirm_step(&se, &ops) == BOOT_CONFIRM_STEP_PENDING && e.clear_calls == 0,
+               "no ms_since_boot_complete op -> never confirms");
+}
+
+/* MED-1: a withheld confirm (monitor_task_start failed) keeps the boot unconfirmed even after the
+ * end-of-boot signal; init clears both flags. */
+static int32_t gate_from_boot_guard(void *c)
+{
+    (void)c;
+    return boot_guard_boot_complete() ? 10 * BOOT_CONFIRM_SOAK_MS : -1;
+}
+
+static void test_boot_complete_signal_and_withhold(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+    boot_guard_init();
+    TEST_CHECK(!boot_guard_boot_complete(), "fresh boot: not complete");
+    boot_guard_boot_complete_signal();
+    TEST_CHECK(boot_guard_boot_complete(), "signalled, nothing withheld -> complete");
+
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(!boot_guard_boot_complete(), "init clears the signal for the next boot");
+    boot_guard_confirm_withhold(); /* monitor_task_start failed */
+    boot_guard_boot_complete_signal();
+    TEST_CHECK(!boot_guard_boot_complete(),
+               "MONITOR FAILURE: a withheld confirm stays unconfirmed after the end-of-boot signal");
+    TEST_CHECK(boot_guard_confirm_is_withheld(), "withheld is reported");
+
+    step_fake_t f = {0};
+    boot_confirm_ops_t ops = { &f, step_nvs, step_mark, step_read, step_clear, gate_from_boot_guard };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    for (int i = 0; i < 20; i++) {
+        TEST_CHECK(boot_confirm_step(&st, &ops) == BOOT_CONFIRM_STEP_PENDING,
+                   "monitor start failure keeps the boot unconfirmed, however long it runs");
+    }
+    TEST_CHECK(f.mark_calls == 0 && f.clear_calls == 0, "no mark-valid, no guard clear on a withheld boot");
+
+    simulate_reboot();
+    boot_guard_init();
+    boot_guard_boot_complete_signal();
+    TEST_CHECK(!boot_guard_confirm_is_withheld() && boot_guard_boot_complete(),
+               "withhold is per boot: init clears it, the next boot can complete");
+}
+
+/* LOW-3: an NVS read error is not count 0 -- the stored record is kept. */
+static void test_unreadable_record_not_collapsed_to_zero(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_power_cycle();
+    for (int i = 0; i < 2; i++) {
+        simulate_reboot();
+        boot_guard_init();
+    }
+    uint32_t before = 0;
+    TEST_CHECK(boot_guard_get_persisted_count(&before) && before == 2u, "precondition: count 2 persisted");
+
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_NOT_READY),
+               "precondition: the next open of the record namespace fails (one-shot)");
+    simulate_reboot();
+    boot_guard_init();
+    TEST_CHECK(boot_guard_get_boot_count() == 1u, "unreadable record: counted as 1 in RAM only");
+    uint32_t after = 0;
+    TEST_CHECK(boot_guard_get_persisted_count(&after), "record readable again");
+    TEST_CHECK(after == 2u,
+               "READ ERROR must not overwrite the stored history with a fabricated count (was collapsed to 0 -> 1)");
+}
+
 void run_test_boot_guard(void)
 {
     test_recovery_route_decision();
@@ -936,6 +1044,9 @@ void run_test_boot_guard(void)
     test_boot_confirm_step_retries_clear();
     test_boot_confirm_step_never_confirms_unhealthy();
     test_boot_confirm_step_factory_skips_mark_valid();
+    test_boot_confirm_step_waits_for_boot_complete_and_soak();
+    test_boot_complete_signal_and_withhold();
+    test_unreadable_record_not_collapsed_to_zero();
     test_stuck_counter_escape();
     test_legacy_record_is_read_once_then_retired();
     test_reset_counter_keeps_normal_flashing_under_threshold();
