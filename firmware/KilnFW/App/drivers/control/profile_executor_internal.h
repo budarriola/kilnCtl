@@ -616,6 +616,9 @@ typedef struct {
      * run start / resume alongside on_off_trigger_state (profile_executor_
      * run.c) -- never merely on a segment change. */
     bool  on_off_actuated_on;
+    /* AUDIT_CONTROL_EXECUTOR LOW-3: true while the zone had no valid sensor; the first valid tick afterwards
+     * re-bases the PID derivative (pid_reseed_derivative) instead of differencing across the outage. */
+    bool  pid_sensor_outage;
     float on_off_actuated_held_s;
 
     /* TODO.md 6A.7's max_ramp_c_per_hr re-check (see reload_zone_config()):

@@ -114,6 +114,11 @@ void pid_reset(pid_state_t *state);
  * original -ff_u form byte-for-byte, and pass 0.0f/0.0f for a zone with no
  * feedforward model at all, which reduces it further to the classic >= 0
  * floor. */
+/* AUDIT_CONTROL_EXECUTOR LOW-3: re-bases the derivative on `measurement` after a sensor outage so the first
+ * valid sample is not differenced across the whole gap (a kick). Sets prev_measurement and clears d_filtered;
+ * leaves the integral and everything else alone, and never touches an uninitialized state. */
+void pid_reseed_derivative(pid_state_t *state, float measurement);
+
 void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
                        float u_desired, float ff_u, float ff_hold);
 

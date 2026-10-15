@@ -178,8 +178,14 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
          * shared, faster-moving destination -- otherwise the P/I/D terms
          * would fight the feedforward's own deliberately tapered rate
          * above. Uncapped, this is bit-identical to s_exec.target_c. */
+        if (z->pid_sensor_outage) {
+            pid_reseed_derivative(&z->pid_state, z->actual_c);
+            z->pid_sensor_outage = false;
+        }
         duty = pid_update_terms(&z->pid_state, cfg, zone_commanded_setpoint_c(z, zi), z->actual_c, dt_s,
                                 u_ff, ff_hold, &z->last_pid_terms);
+    } else {
+        z->pid_sensor_outage = true;
     }
     /* ROADMAP.md M15 B4: Stage B of the duty breakdown -- read-only. duty
      * already reflects both branches above (pid_update_terms()'s clamped

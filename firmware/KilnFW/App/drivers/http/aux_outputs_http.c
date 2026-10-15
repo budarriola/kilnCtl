@@ -19,6 +19,8 @@
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 #include "zones_config_json.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- restore fence */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409 */
 
 static const char *TAG = "aux_outputs_http";
 
@@ -146,6 +148,11 @@ static esp_err_t aux_post_handler(httpd_req_t *req)
 {
     if (cfg_fs_http_refuse_if_unmounted(req)) {
         return ESP_OK;
+    }
+    /* backup-import LOW-3: a restore's commit pass owns the stores; refuse a concurrent write (409). */
+    if (backup_import_restore_in_flight()) {
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
     }
     char body[AUX_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {

@@ -380,6 +380,20 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     }
     return ESP_OK;
 }
+/* backup-import LOW-3 fence: restore-in-flight flag and 409 sender fakes. */
+static bool s_test_restore_in_flight;
+static int s_test_refusals;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+esp_err_t system_mode_gate_http_send_refusal(httpd_req_t *req, const char *reason)
+{
+    (void)req;
+    (void)reason;
+    s_test_refusals++;
+    return ESP_OK;
+}
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r;
@@ -693,6 +707,21 @@ static void test_generation_guard(void)
     httpd_req_t ok2 = make_req("action=discard");
     api_profile_live_decide_post_handler(&ok2);
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "absent gen decide accepted (documented compat)");
+}
+
+static void test_decide_fenced_during_restore(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- refused (409 sender) while a backup restore is in flight (LOW-3)");
+    reset_fakes();
+    fork_for_tests(0);
+    s_test_restore_in_flight = true;
+    s_test_refusals = 0;
+    httpd_req_t req = make_req("action=discard");
+    TEST_CHECK(api_profile_live_decide_post_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_test_refusals == 1, "answered by the mode-gate 409 sender");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "the pending edit was not decided");
+    s_test_restore_in_flight = false;
 }
 
 static void test_decide_nothing_pending_409(void)
@@ -1518,6 +1547,7 @@ int main(void)
     test_accept_success_200();
     test_generation_guard();
     test_decide_nothing_pending_409();
+    test_decide_fenced_during_restore();
     test_decide_discard();
     test_decide_save_as_missing_name_400();
     test_decide_save_as_persist_failure_is_500_and_keeps_edit();

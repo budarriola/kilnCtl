@@ -134,6 +134,21 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
     snprintf(s_reply, sizeof(s_reply), "%s", s ? s : "");
     return ESP_OK;
 }
+/* backup-import LOW-3 fence: restore-in-flight flag and 409 sender fakes. */
+static bool s_test_restore_in_flight;
+static int s_test_refusals;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+esp_err_t system_mode_gate_http_send_refusal(httpd_req_t *req, const char *reason)
+{
+    (void)req;
+    (void)reason;
+    s_test_refusals++;
+    s_status = 409;
+    return ESP_OK;
+}
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t e, const char *m)
 {
     (void)r;
@@ -310,6 +325,10 @@ static void test_mode_gate(void)
     }
     f_profile_running = f_autotune_running = false;
     TEST_CHECK(post_ok(h_manual, man) == 200 && f_relay_state[2], "control: idle manual on succeeds");
+    s_test_restore_in_flight = true;
+    s_test_refusals = 0;
+    TEST_CHECK(post_ok(h_cfg, cfg) == 409 && s_test_refusals == 1, "config write refused 409 during a backup restore (LOW-3)");
+    s_test_restore_in_flight = false;
 }
 
 static void test_indices_and_fields(void)

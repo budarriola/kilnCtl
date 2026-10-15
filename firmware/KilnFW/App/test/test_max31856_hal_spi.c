@@ -186,8 +186,26 @@ static void test_live_check_reconfig(MAX31856BusClass *bus, MAX31856Class *ch)
     /* Part power-on-reset: CR0 = 00h (normally off), CR1 = 03h, MASK = FFh. */
     t += MAX31856_LIVE_CHECK_INTERVAL_MS;
     n = fake_spi_transfer_count();
+    /* LOW-5: the first mismatching read-back changes nothing (one corrupted SPI
+     * read must not cost the invalid window); a second one confirms. */
     script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
-    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "CR0 mismatch -> reconfigured");
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "first CR0 mismatch -> SUSPECT only");
+    TEST_CHECK(fake_spi_transfer_count() == n + 1, "suspect: just the read-back, no writes");
+    TEST_CHECK(ch->has_good_result, "suspect: good-result history kept");
+    TEST_CHECK(ch->live_mismatch_count == 0u, "suspect: not counted yet");
+    TEST_CHECK(MAX31856_live_check(ch, t + MAX31856_LIVE_RECHECK_MS - 1u) == MAX31856_LIVE_NOT_DUE,
+               "re-check not due before MAX31856_LIVE_RECHECK_MS");
+    /* A matching re-check clears the suspicion: a later single mismatch is suspect again. */
+    script_cfg_readback(ch, c0, c1, m);
+    TEST_CHECK(MAX31856_live_check(ch, t + MAX31856_LIVE_RECHECK_MS) == MAX31856_LIVE_OK, "re-check matches -> OK");
+    TEST_CHECK(ch->has_good_result && ch->live_mismatch_count == 0u, "transient glitch changed nothing");
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS + MAX31856_LIVE_RECHECK_MS;
+    script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "mismatch again -> SUSPECT (not stale-confirmed)");
+    t += MAX31856_LIVE_RECHECK_MS;
+    n = fake_spi_transfer_count();
+    script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "second consecutive mismatch -> reconfigured");
     TEST_CHECK(ch->live_mismatch_count == 1u, "mismatch counted");
     TEST_CHECK(fake_spi_transfer_count() == n + 1 + 4, "one read-back plus stop/CR1/MASK/CR0 writes");
     const fake_spi_transfer_record_t *last = fake_spi_transfer(n + 4);
@@ -213,10 +231,48 @@ static void test_live_check_reconfig(MAX31856BusClass *bus, MAX31856Class *ch)
     /* CR1 and MASK mismatches alone also trigger it. */
     t += MAX31856_LIVE_CHECK_INTERVAL_MS;
     script_cfg_readback(ch, c0, (uint8_t)(c1 ^ 0x10u), m);
-    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "CR1 mismatch -> reconfigured");
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "CR1 mismatch -> suspect");
+    t += MAX31856_LIVE_RECHECK_MS;
+    script_cfg_readback(ch, c0, (uint8_t)(c1 ^ 0x10u), m);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "CR1 mismatch confirmed -> reconfigured");
     t += MAX31856_LIVE_CHECK_INTERVAL_MS;
     script_cfg_readback(ch, c0, c1, (uint8_t)(m ^ 0x01u));
-    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "MASK mismatch -> reconfigured");
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "MASK mismatch -> suspect");
+    t += MAX31856_LIVE_RECHECK_MS;
+    script_cfg_readback(ch, c0, c1, (uint8_t)(m ^ 0x01u));
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "MASK mismatch confirmed -> reconfigured");
+}
+
+static void test_zone_helpers(void)
+{
+    MAX31856Reading rd[3];
+    memset(rd, 0, sizeof(rd));
+    for (int i = 0; i < 3; i++) {
+        rd[i].channel = (uint8_t)i;
+        rd[i].tc_temperature_c = 100.0f * (float)(i + 1);
+    }
+    bool v = false;
+    float c = thermo_zone_raw_from_readings(rd, 3, 0x01u, &v);
+    TEST_CHECK(v && c == 100.0f, "identity mask 0 -> channel 0");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x06u, &v);
+    TEST_CHECK(v && c == 250.0f, "mask 0b110 -> mean of channels 1,2 (LOW-1)");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x04u, &v);
+    TEST_CHECK(v && c == 300.0f, "mask on channel 2 reads channel 2, not channel 0");
+    rd[2].spi_failed = true;
+    c = thermo_zone_raw_from_readings(rd, 3, 0x06u, &v);
+    TEST_CHECK(v && c == 200.0f, "spi-failed masked channel dropped from the mean");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x04u, &v);
+    TEST_CHECK(!v && isnan(c), "only masked channel failed -> invalid");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x00u, &v);
+    TEST_CHECK(!v && isnan(c), "empty mask -> invalid");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x08u, &v);
+    TEST_CHECK(!v, "mask names an absent channel -> invalid");
+
+    TEST_CHECK(thermo_channel_cal_applies(0, 0x01u), "identity mask: calibrate");
+    TEST_CHECK(thermo_channel_cal_applies(2, 0x04u), "identity mask ch2: calibrate");
+    TEST_CHECK(!thermo_channel_cal_applies(0, 0x03u), "combined mask: show raw (LOW-2)");
+    TEST_CHECK(!thermo_channel_cal_applies(0, 0x02u), "remapped mask: show raw (LOW-2)");
+    TEST_CHECK(!thermo_channel_cal_applies(0, 0x00u), "empty mask: show raw");
 }
 
 int main(void)
@@ -287,6 +343,7 @@ int main(void)
 
     test_reading_ok_staleness();
     test_live_check_reconfig(&bus, &chs[1]);
+    test_zone_helpers();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

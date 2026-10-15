@@ -26,6 +26,15 @@ void pid_reset(pid_state_t *state)
     memset(state, 0, sizeof(*state));
 }
 
+void pid_reseed_derivative(pid_state_t *state, float measurement)
+{
+    if (!state->initialized) {
+        return; /* the first update seeds prev_measurement itself */
+    }
+    state->prev_measurement = measurement;
+    state->d_filtered = 0.0f;
+}
+
 void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
                        float u_desired, float ff_u, float ff_hold)
 {

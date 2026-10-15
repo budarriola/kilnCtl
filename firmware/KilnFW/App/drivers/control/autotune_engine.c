@@ -1348,6 +1348,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
     s_at.trace_count = 0;
     s_at.abort_reason[0] = '\0';
     s_at.per_zone_blocked = false;
+    s_at.blocked_during_measure = false;
 
     /* TODO.md 6A.6: claim this zone's relays for the duration of the run, same
      * shape as profile_executor.c's RELAY_OWNER_PROFILE claim -- see

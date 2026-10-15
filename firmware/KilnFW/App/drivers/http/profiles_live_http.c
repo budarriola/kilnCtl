@@ -27,6 +27,8 @@
 #include "freertos/semphr.h"
 
 #include "cfg_fs_refusal_http.h" /* cfg_fs_http_refuse_if_unmounted() */
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- restore fence */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409 */
 #include "dashboard_json.h" /* json_escape() */
 #include "http_auth_http.h"
 #include "http_form.h"
@@ -817,6 +819,11 @@ static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_resu
 
 static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
 {
+    /* backup-import LOW-3: a restore's commit pass owns the stores; refuse a concurrent write (409). */
+    if (backup_import_restore_in_flight()) {
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
+    }
     char body[192];
     if (read_small_body(req, body, sizeof(body)) != ESP_OK) {
         return send_bad_request(req, "bad body");

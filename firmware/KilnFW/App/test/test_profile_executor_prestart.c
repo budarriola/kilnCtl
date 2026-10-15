@@ -2358,6 +2358,35 @@ static void test_resume_restarts_thermal_guard_windows(void)
     memset(&s_exec.zones[1].guard_state, 0, sizeof(s_exec.zones[1].guard_state));
 }
 
+static void test_resume_resets_on_off_actuation_state(void)
+{
+    TEST_SECTION("profile_executor_resume() resets the on/off actuation state (AUDIT_CONTROL_EXECUTOR LOW-1)");
+    reset_relay_claim_test_state();
+    relay_off_tracker_reset_all(); /* relay never ON since boot -> hold seeds as settled */
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x01;
+    zone_runtime_t *z = &s_exec.zones[0];
+    memset(&z->guard_state, 0, sizeof(z->guard_state));
+    z->active = true;
+    z->relay_mask = 0x01;
+    z->on_off_actuated_on = true;
+    z->on_off_actuated_held_s = 3.0f;
+    z->on_off_trigger_state.commanded_on = true;
+    z->on_off_trigger_state.held_s = 3.0f;
+
+    TEST_CHECK(profile_executor_pause(), "pause from RUNNING");
+    TEST_CHECK(profile_executor_resume(), "resume from PAUSED");
+    TEST_CHECK(!z->on_off_actuated_on, "resume: the actuation gate no longer believes the relay is ON");
+    TEST_CHECK(!z->on_off_trigger_state.commanded_on, "resume: the trigger state is back to OFF");
+    TEST_CHECK(z->on_off_actuated_held_s > 3.0f && z->on_off_trigger_state.held_s > 3.0f,
+               "resume: the hold timers are re-seeded from the relay's real off time, not the pre-pause 3 s");
+    z->active = false;
+    z->relay_mask = 0;
+    z->on_off_actuated_on = false;
+    memset(&z->guard_state, 0, sizeof(z->guard_state));
+}
+
 /* REVIEW_LD01_WWFIX MED-1: resume shares the start gate. A down/unconfirmed/unreadable link refuses and
  * leaves the run PAUSED with no heat request; the same call succeeds once the link is positively up. */
 static void test_resume_refuses_unless_link_positively_up(void)
@@ -5747,6 +5776,43 @@ static void test_feedforward_both_callers_agree_bump_transfer(void)
     TEST_CHECK_NEAR(duty, u_desired, 0.02, "bumpless-seeded tick (coupling engaged), run through the REAL "
                                           "per-tick call site, reproduces u_desired -- the two call sites "
                                           "computed the identical feedforward");
+}
+
+static void test_pid_no_derivative_kick_after_sensor_outage(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- no derivative kick on the first valid sample after a sensor outage "
+                 "(AUDIT_CONTROL_EXECUTOR LOW-3)");
+    reset_coupling_test_state();
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg = (pid_cfg_t){.kp = 0.0f, .ki = 0.0f, .kd = 50.0f, .d_filter_tau_s = 1.0f, .b = 1.0f,
+                            .pid_range_c = 1000.0f};
+    pid_reset(&z.pid_state);
+    z.heater_cfg.window_ms = 10000;
+    z.heater_cfg.min_on_ms = 0;
+    s_exec.ambient_c = 20.0f;
+    s_exec.target_c = 500.0f;
+    s_exec.target_rate_c_per_s = 0.0f;
+    bool on = false;
+    z.actual_c = 500.0f;
+    for (int i = 0; i < 3; i++) {
+        pid_family_zone_tick(&z, zi, &z.pid_cfg, true, 1.0f, 1000u, &on);
+    }
+    /* Outage: the kiln cools 200 C while no valid reading arrives. */
+    for (int i = 0; i < 5; i++) {
+        z.actual_c = 300.0f;
+        pid_family_zone_tick(&z, zi, &z.pid_cfg, false, 1.0f, 1000u, &on);
+    }
+    TEST_CHECK(z.pid_sensor_outage, "the outage is recorded");
+    pid_family_zone_tick(&z, zi, &z.pid_cfg, true, 1.0f, 1000u, &on);
+    TEST_CHECK(!z.pid_sensor_outage, "the first valid sample clears the outage flag");
+    TEST_CHECK(z.last_pid_terms.d == 0.0f && z.pid_state.d_filtered == 0.0f,
+               "no derivative term from differencing across the gap");
+    /* A genuine rate after the reseed is still seen. */
+    z.actual_c = 310.0f;
+    pid_family_zone_tick(&z, zi, &z.pid_cfg, true, 1.0f, 1000u, &on);
+    TEST_CHECK(z.last_pid_terms.d != 0.0f, "derivative still works on real post-outage motion");
 }
 
 static void test_feedforward_realistic_measured_matrix_zone1_row(void)
@@ -13170,6 +13236,7 @@ void run_test_profile_executor_prestart(void)
     test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run();
     test_pause_keeps_claim_resume_reclaims_it();
     test_resume_restarts_thermal_guard_windows();
+    test_resume_resets_on_off_actuation_state();
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
@@ -13243,6 +13310,7 @@ void run_test_profile_executor_prestart(void)
     test_feedforward_hot_neighbor_subtracts_duty();
     test_feedforward_invalid_neighbor_contributes_zero_never_nan();
     test_feedforward_both_callers_agree_bump_transfer();
+    test_pid_no_derivative_kick_after_sensor_outage();
     test_feedforward_realistic_measured_matrix_zone1_row();
     test_feedforward_out_hold_excludes_climb_includes_coupling_correction();
     test_feedforward_out_hold_is_never_independently_clamped();

@@ -691,6 +691,10 @@ typedef struct {
     thermal_guard_state_t guard_state;
 
     bool  per_zone_blocked;
+    /* AUDIT_CONTROL_EXECUTOR LOW-2: set when relay_authority blocked a heat request while STEPPING,
+     * RELAY_APPROACH or RELAY_CYCLING -- the trace then has an unheated gap. Cleared with per_zone_blocked
+     * in begin_run; a run that finishes with it set is aborted, never offered for accept. */
+    bool  blocked_during_measure;
     uint32_t global_fault_source; /* 0 = none asserted by this run -- mirrors
                                     * profile_executor.c's field of the same
                                     * name; see autotune_escalate_and_abort()'s `global`
@@ -862,6 +866,9 @@ uint32_t at_ticks_to_ms(TickType_t t);
  * single-funnel reasoning these exist to preserve. */
 bool any_other_zone_profile_active(uint8_t zone_index);
 void autotune_apply_relay(bool want_on);
+/* Called just before a run would enter DONE: if heat was blocked during the measurement, sets ABORTED with a
+ * reason and returns true (caller must return without setting DONE). Must be called with s_at.lock held. */
+bool autotune_reject_if_blocked_during_measure(void);
 void force_relays_off(void);
 void autotune_escalate_and_abort(thermal_guard_trip_t reason, const char *detail);
 void clear_block_if_any(void);

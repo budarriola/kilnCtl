@@ -19,6 +19,8 @@ int g_test_count = 0;
 static char g_ev[MAXEV];  /* 'L' ~RESET low, 'H' ~RESET high, 'P' probe, 'I' other I2C */
 static int g_nev;
 static esp_err_t g_probe_result;
+static int g_probe_fail_first_n = -1; /* >=0: first N probes fail with g_probe_result, then succeed */
+static int g_probe_calls;
 static esp_err_t g_owner_init_result;
 
 static void ev(char c) { if (g_nev < MAXEV) g_ev[g_nev++] = c; }
@@ -30,7 +32,9 @@ static void gpio_hook(int gpio, int level)
 esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t b, const i2c_device_config_t *c, i2c_master_dev_handle_t *o)
 { (void)b; (void)c; ev('I'); *o = (i2c_master_dev_handle_t)1; return ESP_OK; }
 esp_err_t i2c_master_bus_rm_device(i2c_master_dev_handle_t d) { (void)d; return ESP_OK; }
-esp_err_t i2c_master_probe(i2c_master_bus_handle_t b, uint16_t a, int t) { (void)b; (void)a; (void)t; ev('P'); return g_probe_result; }
+esp_err_t i2c_master_probe(i2c_master_bus_handle_t b, uint16_t a, int t) { (void)b; (void)a; (void)t; ev('P'); g_probe_calls++;
+    if (g_probe_fail_first_n >= 0 && g_probe_calls > g_probe_fail_first_n) return ESP_OK;
+    return g_probe_result; }
 esp_err_t i2c_master_receive(i2c_master_dev_handle_t d, uint8_t *rx, size_t n, int t)
 { (void)d; (void)rx; (void)n; (void)t; ev('I'); return ESP_FAIL; }
 esp_err_t i2c_master_transmit(i2c_master_dev_handle_t d, const uint8_t *tx, size_t n, int t)
@@ -49,6 +53,8 @@ static void setup(esp_err_t probe, esp_err_t owner_init)
     g_nev = 0;
     memset(g_ev, 0, sizeof(g_ev));
     g_probe_result = probe;
+    g_probe_fail_first_n = -1;
+    g_probe_calls = 0;
     g_owner_init_result = owner_init;
     g_stub_gpio_level_hook = gpio_hook;
 }
@@ -97,12 +103,70 @@ static void test_pulse_pin_standalone_and_unwired(void)
     TEST_CHECK(SX1509_pulse_reset_pin(-1) == ESP_OK && g_nev == 0, "unwired pin (-1) is a no-op");
 }
 
+static void test_probe_retried_once(void)
+{
+    SX1509Class e; memset(&e, 0, sizeof(e));
+    setup(ESP_ERR_TIMEOUT, ESP_OK);
+    esp_err_t err = SX1509_start(&e, (i2c_master_bus_handle_t)1);
+    TEST_CHECK(err == ESP_ERR_NOT_FOUND && g_probe_calls == 2, "persistent miss: exactly one retry (2 probes), then NOT_FOUND");
+    setup(ESP_ERR_TIMEOUT, ESP_OK);
+    g_probe_fail_first_n = 1; /* one transient timeout */
+    err = SX1509_start(&e, (i2c_master_bus_handle_t)1);
+    TEST_CHECK(g_probe_calls == 2 && err != ESP_ERR_NOT_FOUND, "one transient miss: the retry succeeds and bring-up continues");
+}
+
+/* --- 9-clock bus clear ---------------------------------------------------- */
+#define SCL 41
+#define SDA 42
+static int g_sda_low_clocks_left; /* SDA reads low until this many SCL rising edges were seen */
+static int g_scl_level = 1, g_scl_rises, g_stop_seen, g_sda_drv = 1;
+static char g_bc[200]; static int g_nbc;
+static void bc_set(int gpio, int level)
+{
+    if (gpio == SCL) {
+        if (level && !g_scl_level) { g_scl_rises++; if (g_sda_low_clocks_left > 0) g_sda_low_clocks_left--; }
+        g_scl_level = level;
+        if (g_nbc < 199) g_bc[g_nbc++] = level ? 'C' : 'c';
+    } else if (gpio == SDA) {
+        if (level && !g_sda_drv && g_scl_level) g_stop_seen = 1;
+        g_sda_drv = level;
+        if (g_nbc < 199) g_bc[g_nbc++] = level ? 'D' : 'd';
+    }
+}
+static int bc_get(int gpio) { (void)gpio; return (g_sda_low_clocks_left > 0 || !g_sda_drv) ? 0 : 1; }
+static void bc_setup(int low_clocks)
+{
+    fake_time_reset_all();
+    g_sda_low_clocks_left = low_clocks; g_scl_level = 1; g_scl_rises = 0; g_stop_seen = 0; g_sda_drv = 1; g_nbc = 0;
+    g_stub_gpio_level_hook = bc_set;
+    g_stub_gpio_get_level_hook = bc_get;
+}
+static void test_bus_clear(void)
+{
+    bc_setup(0);
+    TEST_CHECK(SX1509_i2c_bus_clear(SCL, SDA) == ESP_OK, "idle bus: OK");
+    TEST_CHECK(g_scl_rises == 0 && !g_stop_seen, "idle bus (SDA high): SCL is never clocked, no STOP");
+    bc_setup(3);
+    TEST_CHECK(SX1509_i2c_bus_clear(SCL, SDA) == ESP_OK, "stuck SDA that frees after 3 clocks: OK");
+    TEST_CHECK(g_scl_rises == 3, "clocks exactly until SDA releases (3)");
+    TEST_CHECK(g_stop_seen, "a STOP (SDA rises while SCL high) ends the clear");
+    bc_setup(100);
+    TEST_CHECK(SX1509_i2c_bus_clear(SCL, SDA) == ESP_ERR_INVALID_STATE, "SDA never frees: reported");
+    TEST_CHECK(g_scl_rises == 9, "never more than 9 clocks");
+    bc_setup(0);
+    TEST_CHECK(SX1509_i2c_bus_clear(-1, SDA) == ESP_OK && g_nbc == 0, "unwired pin: no-op");
+    g_stub_gpio_level_hook = 0;
+    g_stub_gpio_get_level_hook = 0;
+}
+
 int main(void)
 {
     TEST_SECTION("SX1509 ~RESET pulsed before any I2C (boot MED-2)");
     test_probe_miss_still_pulses_reset();
     test_init_failure_still_pulses_reset_first();
     test_pulse_pin_standalone_and_unwired();
+    test_probe_retried_once();
+    test_bus_clear();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
 }

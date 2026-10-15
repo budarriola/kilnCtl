@@ -2949,6 +2949,52 @@ static void test_unknown_version_refused(void)
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
+static void test_fractional_and_huge_version_refused(void)
+{
+    TEST_SECTION("backup_import_apply -- fractional / out-of-range version is refused (LOW-1)");
+    const char *bodies[] = {
+        "{\"kind\":\"kilnctl_backup\",\"version\":7.9,\"profiles\":[],\"zones\":[]}",
+        "{\"kind\":\"kilnctl_backup\",\"version\":1.5,\"profiles\":[],\"zones\":[]}",
+        "{\"kind\":\"kilnctl_backup\",\"version\":1e300,\"profiles\":[],\"zones\":[]}",
+        "{\"kind\":\"kilnctl_backup\",\"version\":-1e300,\"profiles\":[],\"zones\":[]}",
+    };
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        reset_stub_state();
+        char err[160];
+        TEST_CHECK(!test_backup_import_apply(bodies[i], err, sizeof(err)), "non-integer/huge version refused");
+        TEST_CHECK(g_total_write_calls == 0, "nothing written");
+    }
+    reset_stub_state();
+    char err[160];
+    TEST_CHECK(test_backup_import_apply("{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}",
+                                        err, sizeof(err)),
+               "integer version 7 still accepted");
+}
+
+static void test_plan_cap_reports_dropped_lines(void)
+{
+    TEST_SECTION("kiln_cfg_plan -- lines past the cap are counted and rendered as a footer (LOW-2)");
+    kiln_cfg_plan_t *plan = calloc(1, sizeof(*plan));
+    char *out = malloc(KILN_CFG_PLAN_RENDER_CAP);
+    TEST_CHECK(plan && out, "alloc");
+    for (size_t i = 0; i < KILN_CFG_PLAN_MAX_LINES; i++) {
+        kiln_cfg_plan_add(plan, "line %u", (unsigned)i);
+    }
+    TEST_CHECK(plan->count == KILN_CFG_PLAN_MAX_LINES && plan->dropped == 0, "at the cap nothing dropped");
+    size_t n = kiln_cfg_plan_render(plan, out, KILN_CFG_PLAN_RENDER_CAP);
+    TEST_CHECK(strstr(out, "more lines not shown") == NULL, "no footer when nothing dropped");
+    kiln_cfg_plan_add(plan, "extra A");
+    kiln_cfg_plan_add(plan, "extra B");
+    kiln_cfg_plan_add(plan, "extra C");
+    TEST_CHECK(plan->count == KILN_CFG_PLAN_MAX_LINES && plan->dropped == 3, "three dropped counted");
+    n = kiln_cfg_plan_render(plan, out, KILN_CFG_PLAN_RENDER_CAP);
+    TEST_CHECK(strstr(out, "... 3 more lines not shown\n") != NULL, "footer names the dropped count");
+    TEST_CHECK(strstr(out, "extra A") == NULL, "dropped line not rendered");
+    TEST_CHECK(n == strlen(out) && n < KILN_CFG_PLAN_RENDER_CAP, "render length consistent and within cap");
+    free(plan);
+    free(out);
+}
+
 static void test_version1_body_imports_under_v2_reader(void)
 {
     TEST_SECTION("backup_import_apply -- a version 1 body still imports under the v2 reader");
@@ -7597,6 +7643,8 @@ void run_test_backup_import(void)
     test_group_a_header_fail_closed();
     test_wrong_kind_refused();
     test_unknown_version_refused();
+    test_fractional_and_huge_version_refused();
+    test_plan_cap_reports_dropped_lines();
     test_version1_body_imports_under_v2_reader();
     test_out_of_range_model_rejected();
     test_overlong_zone_name_rejected();

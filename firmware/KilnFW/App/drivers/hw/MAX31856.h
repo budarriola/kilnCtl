@@ -270,6 +270,11 @@ typedef struct {
  * part is reconfigured. 5 s costs one 4-byte SPI burst per channel per 5 s. */
 #define MAX31856_LIVE_CHECK_INTERVAL_MS 5000u
 
+/* After a first mismatching read-back the check repeats this soon; only a
+ * second consecutive mismatch reconfigures the part (one corrupted SPI read
+ * must not cost a >=785 ms invalid window). */
+#define MAX31856_LIVE_RECHECK_MS 100u
+
 /* age_ms when no good conversion has ever been seen -- deliberately far past
  * KILN_TEMP_STALE_AGE_MS so "never read" and "too old" need no special case
  * at the UI layer. */
@@ -345,6 +350,7 @@ struct MAX31856Class {
      * first call, which only arms the clock (no SPI). */
     bool live_armed;
     uint32_t live_next_due_ms;
+    bool live_suspect;            /* one unconfirmed mismatch seen; re-check pending */
     uint32_t live_mismatch_count; /* cumulative CR0/CR1/MASK mismatches seen */
 
     /* Last SR value that produced a WARN, so a permanently open thermocouple
@@ -581,6 +587,7 @@ typedef enum {
     MAX31856_LIVE_RECONFIGURED,
     MAX31856_LIVE_RECONFIG_FAILED,
     MAX31856_LIVE_SPI_ERROR,
+    MAX31856_LIVE_SUSPECT, /* first mismatch, unconfirmed: nothing was changed */
 } MAX31856LiveCheckResult;
 MAX31856LiveCheckResult MAX31856_live_check(MAX31856Class *ch, uint32_t now_ms);
 

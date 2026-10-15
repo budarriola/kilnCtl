@@ -548,6 +548,9 @@ void autotune_finalize_fit(void)
     }
 
     force_relays_off();
+    if (autotune_reject_if_blocked_during_measure()) {
+        return;
+    }
     s_at.state = AUTOTUNE_ENGINE_DONE;
     ESP_LOGI(AT_TAG, "autotune zone %u done: K=%.2f tau=%.1fs L=%.1fs -> Kp=%.5f Ki=%.5f Kd=%.5f", s_at.zone_index,
              (double)s_at.model.k_gain_c_per_duty, (double)s_at.model.tau_s, (double)s_at.model.dead_time_s,

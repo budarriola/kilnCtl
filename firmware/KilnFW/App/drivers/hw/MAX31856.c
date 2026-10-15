@@ -664,6 +664,7 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
     max31856_disarm_result(ch); /* CMODE = 0 out of reset: nothing is converting */
     ch->logged_fault_status = 0u;
     ch->live_armed = false;
+    ch->live_suspect = false;
     ch->live_next_due_ms = 0u;
     ch->initialized = true;
     bus->channels[channel] = ch;
@@ -1476,6 +1477,7 @@ MAX31856LiveCheckResult MAX31856_live_check(MAX31856Class *ch, uint32_t now_ms)
     uint8_t live[3]; /* CR0, CR1, MASK */
     esp_err_t err = max31856_read_burst(ch, MAX31856_REG_CR0, live, sizeof(live));
     if (err != ESP_OK) {
+        ch->live_suspect = false; /* an unreadable re-check confirms nothing */
         max31856_unlock(ch);
         return MAX31856_LIVE_SPI_ERROR;
     }
@@ -1485,9 +1487,23 @@ MAX31856LiveCheckResult MAX31856_live_check(MAX31856Class *ch, uint32_t now_ms)
                  (live[1] == ch->cr1_shadow) &&
                  ((live[2] & MAX31856_MASK_ALL) == (ch->mask_shadow & MAX31856_MASK_ALL));
     if (match) {
+        ch->live_suspect = false;
         max31856_unlock(ch);
         return MAX31856_LIVE_OK;
     }
+
+    /* A single mismatching read-back may be one corrupted SPI read (EMI), not a
+     * reset part. Acting on it drops the good-result history and costs a
+     * >=785 ms invalid window, which with sensor_fault_debounce_ticks=1 is a
+     * guard-6 trip. So the first mismatch only re-arms a short re-check; a
+     * real reset persists and is confirmed by the second read ~100 ms later. */
+    if (!ch->live_suspect) {
+        ch->live_suspect = true;
+        ch->live_next_due_ms = now_ms + MAX31856_LIVE_RECHECK_MS;
+        max31856_unlock(ch);
+        return MAX31856_LIVE_SUSPECT;
+    }
+    ch->live_suspect = false;
 
     ch->live_mismatch_count++;
     ESP_LOGW(TAG, "ch%u: config read-back CR0=0x%02X CR1=0x%02X MASK=0x%02X, expected "

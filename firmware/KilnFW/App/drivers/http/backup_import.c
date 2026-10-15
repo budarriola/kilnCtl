@@ -387,16 +387,50 @@ typedef enum {
 /* 144, not 128: WP9's dry-run line "update_repo <old> -> <new>" is at most
  * 12 + 62 + 4 + 62 = 140 characters. */
 #define KILN_CFG_PLAN_LINE_MAX 144
-#define KILN_CFG_PLAN_MAX_LINES 32
+/* 64 (was 32): 30 kiln_configs lines in the worst MIRROR case plus the topology, update_repo,
+ * relay_cycles, prefs and aux lines later producers added. A line still past the cap is counted
+ * in `dropped` and the rendered plan ends "... N more lines not shown" (backup-import LOW-2). */
+#define KILN_CFG_PLAN_MAX_LINES 64
 
 typedef struct {
     char lines[KILN_CFG_PLAN_MAX_LINES][KILN_CFG_PLAN_LINE_MAX];
     size_t count;
+    size_t dropped; /* lines refused past KILN_CFG_PLAN_MAX_LINES */
 } kiln_cfg_plan_t;
+
+/* Room for every line, the "more lines" footer and the NUL. */
+#define KILN_CFG_PLAN_RENDER_CAP ((KILN_CFG_PLAN_MAX_LINES + 1) * (KILN_CFG_PLAN_LINE_MAX + 1) + 1)
+
+static void kiln_cfg_plan_add(kiln_cfg_plan_t *plan, const char *fmt, ...);
+
+/* Renders the plan as newline-terminated lines; a plan that dropped lines ends with
+ * "... N more lines not shown" so the confirm dialog never silently omits changes. */
+static size_t kiln_cfg_plan_render(const kiln_cfg_plan_t *plan, char *out, size_t cap)
+{
+    size_t off = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < plan->count; i++) {
+        int n = snprintf(out + off, cap - off, "%s\n", plan->lines[i]);
+        if (n > 0 && (size_t)n < cap - off) {
+            off += (size_t)n;
+        }
+    }
+    if (plan->dropped > 0) {
+        int n = snprintf(out + off, cap - off, "... %u more lines not shown\n", (unsigned)plan->dropped);
+        if (n > 0 && (size_t)n < cap - off) {
+            off += (size_t)n;
+        }
+    }
+    return off;
+}
 
 static void kiln_cfg_plan_add(kiln_cfg_plan_t *plan, const char *fmt, ...)
 {
-    if (!plan || plan->count >= KILN_CFG_PLAN_MAX_LINES) {
+    if (plan && plan->count >= KILN_CFG_PLAN_MAX_LINES) {
+        plan->dropped++;
+        return;
+    }
+    if (!plan) {
         return; /* plan is informational for the confirm dialog -- silently
                   * capping it is acceptable; KILN_CFG_PLAN_MAX_LINES (32)
                   * still exactly covers the worst case, refreshed for the
@@ -581,6 +615,7 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
         *wrote_out = false;
     }
     plan->count = 0;
+    plan->dropped = 0;
     const char *arr = backup_json_obj_find(body, "kiln_configs");
     if (!arr) {
         return true; /* pre-item-17 backup -- untouched, either mode */
@@ -1027,8 +1062,9 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
         snprintf(err_msg, err_cap, "not a kilnCtl backup file (missing/wrong \"kind\")");
         return false;
     }
-    if (!backup_json_field_num(body, "version", &dver) || (int)dver < BACKUP_FORMAT_VERSION_MIN ||
-        (int)dver > BACKUP_FORMAT_VERSION) {
+    /* LOW-1: compare the double itself and require an integer; (int)7.9 == 7 and (int)1e300 is UB. */
+    if (!backup_json_field_num(body, "version", &dver) || dver != floor(dver) || dver < BACKUP_FORMAT_VERSION_MIN ||
+        dver > BACKUP_FORMAT_VERSION) {
         snprintf(err_msg, err_cap, "unsupported backup version (this firmware understands versions %d-%d)",
                 BACKUP_FORMAT_VERSION_MIN, BACKUP_FORMAT_VERSION);
         return false;
@@ -4376,21 +4412,14 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
 
     if (dry_run) {
         httpd_resp_set_type(async_req, "text/plain");
-        char *out = heap_caps_malloc(KILN_CFG_PLAN_MAX_LINES * (KILN_CFG_PLAN_LINE_MAX + 1) + 1,
+        char *out = heap_caps_malloc(KILN_CFG_PLAN_RENDER_CAP,
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!out) {
             free(plan);
             httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return;
         }
-        size_t off = 0;
-        out[0] = '\0';
-        for (size_t i = 0; i < plan->count; i++) {
-            int n = snprintf(out + off, KILN_CFG_PLAN_LINE_MAX + 2, "%s\n", plan->lines[i]);
-            if (n > 0) {
-                off += (size_t)n;
-            }
-        }
+        size_t off = kiln_cfg_plan_render(plan, out, KILN_CFG_PLAN_RENDER_CAP);
         httpd_resp_send(async_req, out, off);
         free(out);
         free(plan);

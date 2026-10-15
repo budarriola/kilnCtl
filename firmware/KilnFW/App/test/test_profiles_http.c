@@ -340,6 +340,20 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     }
     return ESP_OK;
 }
+/* backup-import LOW-3 fence: restore-in-flight flag and 409 sender fakes. */
+static bool s_test_restore_in_flight;
+static int s_test_refusals;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+esp_err_t system_mode_gate_http_send_refusal(httpd_req_t *req, const char *reason)
+{
+    (void)req;
+    (void)reason;
+    s_test_refusals++;
+    return ESP_OK;
+}
 static int s_last_err_code;
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
@@ -6519,6 +6533,29 @@ static void test_fuzz_small_body_handlers(void)
     g_fake_builtin_on = false;
 }
 
+static void test_restore_in_flight_fences_profile_writes(void)
+{
+    TEST_SECTION("profile POST / delete -- refused (409 sender) while a backup restore is in flight (LOW-3)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    char body[160];
+    build_minimal_post_body(body, sizeof(body), "Fenced");
+    s_test_restore_in_flight = true;
+    s_test_refusals = 0;
+    s_last_err_code = 0;
+    TEST_CHECK(run_profile_post(body) == ESP_OK, "post handler replies itself");
+    TEST_CHECK(s_test_refusals == 1 && s_last_err_code == 0, "post: answered by the mode-gate 409 sender");
+    TEST_CHECK(!profiles_slot_used(0), "post: nothing saved");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 4;
+    TEST_CHECK(profile_delete_post_handler(&req) == ESP_OK, "delete handler replies itself");
+    TEST_CHECK(s_test_refusals == 2, "delete: answered by the mode-gate 409 sender");
+    s_test_restore_in_flight = false;
+    s_test_refusals = 0;
+    TEST_CHECK(run_profile_post(body) == ESP_OK && s_test_refusals == 0, "control: no fence once the restore ends");
+    TEST_CHECK(profiles_slot_used(0), "control: the profile saved");
+}
+
 void run_test_profiles_http(void)
 {
     test_fuzz_profile_post_hostile();
@@ -6559,6 +6596,7 @@ void run_test_profiles_http(void)
     test_profiles_http_save_allows_builtin_name();
     test_profiles_http_save_allows_editing_existing_slot_named_like_builtin();
     test_profile_post_handler_rejects_malformed_id();
+    test_restore_in_flight_fences_profile_writes();
     test_profile_post_builtin_id_copies_to_first_free();
     test_profile_name_nul_refused();
     test_profile_rule_temp_nan_refused_even_with_cmp_none();

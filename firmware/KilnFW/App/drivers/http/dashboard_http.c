@@ -25,6 +25,7 @@
 #include "http_form.h"
 #include "kiln_io_owner.h"
 #include "nvs_report.h"
+#include "thermo_channel_read.h"
 #include "thermo_owner.h" /* thermo_owner_command_read_all() -- see the status/refresh readings block below */
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see the ERR_UPDATING case below */
 #include "profile_executor.h"
@@ -230,7 +231,14 @@ void dashboard_get_status(dashboard_status_t *out)
          * client-side parseFloat(). Calibration applied here (zone i <->
          * channel i, per zones_http.h) -- see zones_config_apply_cal()'s
          * doc comment for the UART-bridge-side scope gap this leaves. */
-        float temp = isnan(r->tc_temperature_c) ? 0.0f : zones_config_apply_cal(r->channel, r->tc_temperature_c);
+        /* AUDIT_THERMOCOUPLE LOW-2: calibrate only when zone == channel reads
+         * exactly this channel; with a non-identity thermo_mask the value is
+         * shown raw rather than with another zone's offset. */
+        uint8_t zone_tmask = 0;
+        bool cal_ok = zones_config_get_thermo_mask(r->channel, &zone_tmask) &&
+                      thermo_channel_cal_applies(r->channel, zone_tmask);
+        float temp = isnan(r->tc_temperature_c) ? 0.0f
+                     : (cal_ok ? zones_config_apply_cal(r->channel, r->tc_temperature_c) : r->tc_temperature_c);
         float cj = isnan(r->cj_temperature_c) ? 0.0f : r->cj_temperature_c;
         out->channels[i].channel = r->channel;
         out->channels[i].temp_c = temp;

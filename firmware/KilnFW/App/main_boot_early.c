@@ -368,6 +368,9 @@ void main_boot_early(main_boot_ctx_t *ctx)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
+    // A slave left mid-transfer by a warm restart can hold SDA low; clear it on
+    // the raw pins first (AUDIT_BOOT_SEQUENCE MED-2 follow-up). Log-only.
+    (void)SX1509_i2c_bus_clear(I2C_MASTER_SCL_IO, I2C_MASTER_SDA_IO);
     esp_err_t i2c_err = i2c_new_master_bus(&i2c_config, &ctx->i2c_bus);
     if (i2c_err != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "i2c_new_master_bus failed: %s -- no expander, no relays, no display",

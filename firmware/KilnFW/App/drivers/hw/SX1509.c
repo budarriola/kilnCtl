@@ -39,6 +39,8 @@ static const char *TAG = "SX1509";
  * gives the pulse minimum as 200 ns t_PULSE, which 10 us clears easily. */
 #define SX1509_RESET_PULSE_US 10
 #define SX1509_RESET_RECOVERY_MS 5
+#define SX1509_PROBE_RETRY_DELAY_MS 10
+#define SX1509_BUS_CLEAR_HALF_US 5 /* ~100 kHz max clock while clearing */
 
 /* How long a caller will wait for another caller's read-modify-write to
  * finish. Generous: the longest thing anyone holds this for is a write plus a
@@ -554,6 +556,50 @@ esp_err_t SX1509_pulse_reset_pin(int gpio)
     return ESP_OK;
 }
 
+esp_err_t SX1509_i2c_bus_clear(int scl_gpio, int sda_gpio)
+{
+    if (scl_gpio < 0 || sda_gpio < 0) return ESP_OK;
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(scl_gpio) || !GPIO_IS_VALID_OUTPUT_GPIO(sda_gpio)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    gpio_set_level((gpio_num_t)scl_gpio, 1);
+    gpio_set_level((gpio_num_t)sda_gpio, 1);
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << scl_gpio) | (1ULL << sda_gpio),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&cfg);
+    if (err != ESP_OK) return err;
+    esp_rom_delay_us(SX1509_BUS_CLEAR_HALF_US);
+    if (gpio_get_level((gpio_num_t)sda_gpio)) {
+        return ESP_OK; /* bus idle: nothing to clear, and nothing was clocked */
+    }
+    /* A slave left mid-byte by a warm restart holds SDA low until it has seen
+     * its remaining clocks. At most 9 (8 data bits + ACK), stop as soon as SDA
+     * releases. */
+    for (int i = 0; i < 9 && !gpio_get_level((gpio_num_t)sda_gpio); i++) {
+        gpio_set_level((gpio_num_t)scl_gpio, 0);
+        esp_rom_delay_us(SX1509_BUS_CLEAR_HALF_US);
+        gpio_set_level((gpio_num_t)scl_gpio, 1);
+        esp_rom_delay_us(SX1509_BUS_CLEAR_HALF_US);
+    }
+    /* STOP condition: SDA low -> high while SCL is high. */
+    gpio_set_level((gpio_num_t)sda_gpio, 0);
+    esp_rom_delay_us(SX1509_BUS_CLEAR_HALF_US);
+    gpio_set_level((gpio_num_t)scl_gpio, 1);
+    esp_rom_delay_us(SX1509_BUS_CLEAR_HALF_US);
+    gpio_set_level((gpio_num_t)sda_gpio, 1);
+    esp_rom_delay_us(SX1509_BUS_CLEAR_HALF_US);
+    if (!gpio_get_level((gpio_num_t)sda_gpio)) {
+        ESP_LOGW(TAG, "I2C bus clear: SDA GPIO%d still held low after 9 clocks", sda_gpio);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
 esp_err_t SX1509_start(SX1509Class *e, i2c_master_bus_handle_t bus)
 {
     if (!e || !bus) return ESP_ERR_INVALID_ARG;
@@ -569,6 +615,14 @@ esp_err_t SX1509_start(SX1509Class *e, i2c_master_bus_handle_t bus)
      * and a retry, so the boot path would stall for seconds per register
      * instead of failing in one 50 ms probe. */
     esp_err_t probe_err = i2c_master_probe(bus, SX1509_I2C_ADDR, SX1509_PROBE_TIMEOUT_MS);
+    if (probe_err != ESP_OK) {
+        /* One bounded retry (AUDIT_BOOT_SEQUENCE MED-2 follow-up): a single
+         * timeout right after the reset pulse must not cost the whole boot its
+         * relay control. The part has had SX1509_RESET_RECOVERY_MS already. */
+        ESP_LOGW(TAG, "SX1509 probe miss: %s -- retrying once", esp_err_to_name(probe_err));
+        vTaskDelay(pdMS_TO_TICKS(SX1509_PROBE_RETRY_DELAY_MS));
+        probe_err = i2c_master_probe(bus, SX1509_I2C_ADDR, SX1509_PROBE_TIMEOUT_MS);
+    }
     if (probe_err != ESP_OK) {
         ESP_LOGE(TAG, "no SX1509 at 0x%02X: %s", SX1509_I2C_ADDR, esp_err_to_name(probe_err));
         return ESP_ERR_NOT_FOUND;

@@ -2147,7 +2147,7 @@ try {
             "/Fo:`"$max31856ObjDir\\`" /Fe:`"$exe25`" " +
             "`"$(Join-Path $testDir 'test_max31856_hal_spi.c')`" " +
             "`"$(Join-Path $driversDir 'hw/MAX31856.c')`" `"$(Join-Path $driversDir 'hw/max31856_codec.c')`" " +
-            "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
+            "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" `"$(Join-Path $driversDir 'control/thermo_combine.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
 

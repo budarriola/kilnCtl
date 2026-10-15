@@ -8,6 +8,23 @@ void run_test_pid(void)
 {
     TEST_SECTION("pid");
 
+    /* LOW-3: pid_reseed_derivative() re-bases D on the given measurement, keeps the integral. */
+    {
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 5.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        pid_reseed_derivative(&s, 123.0f);
+        TEST_CHECK(!s.initialized && s.prev_measurement == 0.0f, "reseed on an uninitialized state is a no-op");
+        (void)pid_update(&s, &cfg, 500.0f, 500.0f, 1.0f, 0.0f, 0.0f);
+        s.integral = 7.0f;
+        (void)pid_update(&s, &cfg, 500.0f, 480.0f, 1.0f, 0.0f, 0.0f);
+        TEST_CHECK(s.d_filtered != 0.0f, "setup: a real D term exists");
+        float integral = s.integral;
+        pid_reseed_derivative(&s, 300.0f);
+        TEST_CHECK(s.prev_measurement == 300.0f && s.d_filtered == 0.0f, "reseed sets prev_measurement, clears D filter");
+        TEST_CHECK(s.integral == integral, "reseed keeps the integral");
+    }
+
     /* Cold start: first tick must not see a derivative kick from an
      * uninitialized prev_measurement. */
     {

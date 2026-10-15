@@ -302,12 +302,13 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
 }
 
 static bool g_at_bump_epoch_in_gate = false;
+static bool g_at_fake_zone_blocked = false;
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
     if (g_at_bump_epoch_in_gate) g_at_fake_off_epoch++; /* LOW-3: an all-off lands during the gate decision */
     if (out_sources) *out_sources = 0;
-    return false;
+    return g_at_fake_zone_blocked;
 }
 
 void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
@@ -1822,6 +1823,33 @@ static void test_accept_succeeds_end_to_end_regardless_of_last_sample_quantizati
     run_one_dither_case_end_to_end(-0.1f, "dither -0.1C");
     run_one_dither_case_end_to_end(0.0f, "dither 0.0C");
     run_one_dither_case_end_to_end(+0.1f, "dither +0.1C");
+}
+
+static void test_blocked_during_measure_aborts_instead_of_done(void)
+{
+    TEST_SECTION("AUDIT_CONTROL_EXECUTOR LOW-2: heat blocked mid-measurement -> ABORTED, not DONE");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.state = AUTOTUNE_ENGINE_STEPPING;
+    g_at_fake_zone_blocked = true;
+    autotune_apply_relay(true);
+    g_at_fake_zone_blocked = false;
+    TEST_CHECK(s_at.blocked_during_measure, "a blocked write while STEPPING latches the flag");
+    write_synthetic_fopdt_trace(25.0f, 50.0f, 200.0f, 20.0f, 1.0f, 60);
+    finalize_fit_then_flush_coupling();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a trace with a blocked gap must ABORT, not reach DONE");
+    TEST_CHECK(strstr(s_at.abort_reason, "heat was blocked") != NULL, "abort reason names the block");
+
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.state = AUTOTUNE_ENGINE_STEPPING;
+    autotune_apply_relay(true);
+    TEST_CHECK(!s_at.blocked_during_measure, "an unblocked write leaves the flag clear");
+    write_synthetic_fopdt_trace(25.0f, 50.0f, 200.0f, 20.0f, 1.0f, 60);
+    finalize_fit_then_flush_coupling();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "no block -> still reaches DONE");
 }
 
 static void test_finalize_fit_uses_the_requested_rule(void)
@@ -7517,6 +7545,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_rejects_relay_only_rules_on_step_path();
     test_step_run_accepts_simc_and_cohen_coon_and_stores_the_rule();
     test_accept_succeeds_end_to_end_regardless_of_last_sample_quantization_dither();
+    test_blocked_during_measure_aborts_instead_of_done();
     test_finalize_fit_uses_the_requested_rule();
     test_finalize_fit_persists_valid_cross_gain_cells();
     test_finalize_fit_persists_cross_gain_tau_dead_time_in_correct_orientation();
