@@ -194,6 +194,23 @@ static bool main_ota_mark_valid(void *c)
     return false;
 }
 
+/* Read back the running image's otadata state; never trust one mmap read (XIP audit MED-1). */
+static bool main_ota_read_valid(void *c)
+{
+    (void)c;
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    esp_ota_img_states_t   state = ESP_OTA_IMG_UNDEFINED;
+    if (!run || esp_ota_get_state_partition(run, &state) != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "ota state read-back failed -- will retry mark-valid");
+        return false;
+    }
+    if (state != ESP_OTA_IMG_VALID) {
+        ESP_LOGW(MAIN_TAG, "ota state reads %d (not VALID) after mark-valid -- will retry", (int)state);
+        return false;
+    }
+    return true;
+}
+
 static bool main_ota_clear_counter(void *c)
 {
     (void)c;
@@ -231,6 +248,7 @@ static void main_ota_rollback_confirm_task(void *arg)
     boot_confirm_ops_t          ops  = { .ctx = &sctx,
                                          .resample_nvs = main_ota_resample_nvs,
                                          .mark_valid = main_ota_mark_valid,
+                                         .read_valid = main_ota_read_valid,
                                          .clear_counter = main_ota_clear_counter };
     boot_confirm_state_t        st   = { .is_factory = is_factory, .web_ok = ctx.web_ok,
                                          .ota_ok = ctx.ota_ok, .nvs_ok = ctx.nvs_ok };

@@ -115,6 +115,18 @@ Counts: HIGH 0, MED 1, LOW 3, INFO 6.
   - Alternatively, evaluate `CONFIG_SPI_FLASH_AUTO_SUSPEND` once the flash ID is
     known. With it, the hardware arbitrates SPI0 reads against an erase.
 
+- **Resolution (MED-1, confirmfx):** the first-boot confirm now goes through
+  `boot_confirm_step()` (`boot_guard.c`). After each
+  `esp_ota_mark_app_valid_cancel_rollback()` it reads the otadata state back
+  (`esp_ota_get_state_partition(running)`, `main_ota_read_valid`) and re-issues
+  mark-valid until it reads VALID, with a 1,2,4,8,16-poll backoff (500 ms
+  polls). After 10 attempts it accepts mark-valid's own ESP_OK and flags
+  `mark_unverified`, so a read-back that can never say VALID cannot rewrite
+  otadata forever. Caveat: `update_http.c` notes that on this single-slot table
+  `esp_ota_get_state_partition` reads otadata[0], not the active entry, so the
+  read-back may not reflect the active entry; the bound covers that case. The
+  broader mmap-vs-writer serialization is still open.
+
 ## LOW
 
 ### LOW-1: esp_image_verify and otadata read-backs can fail spuriously during a concurrent erase (fail-closed)

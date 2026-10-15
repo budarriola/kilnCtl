@@ -832,15 +832,17 @@ typedef struct {
     int  nvs_false_polls;  /* resample reports false for this many calls, then true */
     int  mark_fail_polls;  /* mark-valid fails this many calls, then succeeds */
     int  clear_fail_polls;
+    int  read_calls, read_false_polls; /* read-back says not VALID for this many calls */
 } step_fake_t;
 
 static bool step_nvs(void *c) { step_fake_t *f = c; return f->nvs_calls++ >= f->nvs_false_polls; }
 static bool step_mark(void *c) { step_fake_t *f = c; return f->mark_calls++ >= f->mark_fail_polls; }
+static bool step_read(void *c) { step_fake_t *f = c; return f->read_calls++ >= f->read_false_polls; }
 static bool step_clear(void *c) { step_fake_t *f = c; return f->clear_calls++ >= f->clear_fail_polls; }
 
 static int step_run(boot_confirm_state_t *st, step_fake_t *f, int max_polls)
 {
-    boot_confirm_ops_t ops = { f, step_nvs, step_mark, step_clear };
+    boot_confirm_ops_t ops = { f, step_nvs, step_mark, step_read, step_clear };
     for (int i = 1; i <= max_polls; i++) {
         if (boot_confirm_step(st, &ops) == BOOT_CONFIRM_STEP_DONE) {
             return i;
@@ -862,9 +864,30 @@ static void test_boot_confirm_step_retries_mark_valid(void)
 {
     step_fake_t f = { .mark_fail_polls = 2 };
     boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
-    TEST_CHECK(step_run(&st, &f, 10) == 3, "mark-valid failing twice: DONE only on the third poll");
+    TEST_CHECK(step_run(&st, &f, 10) == 4, "mark-valid failing twice: DONE on the retry after its backoff");
     TEST_CHECK(f.mark_calls == 3, "mark-valid retried until it succeeded");
     TEST_CHECK(f.clear_calls == 1, "guard clear verified once and not repeated");
+}
+
+static void test_boot_confirm_step_readback_retries(void)
+{
+    /* mark-valid returns OK but the read-back misreads twice: never trust one read. */
+    step_fake_t f = { .read_false_polls = 2 };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    int polls = step_run(&st, &f, 40);
+    TEST_CHECK(polls > 0, "read-back eventually VALID -> DONE");
+    TEST_CHECK(f.read_calls == 3 && f.mark_calls == 3, "mark-valid re-issued after each bad read-back");
+    TEST_CHECK(!st.mark_unverified && st.mark_valid_done, "verified, not merely assumed");
+    TEST_CHECK(polls > 3, "retries back off (skipped polls), not every poll");
+}
+
+static void test_boot_confirm_step_readback_bounded(void)
+{
+    step_fake_t f = { .read_false_polls = 100000 };
+    boot_confirm_state_t st = { .is_factory = false, .web_ok = true, .ota_ok = true };
+    TEST_CHECK(step_run(&st, &f, 2000) > 0, "read-back that never says VALID is bounded, still DONE");
+    TEST_CHECK(f.mark_calls == (int)BOOT_CONFIRM_MARK_MAX_FAILS, "attempts capped (no endless otadata rewrites)");
+    TEST_CHECK(st.mark_unverified, "flagged unverified");
 }
 
 static void test_boot_confirm_step_retries_clear(void)
@@ -908,6 +931,8 @@ void run_test_boot_guard(void)
     test_boot_confirm_decide();
     test_boot_confirm_step_resamples_nvs();
     test_boot_confirm_step_retries_mark_valid();
+    test_boot_confirm_step_readback_retries();
+    test_boot_confirm_step_readback_bounded();
     test_boot_confirm_step_retries_clear();
     test_boot_confirm_step_never_confirms_unhealthy();
     test_boot_confirm_step_factory_skips_mark_valid();

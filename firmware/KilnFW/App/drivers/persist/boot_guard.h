@@ -377,6 +377,8 @@ typedef struct {
     void *ctx;
     bool (*resample_nvs)(void *ctx); /* re-run the NVS check, true = all mounted */
     bool (*mark_valid)(void *ctx);   /* true = esp_ota_mark_app_valid_cancel_rollback() == ESP_OK */
+    bool (*read_valid)(void *ctx);   /* true = otadata state read back as VALID (never trust one mmap read:
+                                        XIP-from-PSRAM audit MED-1); NULL = no read-back available */
     bool (*clear_counter)(void *ctx);/* true = boot_guard_mark_healthy() verified */
 } boot_confirm_ops_t;
 
@@ -385,7 +387,10 @@ typedef struct {
     bool web_ok;
     bool ota_ok;
     bool nvs_ok;           /* last resampled value */
-    bool mark_valid_done;  /* OTA slot: mark-valid succeeded (sticky) */
+    bool mark_valid_done;  /* OTA slot: mark-valid succeeded AND read back VALID (sticky) */
+    bool mark_unverified;  /* gave up waiting for the read-back to say VALID; mark-valid returned OK */
+    uint8_t mark_fails;    /* failed/unverified mark-valid attempts so far */
+    uint8_t mark_skip;     /* polls left to skip before the next attempt (bounded backoff) */
     bool clear_done;       /* boot_guard clear verified (sticky) */
 } boot_confirm_state_t;
 
@@ -393,6 +398,11 @@ typedef enum {
     BOOT_CONFIRM_STEP_PENDING = 0, /* call again next poll */
     BOOT_CONFIRM_STEP_DONE,
 } boot_confirm_step_result_t;
+
+/* Mark-valid attempts that fail or do not read back VALID back off 1,2,4,8,16,16.. polls; after
+ * BOOT_CONFIRM_MARK_MAX_FAILS the image is accepted on mark-valid's own ESP_OK (flagged
+ * mark_unverified) so a read-back that can never say VALID cannot rewrite otadata forever. */
+#define BOOT_CONFIRM_MARK_MAX_FAILS 10u
 
 boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boot_confirm_ops_t *ops);
 

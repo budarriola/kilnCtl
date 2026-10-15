@@ -624,7 +624,25 @@ boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boo
         return BOOT_CONFIRM_STEP_PENDING;
     }
     if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT && !st->mark_valid_done) {
-        st->mark_valid_done = ops->mark_valid(ops->ctx);
+        if (st->mark_skip > 0) {
+            st->mark_skip--;
+        } else {
+            bool ok = ops->mark_valid(ops->ctx);
+            if (ok && (!ops->read_valid || ops->read_valid(ops->ctx))) {
+                st->mark_valid_done = true;
+            } else {
+                if (st->mark_fails < 255u) {
+                    st->mark_fails++;
+                }
+                if (ok && st->mark_fails >= BOOT_CONFIRM_MARK_MAX_FAILS) {
+                    st->mark_valid_done = true;
+                    st->mark_unverified = true;
+                } else {
+                    uint8_t shift = (uint8_t)(st->mark_fails - 1u);
+                    st->mark_skip = (uint8_t)((shift >= 4u ? 16u : (1u << shift)) - 1u);
+                }
+            }
+        }
     }
     if (!st->clear_done) {
         st->clear_done = ops->clear_counter(ops->ctx);
