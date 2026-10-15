@@ -92,9 +92,9 @@ $app = Get-Content -Raw -LiteralPath (Join-Path $here "..\..\KilnFW\App\drivers\
 $mSt = [regex]::Match($app, 'static esp_err_t status_get_handler\(.*?\n\}', 'Singleline')
 if (-not $mSt.Success) { throw "update_install_http.c status_get_handler not found" }
 $st = $mSt.Value
-if ($st -notmatch '\\"version\\":\\"%s\\",\\"id\\":\\"%s\\"\}\}') { $fails += "app /api/update/status last_install lacks `"id`":`"%s`"" }
+if ($st -notmatch '\\"version\\":\\"%s\\",\\"id\\":\\"%s\\"(,|\}\})') { $fails += "app /api/update/status last_install lacks `"id`":`"%s`"" }
 if ($st -notmatch 'update_install_id_hex\(\s*res\.id\s*,\s*lid\s*\)') { $fails += "app lid is not built from the read record (update_install_id_hex(res.id, lid))" }
-if ($st -notmatch ',\s*lv\s*,\s*lid\s*\)\s*;') { $fails += "app status snprintf does not pass lid after lv" }
+if ($st -notmatch ',\s*lv\s*,\s*lid\s*[,)]') { $fails += "app status snprintf does not pass lid after lv" }
 
 if ($fails.Count) {
     $fails | ForEach-Object { Write-Host "FAIL: $_" }

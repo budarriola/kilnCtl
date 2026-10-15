@@ -97,7 +97,8 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 // (zones_post_handler's 2561-byte body, see that file's comment on the hang/
 // reset it caused before being bumped); a 4 KB buffer on top of that same
 // stack would eat half of it just for this one variable. Safe as a single
-// shared buffer because it is only ever touched while s_update_claim (above)
+// shared buffer (also borrowed by ota_http_pico.c and update_http.c via
+// ota_http_esp_chunk_buf()) because it is only ever touched while s_update_claim (above)
 // is held by THIS transfer -- ota_http_update_try_begin() guarantees no
 // second ESP or Pico transfer can be in flight at the same time to race it.
 #define OTA_ESP_CHUNK_SIZE 4096
