@@ -165,7 +165,7 @@ int update_install_http_drop_stale_request(void)
     return rc;
 }
 
-static esp_err_t install_post_handler(static esp_err_t install_post_handler(httpd_req_t *req)
+static esp_err_t install_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > INSTALL_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
