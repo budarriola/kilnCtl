@@ -7400,6 +7400,30 @@ static void test_accept_does_not_idle_a_run_started_meanwhile(void)
     s_stub_set_pid_result = false;
 }
 
+/* MED-4, non-relay (STEP/FOPDT) accept block: same ownership rule as the relay block. */
+static void test_accept_step_method_does_not_idle_a_run_started_meanwhile(void)
+{
+    reserve_race_test_setup_idle_zone0();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 1.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 10.0f;
+    s_stub_set_pid_result = true;
+    s_probe_other_zone_run_during_set_pid = true;
+    bool accepted = autotune_engine_accept(NULL, NULL);
+    s_probe_other_zone_run_during_set_pid = false;
+    TEST_CHECK(accepted, "MED-4 (step): accept itself succeeds");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING && s_at.zone_index == 1,
+               "MED-4 (step): accept must leave the run another zone started meanwhile untouched, not write IDLE");
+    s_at.state = AUTOTUNE_ENGINE_IDLE;
+    s_stub_set_pid_result = false;
+}
+
 static void test_run_starts_after_release(void)
 {
     reserve_race_test_setup_idle_zone0();
@@ -7676,6 +7700,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_starts_after_release();
     test_reserve_blocks_a_start_on_another_zone();
     test_accept_does_not_idle_a_run_started_meanwhile();
+    test_accept_step_method_does_not_idle_a_run_started_meanwhile();
     test_accept_is_gated_by_the_reservation_too();
 
     // 2026-09-24 "never hold a module lock across a producer call" fix.

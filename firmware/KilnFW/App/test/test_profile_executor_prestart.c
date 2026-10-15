@@ -3316,6 +3316,36 @@ static void test_io_seg_nonblocking_survives_pause_resume(void)
     TEST_CHECK(!s_exec.io_segs[0].active && g_relay_write_calls == w, "a non-pause stop cancels the remembered segment");
 }
 
+/* MED-2 wiring: the executor task's non-RUNNING branch must call the pause-aware sweep for PAUSED
+ * (the task loop is not host-drivable, so this is a source scan). */
+static void test_paused_tick_uses_pause_aware_io_sweep(void)
+{
+    TEST_SECTION("executor task: PAUSED uses io_segs_pause_all_off() (AUDIT MED-2)");
+    char *text = profile_executor_c_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c to source-scan");
+        return;
+    }
+    char *code = pe_strip_c_comments(text);
+    free(text);
+    if (!code) {
+        TEST_CHECK(false, "malloc for the comment-stripped profile_executor.c failed");
+        return;
+    }
+    const char *b = strstr(code, "void executor_task_entry(void *arg)");
+    const char *e = b ? strstr(b + 1, "void watchdog_task_entry(void *arg)") : NULL;
+    if (!b || !e) {
+        TEST_CHECK(false, "sanity: executor_task_entry() body not findable");
+        free(code);
+        return;
+    }
+    const char *p = strstr(b, "if (s_exec.state == PROFILE_EXEC_PAUSED)");
+    const char *c = strstr(b, "io_segs_pause_all_off(");
+    TEST_CHECK(p && p < e && c && c < e && c > p && c - p < 80,
+               "MUST GO RED if the PAUSED branch stops calling io_segs_pause_all_off()");
+    free(code);
+}
+
 static void test_io_segs_force_all_off_sweeps_general_io_too(void)
 {
     TEST_SECTION("io_segs_force_all_off -- a FAULTED/HALT sweep forces off every active relay/IO segment, "
@@ -13168,6 +13198,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
     test_io_seg_nonblocking_survives_pause_resume();
+    test_paused_tick_uses_pause_aware_io_sweep();
     test_run_refuses_while_zone_sweep_is_active();
     test_run_refuses_slot_being_deleted();
     test_run_decodes_fault_sources_instead_of_hex();
