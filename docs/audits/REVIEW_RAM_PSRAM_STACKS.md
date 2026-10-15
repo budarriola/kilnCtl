@@ -158,3 +158,9 @@ However, nothing outside the host test reads `mark_unverified` (`test_boot_guard
 - `main_network_http.c:182,204`: the ota_confirm task, plain `xTaskCreate` 5120 at `:796`.
 
 `update_stage.c:264` (`ota_esp_image_header_check`) only checks a buffer and does not mmap. Anyone who moves a task stack to PSRAM in future must keep it off this list.
+
+## Resolution (2026-10-15)
+
+- LOW-1/LOW-3: IDF 6.0.2 `vTaskDeleteWithCaps(NULL)` supports self-delete (it spawns a temporary cleanup task), so the self-deletes were switched in place: `uart_bridge_system.c`, `info_boot_push_task` (`uart_bridge_info.c`), `dns_hijack_task` (`wifi_prov_link.c`, two paths), `uart_protocol_rx_task` (`uart_protocol.c`), `safety_link.c` poll-task delete, and the defensive deletes in `factory_reset.c` / `sw_reset_http.c`. Host stub `vTaskDeleteWithCaps` added to `test/stubs/freertos/idf_additions.h`.
+- LOW-2: `tools/check_psram_task_stacks.ps1` now rejects plain `vTaskDelete(` (comments stripped) in every non-test file under KilnFW/App, hwAbstraction and CommonFW that calls `xTaskCreate*WithCaps`. Allowlisted: `update_fetch.c` (its `wr_task` is a plain-created task). Negative test: plain `vTaskDelete(NULL)` in `danger_mode_task` is CAUGHT.
+- INFO-1: comment at `ota_http_esp.c` now states the single-httpd-task reason and that nothing enforces it.

@@ -72,7 +72,7 @@ static void system_bridge_task(void *arg)
                       "command dispatch (relay/CT-cal/danger-mode/factory-reset/watchdog-cfg) "
                       "unavailable this boot, degrading cleanly instead of dereferencing NULL",
                  (unsigned)sizeof(*msg));
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
 

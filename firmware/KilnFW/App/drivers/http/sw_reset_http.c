@@ -224,7 +224,7 @@ static void sw_reset_reboot_task(void *arg)
     ESP_LOGW(TAG, "sw_reset: rebooting ESP now (no configuration touched)");
     free(ctx);
     hal_wdt_reboot(); /* esp_restart() under the hood -- never returns on real hardware */
-    vTaskDelete(NULL); /* defensive only, see factory_reset.c's identical comment */
+    vTaskDeleteWithCaps(NULL); /* defensive only, see factory_reset.c's identical comment */
 }
 
 // Guard audit 2026-10-14 A1: the Pico clears every latch at boot, including S9

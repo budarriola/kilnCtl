@@ -98,9 +98,12 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 // reset it caused before being bumped); a 4 KB buffer on top of that same
 // stack would eat half of it just for this one variable. Safe as a single
 // shared buffer (also borrowed by ota_http_pico.c and update_http.c via
-// ota_http_esp_chunk_buf()) because it is only ever touched while s_update_claim (above)
-// is held by THIS transfer -- ota_http_update_try_begin() guarantees no
-// second ESP or Pico transfer can be in flight at the same time to race it.
+// ota_http_esp_chunk_buf()) because every user is an OTA/update handler and
+// they all run on the single httpd task, so two handlers can never execute
+// at once. That single-task property is the real safety reason; NOTHING
+// enforces it (s_update_claim serialises transfers, it does not protect this
+// buffer). If httpd ever gets more than one worker task, this buffer needs a
+// lock or per-transfer storage.
 #define OTA_ESP_CHUNK_SIZE 4096
 static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 

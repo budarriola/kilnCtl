@@ -461,7 +461,7 @@ static void uart_protocol_rx_task(void *arg)
         }
     }
 
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 esp_err_t uart_protocol_init(uart_protocol_t *proto,

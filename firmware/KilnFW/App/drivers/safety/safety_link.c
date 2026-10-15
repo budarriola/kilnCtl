@@ -655,7 +655,7 @@ esp_err_t safety_link_stop(SafetyLinkClass *link)
     xSemaphoreTake(link->state_lock, portMAX_DELAY);
     link->initialized = false;
     if (link->poll_task) {
-        vTaskDelete(link->poll_task);
+        vTaskDeleteWithCaps(link->poll_task);
         link->poll_task = NULL;
     }
     xSemaphoreGive(link->state_lock);

@@ -70,6 +70,24 @@ foreach ($e in $tasks) {
 $uart = [IO.File]::ReadAllText((Join-Path $root 'firmware/hwAbstraction/esp/uart/hal_uart_esp.c'))
 $uart = [regex]::Replace($uart, '(?s)/\*.*?\*/|//[^\r\n]*', '')
 if ($uart -notmatch 'vTaskDeleteWithCaps\s*\(' -or $uart -match '\bvTaskDelete\s*\(') { $bad += 'hal_uart_esp.c: WithCaps task must be deleted with vTaskDeleteWithCaps' }
+# LOW-2 (REVIEW_RAM_PSRAM_STACKS): a task created WithCaps must be deleted with vTaskDeleteWithCaps
+# (self-delete is supported in IDF 6.0.2: it spawns a cleanup task). A plain vTaskDelete frees neither
+# the TCB nor the PSRAM stack, leaking internal RAM. Any file that creates a task with
+# xTaskCreate*WithCaps may not call plain vTaskDelete( at all, except the allowlisted files below
+# whose plain vTaskDelete deletes a different, plain-xTaskCreate task.
+$plainDeleteOk = @{
+    'firmware/KilnFW/App/drivers/update/update_fetch.c' = 'wr_task is created with plain xTaskCreatePinnedToCore'
+}
+$scanFiles = @('firmware/KilnFW/App', 'firmware/hwAbstraction', 'firmware/CommonFW') | ForEach-Object { Get-ChildItem -Path (Join-Path $root $_) -Recurse -Include *.c -File } |
+    Where-Object { $_.FullName -notmatch "[/\\](test|build)[/\\]" }
+foreach ($f in $scanFiles) {
+    $raw = [IO.File]::ReadAllText($f.FullName)
+    $code = Strip-C $raw
+    if ($code -notmatch 'xTaskCreate\w*WithCaps') { continue }
+    $rel = $f.FullName.Substring($root.Length + 1).Replace('\', '/')
+    if ($plainDeleteOk.ContainsKey($rel)) { continue }
+    if ($code -match '(?<![A-Za-z0-9_])vTaskDelete\s*\(') { $bad += "${rel}: creates a task with xTaskCreate*WithCaps but calls plain vTaskDelete(; use vTaskDeleteWithCaps" }
+}
 $defs = [IO.File]::ReadAllText((Join-Path $root 'firmware/KilnFW/sdkconfig.defaults'))
 if ($defs -notmatch '(?m)^CONFIG_SPIRAM_XIP_FROM_PSRAM=y') { $bad += 'sdkconfig.defaults: CONFIG_SPIRAM_XIP_FROM_PSRAM=y missing; PSRAM task stacks are only safe around flash writes with XIP on' }
 if ($bad.Count) { $bad | ForEach-Object { "FAIL: $_" }; exit 1 }

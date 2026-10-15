@@ -1246,7 +1246,7 @@ static void dns_hijack_task(void *arg)
     if (sock < 0) {
         ESP_LOGE(WIFI_PROV_TAG, "dns_hijack: socket() failed (errno %d) -- captive-portal redirect disabled", errno);
         startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
 
@@ -1258,7 +1258,7 @@ static void dns_hijack_task(void *arg)
         ESP_LOGE(WIFI_PROV_TAG, "dns_hijack: bind(:53) failed (errno %d) -- captive-portal redirect disabled", errno);
         startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
         close(sock);
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
 
