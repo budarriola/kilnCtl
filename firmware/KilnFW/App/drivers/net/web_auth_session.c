@@ -116,6 +116,21 @@ bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t ti
     return false;
 }
 
+size_t web_auth_table_reap_expired(web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms)
+{
+    size_t freed = 0;
+    if (timeout_s == WEB_AUTH_TIMEOUT_NEVER_S) {
+        return 0;
+    }
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        if (t->slots[i].in_use && !web_auth_session_is_valid(t->slots[i].last_seen_ms, timeout_s, now_ms)) {
+            memset(&t->slots[i], 0, sizeof(t->slots[i]));
+            freed++;
+        }
+    }
+    return freed;
+}
+
 void web_auth_table_destroy_session(web_auth_table_t *t, size_t idx)
 {
     if (idx >= WEB_AUTH_WEB_SLOT_COUNT) {
@@ -173,9 +188,11 @@ bool web_auth_session_is_valid(uint32_t last_seen_ms, uint32_t timeout_s, uint32
         return true;
     }
     uint32_t timeout_ms = timeout_s * 1000u;
-    uint32_t elapsed_ms = now_ms - last_seen_ms; // unsigned wraparound is fine: now_ms is
-                                                   // always >= last_seen_ms in real use, and
-                                                   // this module never sees the reverse
+    uint32_t elapsed_ms = now_ms - last_seen_ms; // unsigned wraparound is fine for the tick
+                                                   // itself; an expired slot left allocated would
+                                                   // alias back into range after 2^32 ms, so
+                                                   // callers reap expired slots first
+                                                   // (web_auth_table_reap_expired)
     return elapsed_ms <= timeout_ms;
 }
 

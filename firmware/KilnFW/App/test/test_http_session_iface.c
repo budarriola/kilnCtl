@@ -558,7 +558,32 @@ static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
     set_policy_timeout(60); // repair for later tests
 }
 
+// AUDIT_LOGSTORE_TIME LOW-1: an expired session left allocated would read valid again
+// once the uint32 ms tick wraps (2^32 ms = 49.7 days after its last use).
+static void test_expired_session_does_not_revive_after_tick_wrap(void)
+{
+    TEST_SECTION("expired session is freed and stays dead across the 2^32 ms tick wrap");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-wrap-1", WEB_AUTH_SESSION_ROLE_USER, 0);
+    fake_time_advance_ms(61000); // expired
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    uint32_t last_seen = 0;
+    uint32_t timeout_s = 0;
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "expired at 61 s");
+    // Total elapsed since last use is now exactly 2^32 ms: an unreaped slot reads elapsed==0, valid.
+    fake_time_advance_ms(0xFFFFFFFFu - 61000u + 1u);
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "still dead at last_seen + 2^32 ms");
+    http_auth_session_touch("tok-wrap-1", "10.0.0.5", false);
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "touch cannot resurrect it at +2^32 ms");
+}
+
 void run_test_http_session_iface(void) {
+    test_expired_session_does_not_revive_after_tick_wrap();
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
     test_touch_extends_valid_session();

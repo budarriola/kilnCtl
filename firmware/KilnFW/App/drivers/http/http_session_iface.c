@@ -167,9 +167,11 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     // resolver at all once that has already said auth is on -- see this
     // seam's own header comment for why passing the real flag again here
     // would be redundant, not more correct.
+    uint32_t resolve_now = (uint32_t)hal_time_now_ms();
+    (void)web_auth_table_reap_expired(http_session_table(), timeout.timeout_s, resolve_now);
     web_auth_session_role_t role = web_auth_effective_role(http_session_table(), /*web_enabled=*/true,
                                                              token_hash, client_ip, timeout.timeout_s,
-                                                             (uint32_t)hal_time_now_ms());
+                                                             resolve_now);
     return to_enforce_role(role);
 }
 
@@ -199,12 +201,13 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
     sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
+    uint32_t now = (uint32_t)hal_time_now_ms();
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now); // LOW-1: no 49.7-day revival
     int idx = web_auth_table_find_by_token(t, token_hash);
     if (idx < 0) {
         return false;
     }
 
-    uint32_t now = (uint32_t)hal_time_now_ms();
     if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout.timeout_s, now)) {
         return false;
     }
@@ -237,17 +240,17 @@ void http_auth_session_touch(const char *token, const char *client_ip, bool via_
     sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
-    int idx = web_auth_table_find_by_token(t, token_hash);
-    if (idx < 0) {
-        return;
-    }
-
     uint32_t now = (uint32_t)hal_time_now_ms();
     resolved_timeout_t timeout = resolve_timeout_s();
     // Item 3's fail-closed rule: an unreadable policy record must not
     // resolve against a substitute "never expires" timeout, so treat it as
     // not touchable rather than guessing.
     if (timeout.unreadable) {
+        return;
+    }
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now); // LOW-1: no 49.7-day revival
+    int idx = web_auth_table_find_by_token(t, token_hash);
+    if (idx < 0) {
         return;
     }
     // Never revive an already-expired session -- this is the server-side
@@ -280,6 +283,7 @@ bool http_auth_any_session_active(void) {
     }
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now);
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
         if (!t->slots[i].in_use) {
             continue;
@@ -300,6 +304,7 @@ bool http_auth_any_ap_session_active(bool ap_station_present) {
     }
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now);
     if (!web_auth_table_any_ap_session_active(t, timeout.timeout_s, now)) {
         return false;
     }

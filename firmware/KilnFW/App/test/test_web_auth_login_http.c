@@ -1312,8 +1312,29 @@ static void test_fuzz_login_hostile_bodies(void)
     TEST_CHECK(s_last_set_cookie[0] != '\0', "control: the valid body logs in");
 }
 
+// AUDIT_LOGSTORE_TIME MED-1: one wrong password locks for 5 s, never again 24.86 / 49.7 days later.
+static void test_lockout_no_phantom_lock_at_tick_wrap(void)
+{
+    TEST_SECTION("login lockout -- no phantom 429 at +2^31 ms and +2^32 ms after a failure (MED-1)");
+    static const uint32_t gaps[] = { 0x80000000u, 0x80000001u, 0xFFFFFFFFu };
+    for (unsigned i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
+        reset_all();
+        set_admin_credential("admin", "correct-horse-battery-staple");
+        strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
+        do_login("admin", "wrong-password");
+        do_login("admin", "correct-horse-battery-staple");
+        TEST_CHECK(s_last_status_line == 429, "wrap: inside the 5 s lock the correct password gets 429");
+        fake_time_advance_ms(gaps[i]);
+        s_last_status_line = 0;
+        do_login("admin", "correct-horse-battery-staple");
+        TEST_CHECK(s_last_status_line != 429, "wrap: expired lock does not come back");
+        TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "wrap: correct login succeeds");
+    }
+}
+
 void run_test_web_auth_login_http(void)
 {
+    test_lockout_no_phantom_lock_at_tick_wrap();
     test_lockout_is_per_ip_not_global();
     test_lockout_table_is_bounded();
     test_lockout_eviction_never_evicts_a_locked_slot();

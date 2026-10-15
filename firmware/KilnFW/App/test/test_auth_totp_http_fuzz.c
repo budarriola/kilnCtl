@@ -463,11 +463,32 @@ static void test_fuzz_reset(void)
     TEST_CHECK(fuzz_session_count() == 0, "control: valid reset drops sessions");
 }
 
+// AUDIT_LOGSTORE_TIME MED-2: one wrong TOTP code must lock for 5 s only, never again
+// 2^31 ms / 2^32 ms later.
+static void test_totp_backoff_tick_wrap(void)
+{
+    TEST_SECTION("forgot backoff -- no phantom 429 at +2^31 ms and +2^32 ms after a failure");
+    const char *good = "username=admin&code=000000";
+    size_t gl = strlen(good);
+    static const uint32_t gaps[] = { 0x80000000u, 0x80000001u, 0xFFFFFFFFu };
+    for (unsigned i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
+        fuzz_fresh();
+        int st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 202, "wrap: first wrong code answers 202 and records a failure");
+        st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 429, "wrap: immediate retry is inside the 5 s lock (429)");
+        fake_time_advance_ms(gaps[i]);
+        st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 202, "wrap: long-expired lock does not come back");
+    }
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1; /* pdTRUE */
     test_fuzz_forgot();
     test_fuzz_reset();
+    test_totp_backoff_tick_wrap();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

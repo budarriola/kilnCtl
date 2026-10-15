@@ -138,6 +138,37 @@ static void test_keypad_submit_outcomes(void)
                    "still inside the active lock window -- LOCKED_OUT via the shared login_backoff primitive");
     }
 
+    // AUDIT_LOGSTORE_TIME MED-2: an expired lock must never read as locked again at
+    // 2^31 ms or 2^32 ms after the failure (signed-32-bit lock test, 24.86 days).
+    {
+        static const uint32_t offsets[] = { 0x80000000u, 0x80000001u, 0xFFFFFFFFu };
+        for (unsigned oi = 0; oi < sizeof(offsets) / sizeof(offsets[0]); oi++) {
+            lcd_keypad_state_t ks;
+            lcd_keypad_state_init(&ks);
+            s_fake_verify_result = LCD_PIN_ROLE_NONE;
+            uint32_t t0 = 1000u;
+            for (int d = 0; d < 4; d++) {
+                lcd_pin_entry_push_digit(&ks.entry, '0');
+            }
+            lcd_pin_role_t role;
+            TEST_CHECK(lcd_keypad_state_submit(&ks, t0, &role) == LCD_KEYPAD_SUBMIT_DENIED, "wrap: first wrong PIN denied");
+            // Inside the 5 s window it is locked, at the wrap offsets it is not.
+            lcd_pin_entry_reset(&ks.entry);
+            for (int d = 0; d < 4; d++) {
+                lcd_pin_entry_push_digit(&ks.entry, '0');
+            }
+            s_fake_verify_result = LCD_PIN_ROLE_ADMIN;
+            TEST_CHECK(lcd_keypad_state_submit(&ks, t0 + 4999u, &role) == LCD_KEYPAD_SUBMIT_LOCKED_OUT,
+                       "wrap: locked inside the 5 s window");
+            lcd_pin_entry_reset(&ks.entry);
+            for (int d = 0; d < 4; d++) {
+                lcd_pin_entry_push_digit(&ks.entry, '0');
+            }
+            TEST_CHECK(lcd_keypad_state_submit(&ks, t0 + offsets[oi], &role) == LCD_KEYPAD_SUBMIT_GRANTED,
+                       "wrap: expired lock does not reappear at the wrap offset");
+        }
+    }
+
     // GRANTED
     {
         lcd_keypad_state_t ks;

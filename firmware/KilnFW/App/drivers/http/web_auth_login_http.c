@@ -384,7 +384,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
             // instead, matching what a maximally-escalated genuine lock
             // would also show, so saturation is indistinguishable from an
             // ordinary long lock.
-            retry_after_ms = (slot != NULL) ? (slot->backoff.locked_until_ms - now)
+            retry_after_ms = (slot != NULL) ? login_backoff_remaining_ms(&slot->backoff, now)
                                              : LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1];
         }
         xSemaphoreGive(s_login_lock);

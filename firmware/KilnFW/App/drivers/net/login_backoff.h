@@ -44,11 +44,20 @@ extern const uint32_t LOGIN_BACKOFF_LADDER_MS[5];
 typedef struct {
     uint32_t failure_count;   // consecutive failures since the last success or cycle reset,
                                 // 0..LOGIN_BACKOFF_LADDER_LEN
-    uint32_t locked_until_ms; // 0 = not currently locked
+    // Wrap-safe lock window: locked iff lock_dur_ms != 0 and
+    // (uint32_t)(now - lock_start_ms) < lock_dur_ms. Unsigned elapsed
+    // arithmetic is correct across the 2^32 ms tick wrap, and unlike a
+    // signed "locked_until - now" test it has no 2^31 ms (24.86 day) point
+    // at which an expired lock reads as locked again (AUDIT_LOGSTORE_TIME MED-1).
+    uint32_t lock_start_ms;
+    uint32_t lock_dur_ms;     // 0 = not currently locked (ladder steps are <= 300 s)
 } login_backoff_state_t;
 
-// True iff `s` is currently locked (now_ms has not yet reached locked_until_ms).
+// True iff `s` is currently locked (less than lock_dur_ms has elapsed since lock_start_ms).
 bool login_backoff_is_locked(const login_backoff_state_t *s, uint32_t now_ms);
+
+// Milliseconds of lock left at now_ms; 0 when not locked.
+uint32_t login_backoff_remaining_ms(const login_backoff_state_t *s, uint32_t now_ms);
 
 // Must be called before consulting is_locked()/failure_count on any read
 // path -- once the ladder's last step has both been reached AND its lock has
