@@ -914,9 +914,8 @@ TASKS = [
          historical_note="2026-09-04 panic: s_lvgl_task_stack (this task's own 8192 B stack) sits close "
                           "behind thermo_owner.c's s_slots[] in .bss; a reentrant lv_obj_invalidate()-in-"
                           "flush-callback path (pre-51e1ef5) could run this stack deep enough to corrupt it.",
-         stack=lambda: extract_local_macro("drivers/ui/lvgl_port.c",
-             r'static StackType_t s_lvgl_task_stack\[(\d+)\s*/\s*sizeof\(StackType_t\)\]',
-             r'xTaskCreateStaticPinnedToCore\(\s*lvgl_port_task,\s*"lvgl",\s*sizeof\(s_lvgl_task_stack\)'),
+         stack=lambda: extract_int_literal("drivers/ui/lvgl_port.c",
+             r'xTaskCreatePinnedToCoreWithCaps\(\s*lvgl_port_task,\s*"lvgl",\s*(\d+)'),
          # lvgl_port_task's own body is thin -- practically all of its real
          # depth lives behind lv_timer_handler()'s internal function-pointer
          # dispatch (stack_budget_lib.has_unresolved_dispatch() confirms this

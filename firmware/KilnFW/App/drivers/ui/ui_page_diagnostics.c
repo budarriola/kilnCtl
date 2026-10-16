@@ -640,6 +640,20 @@ static const char *ota_state_str(esp_ota_img_states_t s)
     }
 }
 
+/* Cached OTA image state; written once by ui_page_diagnostics_prime_ota_state(). */
+static esp_ota_img_states_t s_ota_state_cached = ESP_OTA_IMG_UNDEFINED;
+static bool s_ota_state_known;
+
+void ui_page_diagnostics_prime_ota_state(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+    if (running && esp_ota_get_state_partition(running, &st) == ESP_OK) {
+        s_ota_state_cached = st;
+        s_ota_state_known = true;
+    }
+}
+
 /* Everything on the Firmware page is set once at build time -- version,
  * build date, reset reason, running partition, OTA state, and chip/flash
  * facts are all fixed for the life of the running image, so there is
@@ -663,20 +677,17 @@ static void build_firmware_statics(void)
 
     hal_sysinfo_partition_info_t running_info;
     bool have_running_info = (hal_sysinfo_get_running_partition(&running_info) == HAL_OK);
-    /* esp_ota_get_state_partition() below needs the real esp_partition_t
-     * pointer (an OTA-state read, not one of hal_sysinfo.h's six covered
-     * operations -- see this file's esp_ota_ops.h include comment), so the
-     * running-partition pointer is still fetched directly for that one call
-     * even though the label/size text above now comes from hal_sysinfo. */
-    const esp_partition_t *running = esp_ota_get_running_partition();
+    /* The OTA image state is read ONCE by ui_page_diagnostics_prime_ota_state()
+     * from the caller of kiln_ui_init(), never here: esp_ota_get_state_partition()
+     * reads otadata through esp_partition_mmap, which freezes the flash cache
+     * and asserts on a PSRAM task stack (AUDIT_INTERNAL_RAM_XIP section 1).
+     * This builder runs on the LVGL task, whose stack must be allowed in PSRAM. */
     if (have_running_info) {
         snprintf(buf, sizeof(buf), "%s (%lu KB)", running_info.label,
                  (unsigned long)(running_info.size / 1024));
         lv_label_set_text(s_partition_label, buf);
-
-        esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
-        if (running && esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-            lv_label_set_text(s_ota_state_label, ota_state_str(ota_state));
+        if (s_ota_state_known) {
+            lv_label_set_text(s_ota_state_label, ota_state_str(s_ota_state_cached));
         } else {
             /* Genuinely can't be determined (e.g. running from `factory`,
              * which carries no OTA state record) -- "n/a" rather than
