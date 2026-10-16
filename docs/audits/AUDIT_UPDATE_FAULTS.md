@@ -204,7 +204,7 @@ OK result, and `recovery_apply_esp` calls it only after `recovery_boot_partition
   - Optionally auto-exit once if `app` verifies, bounded by a recovery-side
     counter, so a really bad release cannot loop.
 
-MED-3 (the app-side first-boot confirm) is handled by a separate agent; `main_network_http.c` was not touched here.
+MED-3 app side: fixed by aa3955376 (see Resolution).
 
 ## LOW
 
@@ -339,4 +339,4 @@ MED-3 (the app-side first-boot confirm) is handled by a separate agent; `main_ne
 - LOW-3: fixed (app side). The confirm task drops a leftover request on a healthy confirmed boot, see REVIEW_OTA_BOOT_FIXES LOW-4.
 - Refusal paths: `update_install_boot_run` refusals that drop the request now go through `refuse_dropping()`; a failing `req_clear` is reported as `clear_failed` (STAY) instead of being ignored. Test `test_refusal_clear_failure`; negtest CAUGHT.
 - LCD truncation: `s_warn` and the failure line buffer grew from 28 to 41 bytes; `update_install_reason_lcd()` names the reason, and `test_reason_lcd_fits` pins `UPD_INST_REASON_LCD_MAX` (24). Negtest (over-long text) CAUGHT.
-- MED-3: recovery side fixed (otamed3). Result record gains version 2, written only for the new reason `rolled_back` (ordinary records stay v1, so older images still read them; older images report a v2 record unreadable, never misread; a v1 record carrying a v2 reason is refused). `recovery_install.c` `load_last()` rewrites a last OK result to FAIL/`rolled_back` when `esp_ota_get_last_invalid_partition()` is `app` (`update_install_res_apply_rollback`), tests `test_res_versions`, negtest CAUGHT. App-side live recompute of `nvs_ok`/`web_ok` and the mark-valid retry (the other suggested fixes) are not done here.
+- MED-3: recovery side fixed (otamed3). Result record gains version 2, written only for the new reason `rolled_back` (ordinary records stay v1, so older images still read them; older images report a v2 record unreadable, never misread; a v1 record carrying a v2 reason is refused). `recovery_install.c` `load_last()` rewrites a last OK result to FAIL/`rolled_back` when `esp_ota_get_last_invalid_partition()` is `app` (`update_install_res_apply_rollback`), tests `test_res_versions`, negtest CAUGHT. App side fixed (aa3955376): `boot_confirm_step()` (boot_guard.c) re-samples `nvs_ok` live every poll until confirmed and retries `esp_ota_mark_app_valid_cancel_rollback` with bounded backoff and read-back, logged each failure; `web_ok`/`ota_ok` are route-registration results fixed for the boot (a missing httpd cannot appear later), so they stay fixed. The boot_guard counter is still cleared only from the confirm task. Tests `test_boot_confirm_step_*` in `test_boot_guard.c`; negtest mutants no_resample and no_mark_retry CAUGHT by assertions. Recovery image build and size check verified. MED-3 fully fixed.
