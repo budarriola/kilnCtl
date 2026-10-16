@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "nvs_key_check.h"
 
 #include "freertos/FreeRTOS.h"
@@ -607,7 +608,12 @@ static uint32_t kiln_cfg_rev_load(void)
  * OLDER), converts it into s_store through the same chain nvs_load_store() uses, and rewrites it in the current
  * layout (file rev unchanged until that write bumps it). Returns false when the bytes are not a known older
  * layout; the caller then preserves them as .bad and quarantines. */
-static bool migrate_older_cfg_file(uint32_t *out_rev)
+/* PS-01: why a migration did not happen. Only MIGRATE_UNKNOWN_LAYOUT may
+ * quarantine the file as unmigratable (and keep a .bad copy); a transient
+ * failure (alloc, I/O) leaves the good file untouched for a retry next boot. */
+typedef enum { MIGRATE_OK = 0, MIGRATE_TRANSIENT, MIGRATE_UNKNOWN_LAYOUT } kcs_migrate_result_t;
+
+static kcs_migrate_result_t migrate_older_cfg_file(uint32_t *out_rev)
 {
     size_t cap = 4 + sizeof(kiln_cfg_store_blob_t);
     if (4 + sizeof(kiln_cfg_store_blob_v1_t) > cap) {
@@ -618,17 +624,22 @@ static bool migrate_older_cfg_file(uint32_t *out_rev)
     }
     uint8_t *raw = persist_scratch_alloc(cap);
     if (!raw) {
-        return false;
+        return MIGRATE_TRANSIENT;
     }
     size_t len = 0;
-    if (cfg_fs_read(KILN_CFG_STORE_FILE_PATH, raw, cap, &len) != ESP_OK || len < 5) {
+    if (cfg_fs_read(KILN_CFG_STORE_FILE_PATH, raw, cap, &len) != ESP_OK) {
         free(raw);
-        return false;
+        return MIGRATE_TRANSIENT; /* I/O error: the file may be perfectly good */
+    }
+    if (len < 5) {
+        free(raw);
+        return MIGRATE_UNKNOWN_LAYOUT;
     }
     uint32_t rev = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8) | ((uint32_t)raw[2] << 16) | ((uint32_t)raw[3] << 24);
     const uint8_t *blob = raw + 4;
     size_t blen = len - 4;
     bool ok = false;
+    bool alloc_failed = false;
     if (blen == sizeof(kiln_cfg_store_blob_v1_t) && blob[0] == 1) {
         kiln_cfg_store_blob_v1_t *v1 = persist_scratch_alloc(sizeof(*v1));
         kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
@@ -637,6 +648,8 @@ static bool migrate_older_cfg_file(uint32_t *out_rev)
             migrate_store_v1_to_v2(v1, v2);
             migrate_store_v2_to_v3(v2, &s_store);
             ok = true;
+        } else {
+            alloc_failed = true;
         }
         free(v1);
         free(v2);
@@ -646,17 +659,20 @@ static bool migrate_older_cfg_file(uint32_t *out_rev)
             memcpy(v2, blob, sizeof(*v2));
             migrate_store_v2_to_v3(v2, &s_store);
             ok = true;
+        } else {
+            alloc_failed = true;
         }
         free(v2);
     }
-    if (!ok) {
+    if (!ok && !alloc_failed) {
         (void)kiln_cfg_store_cfg_fs_preserve_bad(raw, len);
     }
     free(raw);
     if (ok) {
         *out_rev = rev;
+        return MIGRATE_OK;
     }
-    return ok;
+    return alloc_failed ? MIGRATE_TRANSIENT : MIGRATE_UNKNOWN_LAYOUT;
 }
 
 /* Wraps nvs_load_store() with the `cfg` LittleFS read-through/dual-write
@@ -695,7 +711,8 @@ static void nvs_load_store_with_cfg_fs(void)
     if (fstate == KILN_CFG_FILE_OLDER) {
         uint32_t file_rev = 0;
         free(resolved);
-        if (migrate_older_cfg_file(&file_rev)) {
+        kcs_migrate_result_t mig = migrate_older_cfg_file(&file_rev);
+        if (mig == MIGRATE_OK) {
             s_kiln_cfg_rev = file_rev;
             hal_status_t save_err = nvs_save_store(); /* current layout on disk so the next boot takes the fast path */
             ESP_LOGI(TAG, "kiln_cfg_store migrated the older cfg file (rev %lu) to v%u%s", (unsigned long)file_rev,
@@ -703,7 +720,14 @@ static void nvs_load_store_with_cfg_fs(void)
             return;
         }
         reset_to_defaults();
-        set_quarantine("kiln config file is an older layout this firmware cannot migrate -- copy kept as .bad");
+        if (mig == MIGRATE_TRANSIENT) {
+            /* PS-01: file untouched, no .bad; the quarantine is RAM-only so a reboot retries the migration. */
+            set_quarantine("kiln config file could not be read for migration (transient) -- file kept, reboot to retry");
+        } else {
+            set_quarantine(kiln_cfg_store_cfg_fs_last_preserve_failed()
+                               ? "kiln config file is an older layout this firmware cannot migrate -- copy could NOT be kept as .bad"
+                               : "kiln config file is an older layout this firmware cannot migrate -- copy kept as .bad");
+        }
         s_kiln_cfg_rev = nvs_rev;
         return;
     }
@@ -716,7 +740,9 @@ static void nvs_load_store_with_cfg_fs(void)
         snprintf(qmsg, sizeof(qmsg), "kiln config file is %s -- file left untouched",
                  fstate == KILN_CFG_FILE_NEWER     ? "newer than this firmware"
                  : fstate == KILN_CFG_FILE_UNKNOWN ? "unreadable at boot"
-                                                   : "corrupt or the wrong size (copy kept as .bad)");
+                           : kiln_cfg_store_cfg_fs_last_preserve_failed()
+                               ? "corrupt or the wrong size (copy could NOT be kept as .bad)"
+                               : "corrupt or the wrong size (copy kept as .bad)");
         reset_to_defaults();
         set_quarantine(qmsg);
         s_kiln_cfg_rev = nvs_rev;
@@ -751,7 +777,7 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
-static hal_status_t nvs_save_store(void)
+static hal_status_t nvs_save_store_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "nvs_save_store: REFUSING -- calling task's stack is in external RAM "
@@ -782,6 +808,30 @@ static hal_status_t nvs_save_store(void)
     }
     s_kiln_cfg_rev = new_rev;
     return HAL_OK;
+}
+
+/* PSRAM-stack callers (kiln_cfg_swap worker) hop the cfg write onto the
+ * internal-stack bx_flash_worker. The job takes no lock: the caller already
+ * holds kiln_cfg_store_lock and a worker job must never take it. The guard in
+ * nvs_save_store_impl stays strict. */
+typedef struct {
+    hal_status_t st;
+} nvs_save_store_ctx_t;
+
+static void nvs_save_store_job(void *arg)
+{
+    ((nvs_save_store_ctx_t *)arg)->st = nvs_save_store_impl();
+}
+
+static hal_status_t nvs_save_store(void)
+{
+    nvs_save_store_ctx_t ctx = { .st = HAL_NOT_READY };
+    esp_err_t e = flash_hop_run(nvs_save_store_job, &ctx);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store: flash worker hop failed: %s", esp_err_to_name(e));
+        return HAL_NOT_READY;
+    }
+    return ctx.st;
 }
 
 /* ---- Internal helpers ------------------------------------------------------ */

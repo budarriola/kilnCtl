@@ -12,6 +12,7 @@
 #include "freertos/semphr.h" /* s_store_lock -- 2026-08-27 audit fix (H5), see its own comment */
 
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "nvs_key_check.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
                               * file's callers already branch on */
@@ -192,8 +193,13 @@ static safety_rate_guard_meta_blob_t s_rate_guard_meta;
  *
  * 5 -> 6 (2026-09-18, docs/CT_CHANNEL_MASK.md step 2): zone_ct_channel
  * [0..2] (0x0320-0x0322) appended at the END of the table, same tail-append
- * discipline as every bump above. */
-#define SAFETY_CFG_STORE_VERSION 6u
+ * discipline as every bump above.
+ *
+ * 6 -> 7 (2026-10-16, SR-31): context_max_age_s (0x0401), mainfault_debounce_ms
+ * (0x0404) and telemetry_period_ms (0x0405) REMOVED from the middle of the table
+ * (the Pico no longer carries them; ids stay burned). Rows after them moved down,
+ * so a v6 blob would remap -- the version bump (and the smaller size) refuses it. */
+#define SAFETY_CFG_STORE_VERSION 7u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -286,11 +292,8 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
     { 0x031D, KILNLINK_PARAM_TYPE_U16, "overcurrent_pct" },
     { 0x031E, KILNLINK_PARAM_TYPE_U16, "overcurrent_time_s" },
     /* sec 4 -- link and liveness */
-    { 0x0401, KILNLINK_PARAM_TYPE_U16, "context_max_age_s" },
     { 0x0402, KILNLINK_PARAM_TYPE_U16, "link_timeout_s" },
     { 0x0403, KILNLINK_PARAM_TYPE_U16, "link_dead_hard_s" },
-    { 0x0404, KILNLINK_PARAM_TYPE_U16, "mainfault_debounce_ms" },
-    { 0x0405, KILNLINK_PARAM_TYPE_U16, "telemetry_period_ms" },
     /* sec 5 -- timing and system */
     { 0x0501, KILNLINK_PARAM_TYPE_U16, "startup_grace_s" },
     { 0x0502, KILNLINK_PARAM_TYPE_U16, "estop_debounce_ms" },
@@ -522,6 +525,49 @@ static void reset_to_defaults(void)
  * written, so there is no migration chain yet (mirrors kiln_cfg_store.c's own
  * "only version 1 exists today" state); a future bump needs one here, same as
  * those two files. */
+/* v6 -> v7 migration (SR-31). v6 carried 71 rows: the v7 table plus context_max_age_s
+ * (0x0401, between 0x031E and 0x0402), mainfault_debounce_ms (0x0404) and
+ * telemetry_period_ms (0x0405) (both between 0x0403 and 0x0501). Values are mapped by
+ * param id, so a v6 cache keeps every surviving entry and config_crc as stored. */
+#define SAFETY_CFG_PARAM_COUNT_V6 (SAFETY_CFG_PARAM_COUNT + 3u)
+
+typedef struct {
+    uint8_t version;
+    uint16_t config_crc;
+    safety_cfg_entry_t entries[SAFETY_CFG_PARAM_COUNT_V6];
+} safety_cfg_store_blob_v6_t;
+
+typedef union {
+    safety_cfg_store_blob_t cur;
+    safety_cfg_store_blob_v6_t v6;
+} safety_cfg_load_scratch_t;
+
+static int index_for_id(uint16_t id);
+
+/* The v6 table's id order, rebuilt from the v7 table plus the three removed ids. */
+static bool build_v6_id_order(uint16_t out[SAFETY_CFG_PARAM_COUNT_V6])
+{
+    size_t k = 0;
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
+        uint16_t id = SAFETY_CFG_PARAM_TABLE[i].id;
+        if (id == 0x0402 && k < SAFETY_CFG_PARAM_COUNT_V6) {
+            out[k++] = 0x0401;
+        }
+        if (k >= SAFETY_CFG_PARAM_COUNT_V6) {
+            return false;
+        }
+        out[k++] = id;
+        if (id == 0x0403) {
+            if (k + 2 > SAFETY_CFG_PARAM_COUNT_V6) {
+                return false;
+            }
+            out[k++] = 0x0404;
+            out[k++] = 0x0405;
+        }
+    }
+    return k == SAFETY_CFG_PARAM_COUNT_V6;
+}
+
 static void nvs_load_store(void)
 {
     reset_to_defaults();
@@ -532,48 +578,69 @@ static void nvs_load_store(void)
         return; /* HAL_NOT_FOUND (never saved) or partition trouble -- defaults stand */
     }
 
-    safety_cfg_store_blob_t loaded;
-    size_t len = sizeof(loaded);
-    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CFG, &loaded, &len);
+    /* Scratch holds the larger of the current and v6 layouts (PSRAM-first, not internal). */
+    safety_cfg_load_scratch_t *scr = persist_scratch_alloc(sizeof(*scr));
+    if (!scr) {
+        hal_kv_close(&h);
+        ESP_LOGW(TAG, "safety_cfg_store load scratch alloc failed -- empty cache");
+        return;
+    }
+    size_t len = sizeof(*scr);
+    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CFG, scr, &len);
     hal_kv_close(&h);
     if (err != HAL_OK) {
+        free(scr);
         return; /* nothing stored, or unreadable -- defaults stand */
     }
-    if (len < sizeof(loaded.version)) {
+    if (len < sizeof(scr->cur.version)) {
         ESP_LOGW(TAG, "safety_cfg_store blob is too short to contain a version -- treating as unreadable");
+        free(scr);
         return;
     }
-    if (loaded.version == SAFETY_CFG_STORE_VERSION) {
-        if (len != sizeof(loaded)) {
+    uint8_t ver = scr->cur.version;
+    if (ver == SAFETY_CFG_STORE_VERSION) {
+        if (len != sizeof(scr->cur)) {
             ESP_LOGW(TAG, "safety_cfg_store blob claims current version but is the wrong size -- "
                           "treating as unreadable");
+            free(scr);
             return;
         }
-        s_store = loaded;
-        s_has_data = (loaded.config_crc != 0);
+        s_store = scr->cur;
+        s_has_data = (scr->cur.config_crc != 0);
+        free(scr);
         return;
     }
-    if (loaded.version < SAFETY_CFG_STORE_VERSION) {
-        /* No migration chain exists yet -- unreachable until a future bump
-         * adds one (see this function's header comment). Fail safe rather
-         * than guess at a layout this build has never written: reset stands,
-         * same choice kiln_cfg_store.c's nvs_load_store() makes for "wrong
-         * size or an unknown version". */
+    if (ver == 6u) {
+        uint16_t ids[SAFETY_CFG_PARAM_COUNT_V6];
+        if (len != sizeof(scr->v6) || !build_v6_id_order(ids)) {
+            ESP_LOGW(TAG, "safety_cfg_store v6 blob is the wrong size -- treating as unreadable");
+            free(scr);
+            return;
+        }
+        for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V6; j++) {
+            int idx = index_for_id(ids[j]);
+            if (idx >= 0) {
+                s_store.entries[idx] = scr->v6.entries[j];
+            } /* else: a removed SR-31 id, dropped */
+        }
+        s_store.config_crc = scr->v6.config_crc;
+        s_has_data = (s_store.config_crc != 0);
+        ESP_LOGI(TAG, "safety_cfg_store migrated v6 -> v%u", (unsigned)SAFETY_CFG_STORE_VERSION);
+        free(scr);
+        return;
+    }
+    free(scr);
+    if (ver < SAFETY_CFG_STORE_VERSION) {
+        /* v5 and older: no migration -- fail safe, empty cache, refilled by the next refetch. */
         ESP_LOGW(TAG, "safety_cfg_store blob is version %u with no migration path to %u -- "
                       "resetting to an empty cache",
-                 (unsigned)loaded.version, (unsigned)SAFETY_CFG_STORE_VERSION);
+                 (unsigned)ver, (unsigned)SAFETY_CFG_STORE_VERSION);
         return;
     }
-    /* loaded.version > SAFETY_CFG_STORE_VERSION: firmware-rollback case, same
-     * as zones_http.c/kiln_cfg_store.c -- refuse to load, flash left
-     * untouched, this boot runs with an empty cache. Every param reads
-     * set=false until the next successful refetch, which is a strictly safer
-     * failure than reinterpreting a newer layout's byte offsets as this
-     * version's fields (COMMISSIONING.md sec 1's identical reasoning for the
-     * Pico's own config_store). */
+    /* ver > SAFETY_CFG_STORE_VERSION: firmware-rollback case -- refuse to load, flash untouched. */
     ESP_LOGW(TAG, "safety_cfg_store blob is version %u, newer than this firmware's %u -- "
                   "refusing to load, flash data left untouched",
-             (unsigned)loaded.version, (unsigned)SAFETY_CFG_STORE_VERSION);
+             (unsigned)ver, (unsigned)SAFETY_CFG_STORE_VERSION);
 }
 
 /* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
@@ -768,7 +835,7 @@ static void load_safety_relay_type(void)
 /* Direct write, no flash-worker indirection -- see this function's own doc
  * comment in safety_cfg_store.h for why that's safe here (httpd-worker-only
  * caller). */
-static esp_err_t save_safety_relay_type(void)
+static esp_err_t save_safety_relay_type_impl(void)
 {
     /* check_nvs_write_guard_coverage.ps1 requires every NVS write in a
      * PSRAM-stack-guarded module to carry the same caller_stack_is_external()
@@ -799,6 +866,27 @@ static esp_err_t save_safety_relay_type(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in save_safety_relay_type_impl stays strict. */
+typedef struct {
+    esp_err_t ret;
+} save_safety_relay_type_hop_t;
+
+static void save_safety_relay_type_hop_job(void *arg)
+{
+    save_safety_relay_type_hop_t *c = (save_safety_relay_type_hop_t *)arg;
+    c->ret = save_safety_relay_type_impl();
+}
+
+static esp_err_t save_safety_relay_type(void)
+{
+    save_safety_relay_type_hop_t ctx = { .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(save_safety_relay_type_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 relay_type_t safety_cfg_store_get_safety_relay_type(void)
@@ -916,7 +1004,7 @@ static void load_ct_cal(void)
 /* Direct write, no flash-worker indirection -- same "httpd-worker-only
  * caller" reasoning as save_safety_relay_type()'s own comment; this is only
  * ever reached from the httpd worker's commissioning POST handler. */
-static esp_err_t save_ct_cal(void)
+static esp_err_t save_ct_cal_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "save_ct_cal: REFUSING -- calling task's stack is in external RAM (PSRAM). "
@@ -936,6 +1024,27 @@ static esp_err_t save_ct_cal(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in save_ct_cal_impl stays strict. */
+typedef struct {
+    esp_err_t ret;
+} save_ct_cal_hop_t;
+
+static void save_ct_cal_hop_job(void *arg)
+{
+    save_ct_cal_hop_t *c = (save_ct_cal_hop_t *)arg;
+    c->ret = save_ct_cal_impl();
+}
+
+static esp_err_t save_ct_cal(void)
+{
+    save_ct_cal_hop_t ctx = { .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(save_ct_cal_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 /* SAFETY_CT_CAL_DEFAULT_GAIN (0.715, R46/R43 physical default) is declared in
@@ -1021,7 +1130,7 @@ static void load_rate_guard_meta(void)
 }
 
 /* Same "httpd-worker-only caller" discipline as save_ct_cal(). */
-static esp_err_t save_rate_guard_meta(void)
+static esp_err_t save_rate_guard_meta_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "save_rate_guard_meta: REFUSING -- calling task's stack is in external RAM "
@@ -1041,6 +1150,27 @@ static esp_err_t save_rate_guard_meta(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in save_rate_guard_meta_impl stays strict. */
+typedef struct {
+    esp_err_t ret;
+} save_rate_guard_meta_hop_t;
+
+static void save_rate_guard_meta_hop_job(void *arg)
+{
+    save_rate_guard_meta_hop_t *c = (save_rate_guard_meta_hop_t *)arg;
+    c->ret = save_rate_guard_meta_impl();
+}
+
+static esp_err_t save_rate_guard_meta(void)
+{
+    save_rate_guard_meta_hop_t ctx = { .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(save_rate_guard_meta_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 bool safety_cfg_store_get_rate_guard_meta(safety_rate_guard_source_t *out_source, float *out_value,

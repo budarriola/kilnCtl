@@ -602,7 +602,24 @@ static void reload_live_profile_if_changed(void)
          * concurrent segment advance: both the window check just above and
          * this swap run under the SAME lock acquisition, against the SAME
          * s_exec.segment_index read, so nothing can move between the two. */
+        /* CL-01: a changed target_c on the dwelling segment must ramp, not
+         * step. Compare OLD content (still in s_exec.profile) to the new. */
+        bool clear_dwell = false;
+        if (s_exec.segment_index < s_exec.profile.segment_count && s_exec.segment_index < candidate->segment_count) {
+            clear_dwell = profile_live_pickup_dwell_target_changed(
+                s_exec.dwelling, s_exec.profile.segments[s_exec.segment_index].target_c,
+                candidate->segments[s_exec.segment_index].target_c);
+        }
         s_exec.profile = *candidate;
+        if (clear_dwell) {
+            s_exec.dwelling = false;
+            s_exec.segment_elapsed_s = 0;
+            s_exec.segment_elapsed_rem_ms = 0;
+            s_exec.dwell_credit_applied_s = 0.0f;
+            s_exec.dwell_credit_cap_s = 0.0f;
+            ESP_LOGW(PE_TAG, "live edit changed dwelling segment %u target: dwell cleared, ramping to new target",
+                     s_exec.segment_index);
+        }
     }
 
     /* HIGH-1: only a CHECKED outcome (OK or a REFUSED_*) may consume this
@@ -1778,6 +1795,11 @@ void executor_task_entry(void *arg)
                 .setpoint_c = zone_commanded_setpoint_c(z, zi),
                 .commanded_duty = commanded_duty_for_guards,
                 .dt_s = dt_s,
+                /* SR-10: positive duty rendered as relay OFF for the whole
+                 * window (below the minimum on-time) still arms guard 3. */
+                .relay_held_off = heater_zone_applies_relay && !heat_blocked_for_guards && z->duty > 0.0f &&
+                                  z->heater_state.window_started && z->heater_state.on_ms_this_window == 0 &&
+                                  !z->heater_state.relay_on,
                 /* Guard 8 (TODO.md 6A.3/6A.5): this tick's whole-bus snapshot,
                  * raw and un-averaged, so a zone can be compared against its
                  * neighbours in the same chamber. Costs nothing extra -- the

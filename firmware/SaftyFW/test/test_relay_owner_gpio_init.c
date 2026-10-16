@@ -116,8 +116,26 @@ static void test_relay_owner_start_fails_when_hal_gpio_set_fails(void)
                "proceed to create the queue/task on an unknown-state pin");
 }
 
+extern int g_stub_queue_back_calls;
+extern int g_stub_queue_front_calls;
+
+static void test_po02_trip_goes_to_queue_front(void)
+{
+    TEST_SECTION("relay_owner_command_trip() -- TRIP is queued at the front (PO-02)");
+    fake_gpio_reset();
+    fake_gpio_force_state(SAFTYFW_PIN_RELAY, HAL_GPIO_DIR_OUT, true);
+    (void)relay_owner_start();
+    g_stub_queue_back_calls = 0;
+    g_stub_queue_front_calls = 0;
+    bool ok = relay_owner_command_trip(SAFETY_TRIP_OVERTEMP);
+    TEST_CHECK(ok, "trip command accepted");
+    TEST_CHECK(g_stub_queue_front_calls == 1, "TRIP sent with xQueueSendToFront");
+    TEST_CHECK(g_stub_queue_back_calls == 0, "TRIP not sent to the back of the queue");
+}
+
 void run_test_relay_owner_gpio_init(void)
 {
     test_relay_owner_start_energizes_nothing_and_latches_before_direction();
     test_relay_owner_start_fails_when_hal_gpio_set_fails();
+    test_po02_trip_goes_to_queue_front();
 }

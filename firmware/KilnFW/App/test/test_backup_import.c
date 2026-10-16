@@ -3685,6 +3685,30 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
 // comment in backup_http.c.
 // ---------------------------------------------------------------------------
 
+static void test_bw04_malformed_present_coupling_cell_refuses_import(void)
+{
+    TEST_SECTION("BW-04 -- a coupling cell key that is present but not a valid number refuses the whole import");
+    static const char *bad_vals[] = { "null", "\"3.3\"", "\"0.3x\"" };
+    static const char *keys[] = { "coupling_c0", "coupling_tau_c0", "coupling_dead_time_c0" };
+    for (unsigned k = 0; k < 3; k++) {
+        for (unsigned v = 0; v < 3; v++) {
+            reset_stub_state();
+            char body[400];
+            snprintf(body, sizeof(body),
+                     "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+                     "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+                     "\"%s\":%s,\"coupling_c2\":3.332,\"settings_source\":0}]}",
+                     keys[k], bad_vals[v]);
+            char err[160];
+            err[0] = 0;
+            bool ok = test_backup_import_apply(body, err, sizeof(err));
+            TEST_CHECK(!ok, "BW-04: malformed present coupling cell is refused, not silently kept");
+            TEST_CHECK(strstr(err, keys[k]) != NULL, "BW-04: the refusal names the cell key");
+            TEST_CHECK(!s_writes[1].set_coupling_cell_called[2], "BW-04: nothing of that entry was committed");
+        }
+    }
+}
+
 static void test_v4_new_fields_round_trip_distinct_values(void)
 {
     TEST_SECTION("backup_import_apply -- fuzzy_strength_pct/coupling_c0../settings_source all set to "
@@ -7675,6 +7699,8 @@ void run_test_backup_import(void)
     test_import_pass1b_parse_failure_is_not_a_partial_write();
 
     test_v4_new_fields_round_trip_distinct_values();
+
+    test_bw04_malformed_present_coupling_cell_refuses_import();
     test_coupling_diag_k_dc_round_trips_distinct_value();
     test_v2_body_imports_new_fields_default_floats_zero_source_custom();
     test_v3_fuzzy_strength_out_of_range_rejected();

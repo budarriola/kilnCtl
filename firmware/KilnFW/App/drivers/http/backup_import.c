@@ -1768,13 +1768,15 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             char ckey[16];
             snprintf(ckey, sizeof(ckey), "coupling_c%u", (unsigned)j);
             double dcell;
-            if (backup_json_field_num(ze, ckey, &dcell)) {
-                float max = (j == zc->index) ? 0.0f : (float)ZONE_COUPLING_COEFF_MAX;
-                if (dcell < 0 || dcell > (double)max) {
-                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
-                            (unsigned)zone_candidate_count, ckey);
-                    return false;
-                }
+            /* BW-04: opt_num refuses a PRESENT key that is not a valid in-range number (null, a string, "0.3x");
+             * bare field_num() treated it as absent and the cell silently kept its live value. */
+            float max = (j == zc->index) ? 0.0f : (float)ZONE_COUPLING_COEFF_MAX;
+            bool has_cell = false;
+            if (!backup_json_field_opt_num(ze, ckey, 0, (double)max, &dcell, &has_cell, ckey, err_msg, err_cap,
+                                           (unsigned)zone_candidate_count)) {
+                return false;
+            }
+            if (has_cell) {
                 zc->has_coupling_cell[j] = true;
                 zc->coupling_row[j] = (float)dcell;
             }
@@ -1789,25 +1791,24 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             char ckey[24];
             snprintf(ckey, sizeof(ckey), "coupling_tau_c%u", (unsigned)j);
             double dtau;
-            if (backup_json_field_num(ze, ckey, &dtau)) {
-                float max = (j == zc->index) ? 0.0f : ZONE_MODEL_TIME_MAX_S;
-                if (dtau < 0 || dtau > (double)max) {
-                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
-                            (unsigned)zone_candidate_count, ckey);
-                    return false;
-                }
+            float tmax = (j == zc->index) ? 0.0f : ZONE_MODEL_TIME_MAX_S;
+            bool has_tau = false;
+            if (!backup_json_field_opt_num(ze, ckey, 0, (double)tmax, &dtau, &has_tau, ckey, err_msg, err_cap,
+                                           (unsigned)zone_candidate_count)) {
+                return false;
+            }
+            if (has_tau) {
                 zc->has_coupling_tau_cell[j] = true;
                 zc->coupling_tau_row[j] = (float)dtau;
             }
             snprintf(ckey, sizeof(ckey), "coupling_dead_time_c%u", (unsigned)j);
             double ddead;
-            if (backup_json_field_num(ze, ckey, &ddead)) {
-                float max = (j == zc->index) ? 0.0f : ZONE_MODEL_TIME_MAX_S;
-                if (ddead < 0 || ddead > (double)max) {
-                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
-                            (unsigned)zone_candidate_count, ckey);
-                    return false;
-                }
+            bool has_dead = false;
+            if (!backup_json_field_opt_num(ze, ckey, 0, (double)tmax, &ddead, &has_dead, ckey, err_msg, err_cap,
+                                           (unsigned)zone_candidate_count)) {
+                return false;
+            }
+            if (has_dead) {
                 zc->has_coupling_dead_cell[j] = true;
                 zc->coupling_dead_row[j] = (float)ddead;
             }

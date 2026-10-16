@@ -399,12 +399,52 @@ static void test_touch_cal_exit_and_safety_strip(void)
     TEST_CHECK(!lcd_safety_strip_needs_pin(true), "USER role held: trip strip opens directly");
 }
 
+static void test_split_submit_lu01(void)
+{
+    TEST_SECTION("LU-01 submit split: begin/verify/finish give the same results and lockout as submit");
+    lcd_auth_state_set_verify_fn(fake_verify_fn);
+    lcd_keypad_state_t ks;
+    lcd_keypad_state_init(&ks);
+    lcd_keypad_submit_result_t early = LCD_KEYPAD_SUBMIT_GRANTED;
+    lcd_pin_role_t role = LCD_PIN_ROLE_ADMIN;
+
+    lcd_pin_entry_push_digit(&ks.entry, '1');
+    TEST_CHECK(!lcd_keypad_state_submit_begin(&ks, 0, &early) && early == LCD_KEYPAD_SUBMIT_TOO_SHORT,
+               "begin: too short");
+    lcd_pin_entry_push_digit(&ks.entry, '2');
+    lcd_pin_entry_push_digit(&ks.entry, '3');
+    lcd_pin_entry_push_digit(&ks.entry, '4');
+    TEST_CHECK(lcd_keypad_state_submit_begin(&ks, 0, &early), "begin: 4 digits proceeds to verify");
+
+    s_fake_verify_result = LCD_PIN_ROLE_USER;
+    TEST_CHECK(lcd_keypad_state_verify("1234", 4) == LCD_PIN_ROLE_USER, "verify returns the seam role");
+    TEST_CHECK(lcd_keypad_state_submit_finish(&ks, 10, LCD_PIN_ROLE_USER, &role) == LCD_KEYPAD_SUBMIT_GRANTED &&
+                   role == LCD_PIN_ROLE_USER,
+               "finish: USER role granted unchanged");
+    TEST_CHECK(lcd_keypad_state_submit_finish(&ks, 10, LCD_PIN_ROLE_ADMIN, &role) == LCD_KEYPAD_SUBMIT_GRANTED &&
+                   role == LCD_PIN_ROLE_ADMIN,
+               "finish: ADMIN role granted unchanged");
+
+    /* failures recorded by finish lock out begin, same ladder as submit */
+    int denied = 0;
+    for (int i = 0; i < 20 && lcd_keypad_state_submit_begin(&ks, 100, &early); i++) {
+        TEST_CHECK(lcd_keypad_state_submit_finish(&ks, 100, LCD_PIN_ROLE_NONE, &role) == LCD_KEYPAD_SUBMIT_DENIED &&
+                       role == LCD_PIN_ROLE_NONE,
+                   "finish: NONE is DENIED with role NONE");
+        denied++;
+    }
+    TEST_CHECK(denied > 0 && denied < 20, "repeated finish(NONE) eventually locks begin out");
+    TEST_CHECK(early == LCD_KEYPAD_SUBMIT_LOCKED_OUT, "begin reports LOCKED_OUT after the ladder trips");
+    lcd_auth_state_set_verify_fn(NULL);
+}
+
 void run_test_lcd_auth_state(void)
 {
     test_touch_cal_exit_and_safety_strip();
     test_pin_entry();
     test_verify_seam();
     test_keypad_submit_outcomes();
+    test_split_submit_lu01();
     test_lock_state_boundaries();
     test_lock_has_role_ordering();
     test_relock_edge_keypad_decision();

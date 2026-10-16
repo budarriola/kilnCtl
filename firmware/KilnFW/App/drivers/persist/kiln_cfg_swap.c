@@ -12,6 +12,7 @@
                             * structs, kept off both the stack and .bss */
 #include "esp_log.h"
 #include "hal_kv.h"
+#include "flash_hop.h"
 
 #include "kiln_cfg_store.h"
 #include "kiln_package.h"
@@ -178,7 +179,7 @@ static bool load_pending(kiln_cfg_swap_pending_t *out)
     return load_pending_ex(out, NULL);
 }
 
-static bool save_pending(const kiln_cfg_swap_pending_t *p)
+static bool save_pending_impl(const kiln_cfg_swap_pending_t *p)
 {
     if (!hal_kv_write_safe_here()) {
         /* Same PSRAM-stack guard nvs_save_store() enforces (kiln_cfg_
@@ -221,6 +222,29 @@ static bool save_pending(const kiln_cfg_swap_pending_t *p)
         ESP_LOGE(TAG, "save_pending: write reported success but the record did not read back as written");
     }
     return verified;
+}
+
+/* The swap worker has a PSRAM stack: hop the verified write onto the internal
+ * bx_flash_worker. The job takes no lock; the guard in the impl stays strict. */
+typedef struct {
+    const kiln_cfg_swap_pending_t *p;
+    bool ok;
+} save_pending_ctx_t;
+
+static void save_pending_job(void *arg)
+{
+    save_pending_ctx_t *c = (save_pending_ctx_t *)arg;
+    c->ok = save_pending_impl(c->p);
+}
+
+static bool save_pending(const kiln_cfg_swap_pending_t *p)
+{
+    save_pending_ctx_t ctx = { .p = p, .ok = false };
+    if (flash_hop_run(save_pending_job, &ctx) != ESP_OK) {
+        ESP_LOGE(TAG, "save_pending: flash worker hop failed");
+        return false;
+    }
+    return ctx.ok;
 }
 
 static bool clear_pending(void)

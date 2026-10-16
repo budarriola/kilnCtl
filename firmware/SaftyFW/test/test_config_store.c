@@ -2059,7 +2059,7 @@ static void test_config_params_set_range_validation(void)
         // shares one value across every field in the table, except the
         // ct_cal gains, whose sanity band tops out at
         // CONFIG_PARAMS_CT_CAL_GAIN_MAX (kilnlink audit 2026-10-09 L2).
-        v.f32_val = (f32_ids[i] >= 0x0310u && f32_ids[i] <= 0x0312u) ? 1.0f : 20.0f;
+        v.f32_val = (f32_ids[i] >= 0x0310u && f32_ids[i] <= 0x0312u) ? 1.0f : (f32_ids[i] == 0x030Eu ? 230.0f : 20.0f); // mains_voltage_v has a [50,500] V window (SR-05)
         TEST_CHECK(config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
                    "an ordinary finite value is still accepted for this F32 field");
     }
@@ -3413,6 +3413,17 @@ static void test_a5_threshold_upper_bounds(void)
         { 0x020Cu, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_CJ_MAX_MAX_C, "cj_max_c" },
         { 0x0202u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C, "overshoot_margin_c" },
         { 0x0208u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C, "tc_disagreement_c" },
+        { 0x0104u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_ABS_MAX_TEMP_MAX_C, "abs_max_temp_c" },
+        { 0x0203u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_OVERSHOOT_TIME_MAX_S, "overshoot_time_s" },
+        { 0x0205u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_RATE_WINDOW_MAX_S, "rate_window_s" },
+        { 0x0207u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_FROZEN_WINDOW_MAX_S, "frozen_window_s" },
+        { 0x0209u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_TC_DISAGREEMENT_TIME_MAX_S, "tc_disagreement_time_s" },
+        { 0x020Du, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_CJ_TIME_MAX_S, "cj_time_s" },
+        { 0x020Eu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_BORROWED_STALE_MAX_S, "borrowed_stale_s" },
+        { 0x020Fu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S, "borrowed_stale_trip_s" },
+        { 0x0306u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_STUCK_ON_TIME_MAX_S, "stuck_on_time_s" },
+        { 0x031Eu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_OVERCURRENT_TIME_MAX_S, "overcurrent_time_s" },
+        { 0x0402u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_LINK_TIMEOUT_MAX_S, "link_timeout_s" },
     };
     for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
         config_store_record_t rec;
@@ -3436,10 +3447,86 @@ static void test_a5_threshold_upper_bounds(void)
                d.trip_verify_s <= CONFIG_PARAMS_TRIP_VERIFY_MAX_S && d.cj_max_c <= CONFIG_PARAMS_CJ_MAX_MAX_C &&
                d.overshoot_margin_c <= CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C &&
                d.tc_disagreement_c <= CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C, "defaults are within the bounds");
+    TEST_CHECK(d.overshoot_time_s <= CONFIG_PARAMS_OVERSHOOT_TIME_MAX_S && d.rate_window_s <= CONFIG_PARAMS_RATE_WINDOW_MAX_S &&
+               d.frozen_window_s <= CONFIG_PARAMS_FROZEN_WINDOW_MAX_S && d.tc_disagreement_time_s <= CONFIG_PARAMS_TC_DISAGREEMENT_TIME_MAX_S &&
+               d.cj_time_s <= CONFIG_PARAMS_CJ_TIME_MAX_S && d.borrowed_stale_s <= CONFIG_PARAMS_BORROWED_STALE_MAX_S &&
+               d.borrowed_stale_trip_s <= CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S && d.stuck_on_time_s <= CONFIG_PARAMS_STUCK_ON_TIME_MAX_S &&
+               d.context_max_age_s <= CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S && d.link_timeout_s <= CONFIG_PARAMS_LINK_TIMEOUT_MAX_S,
+               "SR-01/02 defaults are within the new bounds");
+    {
+        config_store_record_t r; kilnlink_param_value_t pv; config_store_default(&r); memset(&pv, 0, sizeof pv);
+        pv.f32_val = INFINITY;
+        TEST_CHECK(!config_params_set(&r, 0x0104u, KILNLINK_PARAM_TYPE_F32, pv), "SR-03 abs_max_temp_c = inf refused");
+        pv.f32_val = 1300.0f;
+        TEST_CHECK(config_params_set(&r, 0x0104u, KILNLINK_PARAM_TYPE_F32, pv), "SR-03 abs_max_temp_c = 1300 (a real ceiling) still accepted");
+    }
+    /* SR-31: reserved ids are refused at SET_PARAM, absent from the enumeration, still readable. */
+    {
+        static const uint16_t rsv[] = { 0x0401u, 0x0404u, 0x0405u };
+        for (unsigned i = 0; i < 3; i++) {
+            config_store_record_t r; kilnlink_param_value_t pv; uint8_t ty = 0, t2;
+            config_store_default(&r); memset(&pv, 0, sizeof pv); pv.u16_val = 7u;
+            TEST_CHECK(!config_params_set(&r, rsv[i], KILNLINK_PARAM_TYPE_U16, pv), "SR-31 reserved id refused");
+            TEST_CHECK(config_params_get(&r, rsv[i], &ty, &pv), "SR-31 reserved id still readable");
+            for (size_t j = 0; j < config_params_count(); j++) {
+                uint16_t id = 0;
+                TEST_CHECK(config_params_id_at(j, &id, &t2), "SR-31 id_at");
+                TEST_CHECK(id != rsv[i], "SR-31 reserved id not enumerated");
+            }
+        }
+    }
     /* Load time is deliberately unbounded (owner decision pending): a stored big value still validates. */
     d.link_dead_hard_s = 5000u;
     const char *field = NULL, *rule = NULL; config_params_reject_reason_t reason;
     TEST_CHECK(config_params_validate_ranges(&d, &field, &rule, &reason), "stored records are not invalidated");
+}
+
+// KNOWN_ISSUES SR-04/05/06: physical-range bounds on guard-feeding SET_PARAMs.
+static void test_sr04_05_06_physical_ranges(void)
+{
+    TEST_SECTION("SR-04/05/06 -- physical-range SET_PARAM bounds (inclusive edges accepted, beyond refused)");
+    static const struct { uint16_t id; uint8_t type; double ok_lo, ok_hi, bad; const char *name; } k[] = {
+        { 0x031Du, KILNLINK_PARAM_TYPE_U16, 100, 300, 65535, "overcurrent_pct" },
+        { 0x0106u, KILNLINK_PARAM_TYPE_U8, 0, 2, 200, "ct_channel_map[0]" },
+        { 0x0108u, KILNLINK_PARAM_TYPE_U8, 0, 2, 3, "ct_channel_map[2]" },
+        { 0x0302u, KILNLINK_PARAM_TYPE_U16, 0, 4095, 4096, "zero_counts[0]" },
+        { 0x0305u, KILNLINK_PARAM_TYPE_U16, 0, 3600, 3601, "correlation_window_s" },
+        { 0x030Fu, KILNLINK_PARAM_TYPE_U16, 0, 3600, 65535, "power_window_s" },
+        { 0x030Eu, KILNLINK_PARAM_TYPE_F32, 90, 264, 1.0e9, "mains_voltage_v" },
+        { 0x0301u, KILNLINK_PARAM_TYPE_F32, 0, 1000, 1.0e6, "i_present_a" },
+        { 0x031Au, KILNLINK_PARAM_TYPE_F32, 0, 1000, 1.0e6, "i_normal_a[0]" },
+        { 0x0319u, KILNLINK_PARAM_TYPE_F32, 0, 1.0e6, 1.0e9, "max_expected_power_w" },
+        { 0x020Bu, KILNLINK_PARAM_TYPE_F32, 60, 150, 1.0e6, "cj_warn_c" },
+        { 0x020Au, KILNLINK_PARAM_TYPE_F32, -500, 500, 1.0e6, "tc_expected_offset_c" },
+    };
+    for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
+        config_store_record_t rec;
+        kilnlink_param_value_t v;
+        double vals[3] = { k[i].ok_lo, k[i].ok_hi, k[i].bad };
+        for (int j = 0; j < 3; j++) {
+            config_store_default(&rec);
+            memset(&v, 0, sizeof v);
+            if (k[i].type == KILNLINK_PARAM_TYPE_U8) { v.u8_val = (uint8_t)vals[j]; }
+            else if (k[i].type == KILNLINK_PARAM_TYPE_U16) { v.u16_val = (uint16_t)vals[j]; }
+            else { v.f32_val = (float)vals[j]; }
+            bool ok = config_params_set(&rec, k[i].id, k[i].type, v);
+            TEST_CHECK(ok == (j < 2), k[i].name);
+        }
+    }
+    {
+        config_store_record_t rec; kilnlink_param_value_t v;
+        config_store_default(&rec); memset(&v, 0, sizeof v);
+        v.u16_val = 99u;
+        TEST_CHECK(!config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 99 refused");
+        v.u16_val = 301u;
+        TEST_CHECK(!config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 301 refused");
+        v.u16_val = 300u;
+        TEST_CHECK(config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 300 accepted");
+        v.u16_val = 0u;
+        TEST_CHECK(config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 0 (default sentinel) accepted");
+        memset(&v, 0, sizeof v); v.f32_val = 0.0f;
+        TEST_CHECK(config_params_set(&rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v), "mains_voltage_v 0 (unset) accepted");
+    }
 }
 
 // 2026-10-09 guard-fixes review LOW-1: a stored record whose tc_offset_c is
@@ -3520,6 +3607,7 @@ void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
     test_a5_threshold_upper_bounds();
+    test_sr04_05_06_physical_ranges();
     test_pack_unpack_roundtrip();
     test_unpack_hostile();
     test_default();

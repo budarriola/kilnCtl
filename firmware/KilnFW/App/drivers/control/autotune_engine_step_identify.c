@@ -548,7 +548,7 @@ void autotune_finalize_fit(void)
     }
 
     force_relays_off();
-    if (autotune_reject_if_blocked_during_measure()) {
+    if (autotune_reject_if_blocked_during_measure() || autotune_reject_if_gains_refused()) {
         return;
     }
     s_at.state = AUTOTUNE_ENGINE_DONE;

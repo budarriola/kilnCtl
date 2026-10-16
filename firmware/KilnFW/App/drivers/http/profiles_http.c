@@ -19,6 +19,7 @@
 #include "esp_log.h"
 
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_random_u32() -- boot seed of s_slot_gen */
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t seen by
                               * callers of this module's nvs_*()-named wrappers below */
@@ -1462,7 +1463,7 @@ esp_err_t nvs_save_slot(uint8_t id)
     return r;
 }
 
-esp_err_t nvs_save_slot_locked(uint8_t id)
+static esp_err_t nvs_save_slot_locked_impl(uint8_t id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot: REFUSING -- calling task's stack is in external RAM "
@@ -1501,6 +1502,28 @@ esp_err_t nvs_save_slot_locked(uint8_t id)
     return ESP_OK;
 }
 
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in nvs_save_slot_locked_impl stays strict. */
+typedef struct {
+    uint8_t id;
+    esp_err_t ret;
+} nvs_save_slot_locked_hop_t;
+
+static void nvs_save_slot_locked_hop_job(void *arg)
+{
+    nvs_save_slot_locked_hop_t *c = (nvs_save_slot_locked_hop_t *)arg;
+    c->ret = nvs_save_slot_locked_impl(c->id);
+}
+
+esp_err_t nvs_save_slot_locked(uint8_t id)
+{
+    nvs_save_slot_locked_hop_t ctx = { .id = id, .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(nvs_save_slot_locked_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
+}
+
 /* DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
  * function writes NVS (nvs_set_u8()/nvs_commit() below) exactly like
  * nvs_save_slot() just above, but never got that function's
@@ -1529,7 +1552,7 @@ esp_err_t nvs_erase_slot(uint8_t id)
     return ESP_OK;
 }
 
-esp_err_t nvs_erase_slot_locked(uint8_t id)
+static esp_err_t nvs_erase_slot_locked_impl(uint8_t id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
@@ -1641,6 +1664,28 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
         return ferr;
     }
     return ESP_OK;
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in nvs_erase_slot_locked_impl stays strict. */
+typedef struct {
+    uint8_t id;
+    esp_err_t ret;
+} nvs_erase_slot_locked_hop_t;
+
+static void nvs_erase_slot_locked_hop_job(void *arg)
+{
+    nvs_erase_slot_locked_hop_t *c = (nvs_erase_slot_locked_hop_t *)arg;
+    c->ret = nvs_erase_slot_locked_impl(c->id);
+}
+
+esp_err_t nvs_erase_slot_locked(uint8_t id)
+{
+    nvs_erase_slot_locked_hop_t ctx = { .id = id, .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(nvs_erase_slot_locked_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 /* One-time move of persisted profiles out of the default partition's

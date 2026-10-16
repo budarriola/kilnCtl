@@ -1209,6 +1209,13 @@ typedef struct {
                            // by config_store_find_latest*_ex() for the
                            // winning slot.
     float       tc_offset_stored_c; // pre-clamp value; valid iff tc_offset_clamped.
+    // PS2-03: independent of `rejected`. refused_any is set when ANY slot that
+    // scanned was refused (range rule, or a format version newer than this
+    // build); max_refused_seq is the highest seq among them. Unlike `rejected`
+    // these survive a successful load of an older valid record, so the caller
+    // can tell "a newer record exists that this build refused".
+    bool        refused_any;
+    uint32_t    max_refused_seq;
 } config_store_reject_info_t;
 
 // --- Record pack/unpack ---------------------------------------------------
@@ -1429,6 +1436,11 @@ typedef enum {
     // for one of the ARMED refusals above; the human-readable *out_reason
     // string still carries the specific hal/flash rc.
     CONFIG_STORE_WRITE_FLASH_FAILURE,
+    // PS2-04: ARMED, the change itself is a permitted narrow one, but the
+    // write needs a sector erase (log wrap or torn-slot fallback). The erase
+    // stalls core 1 (guards, relay owner) for up to ~400 ms, so it is refused
+    // while ARMED. Appended last so existing values keep their numbers.
+    CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE,
 } config_store_write_decision_t;
 
 // Pure decision: given whether the relay is currently ARMED (relay_owner's
@@ -1611,6 +1623,15 @@ bool config_store_is_config_rejected(void);
 // tc_offset_c was beyond +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C and was clamped
 // (2026-10-10 review LOW-A). The clamp is also logged on the console at boot.
 bool config_store_tc_offset_was_clamped(void);
+
+// PS2-03: true when a record with a seq above the loaded one was refused at
+// boot (format version too new after a rollback, or a range rule), so the
+// loaded record is OLDER than what the board last committed. Cleared once a
+// write lands (that record supersedes the refused one).
+bool config_store_newer_record_refused(void);
+// PS2-03: highest seq seen at boot among refused records (0 if none). The
+// next write's seq is always above this.
+uint32_t config_store_refused_seq_floor(void);
 
 // True iff the cached record's tc_type has actually been commissioned
 // (CONFIG_STORE_SET_TC_TYPE, see that bit's own comment) rather than merely

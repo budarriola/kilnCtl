@@ -869,6 +869,7 @@ void autotune_apply_relay(bool want_on);
 /* Called just before a run would enter DONE: if heat was blocked during the measurement, sets ABORTED with a
  * reason and returns true (caller must return without setting DONE). Must be called with s_at.lock held. */
 bool autotune_reject_if_blocked_during_measure(void);
+bool autotune_reject_if_gains_refused(void); /* CL-02; s_at.lock held */
 void force_relays_off(void);
 void autotune_escalate_and_abort(thermal_guard_trip_t reason, const char *detail);
 void clear_block_if_any(void);

@@ -130,6 +130,7 @@ void run_test_iter_tune(void);
 void run_test_ramp_lock_onesided(void);
 void run_test_approach_rate_cap(void);
 void run_test_zone_sweep_relay_off_wiring(void);
+void run_test_lowlink_wiring(void);
 void run_test_safety_ceiling_policy(void);
 void run_test_http_auth_enforce(void);
 void run_test_http_session_iface(void);
@@ -267,6 +268,7 @@ int main(void)
     run_test_ramp_lock_onesided();
     run_test_approach_rate_cap();
     run_test_zone_sweep_relay_off_wiring();
+    run_test_lowlink_wiring();
     run_test_safety_ceiling_policy();
     run_test_http_auth_enforce();
     run_test_http_session_iface();

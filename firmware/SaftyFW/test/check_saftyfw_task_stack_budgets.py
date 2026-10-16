@@ -377,7 +377,7 @@ CEILING_BYTES = {
     # runs only in the boot/load path, never in the safety_core task); the
     # growth most likely came from the earlier F1-F7 batch d53125fe, which
     # changed safety_core/safety_guards without re-pinning.
-    "safety_core": 2216,    # 2026-10-10 TEST_TRIP WP2: measured 2208 -> 2216 B (test_trip queue take)
+    "safety_core": 2240,    # 2026-10-16 PN-04: measured 2216 -> 2240 B (S12 unknown-CJ trip call); before: 2026-10-10 TEST_TRIP WP2: measured 2208 -> 2216 B (test_trip queue take)
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,
     # forced_reconfigure) around the reconfig-retry gate, moving the measured

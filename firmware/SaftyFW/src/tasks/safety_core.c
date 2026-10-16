@@ -21,6 +21,7 @@
 // doc comment on that section, and reboot_announce.h's comment two lines up
 // for the precedent this follows.
 #include "safety_core.h"
+#include "ct_blind_policy.h" // PN-02
 #include "trip_seq.h" // trip_seq_next(), F4 (link-free header; link_frame.h is off limits here)
 #include "hal_barrier.h" // HAL_DMB(): publish/acquire of the trip-event fields across cores, F5
 
@@ -1117,6 +1118,14 @@ static safety_guard_input_t safety_core_build_input(void)
         cfg_rec.borrowed_zone_index, &s_borrowed_sample_counter_known[cfg_rec.borrowed_zone_index],
         &s_borrowed_last_sample_counter[cfg_rec.borrowed_zone_index]);
 
+    // PN-01 inputs (consumed in the guard input below).
+    bool    use_borrowed_tc = (s_guard_cfg.tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE);
+    float   borrowed_c = 0.0f;
+    uint8_t borrowed_fault = 0u;
+    bool    borrowed_ok = use_borrowed_tc && context_borrowed_guard_reading(
+        &ctx, context_valid, (cfg_rec.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u,
+        cfg_rec.borrowed_zone_index, &borrowed_c, &borrowed_fault);
+
     // docs/THERMOCOUPLE.md "Type checking a borrowed channel" / THERMOCOUPLE.md's
     // own open checklist item -- same have_index gate as sample_counter_advancing
     // above (a borrowed zone must be commissioned before its reported tc_type
@@ -1256,6 +1265,17 @@ static safety_guard_input_t safety_core_build_input(void)
         config_store_mask_current_present_to_fitted_mask(
             current.present, config_store_fitted_channel_mask(&cfg_rec));
 
+    // PN-02: CT data that has stayed stale on a commissioned, enabled board
+    // must not read as "no current" (that silently blinds S3/S8/S6b/S14).
+    // Fail safe: past CT_BLIND_GRACE_MS treat current as PRESENT (S3 then trips
+    // with relays commanded off, as S5 does for a blind TC). amps_valid stays
+    // false below (it is gated by current_fresh); no amps are fabricated.
+    if (ct_blind_treat_as_present(s_current_sensing_commissioned && !cts_disabled &&
+                                      config_store_fitted_channel_mask(&cfg_rec) != 0u,
+                                  clock_stalled, current_fresh, now_ms, current.timestamp_ms)) {
+        any_current_present = true;
+    }
+
     // S14 (COMMISSIONING_UX.md section 3.3). amps[ch] comes straight from
     // current_snapshot_t, gated by the SAME freshness fact any_current_
     // present already uses (current_fresh) -- a stale amps[] reading must
@@ -1272,6 +1292,7 @@ static safety_guard_input_t safety_core_build_input(void)
     // meaningful to index relay_now_mask with.
     float amps_for_ct[3] = { 0.0f, 0.0f, 0.0f };
     bool  amps_valid_for_ct[3] = { false, false, false };
+    bool  clipped_for_ct[3] = { false, false, false };
     bool  relay_commanded_now_for_ct[3] = { false, false, false };
     if (current_fresh && !cts_disabled) {
         for (unsigned ch = 0; ch < 3; ch++) {
@@ -1309,6 +1330,7 @@ static safety_guard_input_t safety_core_build_input(void)
             }
             amps_for_ct[ch] = current.amps[ch];
             amps_valid_for_ct[ch] = true;
+            clipped_for_ct[ch] = current.clipped[ch];
         }
     }
     if (context_valid && (cfg_rec.fields_set & CONFIG_STORE_SET_CT_CHANNEL_MAP) != 0u) {
@@ -1370,13 +1392,16 @@ static safety_guard_input_t safety_core_build_input(void)
         // a genuinely stuck publish, sustained for tens of seconds, does,
         // which is exactly the hazard ("safety processor blind and does not
         // know it") this item exists to make visible instead of silent.
-        .tc_valid = thermo.valid && thermo_fresh,
-        .tc_c = thermo.tc_c,
+        // PN-01: in BORROWED_ZONE mode S1/S5/S11/S12 run on the borrowed zone's
+        // measured_c (invalid when absent/stale/non-finite -> S5 handles it),
+        // not the Pico's own J7. The cold junction stays the Pico's own.
+        .tc_valid = use_borrowed_tc ? borrowed_ok : (thermo.valid && thermo_fresh),
+        .tc_c = use_borrowed_tc ? (borrowed_ok ? borrowed_c : NAN) : thermo.tc_c,
         .cj_c = thermo.cj_c,
         .cj_invalid = !thermo.cj_valid || !thermo_fresh, // review saftyfx6 F5
-        .fault_bits = thermo.fault_bits,
-        .spi_failed = thermo.spi_failed,
-        .safety_tc_not_installed_declared = safety_tc_not_installed_declared,
+        .fault_bits = use_borrowed_tc ? (borrowed_ok ? borrowed_fault : 0u) : thermo.fault_bits,
+        .spi_failed = use_borrowed_tc ? false : thermo.spi_failed,
+        .safety_tc_not_installed_declared = safety_tc_not_installed_declared && !use_borrowed_tc,
         .estop_pressed = discrete_task_estop_pressed(),
         // S6a, the sibling of estop_pressed above and read exactly the same
         // way: discrete_task samples GPIO10 as `!gpio_get(...)` (active low)
@@ -1426,6 +1451,7 @@ static safety_guard_input_t safety_core_build_input(void)
         // what these come from and why current_fresh/context_valid gate them.
         .amps = { amps_for_ct[0], amps_for_ct[1], amps_for_ct[2] },
         .amps_valid = { amps_valid_for_ct[0], amps_valid_for_ct[1], amps_valid_for_ct[2] },
+        .clipped = { clipped_for_ct[0], clipped_for_ct[1], clipped_for_ct[2] },
         .relay_commanded_now_for_ct = { relay_commanded_now_for_ct[0], relay_commanded_now_for_ct[1],
                                          relay_commanded_now_for_ct[2] },
         .relay_commanded_now_for_zone = { relay_commanded_now_for_zone[0], relay_commanded_now_for_zone[1],

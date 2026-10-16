@@ -49,7 +49,24 @@ static uint32_t get_u32_le(const uint8_t *p)
 
 /* persfx4 MED-3: keep a copy of an undecodable kiln_configs file as "<path>.bad" before anything can replace it.
  * An identical existing copy is not rewritten. Returns whether a copy of these bytes now exists. */
+/* PS-02: whether the most recent .bad preserve attempt failed, so the quarantine reason never claims a copy exists. */
+static bool s_last_preserve_failed;
+
+bool kiln_cfg_store_cfg_fs_last_preserve_failed(void)
+{
+    return s_last_preserve_failed;
+}
+
+static bool kcfg_preserve_rejected_impl(const uint8_t *raw, size_t len);
+
 static bool kcfg_preserve_rejected(const uint8_t *raw, size_t len)
+{
+    bool ok = kcfg_preserve_rejected_impl(raw, len);
+    s_last_preserve_failed = !ok;
+    return ok;
+}
+
+static bool kcfg_preserve_rejected_impl(const uint8_t *raw, size_t len)
 {
     static const char kBad[] = KILN_CFG_STORE_FILE_PATH ".bad";
     if (!raw || len == 0) {
@@ -92,6 +109,7 @@ void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t
     if (!out_blob || !out_rev || !out_valid) {
         return;
     }
+    s_last_preserve_failed = false;
     if (!cfg_fs_is_available()) {
         return;
     }

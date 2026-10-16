@@ -977,6 +977,29 @@ static void test_s3_load_stuck_on(void)
     expect_trip(SAFETY_TRIP_LOAD_STUCK_ON, "S3", 0);
 }
 
+static void test_pn02_stale_ct_fails_safe(void)
+{
+    TEST_SECTION("PN-02: CT data stale on a commissioned board is blind -> treated as present (S3 trips), not 'no current'");
+    world_reset_keep_clock();
+    W.cfg.fields_set |= CONFIG_STORE_SET_CT_INSTALLED | CONFIG_STORE_SET_CT_CHANNEL_MAP;
+    W.cfg.ct_installed = 1;
+    W.cfg.k_ct_v_per_a[0] = W.cfg.k_ct_v_per_a[1] = W.cfg.k_ct_v_per_a[2] = 0.1f;
+    core_start();
+    arm_context(0.0f, 25.0f);
+    W.ctx.relay_recent_mask = 0;
+    W.ctx.relay_now_mask = 0;
+    steps(3);
+    W.relay_energized = true;
+    W.current.present[0] = false; // last published reading: no current
+    W.current_publish = true;
+    steps(3000);
+    TEST_CHECK(!is_tripped(), "PN-02: fresh CT reading of no current -> no trip");
+    W.current_publish = false; // ADC wedged: snapshot stops updating
+    int n = steps_until_trip(600);
+    TEST_CHECK(n > 0, "PN-02: stale CT on a commissioned board trips instead of reading 'no current'");
+    expect_trip(SAFETY_TRIP_LOAD_STUCK_ON, "PN-02", 0);
+}
+
 static void test_s3_no_false_trip_when_commanded(void)
 {
     TEST_SECTION("Campaign 1: S3 no false trip while the ESP is commanding heat");
@@ -1075,6 +1098,34 @@ static void test_s13_borrowed_stale(void)
     int n = steps_until_trip(700);
     TEST_CHECK(n > 0, "S13: stalled counter trips");
     expect_trip(SAFETY_TRIP_BORROWED_STALE, "S13", 0);
+}
+
+static void test_pn01_borrowed_zone_feeds_s1(void)
+{
+    TEST_SECTION("PN-01: BORROWED_ZONE mode runs S1 on the borrowed zone's measured_c, not the Pico's J7");
+    world_reset_keep_clock();
+    W.cfg.fields_set |= CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX;
+    W.cfg.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    W.cfg.borrowed_zone_index = 0;
+    core_start();
+    arm_context(500.0f, 500.0f);
+    W.ctx.zones[0].sample_counter = 0;
+    W.relay_energized = true;
+    W.thermo.tc_c = 25.0f; // J7 healthy and cold
+    for (int i = 0; i < 100; i++) {
+        W.ctx.zones[0].sample_counter++;
+        step();
+    }
+    TEST_CHECK(!is_tripped(), "PN-01: sane borrowed reading, no trip");
+    W.ctx.zones[0].measured_c = 1400.0f; // borrowed zone over the ceiling, J7 still 25 C
+    int n = 0;
+    for (int i = 0; i < 50 && !is_tripped(); i++) {
+        W.ctx.zones[0].sample_counter++;
+        step();
+        n++;
+    }
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_OVERTEMP,
+               "PN-01: S1 trips on the borrowed zone's over-ceiling reading");
 }
 
 static void test_clock_stall_blinds_not_trips_s1(void)
@@ -1185,11 +1236,13 @@ int main(void)
     test_s12_enclosure();
     test_s2_over_setpoint();
     test_s3_load_stuck_on();
+    test_pn02_stale_ct_fails_safe();
     test_s3_no_false_trip_when_commanded();
     test_s7_ct_masking();
     test_s9_ineffective_trip();
     test_s16_config_corrupt();
     test_s13_borrowed_stale();
+    test_pn01_borrowed_zone_feeds_s1();
     test_clock_stall_blinds_not_trips_s1();
     test_request_enable_gates();
     test_diag_states();

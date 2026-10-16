@@ -36,6 +36,8 @@ if (-not (Test-Path $vcvars)) {
 
 $testDir = $PSScriptRoot
 $driversDir = Join-Path $testDir "..\drivers"
+# flash_hop.h host stand-ins (PSRAM-stack write hop, 2026-10-16): full = run+is_on stub that flips fake_kv write-safe; isOn = is_on only.
+$hopStubFull = "`"$testDir\stubs\flash_hop_host_stub.c`" `"$testDir\stubs\flash_hop_host_stub_is_on.c`" "
 $hwAbsDir = Join-Path $testDir "..\..\..\hwAbstraction"
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
@@ -152,6 +154,7 @@ try {
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
         (Join-Path $testDir "test_estop_verification.c"),
         (Join-Path $testDir "test_dualwrite_window.c"),
+        (Join-Path $testDir "stubs\flash_hop_host_stub_is_on.c"),
         (Join-Path $testDir "test_watchdog_cfg.c"),
         (Join-Path $testDir "test_ramp_assist_cfg.c"),
         (Join-Path $testDir "test_ui_page_home_graph.c"),
@@ -197,6 +200,7 @@ try {
         (Join-Path $testDir "test_cone_table.c"),
         (Join-Path $testDir "test_ramp_lock_onesided.c"),
         (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
+        (Join-Path $testDir "test_lowlink_wiring.c"),
         (Join-Path $testDir "test_approach_rate_cap.c"),
         (Join-Path $testDir "test_safety_ceiling_policy.c"),
         # docs/WEB_AUTH_PLAN.md section 5 -- the fail-closed enforcement
@@ -837,7 +841,8 @@ try {
             "`"$(Join-Path $driversDir 'http/http_async_job.c')`" " +
             "`"$(Join-Path $driversDir 'safety/safety_cfg_writer_guard.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
@@ -857,6 +862,7 @@ try {
     $exe33 = Join-Path $outDir "kilnctl_host_tests_kiln_cfg_swap.exe"
     $cmd33 = "cl @`"$hostTestsRsp`" /std:c11 " +
              "/Fo:`"$outDir\\`" /Fe:`"$exe33`" `"$(Join-Path $testDir 'test_kiln_cfg_swap.c')`" " +
+            $hopStubFull +
              "`"$(Join-Path $hwAbsDir 'host\fake_kv.c')`" " +
              "`"$(Join-Path $driversDir 'persist\web_auth_store.c')`" " +
              "`"$(Join-Path $hwAbsDir 'common\hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp\common\hal_esp_common.c')`""
@@ -1062,6 +1068,7 @@ try {
     # (see this file's own comment above them).
     $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PROFILES_LOADED_TEST_HOOK " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
@@ -1158,6 +1165,7 @@ try {
     # documented MSVC switch that turns it on.
     $cmdLp = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1181,6 +1189,7 @@ try {
     New-Item -ItemType Directory -Force -Path $plhObjDir | Out-Null
     $cmdPlh = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$plhObjDir\\`" /Fe:`"$exePlh`" `"$(Join-Path $testDir 'test_profiles_live_http.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1200,6 +1209,7 @@ try {
     New-Item -ItemType Directory -Force -Path $efaObjDir | Out-Null
     $cmdEfa = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$efaObjDir\\`" /Fe:`"$exeEfa`" `"$(Join-Path $testDir 'test_ui_edit_firing_apply.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1995,7 +2005,7 @@ try {
     $diagObjDir = Join-Path $outDir "diaghttp"
     New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
     $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`""
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag

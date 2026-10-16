@@ -26,6 +26,7 @@
 
 #include "esp_err.h"
 #include "fake_kv.h"
+#include "stubs/flash_hop_host_stub.h"
 
 // docs/WEB_AUTH_PLAN.md item 12b -- kiln_cfg_swap.c is entirely faked above
 // (this file's own convention), but hal_kv is NOT faked: it links the real
@@ -608,6 +609,32 @@ static void reset_state(void)
 
     fake_kv_set_write_safe_here(true);
     kiln_cfg_swap_set_link(&s_fake_link);
+}
+
+static void test_save_pending_hops_from_psram_stack(void)
+{
+    TEST_SECTION("save_pending -- the swap worker has a PSRAM stack: the pending record hops to the flash "
+                 "worker and persists; with the worker unusable the save is refused (swap fails closed)");
+    reset_state();
+    flash_hop_stub_reset();
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    kiln_cfg_swap_pending_t q;
+
+    g_flash_hop_stub_fail = true;
+    fake_kv_set_write_safe_here(false);
+    TEST_CHECK(!save_pending(&p), "worker unusable: refused, nothing written");
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(!load_pending(&q), "no pending record exists after the refused save");
+
+    flash_hop_stub_reset();
+    fake_kv_set_write_safe_here(false);
+    bool ok = save_pending(&p);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(ok, "PSRAM-stack save_pending succeeds through the worker");
+    TEST_CHECK(g_flash_hop_stub_dispatches == 1, "exactly one dispatch");
+    TEST_CHECK(load_pending(&q), "the pending record persisted and loads back");
+    flash_hop_stub_reset();
 }
 
 static void test_clean_swap_applies_both_halves(void)
@@ -1773,6 +1800,7 @@ static void test_low1_boot_fault_kind_names(void)
 int main(void)
 {
     test_clean_swap_applies_both_halves();
+    test_save_pending_hops_from_psram_stack();
     test_successful_apply_not_diverged_despite_zeroed_cache_crc();
     test_apply_autosave_targets_incoming_slot_not_outgoing();
     test_pico_failure_leaves_esp_untouched();

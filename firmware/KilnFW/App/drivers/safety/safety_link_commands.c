@@ -129,17 +129,17 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
     bool boot_id_known = link->cached.diag_boot_id_known;
     uint8_t boot_id = link->cached.diag_boot_id;
     uint8_t diag_state = link->cached.diag_state;
-    uint32_t diag_age_ms = diag_known ? safety_elapsed_ms(link->cached_tick) : 0;
+    uint32_t diag_age_ms = diag_known ? safety_diag_age_ms_locked(link) : 0; /* EL-01 */
     safety_unlock(link);
 
     if (!diag_known) {
         ESP_LOGW(TAG, "clear_trip: refused locally, no DIAG frame ever received");
         return ESP_ERR_INVALID_STATE;
     }
-    if (diag_age_ms > SAFETY_LINK_STALE_MS) {
+    if (diag_age_ms > SAFETY_LINK_DIAG_FRESH_MS) {
         ESP_LOGW(TAG, "clear_trip: refused locally, cached DIAG is %" PRIu32
                        "ms old (stale beyond %ums)",
-                 diag_age_ms, SAFETY_LINK_STALE_MS);
+                 diag_age_ms, SAFETY_LINK_DIAG_FRESH_MS);
         return ESP_ERR_INVALID_STATE;
     }
     if (diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
@@ -1040,10 +1040,10 @@ esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_tri
     bool boot_id_known = link->cached.diag_boot_id_known;
     uint8_t boot_id = link->cached.diag_boot_id;
     uint8_t diag_state = link->cached.diag_state;
-    uint32_t diag_age_ms = diag_known ? safety_elapsed_ms(link->cached_tick) : 0;
+    uint32_t diag_age_ms = diag_known ? safety_diag_age_ms_locked(link) : 0; /* EL-01 */
     safety_unlock(link);
 
-    if (!diag_known || diag_age_ms > SAFETY_LINK_STALE_MS) {
+    if (!diag_known || diag_age_ms > SAFETY_LINK_DIAG_FRESH_MS) {
         ESP_LOGW(TAG, "test_trip: refused locally, no fresh DIAG (known=%d age=%" PRIu32 "ms)",
                  (int)diag_known, diag_age_ms);
         *out_outcome = SAFETY_LINK_TEST_TRIP_LOCAL_STALE;

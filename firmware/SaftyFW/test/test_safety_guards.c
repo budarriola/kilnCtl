@@ -2570,6 +2570,115 @@ static void test_s16(void)
     }
 }
 
+static void test_s6b_ctless_relay_evidence(void)
+{
+    TEST_SECTION("SR-30 -- S6b soft tier on a CT-less board uses the K4 mirror as heat evidence");
+    for (int energized = 0; energized < 2; energized++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.current_sensing_disabled = true;
+        in.relay_deenergized = (energized == 0);
+        in.dt_s = 2.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) { /* 12 s > link_timeout_s 10 s, < 120 s hard backstop */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        if (energized) {
+            TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LINK_DEAD, "CT-less + K4 energized: S6b soft tier trips at link_timeout_s");
+        } else {
+            TEST_CHECK(!tripped, "CT-less + K4 de-energized: no S6b soft trip");
+        }
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.current_sensing_disabled = false;
+        in.relay_deenergized = false;
+        in.dt_s = 2.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) { tripped = safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(!tripped, "CTs fitted, no current: relay mirror alone is not heat evidence (unchanged)");
+    }
+}
+
+static void test_sr33_tcrange_near_ceiling(void)
+{
+    TEST_SECTION("SR-33 -- TCRANGE right after a reading near abs_max trips as S1, not after blind_grace_s");
+    for (int near = 0; near < 2; near++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 1300.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 0.1f;
+        in.tc_valid = true;
+        in.tc_c = near ? 1250.0f : 900.0f;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "good reading does not trip");
+        in.tc_valid = false;
+        in.tc_c = NAN;
+        in.fault_bits = SAFETY_THERMO_FAULT_TCRANGE;
+        int ticks = 0;
+        for (; ticks < 5 && !tripped; ticks++) { tripped = safety_guards_tick(&s, &cfg, &in); }
+        if (near) {
+            TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP && ticks == 3, "near ceiling: TCRANGE trips OVERTEMP in 3 reads");
+        } else {
+            TEST_CHECK(!tripped, "far from ceiling: TCRANGE stays on the S5 grace path");
+        }
+    }
+}
+
+static void test_pn05_clipped_channel_overcurrent(void)
+{
+    TEST_SECTION("PN-05 -- a clipped fitted CT channel counts as over the S14 threshold");
+    for (int clipped = 0; clipped < 2; clipped++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f; /* threshold 15 A */
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 12.0f; /* the clip value reads BELOW the threshold */
+        in.clipped[0] = (clipped != 0);
+        in.relay_commanded_now_for_ct[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s14_warn[0] == (clipped != 0), clipped ? "clipped channel warns S14 despite low amps" : "unclipped 12 A stays quiet");
+    }
+}
+
+static void test_pn05_clipped_summed_channel(void)
+{
+    TEST_SECTION("PN-05 -- a clipped summed-topology CT channel counts as over the S14 threshold");
+    for (int clipped = 0; clipped < 2; clipped++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 12.0f;
+        in.clipped[2] = (clipped != 0);
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s14_warn[2] == (clipped != 0), clipped ? "summed: clipped warns S14 despite low amps" : "summed: unclipped 12 A stays quiet");
+    }
+}
+
 static void test_s6b_reboot_grace(void)
 {
     TEST_SECTION("S6b -- ANNOUNCE_REBOOT grace window suppression");
@@ -3743,7 +3852,8 @@ static void test_try_clear(void)
         safety_guards_reset(&s);
         bad.cj_invalid = true;
         bad.cj_c = (float)NAN;
-        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "T4: bad TC read with an invalid cold junction does not run S12 (no new trip)");
+        bad.dt_s = 1.0f;
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "T4: bad TC read with a briefly invalid cold junction does not trip S12");
     }
 
     /* 2026-08-23 hardware finding: S5 (and S12/S13/S6b below) are the four
@@ -4498,6 +4608,7 @@ static void test_ct_disabled_guards(void)
          * be forced together upstream. */
         in.any_current_present = false;
         in.current_sensing_disabled = true;
+        in.relay_deenergized = true; /* SR-30: with the relay still energized the soft tier now fires */
         bool tripped = false;
         for (int i = 0; i < 500 && !tripped; i++) { /* 50 s: past soft, short of hard */
             tripped = safety_guards_tick(&soft, &lcfg, &in);
@@ -4675,6 +4786,49 @@ static void test_guard_review_2026_10_09(void)
         TEST_CHECK(s.is_tripped, "still latched");
         safety_guard_input_t cool = base_input();
         TEST_CHECK(safety_guards_try_clear(&s, &cfg, &cool), "S12 clear succeeds once cj is known and cool");
+    }
+
+    TEST_SECTION("PN-04 -- sustained unknown cold junction trips S12");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        unk.dt_s = 30.0f;
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &unk), "PN-04: 30 s unknown CJ only warns");
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &unk) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP,
+                   "PN-04: 60 s unknown CJ trips S12");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        unk.dt_s = 30.0f;
+        safety_guard_input_t ok = base_input();
+        ok.dt_s = 1.0f;
+        bool tr = false;
+        for (int i = 0; i < 6; i++) {
+            tr |= safety_guards_tick(&s, &cfg, &unk);
+            tr |= safety_guards_tick(&s, &cfg, &ok);
+        }
+        TEST_CHECK(!tr, "PN-04: a known CJ between unknown spells resets the accumulator");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.cj_invalid = true;
+        bad.cj_c = (float)NAN;
+        bad.dt_s = 61.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &bad) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP,
+                   "PN-04: sustained unknown CJ trips S12 on the bad-TC-read path too");
     }
 
     TEST_SECTION("guard review F6 -- S5 bad read does not suspend TC-independent guards");
@@ -5437,6 +5591,10 @@ void run_test_safety_guards(void)
     test_s6();
     test_s16();
     test_s6b_reboot_grace();
+    test_s6b_ctless_relay_evidence();
+    test_pn05_clipped_channel_overcurrent();
+    test_pn05_clipped_summed_channel();
+    test_sr33_tcrange_near_ceiling();
     test_s9();
     test_s10();
     test_s13();

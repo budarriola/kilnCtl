@@ -117,6 +117,10 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
     // HTTPD_DEFAULT_CONFIG()) -- it is doing httpd_worker's own deferred
     // work, so nothing lower-priority should preempt it (2026-09-25
     // fix-then-push review; was tskIDLE_PRIORITY+1).
+    // STACK MUST STAY INTERNAL (2026-10-16 bench bug): jobs write NVS/cfg files
+    // (backup_import creating a kiln_configs entry), and every NVS writer guards on
+    // hal_kv_write_safe_here() (stack not in PSRAM) and REFUSES from a PSRAM stack
+    // ("could not be saved to flash"). tools/check_psram_task_stacks.ps1 pins this.
     dram_watch_log_task(task_name ? task_name : "http_async_job", "before-create");
     if (dram_watch_task_after(task_name ? task_name : "http_async_job",
                               xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx,

@@ -352,6 +352,38 @@ static inline bool context_borrowed_sample_counter_advancing(const context_snaps
     return false;
 }
 
+// PN-01: the borrowed zone's reading as a guard temperature input. True (and
+// *out_c / *out_fault_bits filled) only when the context is valid, the zone is
+// present, flagged MEASURED_VALID and its measured_c is finite
+// (a stalled sample_counter is deliberately NOT checked here: S13 owns that,
+// graduated WARN then trip). Anything else -> false, and
+// the caller must present the reading as invalid (S5 then handles blindness).
+static inline bool context_borrowed_guard_reading(const context_snapshot_t *ctx, bool context_valid,
+                                                  bool have_index, uint8_t borrowed_zone_index,
+                                                  float *out_c, uint8_t *out_fault_bits)
+{
+    if (!context_valid || !have_index || ctx == NULL) {
+        return false;
+    }
+    uint8_t n = ctx->zone_count;
+    if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
+        n = CONTEXT_SNAPSHOT_MAX_ZONES;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        const context_zone_t *z = &ctx->zones[i];
+        if (z->zone_index != borrowed_zone_index) {
+            continue;
+        }
+        if ((z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) == 0u || !isfinite(z->measured_c)) {
+            return false;
+        }
+        *out_c = z->measured_c;
+        *out_fault_bits = z->tc_fault;
+        return true;
+    }
+    return false;
+}
+
 // Borrowed-channel type mismatch (docs/THERMOCOUPLE.md "Type checking a
 // borrowed channel", docs/CONFIG_REFERENCE.md's borrowed_type_expected row,
 // THERMOCOUPLE.md's own open checklist item "Borrowed tc_type compared

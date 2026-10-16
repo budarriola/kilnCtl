@@ -28,6 +28,8 @@ kilnlink_commit_config_reject_reason_t link_task_commit_config_reject_reason_for
         return KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON;
     case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN:
         return KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN;
+    case CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE:
+        return KILNLINK_COMMIT_CONFIG_REJECT_ARMED_NEEDS_ERASE;
     case CONFIG_STORE_WRITE_FLASH_FAILURE:
         return KILNLINK_COMMIT_CONFIG_REJECT_STORAGE;
     case CONFIG_STORE_WRITE_OK: // not a refusal -- the caller never gets here

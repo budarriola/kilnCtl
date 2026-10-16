@@ -396,6 +396,9 @@ static const char *commit_reject_reason_words(uint8_t reason)
     case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED:
         return "relay is ARMED and this change also modifies field(s) other than "
                "thermocouple type -- only thermocouple type may change while ARMED";
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_NEEDS_ERASE:
+        return "relay is ARMED and this write needs a flash erase that would stall the "
+               "safety core -- disarm and retry";
     default: return "refused (unrecognised reason)";
     }
 }
@@ -437,6 +440,7 @@ static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t rea
     case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON: return SAFETY_CEILING_REFUSAL_ARMED;
     case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN: return SAFETY_CEILING_REFUSAL_ARMED;
     case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED: return SAFETY_CEILING_REFUSAL_ARMED;
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED_NEEDS_ERASE: return SAFETY_CEILING_REFUSAL_ARMED;
     default: return SAFETY_CEILING_REFUSAL_OTHER;
     }
 }

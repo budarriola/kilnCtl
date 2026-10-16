@@ -32,6 +32,9 @@
                                   * only includes safety_ceiling_policy.h/safety_link.h, never this file. */
 #include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- 2026-09-10 opus review finding */
 #include "safety_cfg_store.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- HR-02 mode gate */
+#include "system_mode_gate.h"
+#include "system_mode_gate_http.h"
 #include "safety_cfg_writer_guard.h" /* single-flight vs every other Pico safety-config writer */
 #include "safety_trip_words.h" /* safety_fault_source_short_name() -- 2026-09-24 fault-edge instrumentation */
 #include "safety_cfg_write.h" /* safety_cfg_post_pair_t + the stage/commit/confirm-by-
@@ -58,6 +61,22 @@ static const char *TAG = "safety_cfg_http";
 
 static SafetyLinkClass *s_link = NULL;
 static kiln_io_t *s_hw_io = NULL; // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler() only
+
+/* HR-02 (owner decision 2026-10-16): the safety param, relay_type, CT cal and CT trim POSTs are
+ * refused with the same 409 system_mode_gate as zone/relay writes while a firing or autotune is active.
+ * Runs BEFORE the writer claim and body read. Returns true when it sent the refusal. */
+static bool safety_cfg_mode_gate_refuse(httpd_req_t *req, esp_err_t *out)
+{
+    sys_mode_snapshot_t snap = { 0 };
+    relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
+    char reason[SYSTEM_MODE_GATE_REASON_MAX];
+    reason[0] = '\0';
+    if (!system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &snap, reason, sizeof(reason))) {
+        return false;
+    }
+    *out = system_mode_gate_http_send_refusal(req, reason);
+    return true;
+}
 
 /* Single-flight wrapper for every SYNCHRONOUS SET_PARAM/COMMIT_CONFIG writer
  * in this file (docs/HTTP_POST_OWNER_MIGRATION.md A2 residual). Claims
@@ -767,6 +786,10 @@ static bool commissioning_pair_range_problem(const safety_cfg_post_pair_t *pairs
 static esp_err_t commissioning_post_locked(httpd_req_t *req);
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
     return cfg_writer_guarded(req, commissioning_post_locked);
 }
 
@@ -997,6 +1020,10 @@ static esp_err_t commissioning_post_locked(httpd_req_t *req)
 static esp_err_t relay_type_post_locked(httpd_req_t *req);
 static esp_err_t relay_type_post_handler(httpd_req_t *req)
 {
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
     return cfg_writer_guarded(req, relay_type_post_locked);
 }
 
@@ -1071,6 +1098,10 @@ static esp_err_t relay_type_post_locked(httpd_req_t *req)
 static esp_err_t ct_cal_post_locked(httpd_req_t *req);
 static esp_err_t ct_cal_post_handler(httpd_req_t *req)
 {
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
     return cfg_writer_guarded(req, ct_cal_post_locked);
 }
 
@@ -1229,6 +1260,10 @@ static esp_err_t ct_cal_post_locked(httpd_req_t *req)
 static esp_err_t ct_trim_post_locked(httpd_req_t *req);
 static esp_err_t ct_trim_post_handler(httpd_req_t *req)
 {
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
     return cfg_writer_guarded(req, ct_trim_post_locked);
 }
 
@@ -1938,11 +1973,8 @@ static const struct {
     { 0x030C, KILNLINK_PARAM_TYPE_F32, { .f32_val = 0.715f } },  /* gain[1] */
     { 0x030D, KILNLINK_PARAM_TYPE_F32, { .f32_val = 0.715f } },  /* gain[2] */
     { 0x030F, KILNLINK_PARAM_TYPE_U16, { .u16_val = 120 } },     /* power_window_s */
-    { 0x0401, KILNLINK_PARAM_TYPE_U16, { .u16_val = 5 } },       /* context_max_age_s */
     { 0x0402, KILNLINK_PARAM_TYPE_U16, { .u16_val = 10 } },      /* link_timeout_s */
     { 0x0403, KILNLINK_PARAM_TYPE_U16, { .u16_val = 120 } },     /* link_dead_hard_s */
-    { 0x0404, KILNLINK_PARAM_TYPE_U16, { .u16_val = 200 } },     /* mainfault_debounce_ms */
-    { 0x0405, KILNLINK_PARAM_TYPE_U16, { .u16_val = 500 } },     /* telemetry_period_ms */
     { 0x0501, KILNLINK_PARAM_TYPE_U16, { .u16_val = 60 } },      /* startup_grace_s */
     { 0x0502, KILNLINK_PARAM_TYPE_U16, { .u16_val = 50 } },      /* estop_debounce_ms */
     { 0x0503, KILNLINK_PARAM_TYPE_U16, { .u16_val = 1000 } },    /* watchdog_timeout_ms */

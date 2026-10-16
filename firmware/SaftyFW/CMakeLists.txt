@@ -101,6 +101,7 @@ set(SAFTYFW_APP_SOURCES
     # presence_policy.c) with no hardware/adc.h stub -- see
     # current_presence_policy.h.
     src/current_presence_policy.c
+    src/ct_blind_policy.c
     # ct_amps_cal.c -- pure, host-tested (test/test_ct_amps_cal.c) per-channel
     # CT amps correction current_sense.c applies on top of its own physics-
     # based conversion; see that file's header comment.

@@ -202,6 +202,7 @@ esp_err_t kiln_ui_init(void)
      * comment for the full per-page inventory and the six-page paging this
      * now uses). Linked from ui_page_config.c's nav hub like every other
      * diagnostic/settings page. */
+    ui_page_diagnostics_prime_ota_state(); /* otadata mmap, off the LVGL task */
     err = kiln_ui_register_page("diagnostics", ui_page_diagnostics_build);
     if (err != ESP_OK) return err;
 

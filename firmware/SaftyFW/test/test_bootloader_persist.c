@@ -21,6 +21,7 @@ extern int g_flash_op_limit;
 extern int g_flash_ops;
 extern bool g_power_lost;
 extern bool g_corrupt_backup_program;
+extern bool g_program_src_in_flash;
 
 static const uint8_t *main_sector(void) { return &g_fake_flash[BOOTLOADER_METADATA_FLASH_OFFSET]; }
 static const uint8_t *backup_sector(void)
@@ -179,8 +180,104 @@ static void test_persist_reports_unverified_program(void)
                "the previous record is still the valid one");
 }
 
+static void test_wrap_backup_source_is_ram(void)
+{
+    TEST_SECTION("PS2-01 -- wrap backup program never reads its source from XIP flash");
+
+    memset(g_fake_flash, 0xFF, sizeof(g_fake_flash));
+    power_up();
+    g_program_src_in_flash = false;
+    bootloader_metadata_t m = base_meta();
+    size_t latest = fill_log(BOOTLOADER_METADATA_SLOTS_PER_SECTOR, &m);
+    uint32_t seq_before = m.seq;
+    bootloader_metadata_t w = m;
+    bool ok = bootloader_persist_metadata(&w, latest);
+    TEST_CHECK(!g_program_src_in_flash, "no flash_range_program source pointer inside XIP flash");
+    TEST_CHECK(ok, "wrap persist reports success");
+    bootloader_metadata_t got;
+    size_t idx = bootloader_metadata_find_latest_ab(main_sector(), backup_sector(), &got);
+    TEST_CHECK(idx == 0 && got.seq == seq_before + 1u, "wrapped record is the newest at slot 0");
+    bootloader_metadata_t bk;
+    TEST_CHECK(bootloader_metadata_find_latest(backup_sector(), &bk) != BOOTLOADER_METADATA_NO_SLOT &&
+                   bk.seq == seq_before,
+               "backup holds the previous newest record");
+    g_program_src_in_flash = false;
+}
+
+static void test_persist_failure_blocks_pending(void)
+{
+    TEST_SECTION("PS2-01 -- failed boot-time persist consumes a PENDING_VERIFY attempt");
+
+    bootloader_metadata_t m = base_meta();
+    m.slots[BOOTLOADER_SLOT_A].state = BOOTLOADER_SLOT_PENDING_VERIFY;
+    TEST_CHECK(bootloader_metadata_persist_failure_blocks_boot(&m, BOOTLOADER_SLOT_A),
+               "PENDING_VERIFY slot is not booted when its attempt could not be recorded");
+    TEST_CHECK(!bootloader_metadata_persist_failure_blocks_boot(&m, BOOTLOADER_SLOT_B),
+               "a VALID slot still boots when persist fails");
+    TEST_CHECK(bootloader_metadata_persist_failure_blocks_boot(NULL, BOOTLOADER_SLOT_A),
+               "NULL metadata fails closed");
+}
+
+static void test_torn_target_slot_wraps(void)
+{
+    TEST_SECTION("PS2-02 -- a torn, non-erased target slot takes the wrap path");
+
+    memset(g_fake_flash, 0xFF, sizeof(g_fake_flash));
+    power_up();
+    bootloader_metadata_t m = base_meta();
+    size_t latest = fill_log(3, &m); // slots 0..2 valid, latest == 2
+    TEST_CHECK(latest == 2, "log holds three records");
+    uint32_t seq_before = m.seq;
+    // Slot 3: a record torn mid-program (CRC fails, bytes not erased).
+    uint8_t *torn = &g_fake_flash[BOOTLOADER_METADATA_FLASH_OFFSET + 3u * BOOTLOADER_METADATA_RECORD_LEN];
+    memset(torn, 0xFF, BOOTLOADER_METADATA_RECORD_LEN);
+    memcpy(torn, main_sector() + 2u * BOOTLOADER_METADATA_RECORD_LEN, 12);
+    torn[40] = 0x5A;
+    bootloader_metadata_t chk;
+    TEST_CHECK(bootloader_metadata_find_latest(main_sector(), &chk) == 2, "torn slot is skipped by find_latest");
+
+    bootloader_metadata_t w = m;
+    bool ok = bootloader_persist_metadata(&w, latest);
+    TEST_CHECK(ok, "persist over a torn target slot reports success");
+    bootloader_metadata_t got;
+    size_t idx = bootloader_metadata_find_latest_ab(main_sector(), backup_sector(), &got);
+    TEST_CHECK(idx == 0 && got.seq == seq_before + 1u, "new record landed at slot 0 after the erase");
+    bootloader_metadata_t bk;
+    TEST_CHECK(bootloader_metadata_find_latest(backup_sector(), &bk) != BOOTLOADER_METADATA_NO_SLOT &&
+                   bk.seq == seq_before,
+               "newest record was backed up before the erase");
+
+    // Same with nothing valid in the main sector: erase, no backup.
+    memset(g_fake_flash, 0xFF, sizeof(g_fake_flash));
+    g_fake_flash[BOOTLOADER_METADATA_FLASH_OFFSET + 7] = 0x00;
+    bootloader_metadata_t f = base_meta();
+    TEST_CHECK(bootloader_persist_metadata(&f, BOOTLOADER_METADATA_NO_SLOT),
+               "first write over a dirty slot 0 succeeds");
+    TEST_CHECK(bootloader_metadata_find_latest(main_sector(), &got) == 0, "record readable at slot 0");
+}
+
+static void test_plan_write(void)
+{
+    TEST_SECTION("PS2-02 -- bootloader_metadata_plan_write");
+
+    bootloader_metadata_write_plan_t p = bootloader_metadata_plan_write(2, true);
+    TEST_CHECK(p.slot == 3 && !p.needs_erase && !p.needs_backup, "erased next slot: plain append");
+    p = bootloader_metadata_plan_write(2, false);
+    TEST_CHECK(p.slot == 0 && p.needs_erase && p.needs_backup, "dirty next slot: backup, erase, slot 0");
+    p = bootloader_metadata_plan_write(BOOTLOADER_METADATA_SLOTS_PER_SECTOR - 1, true);
+    TEST_CHECK(p.slot == 0 && p.needs_erase && p.needs_backup, "full log wraps with backup");
+    p = bootloader_metadata_plan_write(BOOTLOADER_METADATA_NO_SLOT, false);
+    TEST_CHECK(p.slot == 0 && p.needs_erase && !p.needs_backup, "dirty slot 0 on empty log: erase, no backup");
+    p = bootloader_metadata_plan_write(BOOTLOADER_METADATA_FROM_BACKUP, false);
+    TEST_CHECK(p.slot == 0 && p.needs_erase && !p.needs_backup, "newest in backup: erase, no new backup");
+}
+
 void run_test_bootloader_persist(void)
 {
+    test_wrap_backup_source_is_ram();
+    test_persist_failure_blocks_pending();
+    test_torn_target_slot_wraps();
+    test_plan_write();
     test_wrap_power_loss_every_step();
     test_backup_failure_keeps_main();
     test_silently_corrupt_backup_keeps_main();

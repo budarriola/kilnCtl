@@ -72,6 +72,11 @@ typedef enum {
      * console log because the wire frame previously only ever carried the
      * plain ARMED reason with the NO_PARAM_ID sentinel for this case. */
     KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED = 7,
+    /* PS2-04: a narrow tc_type / ct_cal write that is allowed while ARMED, but
+     * whose flash slot needs a sector erase (log wrap or torn-slot fallback).
+     * The erase locks out core 1 for up to ~400 ms, so it is refused while
+     * ARMED; retry once disarmed. */
+    KILNLINK_COMMIT_CONFIG_REJECT_ARMED_NEEDS_ERASE = 8,
 } kilnlink_commit_config_reject_reason_t;
 
 typedef enum {

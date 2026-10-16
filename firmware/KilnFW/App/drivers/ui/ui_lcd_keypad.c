@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "ui_theme.h"
 
 #define UI_LCD_KEYPAD_WIDTH_PX 400
@@ -91,6 +94,7 @@ static lv_obj_t *s_info_label; // dots normally; "Wrong PIN" / lockout countdown
 static lv_obj_t *s_bm;
 
 static lcd_keypad_state_t s_ks;
+static uint32_t s_job_gen; /* LU-01: bumped when the overlay is cancelled mid-verify */
 static ui_lcd_keypad_done_cb_t s_on_done;
 static void *s_user_data;
 
@@ -144,6 +148,7 @@ static void finish(bool granted, lcd_pin_role_t role)
 static void cancel_cb(lv_event_t *e)
 {
     (void)e;
+    s_job_gen++; /* LU-01: an in-flight verify result is discarded */
     finish(false, LCD_PIN_ROLE_NONE);
 }
 
@@ -154,21 +159,27 @@ static void backdrop_click_cb(lv_event_t *e)
      * swallows a stray tap and does nothing; a PIN overlay is cheap to
      * re-open and an operator tapping outside it clearly wants out. */
     (void)e;
+    s_job_gen++;
     finish(false, LCD_PIN_ROLE_NONE);
 }
 
-static void try_submit(void)
+/* LU-01: the PIN check is two PBKDF2 runs (ADMIN then USER, ~20000 iterations each), far too
+ * slow for the LVGL task (the whole UI froze for the duration). try_submit() now only runs the
+ * pre-checks and hands the digits to a one-shot worker; the worker verifies and posts the role
+ * back with lv_async_call(), and the lockout bookkeeping + result handling stay on the LVGL task
+ * exactly as before (lcd_keypad_state_submit_begin/verify/finish). */
+typedef struct {
+    char digits[LCD_PIN_MAX_DIGITS + 1];
+    uint8_t len;
+    lcd_pin_role_t role;
+    uint32_t gen;
+} pin_job_t;
+
+static pin_job_t s_job;
+static bool s_worker_running;  /* LVGL task only: a worker exists and its result is not yet consumed */
+
+static void handle_result(lcd_keypad_submit_result_t result, lcd_pin_role_t role, uint32_t now_ms)
 {
-    if (!lcd_pin_entry_can_submit(&s_ks.entry)) {
-        /* "OK is inert below 4 digits" -- do nothing, not even a status
-         * message, since the digit dots already show the count. */
-        return;
-    }
-
-    uint32_t now_ms = (uint32_t)lv_tick_get();
-    lcd_pin_role_t role = LCD_PIN_ROLE_NONE;
-    lcd_keypad_submit_result_t result = lcd_keypad_state_submit(&s_ks, now_ms, &role);
-
     switch (result) {
         case LCD_KEYPAD_SUBMIT_GRANTED:
             finish(true, role);
@@ -199,9 +210,75 @@ static void try_submit(void)
             break;
         case LCD_KEYPAD_SUBMIT_TOO_SHORT:
         default:
-            /* Defensive-only path (see lcd_auth_state.h) -- can't happen
-             * given the can_submit() guard just above. */
+            /* Defensive-only path (see lcd_auth_state.h); cannot happen
+             * given the can_submit() guard in try_submit(). */
             break;
+    }
+}
+
+static void pin_verify_done_async(void *arg)
+{
+    (void)arg;
+    lcd_pin_role_t role = s_job.role;
+    uint32_t gen = s_job.gen;
+    s_job.role = LCD_PIN_ROLE_NONE;
+    s_worker_running = false;
+    uint32_t now_ms = (uint32_t)lv_tick_get();
+    if (gen != s_job_gen || !ui_lcd_keypad_is_open()) {
+        /* Cancelled while verifying: a wrong PIN still counts toward the lockout, a right one is
+         * dropped (the operator walked away from this prompt). */
+        if (role == LCD_PIN_ROLE_NONE) {
+            (void)lcd_keypad_state_submit_finish(&s_ks, now_ms, role, NULL);
+        }
+        return;
+    }
+    lcd_pin_role_t out_role = LCD_PIN_ROLE_NONE;
+    lcd_keypad_submit_result_t result = lcd_keypad_state_submit_finish(&s_ks, now_ms, role, &out_role);
+    handle_result(result, out_role, now_ms);
+}
+
+static void pin_verify_worker_task(void *arg)
+{
+    (void)arg;
+    s_job.role = lcd_keypad_state_verify(s_job.digits, s_job.len);
+    memset(s_job.digits, 0, sizeof(s_job.digits));
+    if (lv_async_call(pin_verify_done_async, NULL) != LV_RESULT_OK) {
+        /* Cannot post: fail closed (deny); the next try_submit() starts fresh. */
+        s_job.role = LCD_PIN_ROLE_NONE;
+        s_worker_running = false;
+    }
+    vTaskDelete(NULL);
+}
+
+static void try_submit(void)
+{
+    if (!lcd_pin_entry_can_submit(&s_ks.entry)) {
+        /* "OK is inert below 4 digits" -- do nothing, not even a status
+         * message, since the digit dots already show the count. */
+        return;
+    }
+    if (s_worker_running) {
+        set_status("Checking PIN...");
+        return;
+    }
+
+    uint32_t now_ms = (uint32_t)lv_tick_get();
+    lcd_keypad_submit_result_t early = LCD_KEYPAD_SUBMIT_TOO_SHORT;
+    if (!lcd_keypad_state_submit_begin(&s_ks, now_ms, &early)) {
+        handle_result(early, LCD_PIN_ROLE_NONE, now_ms);
+        return;
+    }
+
+    memcpy(s_job.digits, s_ks.entry.digits, sizeof(s_job.digits));
+    s_job.len = s_ks.entry.len;
+    s_job.role = LCD_PIN_ROLE_NONE;
+    s_job.gen = s_job_gen;
+    s_worker_running = true;
+    set_status("Checking PIN...");
+    if (xTaskCreate(pin_verify_worker_task, "lcd_pin_ui", 6144, NULL, 5, NULL) != pdPASS) {
+        s_worker_running = false;
+        memset(s_job.digits, 0, sizeof(s_job.digits));
+        set_status("Busy, try again");
     }
 }
 
@@ -217,6 +294,9 @@ static void bm_value_changed_cb(lv_event_t *e)
         return;
     }
 
+    if (s_worker_running && strcmp(key, "OK") != 0) {
+        return; /* digits are frozen while the PIN is being checked */
+    }
     if (strcmp(key, "OK") == 0) {
         /* Deliberately does NOT blank the info label first: the dots/status
          * label is now shared (see this file's header comment), and OK on a
@@ -322,5 +402,6 @@ void ui_lcd_keypad_force_close(void)
     if (!ui_lcd_keypad_is_open()) {
         return;
     }
+    s_job_gen++;
     finish(false, LCD_PIN_ROLE_NONE);
 }

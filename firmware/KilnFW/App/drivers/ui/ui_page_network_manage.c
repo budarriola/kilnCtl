@@ -235,6 +235,8 @@ static void connect_worker_task(void *arg)
     (void)arg;
     esp_err_t err = wifi_prov_add_network(s_connect_job_ssid, strlen(s_connect_job_ssid),
                                            s_connect_job_password, strlen(s_connect_job_password));
+    /* LU-04: the plaintext password must not outlive the save */
+    memset(s_connect_job_password, 0, sizeof(s_connect_job_password));
     xSemaphoreTake(s_connect_job.lock, portMAX_DELAY);
     s_connect_job.err = err;
     s_connect_job.done = true;

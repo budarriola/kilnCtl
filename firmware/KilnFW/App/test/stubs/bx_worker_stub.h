@@ -56,6 +56,19 @@
 // earlier non-static declaration once these drivers' own headers are
 // #included later in the same translation unit.
 
+// 2026-10-16 (PSRAM-stack write hop, flash_hop.h): when the including test also links fake_kv
+// (fake_kv.h seen first), a dispatched job runs with hal_kv_write_safe_here() forced TRUE, like
+// the real worker whose stack is internal, and the previous value is restored afterwards. A test
+// then models a PSRAM-stack caller with fake_kv_set_write_safe_here(false) and a persisted write
+// proves it went through this dispatch. Without fake_kv.h the macros are no-ops.
+#ifdef KILNCTL_FAKE_KV_H
+#define BX_STUB_ENTER_WORKER_CTX() bool bx_stub_prev_safe_ = hal_kv_write_safe_here(); fake_kv_set_write_safe_here(true)
+#define BX_STUB_LEAVE_WORKER_CTX() fake_kv_set_write_safe_here(bx_stub_prev_safe_)
+#else
+#define BX_STUB_ENTER_WORKER_CTX() ((void)0)
+#define BX_STUB_LEAVE_WORKER_CTX() ((void)0)
+#endif
+
 static bool s_stub_bx_busy = false;
 static bool s_stub_on_flash_worker = false;
 
@@ -68,9 +81,14 @@ static bool s_stub_on_flash_worker = false;
 // automatically; a test that cares about a delta should snapshot this
 // before and after the call under test.
 static unsigned s_stub_dispatch_count = 0;
+// When true, uart_bridge_ext_run_on_flash_worker() refuses without running fn (worker unusable).
+static bool s_stub_dispatch_fail = false;
 
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
+    if (s_stub_dispatch_fail) {
+        return ESP_ERR_INVALID_STATE;
+    }
     s_stub_dispatch_count++;
     if (s_stub_bx_busy) {
         // Models the real deadlock: a caller re-entering the worker while a
@@ -85,7 +103,9 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
     s_stub_bx_busy = true;
     bool prev_on_worker = s_stub_on_flash_worker;
     s_stub_on_flash_worker = true; // S3: self-consistent -- fn() really is now "on the worker"
+    BX_STUB_ENTER_WORKER_CTX();
     fn(arg);
+    BX_STUB_LEAVE_WORKER_CTX();
     s_stub_on_flash_worker = prev_on_worker;
     s_stub_bx_busy = false;
     return ESP_OK;
@@ -112,7 +132,9 @@ esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), voi
     s_stub_bx_busy = true;
     bool prev_on_worker = s_stub_on_flash_worker;
     s_stub_on_flash_worker = true;
+    BX_STUB_ENTER_WORKER_CTX();
     fn(arg);
+    BX_STUB_LEAVE_WORKER_CTX();
     s_stub_on_flash_worker = prev_on_worker;
     s_stub_bx_busy = false;
     return ESP_OK;

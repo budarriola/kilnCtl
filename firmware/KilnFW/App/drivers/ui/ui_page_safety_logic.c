@@ -7,7 +7,18 @@
 ui_safety_view_t ui_safety_view_derive(bool diag_ever_received, uint8_t diag_state, uint32_t diag_age_ms)
 {
     ui_safety_view_t v = { .tripped_live = false, .diag_unknown = true };
-    if (!diag_ever_received || diag_age_ms >= SAFETY_LINK_STALE_MS) {
+    if (!diag_ever_received) {
+        return v;
+    }
+    /* EL-02: a cached TRIPPED is shown as tripped at any age. The relay authority keeps heat blocked on it at any
+     * age, so the display must not grey it out as "not tripped" because STATUS went quiet. The clear itself is
+     * still refused by safety_link_send_clear_trip() on a DIAG older than SAFETY_LINK_DIAG_FRESH_MS. */
+    if (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+        v.diag_unknown = false;
+        v.tripped_live = true;
+        return v;
+    }
+    if (diag_age_ms >= SAFETY_LINK_STALE_MS) {
         return v;
     }
     v.diag_unknown = false;

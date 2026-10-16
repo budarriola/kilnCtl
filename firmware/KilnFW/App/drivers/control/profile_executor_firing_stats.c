@@ -23,6 +23,7 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
 #include "nvs_key_check.h"
+#include "flash_hop.h" /* PSRAM-stack callers hop the write onto bx_flash_worker */
 #include "zones_config_accessors.h" /* zone_is_on_off() -- on/off zones have no target_c and no
                                       * meaningful IAE; skip them here, see ON_OFF_ZONE.md
                                       * sec 1 "Firing stats / IAE" row */
@@ -764,7 +765,7 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
-void firing_stats_persist(const profile_firing_run_record_t *rec)
+static void firing_stats_persist_impl(const profile_firing_run_record_t *rec)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PE_TAG, "firing_stats_persist: REFUSING -- calling task's stack is in external "
@@ -854,6 +855,31 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     free(blob);
 }
 
+/* PSRAM-stack hop (owner decision 2026-10-16). The executor tick/halt paths
+ * that end a run are on PSRAM stacks; the strict guard in the impl above would
+ * refuse there and this run's history would be silently lost. flash_hop_run()
+ * runs the impl inline on a safe stack / on the worker itself, else on
+ * bx_flash_worker, blocking until it returns (halt still completes the save
+ * before it returns). The guard in the impl is unchanged and passes on the
+ * worker. If the hop itself cannot be made the history is lost, loudly, and
+ * the shadow module's open firing state is abandoned exactly as the guard's
+ * refusal branch does. */
+static void firing_stats_persist_job(void *arg)
+{
+    firing_stats_persist_impl((const profile_firing_run_record_t *)arg);
+}
+
+void firing_stats_persist(const profile_firing_run_record_t *rec)
+{
+    esp_err_t hop = flash_hop_run(firing_stats_persist_job, (void *)rec);
+    if (hop != ESP_OK) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): could not hand the write to the flash worker (%s) -- "
+                         "this run's history was not saved",
+                 (unsigned)rec->profile_id, esp_err_to_name(hop));
+        firing_shadow_abandon_firing();
+    }
+}
+
 /* docs/PROFILE_SLOTS_100.md section 7 task 10: erases this id's
  * firing-history blob ("fs_<id>", profiles_nvs/fire_stats) plus the
  * cfg-filesystem mirror and its rev key (firing_stats_cfg_fs_delete()) --
@@ -872,7 +898,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
  * already guards before reaching here, but a future caller on a
  * PSRAM-stacked task must not be able to bypass this by skipping that
  * caller's own check. */
-esp_err_t firing_stats_erase(uint8_t profile_id)
+static esp_err_t firing_stats_erase_impl(uint8_t profile_id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PE_TAG, "firing_stats_erase: REFUSING -- calling task's stack is in external "
@@ -926,6 +952,27 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
     // "last-run-started RAM cache" section.
     firing_stats_cache_store(profile_id, 0);
     return ESP_OK;
+}
+
+typedef struct {
+    uint8_t profile_id;
+    esp_err_t err;
+} firing_stats_erase_ctx_t;
+
+static void firing_stats_erase_job(void *arg)
+{
+    firing_stats_erase_ctx_t *c = (firing_stats_erase_ctx_t *)arg;
+    c->err = firing_stats_erase_impl(c->profile_id);
+}
+
+/* Same PSRAM-stack hop as firing_stats_persist() above; the caller needs the
+ * result (a slot delete must not report success past a failed erase), so the
+ * impl's error is returned, or the hop's own error if the write never ran. */
+esp_err_t firing_stats_erase(uint8_t profile_id)
+{
+    firing_stats_erase_ctx_t ctx = { .profile_id = profile_id, .err = ESP_FAIL };
+    esp_err_t hop = flash_hop_run(firing_stats_erase_job, &ctx);
+    return hop != ESP_OK ? hop : ctx.err;
 }
 
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from

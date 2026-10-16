@@ -116,6 +116,10 @@ void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t
 /* Copies `raw` to "kiln_configs.json.bad" unless an identical copy exists; true when a copy of these bytes exists. */
 bool kiln_cfg_store_cfg_fs_preserve_bad(const void *raw, size_t len);
 
+/* PS-02: true when the latest .bad preserve attempt (load_raw_ex with preserve, or preserve_bad) failed. Reset at
+ * the start of each load_raw_ex. */
+bool kiln_cfg_store_cfg_fs_last_preserve_failed(void);
+
 /* persmed MED-B: before a deliberate discard, keep whatever the kiln_configs file holds as ".bad". True when the
  * file is absent / cfg unmounted (nothing to lose) or a copy was made; false when it exists but cannot be kept. */
 bool kiln_cfg_store_cfg_fs_preserve_existing_file(void);

@@ -64,6 +64,7 @@ $persistDir = "firmware/KilnFW/App/drivers/persist"
 $extraFiles = @(
     "firmware/KilnFW/App/drivers/http/backup_import.c",
     "firmware/KilnFW/App/drivers/http/diagnostics_http.c",
+    "firmware/KilnFW/App/drivers/control/adaptive_tune.c",
     "firmware/KilnFW/App/drivers/http/profiles_http.c",
     "firmware/KilnFW/App/drivers/http/zones_http_post.c",
     "firmware/KilnFW/App/drivers/http/zone_aux_convert_http.c",

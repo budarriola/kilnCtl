@@ -73,6 +73,7 @@
                              section 5 item 9 -- see adaptive_tune_internal.h's
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
                              (re-derivable) treatment this item gets. */
+#include "persist_scratch.h"
 #include "profile_executor.h"
 
 #include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION.md sec 3
@@ -634,6 +635,20 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     if (!rec) {
         return;
     }
+    // The per-zone plan arrays are heap (PSRAM scratch), not locals: they cost the executor task
+    // ~400 B of stack (check_executor_task_stack_budget.py ceiling).
+    typedef struct {
+        adaptive_tune_zone_plan_t zone[MAX31856_CHANNEL_COUNT];
+        adaptive_tune_coupled_plan_t coupled[MAX31856_CHANNEL_COUNT];
+    } run_end_plans_t;
+    run_end_plans_t *plans = (run_end_plans_t *)persist_scratch_alloc(sizeof(*plans));
+    if (!plans) {
+        ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_run_end: no memory for the run-end plans -- run not used as training data");
+        return;
+    }
+    memset(plans, 0, sizeof(*plans));
+    adaptive_tune_zone_plan_t *zone_plans;
+    adaptive_tune_coupled_plan_t *coupled_plans;
     adaptive_tune_ensure_lock();
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     // P1: tracks whether ANY zone's ki_baseline_valid flipped false -> true
@@ -649,8 +664,8 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     bool zone_planned[MAX31856_CHANNEL_COUNT] = {false};
     bool baseline_was_valid_a[MAX31856_CHANNEL_COUNT] = {false};
     float baseline_before_a[MAX31856_CHANNEL_COUNT] = {0};
-    adaptive_tune_zone_plan_t zone_plans[MAX31856_CHANNEL_COUNT];
-    adaptive_tune_coupled_plan_t coupled_plans[MAX31856_CHANNEL_COUNT];
+    zone_plans = plans->zone;
+    coupled_plans = plans->coupled;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
         const profile_firing_zone_record_t *zr = &rec->zones[zi];
@@ -869,6 +884,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
                      esp_err_to_name(err), esp_err_to_name(job.result));
         }
     }
+    free(plans);
 }
 
 // ---------------------------------------------------------------------

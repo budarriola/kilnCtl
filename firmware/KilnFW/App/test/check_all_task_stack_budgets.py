@@ -914,9 +914,8 @@ TASKS = [
          historical_note="2026-09-04 panic: s_lvgl_task_stack (this task's own 8192 B stack) sits close "
                           "behind thermo_owner.c's s_slots[] in .bss; a reentrant lv_obj_invalidate()-in-"
                           "flush-callback path (pre-51e1ef5) could run this stack deep enough to corrupt it.",
-         stack=lambda: extract_local_macro("drivers/ui/lvgl_port.c",
-             r'static StackType_t s_lvgl_task_stack\[(\d+)\s*/\s*sizeof\(StackType_t\)\]',
-             r'xTaskCreateStaticPinnedToCore\(\s*lvgl_port_task,\s*"lvgl",\s*sizeof\(s_lvgl_task_stack\)'),
+         stack=lambda: extract_int_literal("drivers/ui/lvgl_port.c",
+             r'xTaskCreatePinnedToCoreWithCaps\(\s*lvgl_port_task,\s*"lvgl",\s*(\d+)'),
          # lvgl_port_task's own body is thin -- practically all of its real
          # depth lives behind lv_timer_handler()'s internal function-pointer
          # dispatch (stack_budget_lib.has_unresolved_dispatch() confirms this
@@ -1067,7 +1066,10 @@ CEILING_BYTES = {
     # (set_reason()/latch_boot_fault()) and returns before any state-
     # mutating step if the allocation fails, so a failed allocation can
     # never leave a partial swap.
-    "kiln_cfg_swap": 5520,
+    # 2026-10-16 psramhop: save_pending hops via flash_hop_run (the walk counts the
+    # inline path: save_pending + save_pending_job frames), 5520 -> 5568 B measured.
+    # The real save runs on bx_flash_worker, not this stack; 2324 B honest free of 8192 B.
+    "kiln_cfg_swap": 5568,
     "autotune_engine": 2944,
     # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
     # regression tripwire -- NOT a measured worst case. The task's deep path
@@ -1296,7 +1298,12 @@ CEILING_BYTES = {
     # walk's own measured total, not headroom-padded: 1184 B of the declared
     # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
     # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
-    "wifi_prov_owner": 3056,  # 2026-10-15 re-measured
+    # 2026-10-16: 3056 -> 3104 B (+48 B), measured on dev a3d5965b5. No large local
+    # grew: the extra depth is the owner_task -> do_rescan_tick -> ap_teardown_should_defer
+    # -> http_auth_any_ap_session_active -> resolve_timeout_s -> web_auth_store_load_policy
+    # chain (read-only AP session query, c27c415a1; web auth store lock, 4dabdd28b), all
+    # 32-64 B frames. Declared stack is 4096 B in PSRAM (0 B DRAM): 692 B honest free.
+    "wifi_prov_owner": 3104,
     # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
     # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
     # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.

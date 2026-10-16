@@ -22,6 +22,9 @@
 #include "crash_report.h"
 #include "estop_verification.h"
 #include "danger_mode.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- HR-01 mode gate */
+#include "system_mode_gate.h"
+#include "system_mode_gate_http.h"
 #include "dashboard_http.h"
 #include "aux_outputs_cfg.h"
 #include "ct_verify_store.h"
@@ -1890,6 +1893,17 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
     if (req->content_len <= 0 || req->content_len > CFGFS_FILE_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
+    }
+    /* HR-01: a restore write of the zones/kiln-scope files mid-run would stage a zone config change
+     * the next boot adopts; same 409 system_mode_gate as every zone/relay write. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
     }
     if (!cfg_fs_is_available()) {
         /* No HTTPD_409_CONFLICT in this esp_http_server's httpd_err_code_t --

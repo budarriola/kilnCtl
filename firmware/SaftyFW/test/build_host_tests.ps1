@@ -217,6 +217,8 @@ try {
         (Join-Path $testDir "test_link_diag_flags.c"),
         (Join-Path $srcDir "current_presence_policy.c"),
         (Join-Path $testDir "test_current_presence_policy.c"),
+        (Join-Path $srcDir "ct_blind_policy.c"),
+        (Join-Path $testDir "test_ct_blind_policy.c"),
         (Join-Path $srcDir "discrete_pin_policy.c"),
         (Join-Path $testDir "test_discrete_pin_policy.c"),
         (Join-Path $srcDir "commissioning_gate.c"),
@@ -487,6 +489,7 @@ try {
     New-Item -ItemType Directory -Force -Path $scObjDir | Out-Null
     $scSources = @(
         (Join-Path $testDir "test_safety_core_host.c"),
+        (Join-Path $srcDir "ct_blind_policy.c"),
         (Join-Path $srcDir "tasks\safety_core.c"),
         (Join-Path $srcDir "safety_guards.c"),
         (Join-Path $srcDir "config_store.c"),

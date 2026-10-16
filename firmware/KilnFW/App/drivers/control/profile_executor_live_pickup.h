@@ -153,6 +153,12 @@ uint8_t profile_live_pickup_io_seg_rederive_count(uint8_t old_segment_count, uin
  * what has already elapsed both floor at 0. */
 float profile_live_pickup_rederive_remaining_s(uint32_t old_dwell_min, float old_remaining_s, uint32_t new_dwell_min);
 
+/* KNOWN_ISSUES CL-01: true when a live edit swaps in a different target_c for
+ * the segment that is currently dwelling. The executor must then clear
+ * `dwelling` so the segment ramps to the new target at its own rate instead
+ * of stepping the setpoint. Pure; no I/O. */
+bool profile_live_pickup_dwell_target_changed(bool dwelling, float old_target_c, float new_target_c);
+
 #ifdef __cplusplus
 }
 #endif

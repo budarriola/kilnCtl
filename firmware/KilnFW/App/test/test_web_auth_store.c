@@ -472,6 +472,65 @@ static void test_policy_absent_is_off(void)
                "effective_enabled(ABSENT) must collapse to false regardless of stored_enabled");
 }
 
+// --- AU-02: ever-enabled marker fails closed when the policy record is lost ---
+static void drop_policy_key_only(void)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+    (void)hal_kv_erase_key(&h, "auth_policy");
+    (void)hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static void test_au02_marker(void)
+{
+    web_auth_policy_t pol;
+    web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = 600, .lcd_timeout_s = 600};
+    web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false, .web_timeout_s = 600, .lcd_timeout_s = 600};
+
+    TEST_SECTION("AU-02 fresh board: no record, no marker stays ABSENT (open)");
+    reset_all();
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "fresh board has no marker");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "fresh board loads ABSENT");
+
+    TEST_SECTION("AU-02 enabling auth sets the marker");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_policy(&on) == HAL_OK, "enable");
+    TEST_CHECK(web_auth_store_ever_enabled() == true, "marker set after enable");
+
+    TEST_SECTION("AU-02 saving an all-off policy on a fresh board does not set the marker");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_policy(&off) == HAL_OK, "save off");
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "no marker for an off policy");
+
+    TEST_SECTION("AU-02 policy key lost with marker set reads UNREADABLE (fail closed)");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_policy(&on) == HAL_OK, "enable");
+    drop_policy_key_only();
+    web_auth_load_status_t st = web_auth_store_load_policy(&pol);
+    TEST_CHECK(st == WEB_AUTH_LOAD_UNREADABLE, "absent record + marker must be UNREADABLE");
+    TEST_CHECK(web_auth_policy_effective_enabled(st, pol.web_enabled) == true, "effective_enabled must be true");
+
+    TEST_SECTION("AU-02 an admin can recover: set_policy over UNREADABLE restores a readable record");
+    TEST_CHECK(web_auth_store_set_policy(&on) == HAL_OK, "re-save policy");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK, "policy loads OK again");
+    TEST_CHECK(pol.web_enabled == true, "recovered policy is enabled");
+
+    TEST_SECTION("AU-02 a disabled policy after enabling keeps the marker, loss is still closed");
+    TEST_CHECK(web_auth_store_set_policy(&off) == HAL_OK, "disable");
+    TEST_CHECK(web_auth_store_ever_enabled() == true, "marker persists after disable");
+    drop_policy_key_only();
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE, "still fail closed");
+
+    TEST_SECTION("AU-02 clear_policy_and_marker returns to the fresh open state");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker() == true, "clear");
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "marker gone");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "policy ABSENT after clear");
+    TEST_CHECK(web_auth_store_set_policy(&on) == HAL_OK, "enable");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker() == true, "clear with policy present");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "ABSENT, not UNREADABLE");
+}
+
 static void test_policy_set_and_load(void)
 {
     TEST_SECTION("auth_policy set/load round trip");
@@ -1059,6 +1118,7 @@ int main(void)
     test_verify_password_timing_oracle_closed();
     test_set_verify_pin();
     test_set_password_stamps_the_web_iteration_count();
+    test_au02_marker();
     test_policy_absent_is_off();
     test_policy_set_and_load();
     test_upgrade_path_unreadable_fails_closed();
