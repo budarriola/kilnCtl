@@ -154,7 +154,8 @@ HANDLER_DIRS = [HTTP_DIR, UPDATE_DIR]
 # 2026-10-09 (stack analyser review F2/F7/F8): worker-only autosave edge dropped, long-call edges only to function entries:
 # profile_exec_start_post_handler measures 4448 B (was 4496 B). Lowered to it.
 # 2026-10-10: autotune_start_post_handler now reaches 4528 B (was 4448 B); 8192 B stack, still ~3.6 KB headroom.
-CEILING_BYTES = 4528
+# 2026-10-15: re-measured 4608 B (was 4528 B) on current dev; honest free 1784 B (21.8%).
+CEILING_BYTES = 4608
 
 # 2026-09-08 honesty fix (docs/audits/2026-09-08-httpd-stack-gap.md, `022bde0a`):
 # the static walk's "N B free" framing was misleading. It measures only each

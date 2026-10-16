@@ -231,14 +231,20 @@ class HeapDramFloorTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
 
     def test_boundary_at_floor_passes(self):
-        """8704 is firmware's own KILN_DRAM_LARGEST_ALARM_BYTES
+        """7168 is firmware's own KILN_DRAM_LARGEST_ALARM_BYTES
         (dram_margin.h) -- the floor triggers strictly below it, not at it.
         The measured 9216 B baseline still sits comfortably above it."""
-        r = J.judge_heap_dram_floor(8704, 8704, False)
+        r = J.judge_heap_dram_floor(7168, 7168, False)
         self.assertEqual(r.verdict, Verdict.PASS)
 
+    def test_boundary_one_above_floor_passes(self):
+        self.assertEqual(J.judge_heap_dram_floor(7169, 7169, False).verdict, Verdict.PASS)
+
+    def test_fetch_dip_7680_passes(self):
+        self.assertEqual(J.judge_heap_dram_floor(7680, 7680, False).verdict, Verdict.PASS)
+
     def test_boundary_one_below_floor_fails(self):
-        r = J.judge_heap_dram_floor(8703, 8703, False)
+        r = J.judge_heap_dram_floor(7167, 7167, False)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 

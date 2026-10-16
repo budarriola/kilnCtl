@@ -487,6 +487,10 @@ bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count
  * index). Lets a restore compute the ceiling a freshly enabled slot would take on. */
 float zones_config_peek_slot_max_temp_c(uint8_t zone_index);
 
+/* max_ramp_c_per_hr stored in zone slot zone_index regardless of thermo_count (0 if out of range).
+ * Lets a restore judge profile ramps against the ceiling a freshly enabled slot would take on. */
+float zones_config_peek_slot_max_ramp_c_per_hr(uint8_t zone_index);
+
 /* TODO.md 6A.5 load-staggering: board-wide cap on relays energized at once
  * (0 = unlimited, the default). Global, not per-zone -- enforced by
  * profile_executor.c against every active zone's commanded relay state in

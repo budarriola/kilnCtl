@@ -50,6 +50,7 @@
 // (extern-declared in the stub headers themselves; defined once here.)
 wifi_mode_t g_stub_wifi_mode = WIFI_MODE_NULL;
 int g_stub_wifi_set_mode_calls = 0;
+esp_err_t g_stub_wifi_set_mode_result = ESP_OK;
 // esp_wifi_set_storage()/esp_wifi_restore() counters (added 2026-09-21,
 // docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md) -- wifi_prov.c
 // now calls esp_wifi_set_storage(RAM) once during wifi_prov_start();
@@ -939,6 +940,7 @@ static void test_wifi_prov_start_sets_ram_storage(void)
 
     reset_state();
 
+    g_stub_task_create_result = pdPASS; /* owner task is now a WithCaps create (PSRAM stack) */
     esp_err_t err = wifi_prov_start();
 
     TEST_CHECK(err == ESP_OK, "wifi_prov_start() succeeds against the host stubs");
@@ -1234,6 +1236,83 @@ static void test_ap_fallback_tick_raises_ap_after_timeout(void)
     TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_APSTA, "radio mode is now APSTA -- home STA config is preserved");
 }
 
+// AUDIT_WIFI LOW-3: a failed set_mode(APSTA) must re-arm the one-shot timer.
+static void test_ap_fallback_tick_rearms_on_set_mode_failure(void)
+{
+    TEST_SECTION("do_ap_fallback_tick -- esp_wifi_set_mode(APSTA) fails: the fallback timer is re-armed "
+                 "(AUDIT_WIFI LOW-3)");
+    reset_state();
+    static int dummy_timer;
+    s_wifi.ap_fallback_timer = (esp_timer_handle_t)&dummy_timer;
+    s_wifi.state = WIFI_PROV_STATE_CONNECTING;
+    g_stub_wifi_mode = WIFI_MODE_STA;
+    g_stub_ap_info_result = ESP_FAIL;
+    g_stub_wifi_set_mode_result = ESP_FAIL;
+    s_stub_timer_start_once_calls = 0;
+    do_ap_fallback_tick();
+    TEST_CHECK(s_stub_timer_start_once_calls == 1, "failure re-arms the fallback timer");
+    TEST_CHECK(!s_wifi.ap_fallback_active, "AP not marked up after a failed bring-up");
+    g_stub_wifi_set_mode_result = ESP_OK;
+    s_stub_timer_start_once_calls = 0;
+    do_ap_fallback_tick();
+    TEST_CHECK(s_stub_timer_start_once_calls == 0 && s_wifi.ap_fallback_active, "success does not re-arm");
+    g_stub_ap_info_result = ESP_OK;
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
+// AUDIT_WIFI LOW-2: losing the lease must reach the disconnect handler.
+static void test_lost_ip_event_posts_disconnect_handling(void)
+{
+    TEST_SECTION("on_ip_event -- STA_LOST_IP posts the disconnect command (AUDIT_WIFI LOW-2)");
+    reset_state();
+    g_stub_queue_send_calls = 0;
+    on_ip_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
+    TEST_CHECK(g_stub_queue_send_calls == 1 && g_stub_last_queue_item[0] == (unsigned char)CMD_EV_STA_DISCONNECTED,
+               "LOST_IP posts CMD_EV_STA_DISCONNECTED");
+    g_stub_queue_send_calls = 0;
+    on_ip_event(NULL, IP_EVENT, 99, NULL);
+    TEST_CHECK(g_stub_queue_send_calls == 0, "unrelated IP event posts nothing");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
+// AUDIT_WIFI LOW-1: rescan timer creation is retried, not log-only.
+static void test_rescan_timer_ensure(void)
+{
+    TEST_SECTION("rescan_timer_ensure -- creates once, idempotent (AUDIT_WIFI LOW-1)");
+    reset_state();
+    s_wifi.rescan_timer = NULL;
+    TEST_CHECK(rescan_timer_ensure() && s_wifi.rescan_timer != NULL, "creates the timer when absent");
+    esp_timer_handle_t h = s_wifi.rescan_timer;
+    TEST_CHECK(rescan_timer_ensure() && s_wifi.rescan_timer == h, "second call is a no-op");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
+// AUDIT_WIFI LOW-6: missed disconnect noticed even while AP teardown is deferred.
+static void test_rescan_missed_disconnect_with_deferred_teardown(void)
+{
+    TEST_SECTION("do_rescan_tick -- missed disconnect while the AP teardown is deferred (AUDIT_WIFI LOW-6)");
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.saved_nets.count = 1;
+    s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+    s_wifi.ap_pending_teardown = true;
+    g_stub_web_auth_enabled = true;
+    g_stub_any_ap_session_active = true; /* teardown stays deferred */
+    g_stub_wifi_connect_calls = 0;
+    g_stub_ap_info_result = ESP_OK;
+    do_rescan_tick(); /* clear debounce */
+    g_stub_ap_info_result = ESP_FAIL;
+    do_rescan_tick();
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "first unassociated tick only debounced");
+    do_rescan_tick();
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_RECONNECTING, "second tick runs disconnect handling despite deferral");
+    TEST_CHECK(!s_wifi.ap_pending_teardown, "pending teardown cleared by the disconnect");
+    g_stub_ap_info_result = ESP_OK;
+    g_stub_web_auth_enabled = false;
+    g_stub_any_ap_session_active = false;
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
 static void test_got_ip_defers_ap_teardown_while_ap_session_active(void)
 {
     TEST_SECTION("do_ev_got_ip -- home Wi-Fi back, web auth ON and an AP-origin session IS active: "
@@ -1459,6 +1538,40 @@ static void test_disconnect_while_fallback_ap_up_waits_for_rescan(void)
     do_rescan_tick();
     TEST_CHECK(g_stub_wifi_connect_calls == 2, "the 30 s rescan tick is what retries the join");
     TEST_CHECK(s_wifi.ap_fallback_active, "still in fallback until a join lands");
+    memset(&s_wifi, 0, sizeof(s_wifi));
+}
+
+static void test_rescan_tick_recovers_from_missed_disconnect_while_connected(void)
+{
+    TEST_SECTION("do_rescan_tick -- state CONNECTED but the driver reports not associated (the one "
+                 "STA_DISCONNECTED event was dropped): debounced, then the disconnect path runs "
+                 "(AUDIT_WIFI MED-1)");
+
+    reset_state();
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    s_wifi.saved_nets.count = 1;
+    s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+    g_stub_wifi_connect_calls = 0;
+
+    g_stub_ap_info_result = ESP_OK; // associated: clears any debounce left by an earlier test
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 0, "associated: no reconnect");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "associated: state untouched");
+
+    g_stub_ap_info_result = ESP_FAIL;
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 0, "first unassociated tick is only debounced");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_CONNECTED, "first unassociated tick: state untouched");
+
+    g_stub_ap_info_result = ESP_OK; // blip healed before the second tick
+    do_rescan_tick();
+    g_stub_ap_info_result = ESP_FAIL;
+    do_rescan_tick();
+    TEST_CHECK(g_stub_wifi_connect_calls == 0, "debounce restarts after an associated tick");
+
+    do_rescan_tick();
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_RECONNECTING, "second consecutive tick: state leaves CONNECTED");
+    TEST_CHECK(g_stub_wifi_connect_calls == 1, "second consecutive tick: esp_wifi_connect() issued");
     memset(&s_wifi, 0, sizeof(s_wifi));
 }
 
@@ -2341,6 +2454,11 @@ void run_test_wifi_prov(void)
     test_rescan_tick_retries_deferred_teardown_until_session_ends();
     test_ap_fallback_tick_leaves_running_ap_alone();
     test_disconnect_while_fallback_ap_up_waits_for_rescan();
+    test_rescan_tick_recovers_from_missed_disconnect_while_connected();
+    test_ap_fallback_tick_rearms_on_set_mode_failure();
+    test_lost_ip_event_posts_disconnect_handling();
+    test_rescan_timer_ensure();
+    test_rescan_missed_disconnect_with_deferred_teardown();
     test_reconcile_sta_state_drops_ap_when_link_regained();
     test_reconcile_sta_state_defers_ap_drop_while_session_active();
     test_reconcile_sta_state_no_ap_action_when_state_already_agreed();

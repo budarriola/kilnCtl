@@ -27,10 +27,20 @@ static inline esp_err_t esp_timer_create(const esp_timer_create_args_t *args, es
     return ESP_OK;
 }
 
+/* Per-TU counter, AUDIT_WIFI LOW-3 test: how many times a one-shot was armed. */
+static int s_stub_timer_start_once_calls = 0;
+
 static inline esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us)
 {
     (void)timer;
     (void)timeout_us;
+    s_stub_timer_start_once_calls++;
+    return ESP_OK;
+}
+
+static inline esp_err_t esp_timer_delete(esp_timer_handle_t timer)
+{
+    (void)timer;
     return ESP_OK;
 }
 

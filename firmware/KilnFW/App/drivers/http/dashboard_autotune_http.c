@@ -3,6 +3,7 @@
  * /api/autotune/trace.csv; POST /api/autotune/{start,abort,accept}. See
  * dashboard_http_internal.h for the shared s_dash/DASH_TAG seam. */
 
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "dashboard_http_internal.h"
 
 #include <math.h>
@@ -543,8 +544,8 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
 
 esp_err_t autotune_trace_csv_get_handler(httpd_req_t *req)
 {
-    autotune_sample_t *batch = malloc(sizeof(autotune_sample_t) * AUTOTUNE_CSV_BATCH);
-    char *line = malloc(64);
+    autotune_sample_t *batch = persist_scratch_alloc(sizeof(autotune_sample_t) * AUTOTUNE_CSV_BATCH);
+    char *line = persist_scratch_alloc(64);
     if (!batch || !line) {
         free(batch);
         free(line);

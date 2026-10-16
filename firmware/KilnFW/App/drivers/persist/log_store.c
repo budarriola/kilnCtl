@@ -21,9 +21,12 @@
  * for the rotation policy this implements. */
 
 typedef struct {
-    bool   has_data;
-    size_t oldest_idx;
-    size_t newest_idx;
+    bool          has_data;
+    size_t        oldest_idx;
+    size_t        newest_idx;
+    unsigned long manifest_seq;  /* sequence of the last manifest copy written or loaded */
+    int           manifest_slot; /* which copy (0 = ".manifest.a", 1 = ".manifest.b") the NEXT save writes */
+    bool          legacy_removed;
 } kind_state_t;
 
 static char         s_base_dir[512];
@@ -45,6 +48,20 @@ static void manifest_path(log_store_kind_t kind, char *out, size_t cap)
     snprintf(out, cap, "%s/%s.manifest", s_base_dir, kind_prefix(kind));
 }
 
+/* AUDIT_LOGSTORE_TIME LOW-4: the manifest used to be one file rewritten with
+ * fopen("w"), which truncates first; SPIFFS has no atomic replace, so a power
+ * cut between the truncate and the write left an empty manifest and orphaned
+ * every old segment. It is now TWO copies (".manifest.a" / ".manifest.b")
+ * written alternately, each carrying a sequence number and a trailing '#'
+ * that only a complete write contains. A torn write can only damage the copy
+ * being written; the other still holds the previous state, and load picks the
+ * valid copy with the higher sequence. The old single-file ".manifest" is
+ * still read as a last-resort fallback so existing stores migrate. */
+static void manifest_copy_path(log_store_kind_t kind, int slot, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s/%s.manifest.%c", s_base_dir, kind_prefix(kind), slot == 0 ? 'a' : 'b');
+}
+
 static long file_size_or_zero(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -60,13 +77,50 @@ static long file_size_or_zero(const char *path)
     return sz < 0 ? 0 : sz;
 }
 
+/* Reads one manifest copy. True only for a COMPLETE copy (all four fields and
+ * the '#' terminator). */
+static bool read_manifest_copy(const char *path, unsigned long *oldest, unsigned long *newest, int *has,
+                               unsigned long *seq)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+    char term = 0;
+    int got = fscanf(f, "%lu %lu %d %lu %c", oldest, newest, has, seq, &term);
+    fclose(f);
+    return got == 5 && term == '#';
+}
+
 static void load_manifest(log_store_kind_t kind)
 {
     kind_state_t *st = &s_state[kind];
     st->has_data = false;
     st->oldest_idx = 0;
     st->newest_idx = 0;
+    st->manifest_seq = 0;
+    st->manifest_slot = 0;
+    st->legacy_removed = false;
 
+    unsigned long o[2] = { 0, 0 }, n[2] = { 0, 0 }, q[2] = { 0, 0 };
+    int h[2] = { 0, 0 };
+    bool ok[2];
+    for (int slot = 0; slot < 2; slot++) {
+        char path[600];
+        manifest_copy_path(kind, slot, path, sizeof(path));
+        ok[slot] = read_manifest_copy(path, &o[slot], &n[slot], &h[slot], &q[slot]);
+    }
+    if (ok[0] || ok[1]) {
+        int best = (ok[0] && ok[1]) ? ((q[1] > q[0]) ? 1 : 0) : (ok[0] ? 0 : 1);
+        st->oldest_idx = (size_t)o[best];
+        st->newest_idx = (size_t)n[best];
+        st->has_data = (h[best] != 0);
+        st->manifest_seq = q[best];
+        st->manifest_slot = 1 - best; /* next save overwrites the OTHER (older or damaged) copy */
+        return;
+    }
+
+    /* Neither new-format copy is usable: fall back to the legacy single file. */
     char path[600];
     manifest_path(kind, path, sizeof(path));
     FILE *f = fopen(path, "r");
@@ -87,17 +141,94 @@ static esp_err_t save_manifest(log_store_kind_t kind)
 {
     kind_state_t *st = &s_state[kind];
     char path[600];
-    manifest_path(kind, path, sizeof(path));
+    manifest_copy_path(kind, st->manifest_slot, path, sizeof(path));
     FILE *f = fopen(path, "w");
     if (!f) {
         return ESP_FAIL;
     }
-    int n = fprintf(f, "%zu %zu %d\n", st->oldest_idx, st->newest_idx, st->has_data ? 1 : 0);
+    unsigned long seq = st->manifest_seq + 1ul;
+    int n = fprintf(f, "%zu %zu %d %lu #\n", st->oldest_idx, st->newest_idx, st->has_data ? 1 : 0, seq);
     int close_rc = fclose(f);
     if (n < 0 || close_rc != 0) {
         return ESP_FAIL;
     }
+    st->manifest_seq = seq;
+    st->manifest_slot = 1 - st->manifest_slot;
+    if (!st->legacy_removed) {
+        /* One-time: the legacy single file is stale now that a complete new copy exists. */
+        char legacy[600];
+        manifest_path(kind, legacy, sizeof(legacy));
+        (void)remove(legacy);
+        st->legacy_removed = true;
+    }
     return ESP_OK;
+}
+
+/* AUDIT_LOGSTORE_TIME LOW-5: true when the newest segment does not end exactly
+ * on a record boundary (power cut after the length prefix or partway through a
+ * payload). Appending after such a tail would misalign every later record. */
+static bool newest_segment_tail_is_torn(log_store_kind_t kind)
+{
+    kind_state_t *st = &s_state[kind];
+    char path[600];
+    segment_path(kind, st->newest_idx, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false; /* no file: nothing to append after */
+    }
+    bool torn = false;
+    for (;;) {
+        uint8_t pre[2];
+        size_t got = fread(pre, 1, sizeof(pre), f);
+        if (got == 0) {
+            break; /* clean EOF on a record boundary */
+        }
+        size_t len = (size_t)pre[0] | ((size_t)pre[1] << 8);
+        if (got != sizeof(pre) || len == 0 || len > LOG_STORE_MAX_RECORD_LEN) {
+            torn = true;
+            break;
+        }
+        uint8_t buf[LOG_STORE_MAX_RECORD_LEN];
+        if (fread(buf, 1, len, f) != len) {
+            torn = true;
+            break;
+        }
+    }
+    fclose(f);
+    return torn;
+}
+
+static void trim_to_cap(log_store_kind_t kind);
+
+/* Mount-time repair of the persisted state against what is really on flash. */
+static void reconcile_after_load(log_store_kind_t kind)
+{
+    kind_state_t *st = &s_state[kind];
+    if (!st->has_data) {
+        return;
+    }
+    bool changed = false;
+    /* A rollover creates segment N+1 before the manifest records it; a power cut in
+     * between leaves the manifest one behind. Adopt segments that exist past newest. */
+    for (;;) {
+        char path[600];
+        segment_path(kind, st->newest_idx + 1, path, sizeof(path));
+        FILE *f = fopen(path, "rb");
+        if (!f) {
+            break;
+        }
+        fclose(f);
+        st->newest_idx++;
+        changed = true;
+    }
+    if (newest_segment_tail_is_torn(kind)) {
+        st->newest_idx++; /* new appends start a fresh segment; the torn one is kept readable */
+        changed = true;
+    }
+    if (changed) {
+        trim_to_cap(kind);
+        (void)save_manifest(kind);
+    }
 }
 
 esp_err_t log_store_init(const char *base_dir)
@@ -120,6 +251,7 @@ esp_err_t log_store_init(const char *base_dir)
 
     for (int k = 0; k < LOG_STORE_KIND_COUNT; k++) {
         load_manifest((log_store_kind_t)k);
+        reconcile_after_load((log_store_kind_t)k);
     }
     return ESP_OK;
 }

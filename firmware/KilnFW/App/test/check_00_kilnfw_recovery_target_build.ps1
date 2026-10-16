@@ -207,6 +207,7 @@ try {
     $sharedFiles = @(
         "update\stage_header.c", "update\stage_header.h",
         "update\update_semver.c", "update\update_semver.h",
+        "update\update_install_record.c", "update\update_install_record.h",
         "http\ota_image_crc.c", "http\ota_image_crc.h",
         "http\http_origin_check.h"
     )

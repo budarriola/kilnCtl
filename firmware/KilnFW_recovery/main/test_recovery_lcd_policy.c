@@ -205,8 +205,46 @@ static void test_lcd_source(const char *path)
         CHECK(chk != NULL && strstr(chk, "s_ready = false") != NULL, "failed draw clears s_ready");
         CHECK(chk != NULL && strstr(chk, "s_draw_failures++") != NULL, "failed draw is counted");
         CHECK(strstr(ds, "RLCD_BG_INVALID") != NULL, "screen has a 'record invalid' state");
+        // QR wiring (REVIEW_RECQRFX LOW-1/LOW-3): one call per phase, in order, and the text
+        // branch driven by the policy's text mode, never by a hand copy of the state flags.
+        const char *pre = strstr(ds, "rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT, draw_qr_area)");
+        const char *post = strstr(ds, "rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT, draw_qr_area)");
+        const char *first_text = strstr(ds, "draw_line(Y_TITLE");
+        const char *last_text = strstr(ds, "\"New password each boot\"");
+        const char *starting = strstr(ds, "\"Network: starting...\"");
+        CHECK(pre != NULL && strstr(pre + 1, "rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT") == NULL,
+              "draw_status hides the QR area exactly once, through the policy");
+        CHECK(post != NULL && strstr(post + 1, "rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT") == NULL,
+              "draw_status paints the QR exactly once, through the policy");
+        CHECK(pre != NULL && first_text != NULL && pre < first_text, "the blank QR area is painted before any text line");
+        CHECK(post != NULL && last_text != NULL && starting != NULL && post > last_text && post > starting,
+              "the QR symbol is painted after every text branch");
+        CHECK(strstr(ds, "bool show_qr = qr_visible_now();") != NULL, "draw_status takes QR visibility from the one helper");
+        CHECK(strstr(ds, "rlcd_text_mode_t mode = text_mode_now();") != NULL, "draw_status takes the text mode from the one helper");
+        CHECK(strstr(ds, "mode == RLCD_TEXT_ERROR") != NULL && strstr(ds, "mode == RLCD_TEXT_NET_FAIL") != NULL &&
+                  strstr(ds, "mode == RLCD_TEXT_NET_SET") != NULL,
+              "the text branches are selected by the text mode");
+        CHECK(strstr(ds, "s_net_set") == NULL && strstr(ds, "s_net_none") == NULL && strstr(ds, "if (s_net_storage_fail") == NULL &&
+                  strstr(ds, "s_err_head[0] ||") == NULL && strstr(ds, "|| s_ap_down") == NULL,
+              "the text branch keeps no hand copy of the QR visibility flags");
         free(ds);
     }
+    char *tm = fn_body(src, "static rlcd_text_mode_t text_mode_now(void)");
+    CHECK(tm != NULL && strstr(tm, "rlcd_text_mode(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0, s_net_storage_fail != 0,") != NULL &&
+              strstr(tm, "s_net_set != 0)") != NULL,
+          "text_mode_now feeds every state flag to the policy");
+    free(tm);
+    char *qv = fn_body(src, "static bool qr_visible_now(void)");
+    CHECK(qv != NULL && strstr(qv, "rlcd_qr_visible(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0, s_net_storage_fail != 0,") != NULL &&
+              strstr(qv, "s_net_set != 0, s_qr_size)") != NULL,
+          "qr_visible_now feeds every state flag and the symbol size to the policy");
+    free(qv);
+    char *raw = fn_body(src, "static esp_err_t draw_line_raw(");
+    CHECK(raw != NULL && strstr(raw, "rlcd_band_width(y, h, qr_visible_now(), PANEL_W, RQR_AREA_PX)") != NULL &&
+              strstr(raw, "set_window(0, y, w - 1, y + h - 1)") != NULL && strstr(raw, "recovery_text_scanline(text, scale, row, fg, bg, w, s_line)") != NULL &&
+              strstr(raw, "send_data(s_line, (size_t)w * 2)") != NULL,
+          "text bands are clipped to the QR's left edge through the policy");
+    free(raw);
     char *burst = fn_body(src, "static bool lcd_bring_up_burst(void)");
     CHECK(burst != NULL, "burst function found");
     if (burst) {
@@ -374,6 +412,13 @@ static void test_http_source(const char *path)
     }
     normalize(src);
     strip_comments(src);
+    char *av = fn_body(src, "static bool app_image_verified(");
+    CHECK(av != NULL, "app_image_verified found");
+    if (av) {
+        CHECK(strstr(av, "portENTER_CRITICAL(&s_verify_mux)") != NULL && strstr(av, "gen == s_verify_gen") != NULL,
+              "the verify cache is lock-guarded and a verify racing an invalidate is not published");
+        free(av);
+    }
     char *st = fn_body(src, "static esp_err_t recovery_status_get(");
     CHECK(st != NULL, "status handler found");
     if (st) {
@@ -384,15 +429,249 @@ static void test_http_source(const char *path)
         CHECK(strstr(st, "\\\"lcd_task_stack_free_bytes\\\"") != NULL, "status reports lcd task stack margin");
         free(st);
     }
+    char *wr = fn_body(src, "static esp_err_t wifi_reset_post(");
+    CHECK(wr != NULL, "wifi_reset handler found");
+    if (wr) {
+        CHECK(strstr(wr, "recovery_pico_busy()") != NULL, "wifi_reset refuses (409) while a Pico relay runs");
+        free(wr);
+    }
+    char *sel = fn_body(src, "int recovery_http_select_app_and_restart(");
+    CHECK(sel != NULL && strstr(sel, "recovery_boot_partition_set_and_verify(") != NULL &&
+              strstr(sel, "restart_soon(") != NULL,
+          "auto-exit selects the app with a read-back and restarts");
+    free(sel);
+    char *vf = fn_body(src, "bool recovery_http_app_verifies(");
+    CHECK(vf != NULL && strstr(vf, "app_verify_invalidate()") != NULL && strstr(vf, "app_image_verified(") != NULL,
+          "auto-exit re-verifies app from flash (the cached verify may predate the apply)");
+    free(vf);
+    CHECK(strstr(src, "update_install_detail_name(") != NULL, "status reports the install detail");
     CHECK(strstr(src, "\\\"boot_guard_record\\\"") != NULL, "status reports boot_guard_record");
     CHECK(strstr(src, "rlcd_classify_boot_guard(") != NULL, "http classifies the boot_guard record");
     free(src);
+}
+
+// recovery_install.c: a failed install is a WARNING (passphrase/QR stay visible), a kiln NVS failure
+// is "request unknown" (not a permanent refusal), and the request is cleared only after set_boot.
+static void test_install_source(const char *path)
+{
+    char *src = slurp(path);
+    CHECK(src != NULL, "recovery_install.c readable");
+    if (!src) {
+        return;
+    }
+    normalize(src);
+    strip_comments(src);
+    CHECK(strstr(src, "recovery_lcd_set_error(") == NULL, "install path never raises the error banner (it hides the passphrase)");
+    char *sf = fn_body(src, "static void show_failure(");
+    CHECK(sf != NULL, "show_failure found");
+    if (sf) {
+        CHECK(strstr(sf, "recovery_lcd_set_warning(") != NULL, "install failure is shown as a warning");
+        free(sf);
+    }
+    char *rr = fn_body(src, "static int op_req_read(");
+    CHECK(rr != NULL, "op_req_read found");
+    if (rr) {
+        CHECK(strstr(rr, "return 1;") != NULL && strstr(rr, "return -1;") == NULL,
+              "kiln NVS failure reads as no request, not a refusal");
+        free(rr);
+    }
+    char *pb = fn_body(src, "static int pre_boot(");
+    CHECK(pb != NULL, "pre_boot found");
+    if (pb) {
+        CHECK(strstr(pb, "update_install_pre_boot(") != NULL && strstr(pb, "update_install_post_boot(") == NULL,
+              "pre_boot does not clear the request or record OK");
+        free(pb);
+    }
+    char *po = fn_body(src, "static int post_boot(");
+    CHECK(po != NULL && strstr(po, "update_install_post_boot(") != NULL, "post_boot records OK");
+    free(po);
+    CHECK(strstr(src, "recovery_apply_esp_start(app, pre_boot, post_boot)") != NULL, "post_boot is wired into the apply");
+
+    // HIGH-1 / MED-1: a failed apply records its specific result, then leaves recovery when that is safe.
+    char *as = fn_body(src, "static int op_apply_start(");
+    CHECK(as != NULL, "op_apply_start found");
+    if (as) {
+        CHECK(strstr(as, "UPD_INST_DETAIL_START_NO_MEM") != NULL && strstr(as, "ESP_ERR_NO_MEM") != NULL,
+              "the heap-floor refusal gets its own detail code");
+        const char *gc = strstr(as, "guard_clear()");
+        const char *inv = strstr(as, "recovery_http_app_verify_invalidate()");
+        const char *st = strstr(as, "recovery_apply_esp_start(");
+        CHECK(gc && st && gc < st, "the boot_guard clear is proven before the first erase of app");
+        CHECK(inv && st && inv < st, "the app verify cache is dropped before the apply starts");
+        free(as);
+    }
+    char *pt = fn_body(src, "static void poll_task(");
+    CHECK(pt != NULL, "poll_task found");
+    if (pt) {
+        const char *rec = strstr(pt, "update_install_record_result_ex(");
+        const char *rcv = strstr(pt, "auto_recover(UPD_INST_REASON_APPLY_FAILED, p.app_modified)");
+        CHECK(rec != NULL && strstr(pt, "(uint8_t)p.result") != NULL && strstr(pt, "p.app_modified") != NULL,
+              "poll_task records the specific apply result and app_modified");
+        CHECK(rcv != NULL && rec != NULL && rcv > rec, "poll_task leaves recovery only after the FAIL result is recorded");
+        free(pt);
+    }
+    char *ib = fn_body(src, "void recovery_install_boot(");
+    CHECK(ib != NULL && strstr(ib, "auto_recover(res.reason") != NULL,
+          "a refused install also leaves recovery when safe");
+    free(ib);
+    char *rt = fn_body(src, "static void recover_task(");
+    CHECK(rt != NULL, "recover_task found");
+    if (rt) {
+        const char *ver = strstr(rt, "recovery_http_app_verifies()");
+        const char *act = strstr(rt, "update_install_after_fail(");
+        const char *bg = strstr(rt, "recovery_http_boot_guard_clear()");
+        const char *rq = strstr(rt, "kv_clear(UPD_INST_KEY_REQ)");
+        const char *sel = strstr(rt, "recovery_http_select_app_and_restart()");
+        const char *rs = strstr(rt, "esp_restart()");
+        CHECK(ver && act && ver < act, "the app is verified before the action is chosen");
+        CHECK(bg && rq && sel && bg < rq && rq < sel, "exit order: boot_guard clear, drop request, select app");
+        CHECK(strstr(rt, "RECOVERY_NVS_FAIL_KILN") != NULL, "no exit or restart while kiln NVS is unavailable");
+        CHECK(strstr(rt, "recovery_pico_busy()") != NULL, "no exit or restart while a Pico relay runs");
+        CHECK(strstr(rt, "UPD_INST_AFTER_EXIT_APP") != NULL && strstr(rt, "UPD_INST_AFTER_RESTART") != NULL,
+              "both actions are handled");
+        CHECK(rs && sel && rs > sel, "the retry restart is in its own branch after the exit branch");
+        CHECK(strstr(rt, "recovery_install_supersede(") == NULL, "auto-exit keeps the FAIL result (no supersede)");
+        free(rt);
+    }
+    free(src);
+}
+
+// recovery_apply_esp.c: the post-boot hook runs only after the boot partition switch succeeded.
+static void test_apply_esp_source(const char *path)
+{
+    char *src = slurp(path);
+    CHECK(src != NULL, "recovery_apply_esp.c readable");
+    if (!src) {
+        return;
+    }
+    normalize(src);
+    strip_comments(src);
+    char *sb = fn_body(src, "static int cb_set_boot(");
+    CHECK(sb != NULL, "cb_set_boot found");
+    if (sb) {
+        const char *set = strstr(sb, "recovery_boot_partition_set_and_verify(");
+        const char *post = strstr(sb, "a->post_boot()");
+        const char *fail = set ? strstr(set, "return -1;") : NULL;
+        CHECK(set && post && post > set, "post_boot runs after the boot partition switch");
+        CHECK(fail && fail < post, "a failed switch returns before post_boot");
+        free(sb);
+    }
+    free(src);
+}
+
+static void test_qr_policy(void)
+{
+    CHECK(rlcd_qr_visible(false, false, false, false, true, 29), "QR visible when AP up and set");
+    CHECK(!rlcd_qr_visible(true, false, false, false, true, 29), "QR hidden under an error banner");
+    CHECK(!rlcd_qr_visible(false, true, false, false, true, 29), "QR hidden while the AP is down");
+    CHECK(!rlcd_qr_visible(false, false, true, false, true, 29), "QR hidden with no network");
+    CHECK(!rlcd_qr_visible(false, false, false, true, true, 29), "QR hidden on storage failure");
+    CHECK(!rlcd_qr_visible(false, false, false, false, false, 29), "QR hidden before the network is set");
+    CHECK(!rlcd_qr_visible(false, false, false, false, true, 0), "QR hidden when nothing was encoded");
+}
+
+static int g_paint_calls, g_paint_last, g_paint_ret;
+
+static int fake_paint(bool show)
+{
+    g_paint_calls++;
+    g_paint_last = show ? 1 : 0;
+    return g_paint_ret;
+}
+
+// Exhaustive: the text mode and the QR visibility over every state, against a
+// reference written out independently of the header.
+static void test_text_mode_and_qr_exhaustive(void)
+{
+    int bad_mode = 0, bad_vis = 0, n = 0;
+    for (int m = 0; m < 32; m++) {
+        bool err = m & 1, down = m & 2, none = m & 4, fail = m & 8, set = m & 16;
+        rlcd_text_mode_t ref;
+        if (err || down) {
+            ref = RLCD_TEXT_ERROR;
+        } else if (none || fail) {
+            ref = RLCD_TEXT_NET_FAIL;
+        } else if (set) {
+            ref = RLCD_TEXT_NET_SET;
+        } else {
+            ref = RLCD_TEXT_STARTING;
+        }
+        for (int qr = 0; qr <= 29; qr += 29) {
+            n++;
+            if (rlcd_text_mode(err, down, none, fail, set) != ref) {
+                bad_mode++;
+            }
+            bool vis_ref = (ref == RLCD_TEXT_NET_SET) && qr > 0;
+            if (rlcd_qr_visible(err, down, none, fail, set, qr) != vis_ref) {
+                bad_vis++;
+            }
+        }
+    }
+    CHECK(n == 64, "every state combination was visited");
+    CHECK(bad_mode == 0, "text mode matches the reference for every state");
+    CHECK(bad_vis == 0, "QR visible iff the passphrase text mode is shown and a symbol exists");
+    CHECK(rlcd_text_mode(false, true, false, false, true) == RLCD_TEXT_ERROR, "AP down overrides a set network");
+    CHECK(rlcd_text_mode(true, false, false, false, true) == RLCD_TEXT_ERROR, "error banner overrides a set network");
+    CHECK(rlcd_text_mode(false, false, true, false, true) == RLCD_TEXT_NET_FAIL, "no network is a failure text");
+    CHECK(rlcd_text_mode(false, false, false, false, false) == RLCD_TEXT_STARTING, "unknown state is starting");
+}
+
+// The show/hide wiring of the QR area (what draw_status() calls twice).
+static void test_qr_paint_phases(void)
+{
+    g_paint_ret = 0;
+    g_paint_calls = 0;
+    CHECK(rlcd_qr_paint(true, RLCD_QR_BEFORE_TEXT, fake_paint) == 0 && g_paint_calls == 0,
+          "visible QR: nothing painted before the text");
+    CHECK(rlcd_qr_paint(true, RLCD_QR_AFTER_TEXT, fake_paint) == 0 && g_paint_calls == 1 && g_paint_last == 1,
+          "visible QR: the symbol is painted after the text");
+    g_paint_calls = 0;
+    CHECK(rlcd_qr_paint(false, RLCD_QR_BEFORE_TEXT, fake_paint) == 0 && g_paint_calls == 1 && g_paint_last == 0,
+          "hidden QR: the blank area is painted before the text (stale symbol cleared)");
+    g_paint_calls = 0;
+    CHECK(rlcd_qr_paint(false, RLCD_QR_AFTER_TEXT, fake_paint) == 0 && g_paint_calls == 0,
+          "hidden QR: the symbol is never painted (AP down / error banner / no network)");
+    // A failed paint is counted, in the phase that ran.
+    g_paint_ret = 7;
+    CHECK(rlcd_qr_paint(true, RLCD_QR_AFTER_TEXT, fake_paint) == 1, "a failed symbol paint counts as one failed line");
+    CHECK(rlcd_qr_paint(false, RLCD_QR_BEFORE_TEXT, fake_paint) == 1, "a failed blank paint counts as one failed line");
+    // Across every state, a symbol (paint(true)) is only ever painted for a visible state.
+    int shown_while_hidden = 0;
+    for (int m = 0; m < 32; m++) {
+        bool vis = rlcd_qr_visible(m & 1, m & 2, m & 4, m & 8, m & 16, 29);
+        g_paint_ret = 0;
+        g_paint_calls = 0;
+        g_paint_last = -1;
+        (void)rlcd_qr_paint(vis, RLCD_QR_BEFORE_TEXT, fake_paint);
+        (void)rlcd_qr_paint(vis, RLCD_QR_AFTER_TEXT, fake_paint);
+        if (g_paint_calls != 1 || g_paint_last != (vis ? 1 : 0)) {
+            shown_while_hidden++;
+        }
+    }
+    CHECK(shown_while_hidden == 0, "exactly one paint per draw, and the symbol only while visible");
+}
+
+static void test_band_width(void)
+{
+    // Rows reaching into the QR square are clipped only while it is visible.
+    CHECK(rlcd_band_width(104, 14, true, 480, 124) == 356, "relay band stops at the QR when it is visible");
+    CHECK(rlcd_band_width(50, 14, true, 480, 124) == 356, "boot-guard band stops at the QR when it is visible");
+    CHECK(rlcd_band_width(104, 14, false, 480, 124) == 480, "relay band is full width while the QR is hidden");
+    CHECK(rlcd_band_width(123, 14, true, 480, 124) == 356, "last QR row still clips a band that starts in it");
+    CHECK(rlcd_band_width(124, 14, true, 480, 124) == 480, "a band wholly below the QR square is full width");
+    CHECK(rlcd_band_width(126, 14, true, 480, 124) == 480, "join row is full width");
+    CHECK(rlcd_band_width(290, 14, true, 480, 124) == 480, "note row is full width");
+    CHECK(rlcd_band_width(4, 21, true, 480, 124) == 356, "title band is clipped");
 }
 
 int main(int argc, char **argv)
 {
     test_schedule();
     test_classify();
+    test_qr_policy();
+    test_text_mode_and_qr_exhaustive();
+    test_qr_paint_phases();
+    test_band_width();
     if (argc < 3) {
         fprintf(stderr, "usage: %s <recovery_lcd.c> <recovery_http.c>\n", argv[0]);
         return 2;
@@ -403,6 +682,11 @@ int main(int argc, char **argv)
     // argv[1], argv[2] and every further argument (all recovery .c files): no
     // log/printf call may carry the passphrase.
     for (int i = 1; i < argc; i++) {
+        if (strstr(argv[i], "recovery_install.c")) {
+            test_install_source(argv[i]);
+        } else if (strstr(argv[i], "recovery_apply_esp.c")) {
+            test_apply_esp_source(argv[i]);
+        }
         char *src = slurp(argv[i]);
         CHECK(src != NULL, "source readable for the passphrase log scan");
         if (src) {

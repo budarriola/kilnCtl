@@ -15,14 +15,9 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 #include "test_common.h"
+#include "esp_heap_caps.h" // stub (persist_scratch.h needs it too)
 
 #define __attribute__(x)
-#define MALLOC_CAP_INTERNAL 1
-#define MALLOC_CAP_8BIT 2
-#define MALLOC_CAP_SPIRAM 4
-static void *heap_caps_malloc(size_t n, int caps) { (void)caps; return malloc(n); }
-static void *heap_caps_calloc(size_t c, size_t n, int caps) { (void)caps; return calloc(c, n); }
-static void heap_caps_free(void *p) { free(p); }
 #include "../drivers/http/dashboard_exec_http.c"
 
 /* ---- fakes ---- */

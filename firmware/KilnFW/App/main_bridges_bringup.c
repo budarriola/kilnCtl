@@ -14,6 +14,7 @@
  * main_bridges_bringup() last. */
 
 #include "esp_err.h"
+#include "boot_guard.h"
 #include "dram_watch.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -243,4 +244,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
 
     dram_watch_start(); /* SK-04: largest-free-block low-water mark, sampled by an esp_timer (dram_watch.h) */
     main_heap_stage("app_main_done");
+    /* MED-1: all of boot has run. ota_confirm (main_network_http.c) waits for this plus
+     * BOOT_CONFIRM_SOAK_MS before marking the image valid / clearing boot_guard. */
+    boot_guard_boot_complete_signal();
 }

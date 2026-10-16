@@ -40,6 +40,13 @@ typedef struct {
     bool link_up;             /* current_a below is only meaningful when true */
     bool ct_installed;        /* safety_cfg ct_installed (unset reads true: default-safe) */
     bool summed;              /* ct_topology: only channel index 2 is fitted */
+    /* Committed zone_ct_channel map (params 0x0320-0x0322), CT audit 2026-10-14
+     * HIGH-1. The Pico back-fills ct_topology to SUMMED for every split map, so
+     * `summed` alone would watch channel 2 only on a board whose CTs are on
+     * channels 0/1. When fitted_map_valid (all three entries set) a channel is
+     * relevant iff some zone selects it; `summed` is then ignored. */
+    bool fitted_map_valid;
+    uint8_t zone_ct_channel[CT_LEAK_CHANNELS];
     bool activity;            /* profile / autotune / CT sweep running: relays chop, skip */
     uint32_t relays_off_ms;   /* kiln_io_relays_off_ms(); UINT32_MAX when any relay is on */
     float current_a[CT_LEAK_CHANNELS];

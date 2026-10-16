@@ -19,13 +19,16 @@ bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, si
     return diff == 0;
 }
 
-static size_t find_lru_slot(const web_auth_table_t *t)
+static size_t find_lru_slot(const web_auth_table_t *t, uint32_t now_ms)
 {
+    // Largest unsigned elapsed time wins (wrap-safe across the 49.7-day tick
+    // wrap; a raw "<" compare would evict a freshly touched post-wrap slot).
     size_t lru = 0;
-    uint32_t oldest = t->slots[0].last_seen_ms;
+    uint32_t oldest_age = (uint32_t)(now_ms - t->slots[0].last_seen_ms);
     for (size_t i = 1; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
-        if (t->slots[i].last_seen_ms < oldest) {
-            oldest = t->slots[i].last_seen_ms;
+        uint32_t age = (uint32_t)(now_ms - t->slots[i].last_seen_ms);
+        if (age > oldest_age) {
+            oldest_age = age;
             lru = i;
         }
     }
@@ -46,7 +49,7 @@ size_t web_auth_table_create_session(web_auth_table_t *t, const uint8_t token_ha
         // Table full -- evict the least-recently-seen slot rather than
         // refusing the new login (WEB_AUTH_PLAN.md section 4: "a stale
         // session can never lock out a real operator").
-        idx = find_lru_slot(t);
+        idx = find_lru_slot(t, now_ms);
     }
 
     web_auth_slot_t *slot = &t->slots[idx];
@@ -116,6 +119,21 @@ bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t ti
     return false;
 }
 
+size_t web_auth_table_reap_expired(web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms)
+{
+    size_t freed = 0;
+    if (timeout_s == WEB_AUTH_TIMEOUT_NEVER_S) {
+        return 0;
+    }
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        if (t->slots[i].in_use && !web_auth_session_is_valid(t->slots[i].last_seen_ms, timeout_s, now_ms)) {
+            memset(&t->slots[i], 0, sizeof(t->slots[i]));
+            freed++;
+        }
+    }
+    return freed;
+}
+
 void web_auth_table_destroy_session(web_auth_table_t *t, size_t idx)
 {
     if (idx >= WEB_AUTH_WEB_SLOT_COUNT) {
@@ -173,9 +191,11 @@ bool web_auth_session_is_valid(uint32_t last_seen_ms, uint32_t timeout_s, uint32
         return true;
     }
     uint32_t timeout_ms = timeout_s * 1000u;
-    uint32_t elapsed_ms = now_ms - last_seen_ms; // unsigned wraparound is fine: now_ms is
-                                                   // always >= last_seen_ms in real use, and
-                                                   // this module never sees the reverse
+    uint32_t elapsed_ms = now_ms - last_seen_ms; // unsigned wraparound is fine for the tick
+                                                   // itself; an expired slot left allocated would
+                                                   // alias back into range after 2^32 ms, so
+                                                   // callers reap expired slots first
+                                                   // (web_auth_table_reap_expired)
     return elapsed_ms <= timeout_ms;
 }
 

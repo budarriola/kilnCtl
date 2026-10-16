@@ -16,8 +16,11 @@
 // assumption every other LVGL-adjacent module in this tree already makes.
 #include "auth_reset_gesture.h"
 
+#include "../http/http_session_iface.h" // http_session_table()
+#include "../http/totp_http_core.h"    // totp_wipe_request_post()
 #include "../persist/web_auth_store.h"
 #include "../persist/totp_config.h"
+#include "web_auth_session.h" // web_auth_table_destroy_all()
 
 static auth_reset_gesture_state_t s_singleton;
 static bool s_singleton_initialized;
@@ -34,10 +37,29 @@ static bool s_singleton_initialized;
 // SHA-1/HMAC, not PSA), so it does not reintroduce the host-stub conflict
 // this file's header comment warns about; it uses hal_kv.h the same way
 // web_auth_store.c already does in this same translation unit.
+// AUDIT_TOTP MED-1: the gesture must evict everyone, same as the web-side
+// clear_credentials (security_backend_web_auth.c): besides the two stores it
+// ends EVERY web session and posts a wipe request that the httpd worker applies
+// (reset tokens + pending enrollment secret, totp_http_core.h) before it next
+// reads them -- that RAM is owned by httpd and unlocked, so it is never touched
+// from this (LVGL) task. totp_config_clear() takes totp_config's own lock, so
+// it cannot interleave with a route's verify/enroll commit. Sessions are ended
+// both before the clear (a held admin session cannot start an enrollment
+// meanwhile) and after it (a login that verified against the old password just
+// before the clear cannot leave a fresh session behind). The wipe request is
+// posted FIRST (REVIEW_FIXERS MED-1): an enroll_confirm waiting on the totp
+// state lock while totp_config_clear() runs gets the lock right after it, and
+// its still_valid guard compares the wipe generation -- so the generation must
+// already differ by then or the commit writes a secret after the reset. It is
+// posted again last so a pending secret begun in between is also wiped.
 static bool auth_reset_gesture_clear_all(void)
 {
+    totp_wipe_request_post();
+    web_auth_table_destroy_all(http_session_table());
     bool web_ok = web_auth_store_clear_for_physical_reset();
     bool totp_ok = totp_config_clear();
+    web_auth_table_destroy_all(http_session_table());
+    totp_wipe_request_post();
     return web_ok && totp_ok;
 }
 

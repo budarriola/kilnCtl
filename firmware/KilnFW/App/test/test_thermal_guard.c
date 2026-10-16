@@ -111,6 +111,57 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
     }
 
+    /* AUDIT_CONTROL_EXECUTOR MED-1: a pause lets the kiln cool while the guard is not ticked; after
+     * thermal_guard_restart_windows() the carried window must not read that cooling as a failure, yet
+     * the guard stays armed and a genuine heating failure after the resume still trips. */
+    {
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 2.0f};
+        for (int variant = 0; variant < 3; variant++) {
+            /* variant 0: no restart (the bug: expect a false trip), 1: restart then healthy rise,
+             * 2: restart then a genuine heating failure. */
+            thermal_guard_state_t s;
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.setpoint_c = 800.0f;
+            in.commanded_duty = 1.0f;
+            in.measurement_c = 300.0f;
+            bool tripped = false;
+            for (int i = 0; i < 25 && !tripped; i++) { /* 250 s of a healthy 6 C/min climb */
+                in.measurement_c += 1.0f;
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            TEST_CHECK(!tripped && s.progress_window_active, "pre-pause: healthy climb, window open");
+            in.measurement_c -= 30.0f; /* the kiln cooled during the pause */
+            if (variant != 0) {
+                thermal_guard_restart_windows(&s);
+                TEST_CHECK(!s.progress_window_active, "restart drops the progress window");
+            }
+            for (int i = 0; i < 60 && !tripped; i++) {
+                if (variant != 2) {
+                    in.measurement_c += 1.0f; /* healthy re-heat from the cooled temperature */
+                }
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            if (variant == 0) {
+                TEST_CHECK(tripped, "control: without a restart the cooled-down window false-trips");
+            } else if (variant == 1) {
+                TEST_CHECK(!tripped, "MED-1: after a restart the post-pause cooling does not false-trip");
+            } else {
+                TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
+                           "MED-1: a genuine heating failure after the restart still trips guard 1");
+            }
+        }
+        /* A latched trip survives a window restart (never a way to clear a fault). */
+        thermal_guard_state_t s;
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.measurement_c = 1400.0f;
+        thermal_guard_cfg_t cfg5 = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 2.0f};
+        TEST_CHECK(thermal_guard_tick(&s, &cfg5, &in), "guard 5 trips");
+        thermal_guard_restart_windows(&s);
+        TEST_CHECK(s.is_tripped && s.reason == THERMAL_GUARD_TRIP_MAX_TEMP, "restart keeps a latched trip");
+    }
+
     /* Guard 1: healthy heating (rising at/above sanity rate) never trips. */
     {
         thermal_guard_state_t s;

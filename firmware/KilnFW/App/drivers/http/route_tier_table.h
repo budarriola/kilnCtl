@@ -373,6 +373,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/update/stage", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/update/settings", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/update/settings", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/install", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/status", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/update/check", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/update/download", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/update/fetch", HTTP_GET, ROUTE_TIER_ADMIN),

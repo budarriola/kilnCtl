@@ -1407,7 +1407,54 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
 void io_segs_force_all_off(bool honor_leave_on)
 {
     for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        s_exec.io_segs[i].resume_pending = false; /* any non-pause stop cancels a segment kept across a pause */
         io_seg_finish(i, honor_leave_on);
+    }
+}
+
+/* AUDIT_CONTROL_EXECUTOR MED-2: the PAUSED-tick sweep. Forces every active segment OFF exactly as
+ * io_segs_force_all_off(false) does, but a non-blocking segment with time left is remembered
+ * (resume_pending, remaining_s kept) so io_segs_resume_pending() can restart it on resume. A blocking
+ * segment is restarted by the segment-stepping block itself. Idempotent: an already-finished segment is
+ * skipped, so repeated PAUSED ticks keep the remembered state. s_exec.lock held. */
+void io_segs_pause_all_off(void)
+{
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (r->active && !r->blocking && r->remaining_s > 0.0f) {
+            float remaining = r->remaining_s;
+            bool want_on = r->wants_on;
+            io_seg_finish(i, false);
+            r->remaining_s = remaining;
+            r->resume_on = want_on;
+            r->resume_pending = true;
+        } else {
+            io_seg_finish(i, false);
+        }
+    }
+}
+
+/* Restarts every non-blocking segment a pause kept (see io_segs_pause_all_off()), with its remaining
+ * time, through the same gated start path a fresh segment uses (authority gate, Pico TRIPPED and stale
+ * DIAG refusals all apply). Called once per RUNNING tick before io_segs_tick(); a no-op unless a pause
+ * left something pending. s_exec.lock held. */
+void io_segs_resume_pending(bool pico_tripped)
+{
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        io_seg_runtime_t saved = s_exec.io_segs[i];
+        if (!saved.resume_pending || saved.active) {
+            continue;
+        }
+        profile_segment_t seg;
+        memset(&seg, 0, sizeof(seg));
+        seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+        seg.io_target = saved.target;
+        seg.io_state = saved.resume_on ? 1 : 0;
+        seg.io_blocking = 0;
+        seg.io_leave_on_at_end = saved.leave_on_at_end ? 1 : 0;
+        io_seg_start_pico(i, &seg, pico_tripped); /* memsets the slot, clearing resume_pending */
+        s_exec.io_segs[i].remaining_s = saved.remaining_s;
+        ESP_LOGI(PE_TAG, "relay/IO segment %u resumed after pause with %.0f s remaining", i + 1, (double)saved.remaining_s);
     }
 }
 

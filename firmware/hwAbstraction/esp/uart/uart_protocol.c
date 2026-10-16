@@ -118,10 +118,10 @@ static size_t frame_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t 
      * one real driver-installed handle for this port (hal_uart_attach's
      * second, non-owning handle is gone).
      *
-     * Partial-send caveat (hal_uart.h): only matters for `o` larger than the
-     * ESP backend's TX ring (4096 B) -- STUFFED_FRAME_MAX here is well under
-     * that, so every send is one chunk and a HAL_TIMEOUT return means nothing
-     * was queued. */
+     * Partial-send caveat (hal_uart.h): only matters for `o` larger than one
+     * ESP backend TX chunk (TX ring 1024 B less 64 B slack = 960 B since
+     * 2026-10-13) -- STUFFED_FRAME_MAX here (528 B) is under that, so every
+     * send is one chunk and a HAL_TIMEOUT return means nothing was queued. */
     hal_status_t hal_result = hal_uart_send_blocking(proto->hal_uart, out, o, timeout_ms);
     if (hal_result != HAL_OK) {
         /* Review fix (2026-09-05): hal_result was only ever logged here --
@@ -461,7 +461,7 @@ static void uart_protocol_rx_task(void *arg)
         }
     }
 
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 esp_err_t uart_protocol_init(uart_protocol_t *proto,

@@ -128,10 +128,12 @@ try {
         httpd_resp_set_status(req, `"500 Internal Server Error`");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
+    (void)recovery_install_supersede(); // a leftover auto-install request must not replay at a later entry
     esp_err_t serr" -Replacement "if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, `"500 Internal Server Error`");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
+    (void)recovery_install_supersede(); // a leftover auto-install request must not replay at a later entry
     esp_err_t serr" -Tag "exitplain"
     # R2-L2: legacy default-partition erase must stay wired and gate the result.
     Test-Mutant -File "recovery_http.c" -Needle "int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);" -Replacement "int legacy_rc = 0;" -Tag "nolegacy"

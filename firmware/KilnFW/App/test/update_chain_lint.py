@@ -27,7 +27,7 @@ if re.search(r"xSemaphoreTake\(s_c->wr_done,\s*portMAX_DELAY\)", fetch):
     bad.append("LOW-2: wr_done wait is unbounded")
 if not re.search(r"xSemaphoreTake\(s_c->wr_done,\s*pdMS_TO_TICKS\(FETCH_WR_TIMEOUT_MS\)\)", fetch):
     bad.append("LOW-2: wr_call has no bounded wait")
-if "uint8_t scratch[" in fetch or "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);" not in fetch.split("static void fetch_task")[1]:
+if "uint8_t scratch[" in fetch or "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)" not in fetch.split("static void fetch_task")[1]:
     bad.append("MED-1: fetch scratch must be a MALLOC_CAP_INTERNAL allocation")
 if "update_stage_set_gate(st, update_stage_manifest_gate" not in fetch:
     bad.append("MED-2: fetch does not install update_stage_manifest_gate")

@@ -24,6 +24,7 @@
 #include "recovery_lcd_policy.h"
 #include "recovery_passphrase.h"
 #include "recovery_text.h"
+#include "recovery_wifi_qr.h"
 
 static const char *TAG = "recovery_lcd";
 
@@ -121,11 +122,20 @@ static bool s_net_set = false;
 static char s_net_name[33];
 static char s_net_pass[RPASS_LEN + 1];
 static char s_net_ip[16];
+// Wi-Fi join QR (recovery_wifi_qr.h): encoded once in recovery_lcd_set_ap into static
+// buffers (no heap), drawn top-right every status redraw, hidden while the AP is down/errored.
+static uint8_t s_qr[RQR_BUF_LEN];
+static uint8_t s_qr_tmp[RQR_BUF_LEN];
+static int s_qr_size = 0; // modules per side, 0 = none (encode failed / no AP)
 static bool s_net_none = false;      // every Wi-Fi bring-up path failed
 static bool s_net_storage_fail = false; // driver not RAM-only: AP refused
 static int s_ap_down = 0;       // SoftAP stopped: do not show its credentials
 static char s_err_head[24];   // generic fatal error (e.g. "HTTP FAILED"), "" = none
 static char s_err_detail[28];
+// Warning line drawn IN ADDITION to the network section (SSID/passphrase stay visible), cleared by the
+// 1 Hz task once s_warn_active() reports false. Never carries a credential.
+static char s_warn[41]; // 40 columns (480 px / 12 px per scale-2 glyph)
+static bool (*s_warn_active)(void);
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 
 // Panel health, reported read-only through GET /api/recovery/status.
@@ -304,20 +314,37 @@ static esp_err_t panel_init(void)
 
 // --- drawing ---------------------------------------------------------------
 
-// Draws one full-width text line whose top edge is `y`. The whole band is
-// repainted (text padded with bg), so a shorter string fully replaces a
-// longer one.
+// The ONE place the status state is turned into the text mode / QR visibility
+// (rlcd_text_mode, rlcd_qr_visible): draw_status() and the band clipping both
+// call these, so the text branch and the QR cannot disagree. No storage.
+static rlcd_text_mode_t text_mode_now(void)
+{
+    return rlcd_text_mode(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0, s_net_storage_fail != 0,
+                          s_net_set != 0);
+}
+
+static bool qr_visible_now(void)
+{
+    return rlcd_qr_visible(s_err_head[0] != 0, s_ap_down != 0, s_net_none != 0, s_net_storage_fail != 0,
+                           s_net_set != 0, s_qr_size);
+}
+
+// Draws one text line whose top edge is `y`. The whole band is repainted (text
+// padded with bg), so a shorter string fully replaces a longer one. Full width,
+// except that a band reaching into a VISIBLE QR's square stops short of it
+// (rlcd_band_width), so the QR never cuts a fault band.
 static esp_err_t draw_line_raw(int y, int scale, uint16_t fg, uint16_t bg, const char *text)
 {
     int h = RECOVERY_FONT_H * scale;
-    esp_err_t err = set_window(0, y, PANEL_W - 1, y + h - 1);
+    int w = rlcd_band_width(y, h, qr_visible_now(), PANEL_W, RQR_AREA_PX);
+    esp_err_t err = set_window(0, y, w - 1, y + h - 1);
     if (err != ESP_OK) {
         return err;
     }
     for (int row = 0; row < RECOVERY_FONT_H; row++) {
-        recovery_text_scanline(text, scale, row, fg, bg, PANEL_W, s_line);
+        recovery_text_scanline(text, scale, row, fg, bg, w, s_line);
         for (int k = 0; k < scale; k++) {
-            err = send_data(s_line, sizeof(s_line));
+            err = send_data(s_line, (size_t)w * 2);
             if (err != ESP_OK) {
                 return err;
             }
@@ -335,6 +362,29 @@ static esp_err_t draw_line(int y, int scale, uint16_t fg, uint16_t bg, const cha
         s_line_errs++;
     }
     return err;
+}
+
+// Paints the RQR_AREA_PX square at the top-right: the QR when `show` and one
+// was encoded, else solid background (so a stale code never outlives its AP).
+// While the QR is visible the text bands in those rows are clipped to
+// x < PANEL_W - RQR_AREA_PX (draw_line_raw), so this paints over no text; while it
+// is hidden it is painted BEFORE the text (rlcd_qr_paint), so full-width fault
+// bands stay whole.
+static esp_err_t draw_qr_area(bool show)
+{
+    int x0 = PANEL_W - RQR_AREA_PX;
+    esp_err_t err = set_window(x0, 0, PANEL_W - 1, RQR_AREA_PX - 1);
+    if (err != ESP_OK) {
+        return err;
+    }
+    for (int y = 0; y < RQR_AREA_PX; y++) {
+        rqr_scanline(s_qr, show ? s_qr_size : 0, y, COL_BG, RGB565(255, 255, 255), COL_BG, s_line);
+        err = send_data(s_line, RQR_AREA_PX * 2);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
 }
 
 static esp_err_t clear_screen(void)
@@ -358,6 +408,11 @@ static void draw_status(void)
     char buf[64];
 
     s_line_errs = 0;
+    // The QR is shown only where the passphrase text is (same state, same decision).
+    bool show_qr = qr_visible_now();
+    rlcd_text_mode_t mode = text_mode_now();
+    // Hidden area first, so the text (full-width fault bands) paints over it.
+    s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT, draw_qr_area);
     (void)draw_line(Y_TITLE, TITLE_SCALE, COL_TITLE, COL_BG, "RECOVERY MODE");
     (void)draw_line(Y_SUB, TEXT_SCALE, COL_DIM, COL_BG, "KilnFW recovery image");
 
@@ -392,7 +447,7 @@ static void draw_status(void)
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_OK, COL_BG, "Heat: OFF");
     }
 
-    if (s_err_head[0] || s_ap_down) {
+    if (mode == RLCD_TEXT_ERROR) {
         // Overrides every network state: never show a passphrase for a server
         // that is not there.
         (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, s_err_head[0] ? s_err_head : "AP DOWN");
@@ -403,7 +458,7 @@ static void draw_status(void)
         (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
-    } else if (s_net_none || s_net_storage_fail) {
+    } else if (mode == RLCD_TEXT_NET_FAIL) {
         // TEXT_SCALE: a NET_SCALE band (21 px from Y_JOIN) would overlap Y_SSID.
         (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG,
                         s_net_storage_fail ? "WIFI STORAGE FAIL" : "NO NETWORK");
@@ -414,7 +469,7 @@ static void draw_status(void)
         (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
-    } else if (s_net_set) {
+    } else if (mode == RLCD_TEXT_NET_SET) {
         (void)draw_line(Y_JOIN, TEXT_SCALE, COL_DIM, COL_BG, "Join Wi-Fi network:");
         // A 32-char SSID needs scale 2 (384 px); shorter ones get scale 3.
         (void)draw_line(Y_SSID, strlen(s_net_name) <= 26 ? NET_SCALE : TEXT_SCALE, COL_TEXT, COL_BG,
@@ -434,6 +489,12 @@ static void draw_status(void)
         (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
+    }
+
+    s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT, draw_qr_area);
+
+    if (s_warn[0]) {
+        (void)draw_line(Y_NOTE, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, s_warn);
     }
 
     if (!rlcd_draw_ok(s_line_errs)) {
@@ -558,6 +619,13 @@ static void lcd_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(LCD_TASK_PERIOD_MS));
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_warn[0] && s_warn_active && !s_warn_active()) {
+            s_warn[0] = 0; // the condition behind the warning is over: stop showing it
+            s_warn_active = NULL;
+            if (s_ready) {
+                draw_status();
+            }
+        }
         if (rlcd_tick_action(s_ready) == RLCD_TICK_WARN_AND_RETRY) {
             ESP_LOGE(TAG, RLCD_NOT_READY_MSG); // never the passphrase itself
             if (lcd_bring_up_burst()) {
@@ -618,6 +686,7 @@ void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *i
     snprintf(s_net_pass, sizeof(s_net_pass), "%s", passphrase ? passphrase : "");
     snprintf(s_net_ip, sizeof(s_net_ip), "%s", ip ? ip : "?");
     s_net_set = true;
+    s_qr_size = rqr_encode(s_net_name, s_net_pass, s_qr, s_qr_tmp); // 0 = text only
     s_net_none = false;
     s_net_storage_fail = false;
     if (s_ready) {
@@ -660,6 +729,20 @@ void recovery_lcd_set_error(const char *headline, const char *detail)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     snprintf(s_err_head, sizeof(s_err_head), "%s", headline && headline[0] ? headline : "ERROR");
     snprintf(s_err_detail, sizeof(s_err_detail), "%s", detail ? detail : "");
+    if (s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_warning(const char *line, bool (*still_active)(void))
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(s_warn, sizeof(s_warn), "%s", line ? line : "");
+    s_warn_active = still_active;
     if (s_ready) {
         draw_status();
     }

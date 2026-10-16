@@ -1128,10 +1128,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         };
         thermal_guard_reset(&z->guard_state);
         /* docs/ON_OFF_ZONE.md sec 5: "Resume starts every on/off device
-         * in its fail-safe state and quasi_dwell = false" -- profile_
-         * executor_run() is the single entry point for both a fresh run and
-         * the warm-start/resume path, so resetting here covers both without
-         * a second call site to keep in sync. */
+         * in its fail-safe state and quasi_dwell = false". This is the fresh-run
+         * reset only: profile_executor_resume() (profile_executor_status.c)
+         * applies the same three resets itself, since resume does not pass
+         * through here. */
         on_off_trigger_state_reset(&z->on_off_trigger_state);
         /* Actuation-layer hold state (plan step 8) mirrors the same
          * fail-safe-shaped reset: never actuated. Both holds are seeded from

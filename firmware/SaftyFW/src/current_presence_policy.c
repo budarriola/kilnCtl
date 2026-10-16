@@ -1,5 +1,6 @@
 // current_presence_policy.c -- see current_presence_policy.h.
 #include "current_presence_policy.h"
+#include <math.h>
 
 bool current_presence_is_flowing(uint32_t counts_avg, uint16_t zero_counts, float i_present_a,
                                    float k_ct_v_per_a, float gain)
@@ -28,4 +29,17 @@ bool current_presence_is_flowing(uint32_t counts_avg, uint16_t zero_counts, floa
     // Not commissioned: fall back to a fixed, sensitive counts-domain floor
     // -- see this file's header comment for the safe-direction reasoning.
     return (uint32_t)delta_counts > CURRENT_PRESENCE_POLICY_FALLBACK_MARGIN_COUNTS;
+}
+
+void current_filter_step(float *state, bool *initialized, float amps, float alpha)
+{
+    if (!isfinite(amps)) {
+        return; // hold
+    }
+    if (!*initialized || !isfinite(*state)) {
+        *state = amps;
+        *initialized = true;
+        return;
+    }
+    *state += alpha * (amps - *state);
 }

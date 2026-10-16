@@ -26,11 +26,13 @@ from .bench_test.runner import RUNNER_LOG_NAME, BenchTestRunner
 
 _OTA_CONFIRM_REFUSAL = ("error: refused -- ota_*/update_*_repo image arguments can flash, roll back "
                          "or reset the safety link; pass confirm=True (or use ota_matrix_run)")
+_RELEASE_CONFIRM_REFUSAL = ("error: refused -- suite 'release' trips the safety latch, heats and stages/installs "
+                            "firmware; pass confirm=True (exactly True)")
 
 
 @_core._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
-                    allow_heat: bool = True, lcd_stop_heat: bool = False,
+                    allow_heat: Optional[bool] = None, lcd_stop_heat: bool = False,
                     lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
                     tag: Optional[str] = None, host: Optional[str] = None,
                     attended: bool = False, allow_flash: bool = False,
@@ -43,6 +45,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                     ota_pico_corrupt_image_path: Optional[str] = None,
                     update_downgrade_repo: Optional[str] = None,
                     update_wrong_repo: Optional[str] = None,
+                    target: str = "bench", ota_install: bool = False,
                     confirm: bool = False) -> str:
     """Run a standardized bench-test suite against this board
     (docs/BENCH_TEST_SYSTEM_PLAN.md). `suite` is one of `smoke`, `static`,
@@ -119,7 +122,14 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     a dry run makes. The report always names the resolved host and how it
     was resolved (`explicit`/`STA IP`/`default`), since the `default`
     fallback is a possibly-stale cached address, not necessarily the board
-    actually on the bench right now."""
+    actually on the bench right now.
+
+    Suite `release` (the unattended release test set, plan section "Release
+    suite"): `target="bench"` (default) or `"kiln"` picks the heat profile and
+    timeouts; `allow_heat` defaults to False for this suite (True for every other),
+    so the heat phase needs an explicit `allow_heat=True`; `ota_install=True` also lets
+    the OTA phase install the staged release (needs `confirm=True`, and the
+    `update_install_staged` tool; absent it that step SKIPs)."""
     from .mcp_server_ota import _ota_resolve_host_with_source  # local import: avoids a circular import with mcp_server_ota.py
 
     resolved_host, host_source = _ota_resolve_host_with_source(host)
@@ -140,6 +150,19 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                        ("update_wrong_repo", update_wrong_repo)):
         if value is not None:
             ctx[key] = value
+    # Suite `release` inputs: `target` picks the heat profile ("bench" or "kiln");
+    # `ota_install=True` lets RL-D01 install the staged image, so it is OTA-gated
+    # like the image paths (only put in ctx when set).
+    if target not in ("bench", "kiln"):
+        return f"error: target must be 'bench' or 'kiln', got {target!r}"
+    ctx["target"] = target
+    if ota_install is True:
+        ctx["ota_install"] = True
+    # INFO-2: heat is opt-in for the release suite, default-on for every other.
+    if allow_heat is None:
+        allow_heat = suite != "release"
+    if suite == "release" and not dry_run and confirm is not True:
+        return _RELEASE_CONFIRM_REFUSAL
     if not dry_run and any(k.startswith(("ota_", "update_")) and k not in ("ota_allow_heat",) for k in ctx):
         if confirm is not True:
             return _OTA_CONFIRM_REFUSAL
@@ -151,7 +174,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
                               allow_heat=allow_heat, lcd_stop_heat=lcd_stop_heat,
-                              lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag)
+                              lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag,
+                              confirm=confirm is True)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
     except bt_board_lock.BoardLockHeld as exc:
@@ -269,7 +293,7 @@ def _runner_log_progress(started: float, suite: str, logs_root: Optional[str] = 
 
 @_core._tool()
 def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = False,
-                      allow_heat: bool = True, lcd_stop_heat: bool = False,
+                      allow_heat: Optional[bool] = None, lcd_stop_heat: bool = False,
                       lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
                       tag: Optional[str] = None, host: Optional[str] = None,
                       attended: bool = False, allow_flash: bool = False,
@@ -282,11 +306,12 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                       ota_pico_corrupt_image_path: Optional[str] = None,
                       update_downgrade_repo: Optional[str] = None,
                       update_wrong_repo: Optional[str] = None,
+                      target: str = "bench", ota_install: bool = False,
                       confirm: bool = False) -> str:
     """Start `bench_test_run` in the background and return a job id at once.
 
     Same arguments, same meaning, same gating as `bench_test_run` (read its
-    docstring): the job runs that very tool function, so the board lock,
+    docstring; `allow_heat=None` means False for suite release, True otherwise): the job runs that very tool function, so the board lock,
     preflight and every opt-in flag (`allow_heat`, `lcd_stop_heat`,
     `lcd_edit_heat`, `ota_allow_heat`, `allow_flash`) apply unchanged, and a
     board-side refusal (`error: refused -- ...`) comes back as the job's FAILED
@@ -299,11 +324,16 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     still going (check logs/bench_test/<run>/runner.log)."""
     # An unconfirmed OTA/update run is refused here, synchronously, before any job exists
     # (same as ota_matrix_start); bench_test_run re-checks inside the job.
-    if not dry_run and confirm is not True and any(
+    # INFO-2: heat is opt-in for the release suite, default-on for every other.
+    if allow_heat is None:
+        allow_heat = suite != "release"
+    if suite == "release" and not dry_run and confirm is not True:
+        return _RELEASE_CONFIRM_REFUSAL
+    if not dry_run and confirm is not True and (any(
             v is not None for v in (ota_image_path, ota_corrupt_image_path, ota_truncated_image_path,
                                     ota_wrong_build_image_path, ota_image_build, ota_pico_image_path,
                                     ota_pico_image_commit, ota_pico_corrupt_image_path,
-                                    update_downgrade_repo, update_wrong_repo)):
+                                    update_downgrade_repo, update_wrong_repo)) or ota_install is True):
         return _OTA_CONFIRM_REFUSAL
     started = time.time()
     job_id = build_jobs.start_job(
@@ -321,7 +351,8 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                                ota_pico_image_commit=ota_pico_image_commit,
                                ota_pico_corrupt_image_path=ota_pico_corrupt_image_path,
                                update_downgrade_repo=update_downgrade_repo,
-                               update_wrong_repo=update_wrong_repo, confirm=confirm),
+                               update_wrong_repo=update_wrong_repo, target=target,
+                               ota_install=ota_install, confirm=confirm),
         {"suite": suite, "cases": cases, "dry_run": dry_run, "allow_heat": allow_heat,
          "tag": tag},
         classify=classify_bench_report,
@@ -333,8 +364,8 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
 
 @_core._tool()
 def bench_test_job_status(job_id: str, wait_s: float = 0.0) -> str:
-    """Report a background run started by `bench_test_start` or
-    `ota_matrix_start`: RUNNING (with the tail of the run's runner.log), then
+    """Report a background run started by `bench_test_start`,
+    `ota_matrix_start` or `update_install_start`: RUNNING (with the tail of the run's runner.log), then
     OK (exit_code 0) / INCOMPLETE (exit_code 3: skips/inconclusive) / FAILED,
     plus the same report the synchronous tool prints. `wait_s` blocks up to
     that many seconds (capped at 120, under the client idle watchdog) for

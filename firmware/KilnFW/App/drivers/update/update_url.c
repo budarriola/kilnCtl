@@ -374,3 +374,104 @@ const char *update_loc_capture_get(const update_loc_capture_t *c, bool *refused)
     }
     return c->buf;
 }
+
+// ---- rate-limit / retry-after capture ----------------------------------------------------------
+void update_rate_capture_init(update_rate_capture_t *c)
+{
+    if (c != NULL) {
+        memset(c, 0, sizeof(*c));
+    }
+}
+
+// Strict decimal parse: digits only (leading spaces allowed), at most 12 digits.
+static bool parse_u64(const char *s, int64_t *out)
+{
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    size_t n = 0;
+    int64_t v = 0;
+    while (s[n] >= '0' && s[n] <= '9') {
+        if (n >= 12) {
+            return false;
+        }
+        v = v * 10 + (s[n] - '0');
+        n++;
+    }
+    if (n == 0) {
+        return false;
+    }
+    for (size_t k = n; s[k] != '\0'; k++) {
+        if (s[k] != ' ' && s[k] != '\t' && s[k] != '\r' && s[k] != '\n') {
+            return false;
+        }
+    }
+    *out = v;
+    return true;
+}
+
+void update_rate_capture_feed(update_rate_capture_t *c, const char *key, const char *value)
+{
+    if (c == NULL || key == NULL || value == NULL) {
+        return;
+    }
+    int64_t v;
+    if (strlen(key) == 11 && ieq_n(key, "Retry-After", 11)) {
+        if (parse_u64(value, &v)) {
+            c->have_retry_after = true;
+            c->retry_after_s = v > UPDATE_BACKOFF_MAX_S ? UPDATE_BACKOFF_MAX_S : (uint32_t)v;
+        }
+    }
+    if (strlen(key) == 21 && ieq_n(key, "X-RateLimit-Remaining", 21)) {
+        if (parse_u64(value, &v)) {
+            c->have_remaining = true;
+            c->remaining = v > 0xFFFFFFFFll ? 0xFFFFFFFFu : (uint32_t)v;
+        }
+    }
+    if (strlen(key) == 17 && ieq_n(key, "X-RateLimit-Reset", 17)) {
+        if (parse_u64(value, &v)) {
+            c->have_reset = true;
+            c->reset_epoch = v;
+        }
+    }
+}
+
+bool update_status_is_rate_or_server(int status)
+{
+    return status == 403 || status == 429 || (status >= 500 && status <= 599);
+}
+
+bool update_status_is_rate_limited(const update_rate_capture_t *c, int status)
+{
+    if (status == 429) {
+        return true;
+    }
+    if (status == 403 && c != NULL) {
+        return c->have_retry_after || (c->have_remaining && c->remaining == 0);
+    }
+    return false;
+}
+
+uint32_t update_rate_backoff_s(const update_rate_capture_t *c, int status, int64_t now_epoch)
+{
+    int64_t s;
+    const bool limited = update_status_is_rate_limited(c, status);
+    // Reset is the window end of a real limit only: with Remaining > 0 it says nothing about this answer,
+    // and a 5xx must never inherit it.
+    const bool reset_ok = limited && c != NULL && c->have_reset && now_epoch > 0 &&
+                          (!c->have_remaining || c->remaining == 0);
+    if (c != NULL && c->have_retry_after) {
+        s = c->retry_after_s;
+    } else if (reset_ok) {
+        s = c->reset_epoch - now_epoch;
+    } else {
+        s = limited ? UPDATE_BACKOFF_DEFAULT_RATE_S : UPDATE_BACKOFF_DEFAULT_SERVER_S;
+    }
+    if (s < (int64_t)UPDATE_BACKOFF_MIN_S) {
+        s = UPDATE_BACKOFF_MIN_S;
+    }
+    if (s > (int64_t)UPDATE_BACKOFF_MAX_S) {
+        s = UPDATE_BACKOFF_MAX_S;
+    }
+    return (uint32_t)s;
+}

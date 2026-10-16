@@ -301,7 +301,7 @@ static void info_boot_push_task(void *arg)
         bridge_note_link_activity();
     }
 
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)

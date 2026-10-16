@@ -316,7 +316,6 @@ static void format_update_error(uint8_t err, char *out, size_t cap)
 static bool relay_wait_for_states(SafetyLinkClass *link, uint32_t since_ms, uint32_t timeout_ms,
                                    uint32_t accept_state_mask, safety_link_update_status_t *out)
 {
-    uint32_t deadline = since_ms + timeout_ms;
     for (;;) {
         safety_link_update_status_t st;
         uint32_t age_ms = 0;
@@ -335,7 +334,9 @@ static bool relay_wait_for_states(SafetyLinkClass *link, uint32_t since_ms, uint
                 }
             }
         }
-        if (now_ms() >= deadline) {
+        // Unsigned elapsed test: correct across the 2^32 ms tick wrap (a precomputed
+        // since+timeout deadline is not; AUDIT_LOGSTORE_TIME LOW-3).
+        if ((uint32_t)(now_ms() - since_ms) >= timeout_ms) {
             return false;
         }
         vTaskDelay(pdMS_TO_TICKS(RELAY_STATUS_POLL_MS));

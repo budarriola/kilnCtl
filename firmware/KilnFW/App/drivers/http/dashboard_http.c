@@ -25,6 +25,7 @@
 #include "http_form.h"
 #include "kiln_io_owner.h"
 #include "nvs_report.h"
+#include "thermo_channel_read.h"
 #include "thermo_owner.h" /* thermo_owner_command_read_all() -- see the status/refresh readings block below */
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see the ERR_UPDATING case below */
 #include "profile_executor.h"
@@ -111,7 +112,7 @@ static uint32_t s_flash_partition_size = 0;
 static bool s_flash_used_known = false;
 static uint32_t s_flash_used = 0;
 
-static void read_flash_facts_once(void)
+void dashboard_prime_flash_facts(void)
 {
     if (s_flash_facts_read) {
         return;
@@ -230,7 +231,14 @@ void dashboard_get_status(dashboard_status_t *out)
          * client-side parseFloat(). Calibration applied here (zone i <->
          * channel i, per zones_http.h) -- see zones_config_apply_cal()'s
          * doc comment for the UART-bridge-side scope gap this leaves. */
-        float temp = isnan(r->tc_temperature_c) ? 0.0f : zones_config_apply_cal(r->channel, r->tc_temperature_c);
+        /* AUDIT_THERMOCOUPLE LOW-2: calibrate only when zone == channel reads
+         * exactly this channel; with a non-identity thermo_mask the value is
+         * shown raw rather than with another zone's offset. */
+        uint8_t zone_tmask = 0;
+        bool cal_ok = zones_config_get_thermo_mask(r->channel, &zone_tmask) &&
+                      thermo_channel_cal_applies(r->channel, zone_tmask);
+        float temp = isnan(r->tc_temperature_c) ? 0.0f
+                     : (cal_ok ? zones_config_apply_cal(r->channel, r->tc_temperature_c) : r->tc_temperature_c);
         float cj = isnan(r->cj_temperature_c) ? 0.0f : r->cj_temperature_c;
         out->channels[i].channel = r->channel;
         out->channels[i].temp_c = temp;
@@ -570,15 +578,15 @@ void dashboard_get_status(dashboard_status_t *out)
      * same accessor esp_ota_* uses internally to validate an image. All
      * fixed for the life of this boot (same reasoning ui_page_diagnostics.c's
      * own build_firmware_statics() doc comment gives for reading these once,
-     * not on every refresh) -- computed once here rather than on every
-     * dashboard_get_status() call (Opus review 2026-08-27: this was walking
+     * not on every refresh) -- primed once at boot by
+     * dashboard_prime_flash_facts() (never lazily here: the mmap would assert
+     * on a PSRAM-stack caller), not on every dashboard_get_status() call (Opus review 2026-08-27: this was walking
      * the image's segment headers via real flash reads from inside the httpd
      * handler on every single /api/status poll). Left at their zero-init
      * default (caught by flash_*_known below) if the one-time read ever
      * fails -- chip-size/partition/image-header reads are all "should never
      * fail on real hardware" but none is worth a fabricated number if one
      * ever does. */
-    read_flash_facts_once();
     out->flash_size_known = s_flash_size_known;
     out->flash_size = s_flash_size;
     out->flash_partition_size = s_flash_partition_size;
@@ -993,8 +1001,8 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     /* Prime the flash facts here, on the app_main task, so no later caller
      * -- least of all rules_task, whose stack is a candidate to move to
      * PSRAM -- can be the one that performs a cache-disabling flash read.
-     * See read_flash_facts_once()'s own comment. */
-    read_flash_facts_once();
+     * See dashboard_prime_flash_facts()'s own comment. */
+    dashboard_prime_flash_facts();
 
     ESP_LOGI(DASH_TAG, "dashboard API up (io_ready=%d, thermo_ready=%d, safety_ready=%d)", s_dash.io != NULL,
              s_dash.thermo_bus != NULL && s_dash.thermo_bus->initialized, s_dash.safety != NULL);

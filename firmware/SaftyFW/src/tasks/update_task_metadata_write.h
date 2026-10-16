@@ -27,6 +27,7 @@ typedef enum {
     UPDATE_METADATA_WRITE_SLOT_NOT_ERASED, // refused: would AND-corrupt
     UPDATE_METADATA_WRITE_PROGRAM_FAILED,
     UPDATE_METADATA_WRITE_READBACK_MISMATCH,
+    UPDATE_METADATA_WRITE_BACKUP_FAILED,
 } update_metadata_write_result_t;
 
 // All callbacks return true on success. `offset` is the byte offset within
@@ -36,6 +37,12 @@ typedef struct {
     bool (*read)(void *ctx, uint32_t offset, uint8_t *buf, size_t len);
     bool (*program)(void *ctx, uint32_t offset, const uint8_t *data, size_t len);
     void *ctx;
+    // Backup sector (AUDIT_PICO_UPDATE MED-1); only used when
+    // update_task_metadata_write_ab() is told to back up. Offsets are within
+    // the BACKUP sector.
+    bool (*erase_backup)(void *ctx);
+    bool (*read_backup)(void *ctx, uint32_t offset, uint8_t *buf, size_t len);
+    bool (*program_backup)(void *ctx, uint32_t offset, const uint8_t *data, size_t len);
 } update_metadata_write_io_t;
 
 // Size of the local verify buffer; records longer than this are refused.
@@ -44,6 +51,16 @@ typedef struct {
 update_metadata_write_result_t update_task_metadata_write_verified(
     const update_metadata_write_io_t *io, bool needs_erase, uint32_t slot_offset,
     const uint8_t *record, size_t record_len);
+
+// As above, plus the wrap protection: when `backup_src_offset` !=
+// UPDATE_METADATA_NO_BACKUP, the record at that main-sector offset (the
+// newest, about to be erased) is first copied to the backup sector and read
+// back; if that fails the main sector is NOT erased (it holds the only copy)
+// and UPDATE_METADATA_WRITE_BACKUP_FAILED is returned.
+#define UPDATE_METADATA_NO_BACKUP 0xFFFFFFFFu
+update_metadata_write_result_t update_task_metadata_write_ab(
+    const update_metadata_write_io_t *io, bool needs_erase, uint32_t slot_offset,
+    const uint8_t *record, size_t record_len, uint32_t backup_src_offset);
 
 #ifdef __cplusplus
 }

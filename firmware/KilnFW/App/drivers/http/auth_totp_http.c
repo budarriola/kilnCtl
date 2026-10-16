@@ -82,6 +82,7 @@
 #include "totp_http_core.h"
 #include "web_auth_login.h"  // web_auth_login_role_for_username()
 #include "web_auth_session.h" // web_auth_table_destroy_all()
+#include "../net/login_backoff.h" // shared wrap-safe lockout ladder
 #include "web_auth_store.h"
 #include "wifi_prov.h"           // wifi_prov_get_cached_sta_ip_netmask()
 #include "wifi_provision_http.h" // wifi_provision_http_get_server()
@@ -136,6 +137,19 @@ void auth_totp_http_clear_reset_tokens(void)
     totp_reset_token_table_init(reset_tokens());
 }
 
+// AUDIT_TOTP MED-1: apply the LCD gesture's posted wipe request (see
+// totp_http_core.h) on the httpd worker, before the token table is read.
+static uint32_t s_atp_wipe_seen_gen;
+
+static void auth_totp_http_apply_wipe_request(void)
+{
+    uint32_t gen = totp_wipe_request_gen();
+    if (gen != s_atp_wipe_seen_gen) {
+        s_atp_wipe_seen_gen = gen;
+        auth_totp_http_clear_reset_tokens();
+    }
+}
+
 // --- Board-wide failed-forgot-attempt cap (plan section 4) ------------------
 
 // TOTP_FORGOT_BOARD_CAP and the blocked/record logic live in
@@ -146,52 +160,15 @@ static totp_forgot_board_cap_t s_forgot_board_cap;
 // (own instance, same shape as web_auth_login_http.c's -- see this file's
 // header comment) -----------------------------------------------------------
 
-static const uint32_t TOTP_BACKOFF_LADDER_MS[] = { 5000u, 10000u, 30000u, 60000u, 300000u };
-#define TOTP_BACKOFF_LADDER_LEN (sizeof(TOTP_BACKOFF_LADDER_MS) / sizeof(TOTP_BACKOFF_LADDER_MS[0]))
-_Static_assert(TOTP_BACKOFF_LADDER_LEN == 5, "totp reset backoff ladder must have exactly 5 steps");
-
+// Wrap-safe shared ladder (AUDIT_LOGSTORE_TIME MED-2): the private copy that used to
+// live here had the signed-32-bit lock test that went phantom-locked after 24.86 days.
 #define TOTP_LOCKOUT_MAX_IPS 16u
-
-typedef struct {
-    uint32_t failure_count;
-    uint32_t locked_until_ms;
-} totp_backoff_state_t;
-
-static bool totp_backoff_is_locked(const totp_backoff_state_t *s, uint32_t now)
-{
-    if (s->locked_until_ms == 0u) {
-        return false;
-    }
-    return (int32_t)(s->locked_until_ms - now) > 0;
-}
-
-static void totp_backoff_cycle_reset_if_due(totp_backoff_state_t *s, uint32_t now)
-{
-    if (s->failure_count >= TOTP_BACKOFF_LADDER_LEN && !totp_backoff_is_locked(s, now)) {
-        s->failure_count = 0;
-        s->locked_until_ms = 0;
-    }
-}
-
-static void totp_backoff_record_failure(totp_backoff_state_t *s, uint32_t now)
-{
-    if (s->failure_count < TOTP_BACKOFF_LADDER_LEN) {
-        s->failure_count++;
-    }
-    s->locked_until_ms = now + TOTP_BACKOFF_LADDER_MS[s->failure_count - 1];
-}
-
-static void totp_backoff_record_success(totp_backoff_state_t *s)
-{
-    s->failure_count = 0;
-    s->locked_until_ms = 0;
-}
 
 typedef struct {
     bool in_use;
     char ip[46];
     uint32_t last_activity_ms;
-    totp_backoff_state_t backoff;
+    login_backoff_state_t backoff;
 } totp_lockout_slot_t;
 static EXT_RAM_BSS_ATTR totp_lockout_slot_t s_totp_lockouts[TOTP_LOCKOUT_MAX_IPS];
 static totp_lockout_slot_t s_remote_totp_slot;
@@ -201,10 +178,10 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
 {
     int free_idx = -1;
     int lru_idx = -1;
-    uint32_t lru_time = UINT32_MAX;
+    uint32_t lru_age = 0;
     for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
         totp_lockout_slot_t *s = &s_totp_lockouts[i];
-        totp_backoff_cycle_reset_if_due(&s->backoff, now);
+        login_backoff_cycle_reset_if_due(&s->backoff, now);
         if (s->in_use && strcmp(s->ip, ip) == 0) {
             s->last_activity_ms = now;
             return s;
@@ -212,8 +189,10 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
-        if (s->in_use && !totp_backoff_is_locked(&s->backoff, now) && s->last_activity_ms < lru_time) {
-            lru_time = s->last_activity_ms;
+        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
+            (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
+            /* largest unsigned elapsed wins: wrap-safe LRU */
+            lru_age = (uint32_t)(now - s->last_activity_ms);
             lru_idx = (int)i;
         }
     }
@@ -231,7 +210,7 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
 
 static totp_lockout_slot_t *claim_remote_totp_slot(uint32_t now)
 {
-    totp_backoff_cycle_reset_if_due(&s_remote_totp_slot.backoff, now);
+    login_backoff_cycle_reset_if_due(&s_remote_totp_slot.backoff, now);
     s_remote_totp_slot.in_use = true;
     strncpy(s_remote_totp_slot.ip, "*remote*", sizeof(s_remote_totp_slot.ip) - 1);
     s_remote_totp_slot.last_activity_ms = now;
@@ -264,10 +243,10 @@ static bool totp_backoff_gate(httpd_req_t *req, const char *ip, bool ip_known, b
         uint32_t now = now_ms();
         totp_lockout_slot_t *slot = totp_backoff_slot_for(ip, ip_known, now);
         *out_have_slot = (slot != NULL);
-        locked = (slot == NULL) || totp_backoff_is_locked(&slot->backoff, now);
+        locked = (slot == NULL) || login_backoff_is_locked(&slot->backoff, now);
         if (locked) {
-            retry_after_ms = (slot != NULL) ? (slot->backoff.locked_until_ms - now)
-                                             : TOTP_BACKOFF_LADDER_MS[TOTP_BACKOFF_LADDER_LEN - 1];
+            retry_after_ms = (slot != NULL) ? login_backoff_remaining_ms(&slot->backoff, now)
+                                             : LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1];
         }
         xSemaphoreGive(s_totp_lock);
     } else {
@@ -293,9 +272,9 @@ static void totp_backoff_record(const char *ip, bool ip_known, bool ok)
         totp_lockout_slot_t *slot = totp_backoff_slot_for(ip, ip_known, now);
         if (slot != NULL) {
             if (ok) {
-                totp_backoff_record_success(&slot->backoff);
+                login_backoff_record_success(&slot->backoff);
             } else {
-                totp_backoff_record_failure(&slot->backoff, now);
+                login_backoff_record_failure(&slot->backoff, now);
             }
         }
         xSemaphoreGive(s_totp_lock);
@@ -304,14 +283,40 @@ static void totp_backoff_record(const char *ip, bool ip_known, bool ok)
 
 // --- ADMIN: GET /api/auth/totp_status ---------------------------------------
 
+// AUDIT_TOTP LOW-5: true when /forgot is refused board-wide until reboot -- the
+// board failure cap is spent, or every per-IP slot is in_use and locked (a new
+// client can get no slot). Lets the owner see that a reboot is needed.
+static bool totp_forgot_blocked_snapshot(void)
+{
+    bool blocked = false;
+    if (xSemaphoreTake(s_totp_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        uint32_t now = now_ms();
+        blocked = totp_forgot_board_cap_blocked(&s_forgot_board_cap);
+        if (!blocked) {
+            bool all_locked = true;
+            for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
+                totp_lockout_slot_t *s = &s_totp_lockouts[i];
+                if (!s->in_use || !login_backoff_is_locked(&s->backoff, now)) {
+                    all_locked = false;
+                    break;
+                }
+            }
+            blocked = all_locked;
+        }
+        xSemaphoreGive(s_totp_lock);
+    }
+    return blocked;
+}
+
 static esp_err_t totp_status_get_handler(httpd_req_t *req)
 {
     time_sync_status_t st;
     time_sync_get_status(&st);
-    char body[128];
-    snprintf(body, sizeof(body), "{\"enrolled\":%s,\"board_time_utc\":%lld,\"sntp_synced\":%s}",
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"enrolled\":%s,\"board_time_utc\":%lld,\"sntp_synced\":%s,\"forgot_blocked\":%s}",
              totp_config_enrolled() ? "true" : "false", (long long)st.now_epoch,
-             st.ever_synced ? "true" : "false");
+             st.ever_synced ? "true" : "false", totp_forgot_blocked_snapshot() ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, body);
 }
@@ -322,6 +327,7 @@ static esp_err_t totp_status_get_handler(httpd_req_t *req)
 
 static esp_err_t forgot_post_handler(httpd_req_t *req)
 {
+    auth_totp_http_apply_wipe_request();
     time_sync_status_t st;
     if (!sntp_ready(&st)) {
         return send_service_unavailable_clock(req);
@@ -448,6 +454,7 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
+    auth_totp_http_apply_wipe_request();
     time_sync_status_t st;
     if (!sntp_ready(&st)) {
         return send_service_unavailable_clock(req);
@@ -523,7 +530,6 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     }
 
     totp_reset_token_result_t tr = totp_reset_token_consume(reset_tokens(), reset_token, username, now_ms());
-    totp_secure_zero(reset_token, sizeof(reset_token));
     bool ok = false;
     // A token only proves a code was valid when /api/auth/forgot minted it
     // (up to TOTP_RESET_TOKEN_TTL_MS ago). Re-check, at the moment of use,
@@ -547,8 +553,13 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         ok = (serr == SECURITY_OK);
         if (ok) {
             web_auth_table_destroy_all(http_session_table());
+        } else {
+            /* AUDIT_TOTP LOW-3: the write failed and changed nothing, so give the
+             * caller the token back (fresh TTL) instead of forcing a new /forgot. */
+            totp_reset_token_store(reset_tokens(), reset_token, username, now_ms());
         }
     }
+    totp_secure_zero(reset_token, sizeof(reset_token));
     totp_secure_zero(new_password, sizeof(new_password));
     totp_backoff_record(ip, ip_known, ok);
 

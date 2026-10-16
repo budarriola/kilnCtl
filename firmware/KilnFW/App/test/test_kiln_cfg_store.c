@@ -1827,6 +1827,99 @@ static void test_cfg_fs_nvs_fallback_then_file_preferred_after_migration(void)
                "reload from the file alone returns the same store");
 }
 
+// persistfx MED-3 (AUDIT_PERSISTENCE): a kiln_configs file that exists but cannot be used (wrong size, version
+// mismatch, unreadable) used to count as "file absent": the frozen NVS blob overwrote it, and a board with no NVS
+// blob came up empty and unquarantined. Now the store quarantines, writes nothing, and keeps a .bad copy of a
+// corrupt file.
+static uint8_t s_med3_file[4 + sizeof(kiln_cfg_store_blob_t) + 16];
+
+static void med3_run_case(const char *label, size_t len, uint8_t version_or_0, bool inject_read_error,
+                          bool expect_bad_copy, bool with_nvs)
+{
+    TEST_SECTION(label);
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    int32_t id = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("legacy", -1, &id, reason, sizeof(reason)), "setup: a store with one entry");
+    if (with_nvs) {
+        kcfg_stage_legacy_nvs(&s_store, 7);
+    }
+    if (inject_read_error) {
+        /* the good file the save just wrote stays; only its READ fails */
+        cfg_fs_test_inject_read_error(KILN_CFG_STORE_FILE_PATH, ESP_FAIL, 8);
+    } else {
+        memset(s_med3_file, 0x5A, sizeof(s_med3_file));
+        s_med3_file[0] = 3; /* rev 3, LE */
+        s_med3_file[1] = s_med3_file[2] = s_med3_file[3] = 0;
+        if (len >= 4 + sizeof(kiln_cfg_store_blob_t) && version_or_0) {
+            memcpy(s_med3_file + 4, &s_store, sizeof(kiln_cfg_store_blob_t));
+            ((kiln_cfg_store_blob_t *)(s_med3_file + 4))->version = version_or_0;
+        }
+        TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, s_med3_file, len) == ESP_OK, "setup: bad file written");
+    }
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+
+    TEST_CHECK(kiln_cfg_store_is_quarantined(NULL, 0), "MED-3: store quarantined (not empty-and-trusted)");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == KILN_CFG_NO_ACTIVE_ID, "MED-3: frozen NVS blob NOT adopted");
+    static uint8_t after[sizeof(s_med3_file)];
+    size_t got = 0;
+    if (!inject_read_error) {
+        TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH, after, sizeof(after), &got) == ESP_OK && got == len &&
+                       memcmp(after, s_med3_file, len) == 0,
+                   "MED-3: the unusable file is byte-identical (NOT overwritten from NVS)");
+        size_t bgot = 0;
+        esp_err_t be = cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", after, sizeof(after), &bgot);
+        if (expect_bad_copy) {
+            TEST_CHECK(be == ESP_OK && bgot == len && memcmp(after, s_med3_file, len) == 0, "MED-3: .bad copy kept");
+        } else {
+            TEST_CHECK(be == ESP_ERR_NOT_FOUND, "MED-3: a NEWER file is left alone, no .bad copy");
+        }
+    } else {
+        TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH, after, sizeof(after), &got) == ESP_OK && got > 4,
+                   "MED-3: the file the read error hid is still there, unreplaced");
+    }
+    char op_reason[192];
+    op_reason[0] = 0;
+    TEST_CHECK(!kiln_cfg_store_save_current("again", -1, &id, op_reason, sizeof(op_reason)),
+               "MED-3: mutators refused while quarantined");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+}
+
+static void test_med3_unusable_file_quarantines_never_absent(void)
+{
+    const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
+    med3_run_case("persistfx MED-3: wrong-size kiln_configs file + NVS blob -> quarantine, .bad kept", full - 3, 0,
+                  false, true, true);
+    med3_run_case("persistfx MED-3: wrong-size file, NO NVS blob -> quarantined, not empty-and-trusted", full - 3, 0,
+                  false, true, false);
+    med3_run_case("persistfx MED-3: NEWER version file + NVS blob -> quarantine, file untouched", full,
+                  (uint8_t)(KILN_CFG_STORE_VERSION + 1), false, false, true);
+    med3_run_case("persistfx MED-3: older-version file (no file migration) -> quarantine, .bad kept", full,
+                  (uint8_t)1, false, true, true);
+    med3_run_case("persistfx MED-3: read error on a present file + NVS blob -> quarantine, not overwritten", 0, 0,
+                  true, false, true);
+    med3_run_case("persistfx MED-3: read error, NO NVS blob -> quarantined", 0, 0, true, false, false);
+    TEST_SECTION("persistfx MED-3: quarantine_clear is the deliberate way past an unusable file");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    memset(s_med3_file, 0x5A, sizeof(s_med3_file));
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, s_med3_file, full - 3) == ESP_OK, "setup: bad file");
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(kiln_cfg_store_is_quarantined(NULL, 0), "quarantined");
+    char op_reason[192];
+    TEST_CHECK(kiln_cfg_store_quarantine_clear(true, op_reason, sizeof(op_reason)), "operator confirms the discard");
+    TEST_CHECK(!kiln_cfg_store_is_quarantined(NULL, 0), "clear lifts the quarantine");
+    kiln_cfg_store_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &valid);
+    TEST_CHECK(valid, "the file is now a valid empty store (rewritten only after the operator confirmed)");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+}
+
 // 4. Saves and deletes each advance the shared whole-document rev, in the
 //    file only.
 static void test_cfg_fs_dual_write_keeps_file_and_nvs_in_sync(void)
@@ -4256,6 +4349,7 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_cfg_fs_stale_delete_not_resurrected();
     test_cfg_fs_interrupted_write_leaves_old_or_new();
+    test_med3_unusable_file_quarantines_never_absent();
 
     test_export_import_new_slot_round_trip();
     test_export_package_json_never_contains_or_disturbs_credential();

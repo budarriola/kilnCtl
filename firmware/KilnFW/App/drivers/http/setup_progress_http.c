@@ -1,3 +1,4 @@
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "setup_progress_http.h"
 
 #include <stdio.h>
@@ -79,7 +80,7 @@ typedef struct {
 
 static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
 {
-    setup_progress_get_scratch_t *s = malloc(sizeof(*s));
+    setup_progress_get_scratch_t *s = persist_scratch_alloc(sizeof(*s));
     if (!s) {
         ESP_LOGE(TAG, "api_setup_progress_get_handler: malloc(%u) failed", (unsigned)sizeof(*s));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");

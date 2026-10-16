@@ -39,6 +39,7 @@ int g_test_count = 0;
 
 #include "MAX31856.h"
 #include "fake_spi.h"
+#include "control/thermo_channel_read.h"
 
 #define EXACT 0.0
 
@@ -87,6 +88,197 @@ static void check_channel(MAX31856BusClass *bus, MAX31856Class *ch, uint8_t i)
                  (unsigned)i, rec->cs_pin, cs_gpio);
         TEST_CHECK(rec->cs_pin == cs_gpio, msg);
     }
+}
+
+
+// ---- AUDIT_THERMOCOUPLE MED-1 --------------------------------------------
+
+static bool s_drdy_asserted;
+static bool test_drdy_provider(uint8_t channel, bool *out_asserted, void *ctx)
+{
+    (void)channel; (void)ctx;
+    *out_asserted = s_drdy_asserted;
+    return true;
+}
+
+static MAX31856Reading good_reading(void)
+{
+    MAX31856Reading r;
+    memset(&r, 0, sizeof(r));
+    r.tc_temperature_c = 500.0f;
+    r.cj_temperature_c = 25.0f;
+    r.continuous = true;
+    r.age_ms = 100u;
+    return r;
+}
+
+static void test_reading_ok_staleness(void)
+{
+    MAX31856Reading r = good_reading();
+    TEST_CHECK(thermo_reading_ok(&r), "fresh continuous reading is ok");
+    r.age_ms = MAX31856_CONTROL_MAX_AGE_MS;
+    TEST_CHECK(thermo_reading_ok(&r), "age exactly at the control bound is still ok");
+    r.age_ms = MAX31856_CONTROL_MAX_AGE_MS + 1u;
+    TEST_CHECK(!thermo_reading_ok(&r), "continuous reading older than the bound is NOT ok (frozen part)");
+    r.age_ms = MAX31856_READING_AGE_UNKNOWN;
+    TEST_CHECK(!thermo_reading_ok(&r), "continuous reading with no good conversion yet is NOT ok");
+    r.continuous = false;
+    TEST_CHECK(thermo_reading_ok(&r), "a normally-off/one-shot channel is not judged by age");
+    r = good_reading(); r.spi_failed = true;
+    TEST_CHECK(!thermo_reading_ok(&r), "spi_failed is not ok");
+    r = good_reading(); r.tc_temperature_c = NAN;
+    TEST_CHECK(!thermo_reading_ok(&r), "NaN is not ok");
+    r = good_reading(); r.fault_status = THERMO_FAULT_OPEN;
+    TEST_CHECK(!thermo_reading_ok(&r), "OPEN fault is not ok");
+}
+
+static void script_cfg_readback(MAX31856Class *ch, uint8_t cr0, uint8_t cr1, uint8_t mask)
+{
+    uint8_t rx[4] = { 0x00, cr0, cr1, mask };
+    TEST_CHECK(fake_spi_script_rx(&ch->dev, rx, sizeof(rx)) == HAL_OK, "script CR0..MASK read-back");
+}
+
+static void script_temp_burst(MAX31856Class *ch)
+{
+    uint8_t rx[7] = { 0x00, 0x19, 0x00, 0x3E, 0x80, 0x00, 0x00 };
+    TEST_CHECK(fake_spi_script_rx(&ch->dev, rx, sizeof(rx)) == HAL_OK, "script temperature burst");
+}
+
+static void test_live_check_reconfig(MAX31856BusClass *bus, MAX31856Class *ch)
+{
+    (void)bus;
+    MAX31856Config cfg;
+    MAX31856_config_default(&cfg);
+    cfg.auto_convert = true;
+    TEST_CHECK(MAX31856_configure(ch, &cfg) == ESP_OK, "configure channel (auto convert)");
+    TEST_CHECK(MAX31856_set_fault_mask(ch, MAX31856_DEFAULT_FAULT_MASK) == ESP_OK, "set fault mask");
+    TEST_CHECK(MAX31856_set_drdy_provider(bus, test_drdy_provider, NULL) == ESP_OK, "install DRDY provider");
+    const uint8_t c0 = ch->cr0_shadow, c1 = ch->cr1_shadow, m = ch->mask_shadow;
+    TEST_CHECK((c0 & MAX31856_CR0_CMODE) != 0, "shadow is auto-convert");
+
+    size_t n = fake_spi_transfer_count();
+    TEST_CHECK(MAX31856_live_check(ch, 1000u) == MAX31856_LIVE_NOT_DUE, "first call only arms the cadence");
+    TEST_CHECK(MAX31856_live_check(ch, 1000u + MAX31856_LIVE_CHECK_INTERVAL_MS - 1u) == MAX31856_LIVE_NOT_DUE,
+               "not due before the interval");
+    TEST_CHECK(fake_spi_transfer_count() == n, "no SPI traffic while not due");
+
+    uint32_t t = 1000u + MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, c0, c1, m);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_OK, "matching read-back -> OK");
+    TEST_CHECK(fake_spi_transfer_count() == n + 1, "exactly one read-back burst");
+    const fake_spi_transfer_record_t *rec = fake_spi_transfer(n);
+    TEST_CHECK(rec && rec->tx[0] == MAX31856_REG_CR0 && rec->tx_len == 4, "read-back burst starts at CR0, 3 registers");
+
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, (uint8_t)(c0 | MAX31856_CR0_ONESHOT | MAX31856_CR0_FAULTCLR), c1, (uint8_t)(m ^ 0xC0u));
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_OK,
+               "self-clearing CR0 bits and reserved MASK bits are not a mismatch");
+
+    /* A healthy channel with a fresh conversion on record before the reset. */
+    {
+        MAX31856Reading pre;
+        s_drdy_asserted = true;
+        script_temp_burst(ch);
+        TEST_CHECK(MAX31856_read(ch, &pre) == ESP_OK && thermo_reading_ok(&pre) && ch->has_good_result,
+                   "healthy channel reads ok with a good conversion on record");
+    }
+
+    /* Part power-on-reset: CR0 = 00h (normally off), CR1 = 03h, MASK = FFh. */
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    n = fake_spi_transfer_count();
+    /* LOW-5: the first mismatching read-back changes nothing (one corrupted SPI
+     * read must not cost the invalid window); a second one confirms. */
+    script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "first CR0 mismatch -> SUSPECT only");
+    TEST_CHECK(fake_spi_transfer_count() == n + 1, "suspect: just the read-back, no writes");
+    TEST_CHECK(ch->has_good_result, "suspect: good-result history kept");
+    TEST_CHECK(ch->live_mismatch_count == 0u, "suspect: not counted yet");
+    TEST_CHECK(MAX31856_live_check(ch, t + MAX31856_LIVE_RECHECK_MS - 1u) == MAX31856_LIVE_NOT_DUE,
+               "re-check not due before MAX31856_LIVE_RECHECK_MS");
+    /* A matching re-check clears the suspicion: a later single mismatch is suspect again. */
+    script_cfg_readback(ch, c0, c1, m);
+    TEST_CHECK(MAX31856_live_check(ch, t + MAX31856_LIVE_RECHECK_MS) == MAX31856_LIVE_OK, "re-check matches -> OK");
+    TEST_CHECK(ch->has_good_result && ch->live_mismatch_count == 0u, "transient glitch changed nothing");
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS + MAX31856_LIVE_RECHECK_MS;
+    script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "mismatch again -> SUSPECT (not stale-confirmed)");
+    /* REVIEW_ALL_FIXES L4: an unreadable re-check keeps the suspect stage (as the
+     * lock-failure path does), so the next mismatch confirms instead of restarting. */
+    t += MAX31856_LIVE_RECHECK_MS;
+    fake_spi_inject_enqueue_timeout(&bus->hal_bus, 1);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SPI_ERROR, "re-check with a failed SPI read -> SPI_ERROR");
+    TEST_CHECK(ch->live_suspect, "an SPI error keeps the suspect stage");
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS; /* the error rescheduled the next check a full interval out */
+    n = fake_spi_transfer_count();
+    script_cfg_readback(ch, 0x00u, 0x03u, 0xFFu);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "mismatch after an SPI error still confirms (suspect survived the error) -> reconfigured");
+    TEST_CHECK(ch->live_mismatch_count == 1u, "mismatch counted");
+    TEST_CHECK(fake_spi_transfer_count() == n + 1 + 4, "one read-back plus stop/CR1/MASK/CR0 writes");
+    const fake_spi_transfer_record_t *last = fake_spi_transfer(n + 4);
+    TEST_CHECK(last && last->tx[0] == (0x80u | MAX31856_REG_CR0) && last->tx[1] == c0,
+               "final write restores CR0 (CMODE back on) from the shadow");
+    const fake_spi_transfer_record_t *w1 = fake_spi_transfer(n + 1);
+    TEST_CHECK(w1 && w1->tx[0] == (0x80u | MAX31856_REG_CR0) && (w1->tx[1] & MAX31856_CR0_CMODE) == 0,
+               "first write stops conversions");
+    TEST_CHECK(ch->cr0_shadow == c0 && ch->cr1_shadow == c1 && ch->mask_shadow == m, "shadows unchanged");
+
+    /* Invalid until a fresh post-reconfigure conversion. */
+    MAX31856Reading r;
+    s_drdy_asserted = false;
+    script_temp_burst(ch);
+    TEST_CHECK(MAX31856_read(ch, &r) == ESP_OK, "read after reconfigure");
+    TEST_CHECK(r.age_ms == MAX31856_READING_AGE_UNKNOWN, "age UNKNOWN until a fresh conversion");
+    TEST_CHECK(!thermo_reading_ok(&r), "reading is NOT ok before a fresh post-reconfigure conversion");
+    s_drdy_asserted = true;
+    script_temp_burst(ch);
+    TEST_CHECK(MAX31856_read(ch, &r) == ESP_OK, "read with DRDY asserted");
+    TEST_CHECK(thermo_reading_ok(&r), "reading is ok again after a fresh conversion");
+
+    /* CR1 and MASK mismatches alone also trigger it. */
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, c0, (uint8_t)(c1 ^ 0x10u), m);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "CR1 mismatch -> suspect");
+    t += MAX31856_LIVE_RECHECK_MS;
+    script_cfg_readback(ch, c0, (uint8_t)(c1 ^ 0x10u), m);
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "CR1 mismatch confirmed -> reconfigured");
+    t += MAX31856_LIVE_CHECK_INTERVAL_MS;
+    script_cfg_readback(ch, c0, c1, (uint8_t)(m ^ 0x01u));
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_SUSPECT, "MASK mismatch -> suspect");
+    t += MAX31856_LIVE_RECHECK_MS;
+    script_cfg_readback(ch, c0, c1, (uint8_t)(m ^ 0x01u));
+    TEST_CHECK(MAX31856_live_check(ch, t) == MAX31856_LIVE_RECONFIGURED, "MASK mismatch confirmed -> reconfigured");
+}
+
+static void test_zone_helpers(void)
+{
+    MAX31856Reading rd[3];
+    memset(rd, 0, sizeof(rd));
+    for (int i = 0; i < 3; i++) {
+        rd[i].channel = (uint8_t)i;
+        rd[i].tc_temperature_c = 100.0f * (float)(i + 1);
+    }
+    bool v = false;
+    float c = thermo_zone_raw_from_readings(rd, 3, 0x01u, &v);
+    TEST_CHECK(v && c == 100.0f, "identity mask 0 -> channel 0");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x06u, &v);
+    TEST_CHECK(v && c == 250.0f, "mask 0b110 -> mean of channels 1,2 (LOW-1)");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x04u, &v);
+    TEST_CHECK(v && c == 300.0f, "mask on channel 2 reads channel 2, not channel 0");
+    rd[2].spi_failed = true;
+    c = thermo_zone_raw_from_readings(rd, 3, 0x06u, &v);
+    TEST_CHECK(v && c == 200.0f, "spi-failed masked channel dropped from the mean");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x04u, &v);
+    TEST_CHECK(!v && isnan(c), "only masked channel failed -> invalid");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x00u, &v);
+    TEST_CHECK(!v && isnan(c), "empty mask -> invalid");
+    c = thermo_zone_raw_from_readings(rd, 3, 0x08u, &v);
+    TEST_CHECK(!v, "mask names an absent channel -> invalid");
+
+    TEST_CHECK(thermo_channel_cal_applies(0, 0x01u), "identity mask: calibrate");
+    TEST_CHECK(thermo_channel_cal_applies(2, 0x04u), "identity mask ch2: calibrate");
+    TEST_CHECK(!thermo_channel_cal_applies(0, 0x03u), "combined mask: show raw (LOW-2)");
+    TEST_CHECK(!thermo_channel_cal_applies(0, 0x02u), "remapped mask: show raw (LOW-2)");
+    TEST_CHECK(!thermo_channel_cal_applies(0, 0x00u), "empty mask: show raw");
 }
 
 int main(void)
@@ -154,6 +346,10 @@ int main(void)
                "the adopted-bus channel's read landed in the SAME shared transfer log as the "
                "original bus's channels -- adopted and original share one underlying slot, not "
                "two independent SPI owners on one physical bus");
+
+    test_reading_ok_staleness();
+    test_live_check_reconfig(&bus, &chs[1]);
+    test_zone_helpers();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

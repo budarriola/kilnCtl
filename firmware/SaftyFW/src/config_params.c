@@ -383,6 +383,8 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
 //     present" reading, not a disabled-guard sentinel) -- only
 //     abs_max_temp_c moves to CHECK_F32_POS.
 #define CHECK_U8_MAX(maxval) do { if (value.u8_val > (uint8_t)(maxval)) { return false; } } while (0)
+#define CHECK_U16_MAX(maxval) do { if (value.u16_val > (uint16_t)(maxval)) { return false; } } while (0)
+#define CHECK_F32_MAX(maxval) do { if (value.f32_val > (float)(maxval)) { return false; } } while (0)
 #define CHECK_F32_FINITE() do { if (!isfinite(value.f32_val)) { return false; } } while (0)
 #define CHECK_F32_NONNEG() do { if (!isfinite(value.f32_val) || value.f32_val < 0.0f) { return false; } } while (0)
 #define CHECK_F32_POS() do { if (!isfinite(value.f32_val) || value.f32_val <= 0.0f) { return false; } } while (0)
@@ -490,17 +492,17 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x010Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); if (value.f32_val > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C || value.f32_val < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) { return false; } rec->tc_offset_c = value.f32_val; return true;
 
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
-    case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->overshoot_margin_c = value.f32_val; return true;
+    case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C); rec->overshoot_margin_c = value.f32_val; return true;
     case 0x0203u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overshoot_time_s = value.u16_val; return true;
     case 0x0204u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING); rec->max_rate_c_per_min = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; return true;
     case 0x0205u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->rate_window_s = value.u16_val; return true;
-    case 0x0206u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->blind_grace_s = value.u16_val; return true;
+    case 0x0206u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_BLIND_GRACE_MAX_S); rec->blind_grace_s = value.u16_val; return true;
     case 0x0207u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->frozen_window_s = value.u16_val; return true;
-    case 0x0208u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->tc_disagreement_c = value.f32_val; return true;
+    case 0x0208u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C); rec->tc_disagreement_c = value.f32_val; return true;
     case 0x0209u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->tc_disagreement_time_s = value.u16_val; return true;
     case 0x020Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->tc_expected_offset_c = value.f32_val; return true;
     case 0x020Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->cj_warn_c = value.f32_val; return true;
-    case 0x020Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->cj_max_c = value.f32_val; return true;
+    case 0x020Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_CJ_MAX_MAX_C); rec->cj_max_c = value.f32_val; return true;
     case 0x020Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->cj_time_s = value.u16_val; return true;
     case 0x020Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->borrowed_stale_s = value.u16_val; return true;
     case 0x020Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->borrowed_stale_trip_s = value.u16_val; return true;
@@ -541,13 +543,13 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0304u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[2] = value.u16_val; return true;
     case 0x0305u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->correlation_window_s = value.u16_val; return true;
     case 0x0306u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->stuck_on_time_s = value.u16_val; return true;
-    case 0x0307u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->trip_verify_s = value.u16_val; return true;
-    case 0x0308u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->k_ct_v_per_a[0] = value.f32_val; return true;
-    case 0x0309u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->k_ct_v_per_a[1] = value.f32_val; return true;
-    case 0x030Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->k_ct_v_per_a[2] = value.f32_val; return true;
-    case 0x030Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[0] = value.f32_val; return true;
-    case 0x030Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[1] = value.f32_val; return true;
-    case 0x030Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[2] = value.f32_val; return true;
+    case 0x0307u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_TRIP_VERIFY_MAX_S); rec->trip_verify_s = value.u16_val; return true;
+    case 0x0308u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[0] = value.f32_val; return true;
+    case 0x0309u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[1] = value.f32_val; return true;
+    case 0x030Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[2] = value.f32_val; return true;
+    case 0x030Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->gain[0] = value.f32_val; return true;
+    case 0x030Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->gain[1] = value.f32_val; return true;
+    case 0x030Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->gain[2] = value.f32_val; return true;
     case 0x030Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->mains_voltage_v = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAINS_VOLTAGE_V; return true;
     case 0x030Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->power_window_s = value.u16_val; return true;
     case 0x0310u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_GAIN(); rec->ct_cal[0].gain = value.f32_val; return true;
@@ -596,7 +598,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 
     case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->context_max_age_s = value.u16_val; return true;
     case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_timeout_s = value.u16_val; return true;
-    case 0x0403u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_dead_hard_s = value.u16_val; return true;
+    case 0x0403u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S); rec->link_dead_hard_s = value.u16_val; return true;
     case 0x0404u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->mainfault_debounce_ms = value.u16_val; return true;
     case 0x0405u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->telemetry_period_ms = value.u16_val; return true;
 
@@ -783,12 +785,12 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     }
     RANGE_F32_FINITE(rec->cj_warn_c, "cj_warn_c");
     RANGE_F32_FINITE(rec->cj_max_c, "cj_max_c");
-    RANGE_F32_FINITE(rec->k_ct_v_per_a[0], "k_ct_v_per_a[0]");
-    RANGE_F32_FINITE(rec->k_ct_v_per_a[1], "k_ct_v_per_a[1]");
-    RANGE_F32_FINITE(rec->k_ct_v_per_a[2], "k_ct_v_per_a[2]");
-    RANGE_F32_FINITE(rec->gain[0], "gain[0]");
-    RANGE_F32_FINITE(rec->gain[1], "gain[1]");
-    RANGE_F32_FINITE(rec->gain[2], "gain[2]");
+    RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[0], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[0]");
+    RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[1], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[1]");
+    RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[2], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[2]");
+    RANGE_F32_RANGE_OR_ZERO(rec->gain[0], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "gain[0]");
+    RANGE_F32_RANGE_OR_ZERO(rec->gain[1], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "gain[1]");
+    RANGE_F32_RANGE_OR_ZERO(rec->gain[2], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "gain[2]");
     RANGE_F32_FINITE(rec->mains_voltage_v, "mains_voltage_v");
     RANGE_F32_FINITE(rec->ct_cal[0].gain, "ct_cal[0].gain");
     RANGE_F32_FINITE(rec->ct_cal[1].gain, "ct_cal[1].gain");

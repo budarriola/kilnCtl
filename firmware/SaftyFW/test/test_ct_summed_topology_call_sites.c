@@ -65,11 +65,11 @@ static void test_safety_core_present_masking_uses_shared_helper(void)
     }
 
     const char *mask_call = strstr(
-        text, "config_store_mask_current_present_to_fitted(current.present, !cts_disabled,");
+        text, "config_store_mask_current_present_to_fitted_mask(");
     TEST_CHECK(mask_call != NULL,
                "any_current_present's masking must call "
-               "config_store_mask_current_present_to_fitted(current.present, !cts_disabled, "
-               "cfg_rec.ct_topology) -- if this fails, unfitted channels' idle ADC noise "
+               "config_store_mask_current_present_to_fitted_mask(current.present, "
+               "config_store_fitted_channel_mask(&cfg_rec)) -- if this fails, unfitted channels' idle ADC noise "
                "(16-17 counts against a 25-count margin) can set any_current_present true "
                "again, letting the unclearable S9 latch arm and trip off noise on a SUMMED "
                "board");
@@ -120,10 +120,10 @@ static void test_safety_core_s14_loop_uses_shared_helper(void)
         return;
     }
 
-    TEST_CHECK(strstr(text, "if (!config_store_ct_channel_fitted((uint8_t)ch, true, "
-                            "cfg_rec.ct_topology)) {") != NULL,
+    TEST_CHECK(strstr(text, "if (!config_store_ct_channel_fitted_rec(&cfg_rec, (uint8_t)ch)) {") != NULL,
                "the S14 loop must skip a channel via "
-               "config_store_ct_channel_fitted((uint8_t)ch, true, cfg_rec.ct_topology) -- "
+               "config_store_ct_channel_fitted_rec(&cfg_rec, ch) (record-aware: honours a "
+               "committed split zone_ct_channel map) -- "
                "if this fails, the inline `ct_summed && ch != 2` duplicate may have come "
                "back, which is exactly the two-sites-drift class this refactor closed");
 
@@ -156,7 +156,7 @@ static void test_current_task_any_present_uses_shared_helper(void)
     TEST_CHECK(fn_sig != NULL, "current_task_any_current_present() must still exist");
 
     const char *mask_call =
-        fn_sig ? strstr(fn_sig, "config_store_mask_current_present_to_fitted(") : NULL;
+        fn_sig ? strstr(fn_sig, "config_store_mask_current_present_to_fitted_mask(") : NULL;
     TEST_CHECK(mask_call != NULL,
                "current_task_any_current_present() must call "
                "config_store_mask_current_present_to_fitted() -- if this fails, "

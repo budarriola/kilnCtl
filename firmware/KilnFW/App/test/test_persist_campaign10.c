@@ -262,6 +262,7 @@ static void fresh(void)
     rm_file("ct_verify.bin");
     rm_file("big.bin");
     rm_file("small.bin");
+    rm_file("small.bin.bad");
     char t[300];
     snprintf(t, sizeof(t), "%s/.tmp", BASE);
     C10_RMDIR(t);
@@ -648,12 +649,105 @@ static void test_ct_verify(void)
     }
 }
 
+static size_t read_raw_file(const char *name, uint8_t *buf, size_t cap)
+{
+    char p[300];
+    snprintf(p, sizeof(p), "%s/%s", BASE, name);
+    FILE *f = fopen(p, "rb");
+    if (!f) {
+        return (size_t)-1;
+    }
+    size_t n = fread(buf, 1, cap, f);
+    fclose(f);
+    return n;
+}
+
+static void write_raw_file(const char *name, const uint8_t *buf, size_t n)
+{
+    char p[300];
+    snprintf(p, sizeof(p), "%s/%s", BASE, name);
+    FILE *f = fopen(p, "wb");
+    TEST_CHECK(f != NULL, "write_raw_file opens");
+    if (f) {
+        fwrite(buf, 1, n, f);
+        fclose(f);
+    }
+}
+
+/* persistfx MED-1 / LOW-1 (AUDIT_PERSISTENCE): a cfg file that is PRESENT but fails validation (newer or corrupt)
+ * must never be overwritten with the frozen NVS copy. */
+static void test_med1_rejected_file_never_overwritten(void)
+{
+    TEST_SECTION("persistfx MED-1/LOW-1: rejected (validator/size) pref file is preserved, path rev-unknown, no overwrite");
+    uint8_t file[4 + 8], nvs[8], out[8], got[64];
+    memset(nvs, 6, sizeof(nvs));
+    nvs[0] = 1;
+    uint32_t rev = 0;
+    bool used = true;
+
+    /* validator rejection (first byte 9 = a "newer" layout this build cannot judge) */
+    fresh();
+    memset(file, 0, sizeof(file));
+    file[0] = 9; /* rev 9 LE */
+    file[4] = 9; /* payload first byte fails v_first1 */
+    file[5] = 0x55;
+    write_raw_file("small.bin", file, sizeof(file));
+    bool ok = pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
+    TEST_CHECK(ok && !used && memcmp(out, nvs, sizeof(nvs)) == 0, "MED-1: NVS copy served in RAM only");
+    TEST_CHECK(read_raw_file("small.bin", got, sizeof(got)) == sizeof(file) && memcmp(got, file, sizeof(file)) == 0,
+               "MED-1: the rejected file is byte-identical afterwards (NOT overwritten from NVS)");
+    TEST_CHECK(read_raw_file("small.bin.bad", got, sizeof(got)) == sizeof(file) && memcmp(got, file, sizeof(file)) == 0,
+               "MED-1: a .bad copy of the rejected file exists");
+    TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "MED-1: path marked rev-unknown");
+    TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_ERR_INVALID_STATE,
+               "MED-1: saves refused while the rejected file stands");
+    TEST_CHECK(pref_cfg_fs_remove("small.bin") == ESP_OK && !pref_cfg_fs_rev_unknown("small.bin"),
+               "MED-1: a deliberate remove clears the refusal");
+    TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_OK, "MED-1: save works after remove");
+
+    /* wrong size, shorter than this build's item: preserved as .bad, never overwritten */
+    fresh();
+    uint8_t shortf[4 + 8 - 3];
+    memset(shortf, 0x33, sizeof(shortf));
+    write_raw_file("small.bin", shortf, sizeof(shortf));
+    ok = pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
+    TEST_CHECK(ok && !used, "MED-1 size: NVS served in RAM");
+    TEST_CHECK(read_raw_file("small.bin", got, sizeof(got)) == sizeof(shortf) && memcmp(got, shortf, sizeof(shortf)) == 0,
+               "MED-1 size: wrong-size file not overwritten");
+    TEST_CHECK(read_raw_file("small.bin.bad", got, sizeof(got)) == sizeof(shortf), "MED-1 size: .bad copy kept");
+    TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "MED-1 size: rev-unknown");
+
+    /* bigger than this build's item (newer firmware): left untouched, saves refused */
+    fresh();
+    uint8_t big[4 + 8 + 5];
+    memset(big, 0x33, sizeof(big));
+    write_raw_file("small.bin", big, sizeof(big));
+    ok = pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
+    TEST_CHECK(ok && !used, "MED-1 big: NVS served in RAM");
+    TEST_CHECK(read_raw_file("small.bin", got, sizeof(got)) == sizeof(big) && memcmp(got, big, sizeof(big)) == 0,
+               "MED-1 big: larger (newer) file not overwritten");
+    TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "MED-1 big: rev-unknown");
+
+    /* LOW-1: NVS-retired variant -> defaults, still no overwrite, still rev-unknown */
+    fresh();
+    write_raw_file("small.bin", file, sizeof(file));
+    memset(out, 0xEE, sizeof(out));
+    ok = pref_cfg_fs_resolve_nvs_retired("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
+    TEST_CHECK(!ok && !used, "LOW-1: retired-NVS store gets defaults, not the frozen copy");
+    TEST_CHECK(read_raw_file("small.bin", got, sizeof(got)) == sizeof(file) && memcmp(got, file, sizeof(file)) == 0,
+               "LOW-1: rejected file untouched");
+    TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "LOW-1: rev-unknown set for a newer/corrupt file");
+    TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_ERR_INVALID_STATE, "LOW-1: saves refused");
+    rm_file("small.bin.bad");
+}
+
 int main(void)
 {
     test_backup_json();
     test_touch_cal();
     test_pref_cfg_fs();
     test_resolve_io_error_keeps_nvs_and_refuses_saves();
+    test_med1_rejected_file_never_overwritten();
     test_ct_verify();
     fresh();
     cfg_fs_deinit();

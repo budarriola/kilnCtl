@@ -306,6 +306,7 @@ void ap_fallback_timer_cb(void *arg);
 void do_rescan_tick(void);
 void rescan_timer_cb(void *arg);
 void start_ap_fallback_timer(void);
+bool rescan_timer_ensure(void);
 void start_sta_join(void);
 void do_ev_sta_start(void);
 void do_ev_sta_disconnected(void);

@@ -112,9 +112,11 @@ typedef enum {
 // leading v stripped) and commit. Return UPDATE_STAGE_OK to proceed or UPDATE_STAGE_ERR_POLICY to refuse
 // (the upload fails like any other and the stage stays blank). NULL = no gate (the GitHub fetch path
 // decides before it downloads).
+// `dirty` is true only when the semver was taken from the image descriptor (no declared version) and that
+// descriptor ended in "-dirty" (the suffix is stripped from `semver`).
 // `id` is the identity record read from the held-back head, NULL when the image carries none.
 typedef update_stage_err_t (*update_stage_gate_fn)(void *ctx, const char *semver, const char *commit,
-                                                   const update_image_id_t *id);
+                                                   const update_image_id_t *id, bool dirty);
 
 typedef struct {
     update_stage_io_t io;
@@ -178,7 +180,7 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
 // (descriptor vs manifest version) is already done by flush_head for any stager that has a gate and a
 // declared version. Install with update_stage_set_gate(st, update_stage_manifest_gate, &identity).
 update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, const char *commit,
-                                              const update_image_id_t *id);
+                                              const update_image_id_t *id, bool dirty);
 // Install a gate for the upload just begun (call after a successful update_stage_upload_begin).
 void update_stage_set_gate(update_stage_t *st, update_stage_gate_fn gate, void *ctx);
 update_stage_err_t update_stage_upload_write(update_stage_t *st, const uint8_t *data, size_t len);

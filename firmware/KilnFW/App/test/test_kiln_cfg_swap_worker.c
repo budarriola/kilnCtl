@@ -259,6 +259,7 @@ static void test_boot_recovery_gives_up_after_bound_and_never_clears_holder(void
 int main(void)
 {
     g_stub_queue_ring_enabled = 1;
+    g_stub_task_create_result = pdPASS; /* WithCaps create stub defaults to pdFAIL */
     TEST_CHECK(kiln_cfg_swap_worker_start() == ESP_OK, "worker start (creates mutex and depth-1 queue)");
     s_task = (TaskHandle_t)0x1; // the host xTaskCreate() stub leaves the handle NULL
 

@@ -111,13 +111,13 @@ static void test_lockout(void)
         ota_auth_lockout_record_failure(&ceil_s, now);
         ota_auth_lockout_record_failure(&ceil_s, now + 1);
         ota_auth_lockout_record_failure(&ceil_s, now + 2);
-        now = ceil_s.locked_until_ms; // jump to exactly when this lock lifts
+        now = ceil_s.lock_start_ms + ceil_s.lock_dur_ms; // jump to exactly when this lock lifts
     }
-    TEST_CHECK(ceil_s.locked_until_ms > 0, "still produces a real lockout after many cycles");
+    TEST_CHECK(ceil_s.lock_dur_ms > 0, "still produces a real lockout after many cycles");
     // The most recent lock's duration must never exceed OTA_AUTH_LOCKOUT_MAX_MS.
     uint32_t last_lock_start = now; // 'now' was set to the PREVIOUS locked_until_ms before this
                                      // cycle's failures ran, so it's this lock's start time
-    TEST_CHECK((ceil_s.locked_until_ms - last_lock_start) <= OTA_AUTH_LOCKOUT_MAX_MS,
+    TEST_CHECK(ceil_s.lock_dur_ms <= OTA_AUTH_LOCKOUT_MAX_MS,
                "backoff duration never exceeds the 15-minute ceiling, even after many escalations");
 
     // Reset on success.
@@ -126,9 +126,27 @@ static void test_lockout(void)
     ota_auth_lockout_record_failure(&s, t + 100);
     ota_auth_lockout_record_failure(&s, t + 101);
     ota_auth_lockout_record_failure(&s, t + 102); // 3rd failure after reset -- back to tier 0
-    TEST_CHECK((s.locked_until_ms - (t + 102)) == OTA_AUTH_LOCKOUT_BASE_MS,
+    TEST_CHECK(s.lock_dur_ms == OTA_AUTH_LOCKOUT_BASE_MS,
                "after a success reset, the next lockout starts back at the base 60s, not the "
                "escalated tier from before");
+}
+
+static void test_lockout_wrap(void)
+{
+    // Lock imposed just before the 2^32 tick wrap must hold across it and lift on time.
+    ota_auth_lockout_state_t s;
+    memset(&s, 0, sizeof(s));
+    uint32_t start = 0xFFFFFFFFu - 10u;
+    ota_auth_lockout_record_failure(&s, start);
+    ota_auth_lockout_record_failure(&s, start);
+    ota_auth_lockout_record_failure(&s, start);
+    TEST_CHECK(ota_auth_lockout_is_locked(&s, start + 5u), "locked just after imposing");
+    TEST_CHECK(ota_auth_lockout_is_locked(&s, start + OTA_AUTH_LOCKOUT_BASE_MS - 1u),
+               "still locked one ms before the window ends, across the wrap");
+    TEST_CHECK(!ota_auth_lockout_is_locked(&s, start + OTA_AUTH_LOCKOUT_BASE_MS), "lifts exactly at the window end across the wrap");
+    // An idle slot must not alias back to locked 2^31+ ms later.
+    TEST_CHECK(!ota_auth_lockout_is_locked(&s, start + 0x80000000u), "no phantom lock after 2^31 ms idle");
+    TEST_CHECK(!ota_auth_lockout_is_locked(&s, start + 0xFFFFFFF0u), "no phantom lock near a full 2^32 ms idle");
 }
 
 void run_test_ota_auth(void)
@@ -136,4 +154,5 @@ void run_test_ota_auth(void)
     test_nonce_lifecycle();
     test_constant_time_equal();
     test_lockout();
+    test_lockout_wrap();
 }

@@ -340,6 +340,20 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     }
     return ESP_OK;
 }
+/* backup-import LOW-3 fence: restore-in-flight flag and 409 sender fakes. */
+static bool s_test_restore_in_flight;
+static int s_test_refusals;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+esp_err_t system_mode_gate_http_send_refusal(httpd_req_t *req, const char *reason)
+{
+    (void)req;
+    (void)reason;
+    s_test_refusals++;
+    return ESP_OK;
+}
 static int s_last_err_code;
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
@@ -1568,6 +1582,63 @@ static void test_pcfg_resolve_scratch_oom_leaves_file_untouched(void)
     TEST_CHECK(lerr == ESP_ERR_NO_MEM, "boot load reports the failure");
     TEST_CHECK(s_profile_rev_unknown[0], "the unexamined slot is marked unknown (saves/deletes refused)");
     TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact after boot load");
+}
+
+static void test_pcfg_med2_newer_corrupt_ioerror_file_protected(void)
+{
+    TEST_SECTION("persistfx MED-2: NEWER file fails closed, corrupt file preserved as .bad, read error is not absence");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t stale_nvs = make_stored_profile();
+    strncpy(stale_nvs.name, "StaleNvs", PROFILE_NAME_MAX_LEN);
+    char rel[40], bad[48];
+    profiles_cfg_fs_path(2, rel, sizeof(rel));
+    snprintf(bad, sizeof(bad), "%s.bad", rel);
+    static uint8_t junk[4 + 64];
+    static uint8_t after[4 + 64];
+    size_t got = 0;
+    profile_t out;
+    uint32_t out_rev = 99;
+    bool used_file = true, err = false;
+
+    /* NEWER: version byte above this build's */
+    memset(junk, 0x11, sizeof(junk));
+    junk[0] = 7;
+    junk[1] = junk[2] = junk[3] = 0;
+    junk[4] = (uint8_t)(PROFILE_VERSION + 1);
+    TEST_CHECK(cfg_fs_write_atomic(rel, junk, sizeof(junk)) == ESP_OK, "setup: newer-version file");
+    bool have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    TEST_CHECK(err && !have && !used_file, "MED-2: NEWER file with a valid NVS copy -> error, slot not adopted");
+    TEST_CHECK(cfg_fs_read(rel, after, sizeof(after), &got) == ESP_OK && got == sizeof(junk) &&
+                   memcmp(after, junk, sizeof(junk)) == 0,
+               "MED-2: the NEWER file is byte-identical (NOT overwritten from NVS)");
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, false, 3, &out, &out_rev, &used_file, &err);
+    TEST_CHECK(err && !have, "MED-2: NEWER file with no NVS copy -> error, slot NOT reported free");
+    TEST_CHECK(cfg_fs_read(rel, after, sizeof(after), &got) == ESP_OK && got == sizeof(junk), "MED-2: file not deleted");
+
+    /* CORRUPT: version 0 never valid -> preserved as .bad */
+    junk[4] = 0;
+    TEST_CHECK(cfg_fs_write_atomic(rel, junk, sizeof(junk)) == ESP_OK, "setup: corrupt file");
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    TEST_CHECK(!err && have && !used_file, "MED-2: corrupt file -> NVS candidate decides");
+    TEST_CHECK(cfg_fs_read(bad, after, sizeof(after), &got) == ESP_OK && got == sizeof(junk) &&
+                   memcmp(after, junk, sizeof(junk)) == 0,
+               "MED-2: the corrupt file was preserved as .bad before any fallback");
+    (void)cfg_fs_delete(bad);
+
+    /* I/O error: not absence */
+    profile_t good = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(2, &good, 8) == ESP_OK, "setup: good file");
+    cfg_fs_test_inject_read_error(rel, ESP_FAIL, 8);
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    TEST_CHECK(err && !have, "MED-2: transient read error -> error, not 'file absent' + NVS adoption");
+    profile_t again;
+    TEST_CHECK(pcfg_file_profile(2, &again), "MED-2: the good file is still intact after the read error");
 }
 
 static void test_pcfg_boot_profile_scratch_oom_fails_closed(void)
@@ -6462,6 +6533,29 @@ static void test_fuzz_small_body_handlers(void)
     g_fake_builtin_on = false;
 }
 
+static void test_restore_in_flight_fences_profile_writes(void)
+{
+    TEST_SECTION("profile POST / delete -- refused (409 sender) while a backup restore is in flight (LOW-3)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    char body[160];
+    build_minimal_post_body(body, sizeof(body), "Fenced");
+    s_test_restore_in_flight = true;
+    s_test_refusals = 0;
+    s_last_err_code = 0;
+    TEST_CHECK(run_profile_post(body) == ESP_OK, "post handler replies itself");
+    TEST_CHECK(s_test_refusals == 1 && s_last_err_code == 0, "post: answered by the mode-gate 409 sender");
+    TEST_CHECK(!profiles_slot_used(0), "post: nothing saved");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 4;
+    TEST_CHECK(profile_delete_post_handler(&req) == ESP_OK, "delete handler replies itself");
+    TEST_CHECK(s_test_refusals == 2, "delete: answered by the mode-gate 409 sender");
+    s_test_restore_in_flight = false;
+    s_test_refusals = 0;
+    TEST_CHECK(run_profile_post(body) == ESP_OK && s_test_refusals == 0, "control: no fence once the restore ends");
+    TEST_CHECK(profiles_slot_used(0), "control: the profile saved");
+}
+
 void run_test_profiles_http(void)
 {
     test_fuzz_profile_post_hostile();
@@ -6502,6 +6596,7 @@ void run_test_profiles_http(void)
     test_profiles_http_save_allows_builtin_name();
     test_profiles_http_save_allows_editing_existing_slot_named_like_builtin();
     test_profile_post_handler_rejects_malformed_id();
+    test_restore_in_flight_fences_profile_writes();
     test_profile_post_builtin_id_copies_to_first_free();
     test_profile_name_nul_refused();
     test_profile_rule_temp_nan_refused_even_with_cmp_none();
@@ -6577,6 +6672,7 @@ void run_test_profiles_http(void)
     test_pcfg_longer_rev_array_is_known_tail_ignored();
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
+    test_pcfg_med2_newer_corrupt_ioerror_file_protected();
     test_pcfg_boot_profile_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_refuses_on_external_ram_stack();

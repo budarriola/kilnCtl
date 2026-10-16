@@ -101,6 +101,28 @@ esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_reading
 { (void)out; (void)max_readings; (void)out_count; return ESP_FAIL; }
 bool zones_config_get_safety_tc_type(uint8_t *out_tc_type) { (void)out_tc_type; return false; }
 bool zones_config_is_valid(void) { return true; }
+/* AUDIT_THERMOCOUPLE LOW-1: the context frame now resolves each zone through its thermo mask.
+ * Identity mask stub (zone i -> channel i); the mask-mean logic itself is covered in
+ * test_max31856_hal_spi.c against the real thermo_zone_raw_from_readings(). */
+bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
+{
+    if (zone_index >= 8u) return false;
+    if (out_mask) *out_mask = (uint8_t)(1u << zone_index);
+    return true;
+}
+float thermo_zone_raw_from_readings(const MAX31856Reading *readings, size_t count, uint8_t thermo_mask,
+                                    bool *out_valid)
+{
+    for (size_t r = 0; readings && r < count; r++) {
+        if (thermo_mask == (uint8_t)(1u << readings[r].channel)) {
+            bool ok = !readings[r].spi_failed && !isnan(readings[r].tc_temperature_c);
+            if (out_valid) *out_valid = ok;
+            return ok ? readings[r].tc_temperature_c : NAN;
+        }
+    }
+    if (out_valid) *out_valid = false;
+    return NAN;
+}
 
 /* 2026-09-10 opus review: safety_link_poll.c (#included below) now calls
  * safety_ceiling_sync_reconcile_on_link_up() on every tick the link is up,

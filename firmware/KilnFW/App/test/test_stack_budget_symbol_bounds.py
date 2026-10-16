@@ -259,13 +259,38 @@ Disassembly of section .flash.text:
 """
 
 
+BND_D = '''
+Disassembly of section .flash.text:
+
+00000010 <caller_fn>:
+10:	006136        	entry	a1, 32
+13:	c90c81        	l32r	a9, 00000004 <x> (00000400 <_stext>)
+16:	c90c81        	l32r	a9, 00000008 <x> (00000200 <far_fn>)
+19:	0009e0        	callx8	a9
+1c:	f01d          	retw.n
+
+00000200 <far_fn>:
+200:	006236        	entry	a1, 48
+203:	f01d          	retw.n
+
+00000400 <_stext>:
+400:	1ac936        	entry	a9, 0xd60
+'''
+# _stext is a zero-size NOTYPE label (no type flag); the others are real functions.
+BND_T = (
+    "00000010 g     F .flash.text\t00000020 caller_fn\n"
+    "00000200 g     F .flash.text\t00000010 far_fn\n"
+    "00000400 g       .flash.text\t00000000 _stext\n"
+)
+
+
 class LongCallFilterTest(unittest.TestCase):
     def _run(self, **kw):
         return mock.Mock(returncode=0, stderr="", stdout="")
 
-    def _parse(self, mod, text):
+    def _parse(self, mod, text, symtab=""):
         def run(cmd, capture_output=True, text_=True, check=False, **k):
-            return mock.Mock(returncode=0, stderr="", stdout="" if "-t" in cmd else text)
+            return mock.Mock(returncode=0, stderr="", stdout=symtab if "-t" in cmd else text)
         with mock.patch.object(mod.subprocess, "run", side_effect=run),                 mock.patch("os.path.getsize", return_value=len(text)):
             return mod.parse("objdump", "fake.elf")
 
@@ -284,6 +309,32 @@ class LongCallFilterTest(unittest.TestCase):
         self.assertEqual(addr_keyed.bodyless_calls(0x10, parsed), ["memcpy"])   # F3
         self.assertNotIn(0x300, parsed.calls[0x10])            # cb_fn literal: never called via a reg
         self.assertTrue(parsed.indirect[0x10])                 # callx0 a12 is indirect (F5)
+
+    def test_linker_boundary_literal_is_not_a_call_edge(self):
+        # 2026-10-14 (XIP): an l32r of the _stext section bound later paired with
+        # a callx must not become an edge into the literal pool objdump decodes
+        # as a huge-frame `entry` at _stext.
+        bnd = BND_D
+        parsed = self._parse(addr_keyed, bnd, BND_T)
+        self.assertNotIn(0x400, parsed.calls[0x10])
+        self.assertIn(0x200, parsed.calls[0x10])
+        self.assertNotIn(0x400, parsed.frames)                 # no frame from the marker either
+
+    def test_unnamed_zero_size_notype_marker_is_not_a_call_edge(self):
+        # REVIEW_XIPLAND LOW-1: the filter is keyed on the symbol TYPE (zero-size NOTYPE, no
+        # FUNC symbol at the address), not on a name list: a name no list ever heard of works too.
+        bnd = BND_D.replace("_stext", "_some_future_section_bound")
+        parsed = self._parse(addr_keyed, bnd, BND_T.replace("_stext", "_some_future_section_bound"))
+        self.assertNotIn(0x400, parsed.calls[0x10])
+        self.assertNotIn(0x400, parsed.frames)
+        self.assertIn(0x200, parsed.calls[0x10])
+        self.assertFalse(parsed.indirect[0x10])                # dropped as a bound, not as an unresolved call
+
+    def test_func_symbol_at_the_same_address_keeps_the_entry_walkable(self):
+        # A hand-written assembly entry (FUNC, even size 0) sharing the address is a real target.
+        t = BND_T + "00000400 g     F .flash.text\t00000000 asm_entry\n"
+        parsed = self._parse(addr_keyed, BND_D, t)
+        self.assertIn(0x400, parsed.frames)
 
     def test_non_entry_long_call_target_marks_caller_indirect(self):
         # Review L1: callx8 to far_fn+0x4 (not an entry) must not be silently dropped.

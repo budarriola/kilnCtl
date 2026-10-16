@@ -11,6 +11,7 @@
 #define main uf_main
 #define UF_EXTRA_TESTS 1
 static void extra_tests(void);
+static void extra_final_wedge_test(void);
 #include "test_update_fetch.c"
 #undef main
 
@@ -164,6 +165,35 @@ static void test_settings_http(void)
     CHECK(post_settings("repo=alice%2Fproj", 0) == 200, "settings POST: valid repo -> 200");
     CHECK(strcmp(g_set_last, "alice/proj") == 0 && g_set_calls == 1, "decoded repo passed to update_settings_set once");
     CHECK(resp_has("\"repo\":\"alice/proj\"") && resp_has("\"is_default\":false"), "success body is the new setting");
+    // UPDLOW MED-1: a backoff earned against the OLD repo is cleared by a successful repo change only.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 429;
+    g_fr_routes[0].retry_after = "300";
+    run_job_and_result("/api/update/check");
+    CHECK(POST("/api/update/check", NULL) == 429 && resp_has("\"error\":\"backoff\""), "backoff active before settings change");
+    g_set_result = ESP_FAIL;
+    CHECK(post_settings("repo=bob%2Fproj", 0) == 500, "failed settings POST");
+    CHECK(POST("/api/update/check", NULL) == 429, "failed settings POST leaves the backoff in place");
+    g_set_result = ESP_OK;
+    CHECK(post_settings("repo=bob%2Fproj", 0) == 200, "successful settings POST");
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(POST("/api/update/check", NULL) == 202, "repo change cleared the backoff");
+    wait_idle();
+    // UPDBATCH LOW-1: re-saving the SAME repo (any case) must not walk past a fresh backoff.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 429;
+    g_fr_routes[0].retry_after = "300";
+    run_job_and_result("/api/update/check");
+    CHECK(POST("/api/update/check", NULL) == 429, "backoff active before the same-repo save");
+    strcpy(g_fr_repo, "bob/proj"); // fixture() blanks the fake's repo; set it only after the job ran
+    CHECK(post_settings("repo=bob%2Fproj", 0) == 200, "same-repo settings POST succeeds");
+    CHECK(POST("/api/update/check", NULL) == 429, "same-repo save leaves the backoff in place");
+    CHECK(post_settings("repo=BOB%2FPROJ", 0) == 200, "case-only repo POST succeeds");
+    CHECK(POST("/api/update/check", NULL) == 429, "case-only repo change leaves the backoff in place");
+    CHECK(post_settings("repo=carol%2Fproj", 0) == 200, "different repo POST succeeds");
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(POST("/api/update/check", NULL) == 202, "a real repo change still clears the backoff");
+    wait_idle();
     strcpy(g_fr_repo, "budarriola/kilnCtl");
 }
 
@@ -305,6 +335,28 @@ static void test_stage_routes_extra(void)
     CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "refused downgrade staged nothing");
     (void)e0;
     expect_claim_balanced("downgrade upload");
+    // STAGEVERFX LOW-2: a -dirty descriptor (upgrade, so only the dirty rule can refuse) reaches the policy
+    // through update_http's gate as dirty=true and is answered refuse_dirty, forced or not.
+    {
+        static uint8_t dirty_img[IMG_LEN];
+        memcpy(dirty_img, g_img, IMG_LEN);
+        memset(dirty_img + 48, 0, 32);
+        memcpy(dirty_img + 48, "v1.2.3-dirty", 12);
+        upload(dirty_img, IMG_LEN);
+        code = run_upload();
+        CHECK(code == 409 && resp_has("refuse_dirty"), "undeclared -dirty upload -> 409 refuse_dirty");
+        CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "refused dirty upload staged nothing");
+        upload(dirty_img, IMG_LEN);
+        fr_req_header(&g_rq, "X-Stage-Force", "1");
+        code = run_upload();
+        CHECK(code == 409 && resp_has("refuse_dirty"), "forced -dirty upload still refused (force cannot override)");
+        upload(dirty_img, IMG_LEN);
+        fr_req_header(&g_rq, "X-Stage-Version", "1.2.3");
+        code = run_upload();
+        CHECK(code == 409 && resp_has("refuse_dirty"), "declared version does not launder a -dirty descriptor");
+        CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "dirty uploads staged nothing");
+        expect_claim_balanced("dirty upload");
+    }
 
     // status GET reports a staged image, and clear removes it
     upload(g_img, IMG_LEN);
@@ -323,6 +375,32 @@ static void test_stage_routes_extra(void)
     g_fr_flash_write_fail = false;
     expect_claim_balanced("clear failure");
     CHECK(POST("/api/update/stage/clear", NULL) == 200, "clear retry succeeds (claim was released)");
+}
+
+// REVIEW_UPDLOW LOW-1: the writer finishes its op in the instant the caller's wait times out (arb DONE, so
+// update_wr_arb_caller_timeout() says not wedged) but its completion give never arrives. wr_call() latches the
+// wedge and must set wr_late_exited, because that writer already passed its hand-off point and will never
+// reclaim leak_*: fetch_task has to free the job buffers itself. Without it they leak until reboot.
+static void extra_final_wedge_test(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(!update_fetch_writer_wedged(), "missed give: writer not wedged before the case");
+    const long heap_pre = g_fr_heap_live;
+    g_fr_wr_missed_give = true;
+    CHECK(POST("/api/update/download", NULL) == 202, "missed give: download accepted");
+    WAIT_FOR_MS((job_result(), strcmp(g_state, "failed") == 0), 30000);
+    CHECK(g_fr_wr_give_dropped == 1, "missed give: the writer finished its op and its completion give was dropped");
+    CHECK(update_fetch_writer_wedged(), "missed give: wr_call latches the wedge");
+    CHECK(strcmp(g_state, "failed") == 0, "missed give: job failed");
+    CHECK(strcmp(g_error, "writer_wedged_reboot_required") == 0, "missed give: names writer_wedged_reboot_required");
+    WAIT_FOR(!g_fr_claim_held);
+    expect_claim_balanced("missed give");
+    // the writer is back at its idle command wait and will never run again (nobody gives wr_req after a wedge)
+    WAIT_FOR_MS(g_fr_sem_idle_waiters >= 1, 30000);
+    CHECK(g_fr_sem_idle_waiters >= 1, "missed give: writer parked at its idle wait");
+    WAIT_FOR(g_fr_heap_live == heap_pre);
+    CHECK(g_fr_heap_live == heap_pre, "missed give: fetch_task freed the job buffers itself (wr_late_exited)");
+    g_fr_wr_missed_give = false;
 }
 
 static void extra_tests(void)

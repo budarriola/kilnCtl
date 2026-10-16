@@ -524,6 +524,25 @@ static void test_stuck_reading_documented(void)
                "documented: thermo_task does no stuck-value detection; identical readings stay valid");
 }
 
+extern uint32_t g_test_hw_skew_ms;
+
+// Guard audit 2026-10-14 A2: safety_core.c ages snapshots against the hardware
+// timer (to_ms_since_boot(get_absolute_time())). The stamp must come from that
+// clock, not the FreeRTOS tick, or the two drift apart (tick time stops while the
+// scheduler is suspended in flash writes; timer time does not).
+static void test_snapshot_stamped_from_hardware_timer(void)
+{
+    TEST_SECTION("thermo_task loop -- snapshot timestamp comes from the hardware timer, not the FreeRTOS tick (A2)");
+    setup_chip(true);
+    g_test_hw_skew_ms = 5000000u; // timer runs far ahead of the tick; harness tick is ~1000-2000 ms
+    step_t steps[2] = { good_step(100.0f), good_step(100.0f) };
+    run_steps(steps, 2);
+    g_test_hw_skew_ms = 0;
+    TEST_CHECK(s_out[0].valid, "precondition: conversion publishes valid");
+    TEST_CHECK(s_out[0].timestamp_ms >= 5000000u,
+               "timestamp_ms carries the hardware-timer clock, not the tick-derived one");
+}
+
 void run_test_thermo_task_faults(void)
 {
     test_healthy_baseline();
@@ -538,4 +557,5 @@ void run_test_thermo_task_faults(void)
     test_recovery_after_fault_clears();
     test_stale_publish_never_reads_good();
     test_stuck_reading_documented();
+    test_snapshot_stamped_from_hardware_timer();
 }

@@ -614,3 +614,16 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
 # firmware-wide TLS behaviour change that cannot be proven here without a board (crt_bundle
 # against github.com with a synced clock, and every other TLS client). See
 # docs/GITHUB_RELEASE_UPDATE_PLAN.md WP8 status, "Clock".
+
+# XIP from PSRAM instead of UART ISR in IRAM (2026-10-14, docs/audits/XIP_PSRAM_INVESTIGATION.md,
+# docs/audits/LINK_CRC_DURING_FETCH.md). A flash erase/write (update stage: 64 KB erase-ahead blocks,
+# ~150-400 ms) used to run with the cache off, which held off the non-IRAM UART1 ISR (kilnlink to the Pico,
+# 230400 baud) longer than the 128-byte HW RX FIFO lasts (~5.5 ms): crc/length mismatches and reply
+# timeouts. CONFIG_UART_ISR_IN_IRAM=y (2026-10-13) fixed that but moved both UART drivers' rings and queues
+# from PSRAM to internal RAM (~12 KB), leaving the idle internal free at ~30-34 KB, under the 32752 B fetch
+# admission. XIP_FROM_PSRAM (selects SPIRAM_FETCH_INSTRUCTIONS + SPIRAM_RODATA) copies .text and .rodata into
+# PSRAM at boot (~2.9 MB of the 8 MB), so SPI1 erase/write no longer disables the cache and a non-IRAM ISR keeps
+# running: same zero link errors with ~+11 KB internal free. The UART ISR is therefore NOT in IRAM. Bench trial
+# 2026-10-14 (BENCH_TEST_LOG.md). Do not turn the ISR flag back on without turning XIP off, and vice versa.
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+# CONFIG_UART_ISR_IN_IRAM is not set

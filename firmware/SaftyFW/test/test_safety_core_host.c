@@ -542,6 +542,32 @@ static void test_estop_trip_latch_and_clear(void)
     TEST_CHECK(W.clear_cmd_calls == 1, "no repeated clear commands");
 }
 
+static void test_clear_retrip_with_different_reason_republishes(void)
+{
+    TEST_SECTION("A10: a refused clear whose retest re-trips under a different reason republishes the event");
+    world_reset_keep_clock();
+    core_start();
+    steps(5);
+    W.estop = true;
+    TEST_CHECK(steps_until_trip(5) > 0, "S7 trips");
+    TEST_CHECK(trip_reason() == SAFETY_TRIP_ESTOP, "latched reason is ESTOP");
+    W.estop = false;
+    steps(3);
+    uint8_t seq_before = trip_seq_now();
+    W.main_fault = true; // S6a is not evaluated while latched; it fires on the retest tick
+    TEST_CHECK(safety_core_request_clear_trip(true, seq_before), "clear queued");
+    steps(3);
+    TEST_CHECK(last_outcome() == SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,
+               "clear refused: the retest re-tripped");
+    uint8_t seq = 0;
+    safety_trip_t ev = SAFETY_TRIP_NONE;
+    TEST_CHECK(safety_core_get_trip_event(&seq, &ev, NULL, NULL, NULL), "event readable");
+    TEST_CHECK(ev == SAFETY_TRIP_MAIN_FAULT, "A10: TRIP_EVENT now names the new reason");
+    TEST_CHECK(seq != seq_before, "A10: the event is a new occurrence (trip_seq advanced)");
+    TEST_CHECK(W.last_latched_reason == (uint32_t)SAFETY_TRIP_MAIN_FAULT, "A10: boot reason latched the new reason");
+    W.main_fault = false;
+}
+
 static void test_admin_test_trip_boot_reason_latch(void)
 {
     TEST_SECTION("TEST trip (plan 4.4): latched like any real trip, reason 4 reaches boot_reason (REVIEW_TRIPWP2 LOW-5)");
@@ -1108,7 +1134,10 @@ static void test_request_enable_gates(void)
     // While tripped, enable must not energize.
     W.main_fault = true;
     TEST_CHECK(steps_until_trip(3) > 0, "trip");
+    unsigned calls_before_tripped_enable = (unsigned)W.energize_true_calls;
     TEST_CHECK(!safety_core_request_enable(true), "enable refused while tripped (relay_owner refuses)");
+    TEST_CHECK((unsigned)W.energize_true_calls == calls_before_tripped_enable,
+               "A9: tripped enable is refused in safety_core, never forwarded to relay_owner");
     TEST_CHECK(!W.relay_energized, "relay stays off while tripped");
 }
 
@@ -1139,6 +1168,7 @@ int main(void)
 {
     test_healthy_never_trips();
     test_estop_trip_latch_and_clear();
+    test_clear_retrip_with_different_reason_republishes();
     test_admin_test_trip_boot_reason_latch();
     test_clear_queue_refusals();
     test_command_retry_until_relay_accepts();

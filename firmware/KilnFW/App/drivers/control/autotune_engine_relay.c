@@ -107,6 +107,9 @@ void finalize_relay_fit(void)
 
     s_at.proposed_gains = pid_autotune_tune_from_relay(&s_at.relay, s_at.relay_rule);
     force_relays_off();
+    if (autotune_reject_if_blocked_during_measure()) {
+        return;
+    }
     s_at.state = AUTOTUNE_ENGINE_DONE;
     ESP_LOGI(AT_TAG,
              "autotune zone %u relay done: Ku=%.4f Tu=%.0fs a=%.2fC over %d cycles -> Kp=%.5f Ki=%.5f Kd=%.5f",

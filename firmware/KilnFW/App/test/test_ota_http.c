@@ -551,6 +551,17 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
 }
 esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link) { (void)link; return ESP_OK; }
 
+// Guard audit 2026-10-14 A1: controllable DIAG trip-reason read for sw_reset_http.c's S9 gate.
+static bool g_stub_diag_fresh = false;
+static uint8_t g_stub_diag_reason = 0;
+esp_err_t safety_link_get_diag_trip_reason(SafetyLinkClass *link, bool *out_fresh, uint8_t *out_reason)
+{
+    (void)link;
+    *out_fresh = g_stub_diag_fresh;
+    *out_reason = g_stub_diag_reason;
+    return ESP_OK;
+}
+
 // safety_link.h -- SAFETY_CMD_REBOOT (0x29). Never actually invoked by any
 // test here: sw_reset_http.c's own s_safety stays NULL (sw_reset_http_start()
 // is never called in this suite), so the handler takes its NO_LINK branch.
@@ -781,7 +792,7 @@ static char s_last_resp_status[32] = "";
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    size_t n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    size_t n = (buf_len < 0) ? (buf ? strlen(buf) : 0) : (size_t)buf_len;
     if (n >= sizeof(s_last_resp_body)) {
         n = sizeof(s_last_resp_body) - 1;
     }
@@ -1283,6 +1294,50 @@ static void test_sw_reset_refuses_during_firing(void)
     TEST_CHECK(g_probe_interlock_called, "the interlock check must actually have run");
 
     g_stub_profile_state = PROFILE_EXEC_IDLE; // restore for later tests
+}
+
+// Guard audit 2026-10-14 A1: sw_reset refuses with 409 while the Pico reports S9.
+static void test_sw_reset_refuses_while_pico_s9_latched(void)
+{
+    TEST_SECTION("A1 sw_reset_post_handler -- 409 while the Pico reports S9 TRIP_INEFFECTIVE (fresh DIAG)");
+    TEST_CHECK(sw_reset_s9_refusal_needed(true, SAFETY_LINK_TRIP_REASON_INEFFECTIVE),
+               "fresh + reason 10 -> refuse");
+    TEST_CHECK(!sw_reset_s9_refusal_needed(false, SAFETY_LINK_TRIP_REASON_INEFFECTIVE),
+               "stale DIAG -> do not refuse");
+    TEST_CHECK(!sw_reset_s9_refusal_needed(true, 6u), "S6a (main fault) is NOT refused");
+    TEST_CHECK(!sw_reset_s9_refusal_needed(true, 0u), "no trip is NOT refused");
+
+    sw_reset_authenticate();
+    static int dummy_link;
+    SafetyLinkClass *saved = s_safety;
+    s_safety = (SafetyLinkClass *)&dummy_link;
+    g_stub_diag_fresh = true;
+    g_stub_diag_reason = SAFETY_LINK_TRIP_REASON_INEFFECTIVE;
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = sw_reset_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_status, "409") != NULL, "S9 latched -> 409");
+    TEST_CHECK(strstr(s_last_sendstr_body, "S9") != NULL, "the refusal names S9");
+    g_stub_diag_fresh = false;
+    g_stub_diag_reason = 0;
+    s_safety = saved;
+}
+
+static void test_a1_pico_reason_mapping(void)
+{
+    TEST_SECTION("A1 Pico TRIP_INEFFECTIVE refusal reason mapping");
+    TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
+                                              KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE) ==
+                   SW_RESET_PICO_REFUSED_S9,
+               "reboot reason TRIP_INEFFECTIVE maps to REFUSED_S9");
+    TEST_CHECK(strstr(sw_reset_pico_sentence(SW_RESET_PICO_REFUSED_S9), "S9") != NULL,
+               "the REFUSED_S9 sentence names S9");
+    TEST_CHECK(strstr(ota_http_pico_rollback_reason_str(KILNLINK_ROLLBACK_RESULT_REASON_TRIP_INEFFECTIVE),
+                      "S9") != NULL,
+               "rollback reason string names S9, not 'unknown reason'");
 }
 
 // Same property, the other running-shaped state: PAUSED is still a firing
@@ -2208,7 +2263,7 @@ static void test_sw_reset_pico_outcome_mapping(void)
                    SW_RESET_PICO_REFUSED_OTHER,
                "REFUSED + an explicit UNKNOWN reason reports the generic refusal, not a specific claim");
     TEST_CHECK(sw_reset_classify_pico_outcome(ESP_OK, SAFETY_LINK_REBOOT_OUTCOME_REFUSED,
-                                              (uint8_t)(KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE + 1)) ==
+                                              (uint8_t)(KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE + 1)) ==
                    SW_RESET_PICO_REFUSED_OTHER,
                "REFUSED + a reason byte this build's enum does not name (a newer peer) reports the "
                "generic refusal rather than aliasing onto ARMED or TRANSFER");
@@ -3165,6 +3220,8 @@ void run_test_ota_http(void)
      * back to pdFAIL for its own duration. */
     g_stub_task_create_result = pdPASS;
     test_sw_reset_refuses_during_firing();
+    test_sw_reset_refuses_while_pico_s9_latched();
+    test_a1_pico_reason_mapping();
     test_sw_reset_refuses_while_paused();
     test_sw_reset_refuses_during_autotune();
     test_sw_reset_ok_when_idle();

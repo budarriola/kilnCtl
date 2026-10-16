@@ -1044,6 +1044,35 @@ static void test_s8(void)
         TEST_CHECK(!tripped, "recovering to a normal reading after a bad-read burst does not trip S8");
     }
 
+    /* A11 (guard audit 2026-10-14): a bad read still counts its dt toward the open S8
+     * window, so the window's elapsed time is wall-clock and the rate is not inflated. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in); /* window opens at 20C */
+
+        safety_guard_input_t bad = in;
+        bad.tc_valid = false;
+        bad.tc_c = NAN;
+        bad.cj_c = NAN;
+        bad.dt_s = 30.0f; /* one bad read spanning half the window */
+        safety_guards_tick(&s, &cfg, &bad);
+        TEST_CHECK(s.s8_window_elapsed_s == 30.0f, "A11: a bad read's dt is counted into the open S8 window");
+
+        in.tc_c = 25.0f;
+        in.dt_s = 30.0f; /* wall clock now 60s since the window opened: 5C in 60s */
+        bool t = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!t && s.s8_over_rate_streak == 0, "A11: 5C/min over the true 60s is in bounds");
+        TEST_CHECK(s.s8_window_start_c == 25.0f,
+                   "A11: the window closed on wall-clock time (a skipped bad-read dt would leave it open)");
+    }
+
     /* Latching: once tripped, S8 stays tripped, and safety_guards_clear()
      * un-latches it -- the same contract every other guard in this file
      * gets. */
@@ -3367,6 +3396,41 @@ static void test_try_clear(void)
         TEST_CHECK(!s.is_tripped, "T1: S1 cleared");
     }
 
+    /* A8 (SAFTYFW_GUARDS audit 2026-10-14): S2 and S11 clears are refused on an
+     * unknown (tc_valid == false) reading, as S1 already does. The latch must stay
+     * on the ORIGINAL reason (a granted clear would re-trip as S5 instead). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        s.is_tripped = true;
+        s.reason = SAFETY_TRIP_OVER_SETPOINT;
+        safety_guard_input_t bad = base_input();
+        bad.context_valid = true;
+        bad.zone_count = 1u;
+        bad.max_zone_setpoint_c = 500.0f;
+        bad.tc_valid = false;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "A8: S2 clear refused on an invalid reading");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVER_SETPOINT, "A8: refused S2 clear leaves the S2 latch untouched");
+        safety_guard_input_t ok = bad;
+        ok.tc_valid = true;
+        ok.tc_c = 100.0f;
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &ok), "A8: S2 clear granted on a valid, in-range reading");
+
+        safety_guards_reset(&s);
+        s.is_tripped = true;
+        s.reason = SAFETY_TRIP_FROZEN_SENSOR;
+        s.s11_window_active = true;
+        s.s11_last_c = 100.0f;
+        safety_guard_input_t bad11 = base_input();
+        bad11.tc_valid = false;
+        bad11.tc_c = 250.0f;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad11), "A8: S11 clear refused on an invalid reading");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "A8: refused S11 clear leaves the S11 latch untouched");
+    }
+
     /* T1: S8 -- refused while the tripping window measured against the current
      * reading still exceeds max_rate_c_per_min; accepted once the kiln cooled. */
     {
@@ -5257,8 +5321,92 @@ static void test_s8_clear_followups(void)
     }
 }
 
+/* SAFETYFW guard audit 2026-10-14 A4: a clear must not land while S9's evidence is still
+ * accumulating (K4 commanded open, calibrated chain still sees current). */
+static void test_a4_clear_refused_during_s9_evidence(void)
+{
+    TEST_SECTION("A4: CLEAR_TRIP refused while S9 evidence accumulates");
+    /* Early: K4 open for 3 ticks, current present, trip_verify_s not yet elapsed. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.any_current_present = true;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 3; i++) {
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(s.is_tripped && !s.trip_ineffective, "precondition: tripped, S9 not yet latched");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &v),
+                   "A4: clear refused while K4 open and current present (verify window running)");
+        TEST_CHECK(s.is_tripped, "A4: refused clear leaves the trip latched");
+    }
+    /* Inside the streak: verify window elapsed, streak started but not yet at the latch. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.any_current_present = true;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 10; i++) { /* 10 s == trip_verify_s default */
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(s.is_tripped && !s.trip_ineffective && s.s9_current_present_streak > 0u,
+                   "precondition: inside the S9 streak, not yet latched");
+        safety_guard_input_t gone = v;
+        gone.any_current_present = false; /* current vanishes the instant the clear arrives */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &gone),
+                   "A4: clear refused while the S9 streak counter is non-zero");
+    }
+    /* Controls: no current -> clear granted; uncommissioned chain -> not blocked by A4. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 12; i++) {
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &v), "A4 control: K4 open, no current -> clear granted");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        (void)safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t v = base_input();
+        v.relay_deenergized = true;
+        v.any_current_present = true;
+        v.current_sensing_commissioned = false;
+        v.dt_s = 1.0f;
+        for (int i = 0; i < 3; i++) {
+            (void)safety_guards_tick(&s, &cfg, &v);
+        }
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &v),
+                   "A4 control: uncommissioned chain (S9 only WARNs) is not blocked by the A4 refusal");
+    }
+}
+
 void run_test_safety_guards(void)
 {
+    test_a4_clear_refused_during_s9_evidence();
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
     test_test_clear_s8_streak_zero_elapsed();

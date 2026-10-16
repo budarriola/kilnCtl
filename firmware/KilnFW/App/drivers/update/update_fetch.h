@@ -4,7 +4,7 @@
 //
 // Routes (all ROUTE_TIER_ADMIN, registered by update_fetch_start()):
 //   POST /api/update/check            start an async check of the latest release (no flash access)
-//                                       query: allow_prerelease=1 reads releases?per_page=5 and picks the
+//                                       query: allow_prerelease=1 reads releases?per_page=15 and picks the
 //                                       highest-semver non-draft release (/releases/latest hides pre-releases)
 //   POST /api/update/download         start an async download into the stage; query overrides:
 //                                       allow_downgrade=1&confirm_downgrade=<tag>  (typed confirm)
@@ -37,6 +37,9 @@ extern "C" {
 // Registers the four routes and the task-margin slots. Call from update_http_start() once the
 // stager exists. Returns an error if a route cannot be registered.
 esp_err_t update_fetch_start(httpd_handle_t server);
+
+// UPDLOW MED-1: drop the rate/server-error backoff (a repo change makes the old answer irrelevant).
+void update_fetch_backoff_clear(void);
 
 #ifdef __cplusplus
 }

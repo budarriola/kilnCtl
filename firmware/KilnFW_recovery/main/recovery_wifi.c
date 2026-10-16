@@ -413,7 +413,20 @@ void recovery_wifi_start(void)
         if (!s_error || strcmp((const char *)s_error, "event_register_fail") == 0) {
             s_error = "softap_fail";
         }
+        // AUDIT_WIFI MED-2: a failed first bring-up used to be final (no
+        // network until a power cycle). Same capped policy as a failed
+        // re-raise after AP_STOP: restart the image while the budget lasts.
+        if (rhealth_ap_reraise_failed_action(recovery_health_wifi_restarts()) == RHEALTH_AP_RESTART_IMAGE) {
+            restart_image_for_wifi();
+        }
+        // Budget used up: staying up with no network. Stop the radio so a
+        // late AP_START cannot leave an AP up whose passphrase was never
+        // shown (the AP_STOP is ignored via s_shutting_down).
+        s_shutting_down = true;
+        (void)esp_wifi_stop();
+        s_up = false;
         recovery_lcd_set_no_network();
+        recovery_health_clear_wifi(); // staying up for good; after the decision
     }
 }
 

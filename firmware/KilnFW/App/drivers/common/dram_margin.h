@@ -31,7 +31,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define KILN_DRAM_LARGEST_ALARM_BYTES ((size_t)8704)
+/* Owner decision 2026-10-13: lowered from 8704 to 7168 B, one level everywhere
+ * (no fetch-time exception). Reason: a GitHub update fetch dips the internal
+ * largest free block to 7680 B on the bench, which is healthy behaviour that
+ * the old 8704 B alarm flagged (SK-04). The 8192 B internal min_free floor and
+ * every fetch admission constant are unchanged. PC-side mirror:
+ * judgments.py judge_heap_dram_floor(floor_bytes=7168). */
+#define KILN_DRAM_LARGEST_ALARM_BYTES ((size_t)7168)
 #define KILN_DRAM_FREE_ALARM_BYTES    ((size_t)11903)
 
 /* The worst figures the CURRENT firmware actually reaches on the bench.

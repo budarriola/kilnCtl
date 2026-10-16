@@ -48,26 +48,40 @@
 #include <string.h>
 
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "hal_esp_common.h"
+#include "kilnlink/kilnlink_frame.h"
 
 static const char *TAG = "hal_uart_esp";
 
-/* Same reasoning/values as espInterfaces/uart_owner.c's identical macros:
- * generous headroom over one worst-case stuffed frame so a burst can't
- * overrun the ring before the event task/hal_uart_recv's caller drains it.
- * See that file's header comment for the full derivation -- unchanged here. */
-#define HAL_UART_ESP_RX_RING_BUF_SIZE 4096
-#define HAL_UART_ESP_TX_RING_BUF_SIZE 4096
+/* Headroom over one worst-case stuffed frame so a burst can't overrun the
+ * ring before the event task/hal_uart_recv's caller drains it. (The
+ * espInterfaces/uart_owner.c macros this comment used to point at no longer
+ * exist; these are the only ring sizes.) */
+/* 2026-10-13 (docs/audits/LINK_CRC_DURING_FETCH.md): 4096 -> 2048 RX / 1024 TX.
+ * That cut was made for CONFIG_UART_ISR_IN_IRAM=y, which makes the IDF driver allocate these rings
+ * MALLOC_CAP_INTERNAL (an IRAM-resident ISR cannot touch PSRAM). 2026-10-14: the UART ISR is no longer in IRAM;
+ * CONFIG_SPIRAM_XIP_FROM_PSRAM=y (sdkconfig.defaults) keeps the cache on during flash erase/write instead, so
+ * the rings come from the default (PSRAM) heap again. The 2048/1024 sizes are kept: one worst-case stuffed
+ * kilnlink frame is KILNLINK_FRAME_STUFFED_MAX (528 B), so 2048 RX holds 3+ frames and a 1024 TX ring holds one
+ * (plus the 8 B ring item header). */
+#define HAL_UART_ESP_RX_RING_BUF_SIZE 2048
+#define HAL_UART_ESP_TX_RING_BUF_SIZE 1024
+_Static_assert(HAL_UART_ESP_RX_RING_BUF_SIZE >= 3 * KILNLINK_FRAME_STUFFED_MAX,
+               "RX ring must hold several worst-case stuffed kilnlink frames");
+_Static_assert(HAL_UART_ESP_TX_RING_BUF_SIZE >= KILNLINK_FRAME_STUFFED_MAX + 64,
+               "TX ring must hold one worst-case stuffed frame plus ring item overhead");
 #define HAL_UART_ESP_EVENT_QUEUE_LEN  16
 
 /* Floor for hal_uart_send_blocking()'s final uart_wait_tx_done() wait -- see
- * that function's 2026-09-05 review-fix comment. 2 ticks (portTICK_PERIOD_MS
- * is 1ms on this project's FreeRTOSConfig) is comfortably more than the
+ * that function's 2026-09-05 review-fix comment. 2 ticks (KilnFW builds with
+ * CONFIG_FREERTOS_HZ=100, so 20 ms; REVIEW_LINKCRC) is comfortably more than the
  * microseconds needed to drain the last few bytes of one frame at 230400+
  * baud, and small enough to never matter next to any real ack_timeout_ms
  * (200ms default, UART_PROTO_DEFAULT_ACK_TIMEOUT_MS). */
@@ -204,13 +218,19 @@ hal_status_t hal_uart_init(hal_uart_t *u, const hal_uart_cfg_t *cfg) {
     char task_name[16];
     snprintf(task_name, sizeof(task_name), "hal_uart%d_evt", (int)impl->port);
 
-    BaseType_t task_created = xTaskCreatePinnedToCore(hal_uart_esp_event_task,
-                                                       task_name,
-                                                       stack_depth,
-                                                       impl,
-                                                       task_priority,
-                                                       &impl->event_task_handle,
-                                                       core_id);
+    /* PSRAM stack (2026-10-14, docs/audits/AUDIT_INTERNAL_RAM_XIP.md): this task
+     * only blocks on the driver's event queue and flushes/counts; the UART ISR
+     * is no longer in IRAM (CONFIG_UART_ISR_IN_IRAM off) and runs on no task
+     * stack, and flash writes no longer freeze the cache under XIP. Torn down
+     * with vTaskDeleteWithCaps() below. */
+    BaseType_t task_created = xTaskCreatePinnedToCoreWithCaps(hal_uart_esp_event_task,
+                                                              task_name,
+                                                              stack_depth,
+                                                              impl,
+                                                              task_priority,
+                                                              &impl->event_task_handle,
+                                                              core_id,
+                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_created != pdPASS) {
         ESP_LOGE(TAG, "uart%d: failed to create hal_uart event task", impl->port);
         uart_driver_delete(impl->port);
@@ -238,7 +258,7 @@ hal_status_t hal_uart_deinit(hal_uart_t *u) {
      * freed underneath it by uart_driver_delete(), same ordering
      * uart_owner_deinit() uses for the same reason. */
     if (impl->event_task_handle) {
-        vTaskDelete(impl->event_task_handle);
+        vTaskDeleteWithCaps(impl->event_task_handle);
     }
 
     uart_driver_delete(impl->port);
@@ -310,8 +330,10 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
      *
      * 2026-09-05 fix: the original gate waited for `free_bytes >= len`
      * outright, which for any len larger than the TX ring itself
-     * (HAL_UART_ESP_TX_RING_BUF_SIZE, 4096) can NEVER be satisfied even with
-     * an idle, fully-draining ring -- free_bytes tops out at the ring size,
+     * (HAL_UART_ESP_TX_RING_BUF_SIZE, 1024 since 2026-10-13) can NEVER be
+     * satisfied even with an idle, fully-draining ring -- free_bytes tops out
+     * at the ring size less one 8 B item header (1016 B for an empty ring,
+     * and only the 504 B max item size while anything is still queued),
      * so that request always ran out the clock and returned HAL_TIMEOUT
      * regardless of timeout_ms, even though uart_write_bytes() itself
      * chunks writes larger than the ring just fine. Send in ring-sized
@@ -325,7 +347,8 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
      * HAL_TIMEOUT return in that case is NOT "nothing queued", it is
      * "queued up through total_written bytes, no way to report or retract
      * that count via this return value". Every real caller's frames today
-     * are smaller than the 4096 B ring (one chunk), so this is latent; see
+     * (at most KILNLINK_FRAME_STUFFED_MAX, 528 B) are smaller than one
+     * chunk (1024 - 64 = 960 B), so this is latent; see
      * hal_uart.h's hal_uart_send_blocking() doc for the caller-facing
      * caveat. */
     TickType_t start_tick = xTaskGetTickCount();
@@ -333,9 +356,10 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
     size_t total_written = 0;
     while (total_written < len) {
         size_t remaining = len - total_written;
-        size_t chunk_target = (remaining < HAL_UART_ESP_TX_RING_BUF_SIZE)
-                                   ? remaining
-                                   : HAL_UART_ESP_TX_RING_BUF_SIZE;
+        /* A NOSPLIT ring item carries a header, so a chunk of exactly the ring
+         * size can never fit: leave 64 B of slack. */
+        size_t chunk_max = HAL_UART_ESP_TX_RING_BUF_SIZE - 64;
+        size_t chunk_target = (remaining < chunk_max) ? remaining : chunk_max;
 
         for (;;) {
             size_t free_bytes = 0;

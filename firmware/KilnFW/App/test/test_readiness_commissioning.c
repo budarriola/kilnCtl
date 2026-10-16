@@ -405,3 +405,23 @@ void run_test_readiness_estop_verification(void)
     TEST_CHECK(readiness_estop_verification_status(true) == READY_OK,
                 "a standing confirmation must read ok");
 }
+
+void run_test_readiness_uncalibrated_ct(void)
+{
+    TEST_SECTION("readiness: fitted-but-uncalibrated CT channels (ctfx LOW-3)");
+    const bool none[3] = { false, false, false };
+    const bool only2[3] = { false, false, true };
+    const bool all[3] = { true, true, true };
+    const uint8_t split[3] = { 0, 2, 2 };
+    TEST_CHECK(readiness_uncalibrated_fitted_ct_mask(1, 0, true, split, only2) == 0x01u,
+                "split {0,2,2} with only k_ct[2] set names channel 0");
+    TEST_CHECK(readiness_uncalibrated_fitted_ct_mask(1, 0, true, split, none) == 0x05u,
+                "split {0,2,2} with no k_ct names channels 0 and 2 (1 is unclaimed, not fitted)");
+    TEST_CHECK(readiness_uncalibrated_fitted_ct_mask(1, 0, true, split, all) == 0u, "all calibrated names nothing");
+    TEST_CHECK(readiness_uncalibrated_fitted_ct_mask(1, 1, false, split, none) == 0x04u,
+                "summed legacy topology: only channel 2 is fitted");
+    TEST_CHECK(readiness_uncalibrated_fitted_ct_mask(1, 0, false, split, only2) == 0x03u,
+                "per_zone legacy topology: all three fitted");
+    TEST_CHECK(readiness_uncalibrated_fitted_ct_mask(0, 0, true, split, none) == 0u,
+                "ct_installed 0: nothing fitted");
+}

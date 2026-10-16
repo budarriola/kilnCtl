@@ -124,4 +124,10 @@ bool current_presence_is_flowing(uint32_t counts_avg, uint16_t zero_counts, floa
 }
 #endif
 
+// AUDIT_CURRENT_SENSE LOW (non-finite reporting-filter reseed): one-pole
+// reporting-filter step. A non-finite sample never enters the filter (inf - inf
+// = NaN would stick forever); the filter holds its state and reseeds from the
+// next finite sample if its own state was ever non-finite or uninitialised.
+void current_filter_step(float *state, bool *initialized, float amps, float alpha);
+
 #endif // SAFTYFW_CURRENT_PRESENCE_POLICY_H

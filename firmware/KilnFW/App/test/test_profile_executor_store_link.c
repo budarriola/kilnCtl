@@ -86,6 +86,12 @@ esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
 
 // httpd/web symbols the (never-invoked here) handlers in profiles_catalog_http.c /
 // profiles_edit_http.c reference; only link-time presence matters.
+esp_err_t system_mode_gate_http_send_refusal(httpd_req_t *req, const char *reason)
+{
+    (void)req;
+    (void)reason;
+    return ESP_OK;
+}
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *f, const char *v) { (void)r; (void)f; (void)v; return ESP_OK; }
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *b, long long n) { (void)r; (void)b; (void)n; return ESP_OK; }
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *b, size_t n) { (void)r; (void)b; (void)n; return ESP_OK; }

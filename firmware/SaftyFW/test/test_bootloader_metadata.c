@@ -231,15 +231,27 @@ static void test_decide_boot(void)
 {
     TEST_SECTION("bootloader_decide_boot -- normal and fallback paths");
 
-    // Healthy active slot, under the attempt limit -> boot it, increment attempts.
+    // Healthy VALID active slot -> boots, and (HIGH-1) is NOT counted: a
+    // confirmed slot already checked in, so no attempt increment, no write.
     bootloader_metadata_t m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID,
                                          BOOTLOADER_SLOT_EMPTY, 0);
     bootloader_boot_decision_t d = bootloader_decide_boot(&m);
-    TEST_CHECK(d.bootable, "VALID active slot under attempt limit is bootable");
+    TEST_CHECK(d.bootable, "VALID active slot is bootable");
     TEST_CHECK(d.chosen_slot == BOOTLOADER_SLOT_A, "chooses the active slot");
-    TEST_CHECK(d.needs_metadata_update, "boot_attempts increment needs a metadata write");
-    TEST_CHECK(d.updated_meta.boot_attempts == 1, "boot_attempts incremented from 0 to 1");
+    TEST_CHECK(!d.needs_metadata_update, "VALID slot with attempts 0: no metadata write");
+    TEST_CHECK(d.updated_meta.boot_attempts == 0, "VALID slot is not counted");
     TEST_CHECK(d.updated_meta.active_slot == BOOTLOADER_SLOT_A, "active_slot unchanged");
+
+    // A stale nonzero count on a VALID slot (left by an older image) is
+    // cleared, never turned into a BAD marking, even at the cap.
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_VALID,
+                  BOOTLOADER_MAX_BOOT_ATTEMPTS);
+    d = bootloader_decide_boot(&m);
+    TEST_CHECK(d.bootable && d.chosen_slot == BOOTLOADER_SLOT_A, "VALID at the cap still boots A");
+    TEST_CHECK(d.needs_metadata_update && d.updated_meta.boot_attempts == 0,
+               "stale count on a VALID slot is cleared");
+    TEST_CHECK(d.updated_meta.slots[BOOTLOADER_SLOT_A].state == BOOTLOADER_SLOT_VALID,
+               "VALID slot is not marked BAD");
 
     // PENDING_VERIFY active slot boots too (docs/BOOTLOADER.md section 5:
     // the app needs the chance to confirm itself).
@@ -249,7 +261,7 @@ static void test_decide_boot(void)
     TEST_CHECK(d.chosen_slot == BOOTLOADER_SLOT_B, "chooses the PENDING_VERIFY slot");
 
     // Active slot exhausted its attempts, other slot VALID -> switch.
-    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_VALID,
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_PENDING_VERIFY, BOOTLOADER_SLOT_VALID,
                   BOOTLOADER_MAX_BOOT_ATTEMPTS);
     d = bootloader_decide_boot(&m);
     TEST_CHECK(d.bootable, "attempt-exhausted active slot falls back to a VALID other slot");
@@ -260,7 +272,7 @@ static void test_decide_boot(void)
     TEST_CHECK(d.updated_meta.boot_attempts == 1, "boot_attempts reset to 1 for the new slot");
 
     // Active slot exhausted, other slot also not bootable -> recovery.
-    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_EMPTY,
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_PENDING_VERIFY, BOOTLOADER_SLOT_EMPTY,
                   BOOTLOADER_MAX_BOOT_ATTEMPTS);
     d = bootloader_decide_boot(&m);
     TEST_CHECK(!d.bootable, "both slots unusable after exhaustion -> not bootable (recovery)");
@@ -290,6 +302,92 @@ static void test_decide_boot(void)
     TEST_CHECK(d.bootable, "sig_required=1 with no signature does not block boot (unenforced)");
     TEST_CHECK(d.chosen_slot == BOOTLOADER_SLOT_A,
                "sig_required has no effect on which slot is chosen");
+}
+
+// AUDIT_PICO_UPDATE HIGH-1: drive the real boot -> persist -> confirm cycle.
+static bootloader_metadata_t sim_boot(bootloader_metadata_t m, bool *bootable, uint8_t *slot)
+{
+    bootloader_boot_decision_t d = bootloader_decide_boot(&m);
+    *bootable = d.bootable;
+    *slot = d.chosen_slot;
+    return d.needs_metadata_update ? d.updated_meta : m; // what flash holds afterwards
+}
+
+static void test_confirmed_slot_survives_resets(void)
+{
+    TEST_SECTION("HIGH-1 -- confirmed slot survives many ordinary resets");
+
+    bool ok = false;
+    uint8_t slot = 0;
+    // Update finished: slot B PENDING_VERIFY, attempts 0, A is the old VALID image.
+    bootloader_metadata_t m = make_meta(BOOTLOADER_SLOT_B, BOOTLOADER_SLOT_VALID,
+                                         BOOTLOADER_SLOT_PENDING_VERIFY, 0);
+    m = sim_boot(m, &ok, &slot);
+    TEST_CHECK(ok && slot == BOOTLOADER_SLOT_B, "first boot runs the new image B");
+    TEST_CHECK(m.boot_attempts == 1, "PENDING_VERIFY boot is counted");
+
+    bootloader_metadata_apply_confirm(&m, BOOTLOADER_SLOT_B); // the app's check-in
+    TEST_CHECK(m.slots[BOOTLOADER_SLOT_B].state == BOOTLOADER_SLOT_VALID, "confirm sets VALID");
+    TEST_CHECK(m.boot_attempts == 0, "confirm clears boot_attempts");
+
+    for (int i = 0; i < 12; i++) { // far past BOOTLOADER_MAX_BOOT_ATTEMPTS
+        m = sim_boot(m, &ok, &slot);
+        TEST_CHECK(ok && slot == BOOTLOADER_SLOT_B, "ordinary reset after confirm still boots B");
+        TEST_CHECK(m.slots[BOOTLOADER_SLOT_B].state == BOOTLOADER_SLOT_VALID &&
+                       m.active_slot == BOOTLOADER_SLOT_B,
+                   "B stays VALID and active");
+    }
+
+    // Rollback protection for an unconfirmed slot is kept: never checks in,
+    // 3 boots count, the 4th marks B BAD and falls back to A.
+    m = make_meta(BOOTLOADER_SLOT_B, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_PENDING_VERIFY, 0);
+    for (int i = 0; i < BOOTLOADER_MAX_BOOT_ATTEMPTS; i++) {
+        m = sim_boot(m, &ok, &slot);
+        TEST_CHECK(ok && slot == BOOTLOADER_SLOT_B, "unconfirmed B keeps booting within the cap");
+    }
+    m = sim_boot(m, &ok, &slot);
+    TEST_CHECK(ok && slot == BOOTLOADER_SLOT_A, "unconfirmed B past the cap falls back to A");
+    TEST_CHECK(m.slots[BOOTLOADER_SLOT_B].state == BOOTLOADER_SLOT_BAD, "unconfirmed B marked BAD");
+}
+
+static void test_find_latest_ab(void)
+{
+    TEST_SECTION("MED-1 -- bootloader_metadata_find_latest_ab / wrap backup rules");
+
+    uint8_t main_s[BOOTLOADER_METADATA_FLASH_SIZE];
+    uint8_t back_s[BOOTLOADER_METADATA_FLASH_SIZE];
+    bootloader_metadata_t out;
+    bootloader_metadata_t m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID,
+                                         BOOTLOADER_SLOT_EMPTY, 0);
+    m.seq = 20;
+    memset(main_s, 0xFF, sizeof(main_s));
+    memset(back_s, 0xFF, sizeof(back_s));
+
+    TEST_CHECK(bootloader_metadata_find_latest_ab(main_s, back_s, &out) ==
+                   BOOTLOADER_METADATA_NO_SLOT,
+               "both sectors blank -> NO_SLOT");
+
+    bootloader_metadata_pack(&m, back_s);
+    TEST_CHECK(bootloader_metadata_find_latest_ab(main_s, back_s, &out) ==
+                   BOOTLOADER_METADATA_FROM_BACKUP && out.seq == 20,
+               "main blank, backup valid -> recovered from backup");
+
+    m.seq = 21;
+    bootloader_metadata_pack(&m, &main_s[3 * BOOTLOADER_METADATA_RECORD_LEN]);
+    TEST_CHECK(bootloader_metadata_find_latest_ab(main_s, back_s, &out) == 3 && out.seq == 21,
+               "main newer than backup -> main wins");
+    TEST_CHECK(bootloader_metadata_find_latest_ab(main_s, NULL, &out) == 3, "NULL backup tolerated");
+
+    TEST_CHECK(bootloader_metadata_next_write_slot(BOOTLOADER_METADATA_FROM_BACKUP) == 0,
+               "FROM_BACKUP writes slot 0");
+    TEST_CHECK(bootloader_metadata_next_write_needs_erase(BOOTLOADER_METADATA_FROM_BACKUP),
+               "FROM_BACKUP erases the (possibly torn) main sector first");
+    TEST_CHECK(bootloader_metadata_wrap_needs_backup(BOOTLOADER_METADATA_SLOTS_PER_SECTOR - 1),
+               "last slot written -> next write wraps and needs the backup");
+    TEST_CHECK(!bootloader_metadata_wrap_needs_backup(0) &&
+                   !bootloader_metadata_wrap_needs_backup(BOOTLOADER_METADATA_NO_SLOT) &&
+                   !bootloader_metadata_wrap_needs_backup(BOOTLOADER_METADATA_FROM_BACKUP),
+               "no backup needed mid-log, on first write, or when recovered from backup");
 }
 
 static void test_decide_after_crc_fail(void)
@@ -374,6 +472,8 @@ void run_test_bootloader_metadata(void)
     test_find_latest();
     test_next_write_slot();
     test_decide_boot();
+    test_confirmed_slot_survives_resets();
+    test_find_latest_ab();
     test_decide_after_crc_fail();
     test_decide_rollback();
 }

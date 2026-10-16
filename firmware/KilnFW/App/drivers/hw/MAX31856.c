@@ -663,6 +663,9 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
     ch->mask_shadow = 0xFFu;
     max31856_disarm_result(ch); /* CMODE = 0 out of reset: nothing is converting */
     ch->logged_fault_status = 0u;
+    ch->live_armed = false;
+    ch->live_suspect = false;
+    ch->live_next_due_ms = 0u;
     ch->initialized = true;
     bus->channels[channel] = ch;
     return ESP_OK;
@@ -1163,6 +1166,7 @@ esp_err_t MAX31856_read(MAX31856Class *ch, MAX31856Reading *out)
         return ESP_ERR_INVALID_STATE;
     }
     out->channel = ch->channel;
+    out->continuous = (ch->cr0_shadow & MAX31856_CR0_CMODE) != 0;
 
     /* A finite wait: a caller that cannot get the lock gets the failure answer
      * already staged above (NaN, spi_failed) rather than blocking forever
@@ -1315,6 +1319,18 @@ esp_err_t MAX31856_read_all(MAX31856BusClass *bus,
 
     size_t count = 0;
     esp_err_t first_err = ESP_OK;
+
+    /* Configuration read-back (MED-1) runs first and outside the latency stats
+     * below, which measure only the temperature burst reads. Each channel's
+     * check takes only that channel's leaf lock. */
+    uint32_t now_ms = (uint32_t)hal_time_now_ms();
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; ++i) {
+        MAX31856Class *lch = MAX31856_bus_channel(bus, i);
+        if (lch) {
+            (void)MAX31856_live_check(lch, now_ms);
+        }
+    }
+
     uint64_t start_us = hal_time_now_us();
 
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT && count < max_readings; ++i) {
@@ -1434,6 +1450,99 @@ uint32_t MAX31856_conversion_time_ms(MAX31856Class *ch, bool one_shot)
     uint32_t ms = max31856_conv_ms(ch, one_shot);
     max31856_unlock(ch);
     return ms;
+}
+
+/* --- Live configuration read-back -------------------------------------- */
+
+MAX31856LiveCheckResult MAX31856_live_check(MAX31856Class *ch, uint32_t now_ms)
+{
+    if (!ch || !max31856_ready(ch)) {
+        return MAX31856_LIVE_NOT_DUE;
+    }
+    if (!max31856_lock(ch)) {
+        return MAX31856_LIVE_SPI_ERROR;
+    }
+    if (!ch->live_armed) {
+        ch->live_armed = true;
+        ch->live_next_due_ms = now_ms + MAX31856_LIVE_CHECK_INTERVAL_MS;
+        max31856_unlock(ch);
+        return MAX31856_LIVE_NOT_DUE;
+    }
+    if ((int32_t)(now_ms - ch->live_next_due_ms) < 0) {
+        max31856_unlock(ch);
+        return MAX31856_LIVE_NOT_DUE;
+    }
+    ch->live_next_due_ms = now_ms + MAX31856_LIVE_CHECK_INTERVAL_MS;
+
+    uint8_t live[3]; /* CR0, CR1, MASK */
+    esp_err_t err = max31856_read_burst(ch, MAX31856_REG_CR0, live, sizeof(live));
+    if (err != ESP_OK) {
+        /* REVIEW_ALL_FIXES L4: an unreadable re-check confirms nothing, but it also refutes
+         * nothing: keep the suspect stage, same as the lock-failure path above. */
+        max31856_unlock(ch);
+        return MAX31856_LIVE_SPI_ERROR;
+    }
+
+    const uint8_t cr0_ignore = (uint8_t)(MAX31856_CR0_ONESHOT | MAX31856_CR0_FAULTCLR);
+    bool match = ((live[0] & ~cr0_ignore) == (ch->cr0_shadow & ~cr0_ignore)) &&
+                 (live[1] == ch->cr1_shadow) &&
+                 ((live[2] & MAX31856_MASK_ALL) == (ch->mask_shadow & MAX31856_MASK_ALL));
+    if (match) {
+        ch->live_suspect = false;
+        max31856_unlock(ch);
+        return MAX31856_LIVE_OK;
+    }
+
+    /* A single mismatching read-back may be one corrupted SPI read (EMI), not a
+     * reset part. Acting on it drops the good-result history and costs a
+     * >=785 ms invalid window, which with sensor_fault_debounce_ticks=1 is a
+     * guard-6 trip. So the first mismatch only re-arms a short re-check; a
+     * real reset persists and is confirmed by the second read ~100 ms later. */
+    if (!ch->live_suspect) {
+        ch->live_suspect = true;
+        ch->live_next_due_ms = now_ms + MAX31856_LIVE_RECHECK_MS;
+        max31856_unlock(ch);
+        return MAX31856_LIVE_SUSPECT;
+    }
+    ch->live_suspect = false;
+
+    ch->live_mismatch_count++;
+    ESP_LOGW(TAG, "ch%u: config read-back CR0=0x%02X CR1=0x%02X MASK=0x%02X, expected "
+             "0x%02X/0x%02X/0x%02X -- part reset? reconfiguring",
+             ch->channel, live[0], live[1], live[2], ch->cr0_shadow, ch->cr1_shadow,
+             ch->mask_shadow);
+
+    /* Whatever the writes below do, nothing read before them can be trusted as
+     * a conversion of the intended configuration: drop the good-result
+     * history so age_ms reads UNKNOWN until a fresh conversion lands. */
+    ch->has_good_result = false;
+
+    /* Same order as MAX31856_configure(): conversions off, CR1 + MASK while
+     * stopped, then CR0 back as shadowed. Shadows are the intended state and
+     * are not modified here. */
+    const uint8_t cr0_want = (uint8_t)(ch->cr0_shadow & ~cr0_ignore);
+    err = max31856_write_u8(ch, MAX31856_REG_CR0, (uint8_t)(cr0_want & ~MAX31856_CR0_CMODE));
+    if (err == ESP_OK) {
+        err = max31856_write_u8(ch, MAX31856_REG_CR1, ch->cr1_shadow);
+    }
+    if (err == ESP_OK) {
+        err = max31856_write_u8(ch, MAX31856_REG_MASK, ch->mask_shadow);
+    }
+    if (err == ESP_OK && (cr0_want & MAX31856_CR0_CMODE)) {
+        err = max31856_write_u8(ch, MAX31856_REG_CR0, cr0_want);
+    }
+    if (err == ESP_OK) {
+        if (cr0_want & MAX31856_CR0_CMODE) {
+            max31856_arm_result(ch, true); /* first conversion takes the long timing */
+        } else {
+            max31856_disarm_result(ch);
+        }
+    } else {
+        ESP_LOGE(TAG, "ch%u: reconfigure after mismatch failed: %s", ch->channel,
+                 esp_err_to_name(err));
+    }
+    max31856_unlock(ch);
+    return (err == ESP_OK) ? MAX31856_LIVE_RECONFIGURED : MAX31856_LIVE_RECONFIG_FAILED;
 }
 
 /* --- Raw register access ----------------------------------------------- */

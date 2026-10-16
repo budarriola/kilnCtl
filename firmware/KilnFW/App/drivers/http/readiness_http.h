@@ -174,6 +174,36 @@ static inline bool readiness_param_required_for_commissioning(uint16_t param_id,
     }
 }
 
+/* ctfx LOW-3 (REVIEW_FIXERS_2026-10-15): bit n set iff CT channel n is FITTED
+ * but has no positive k_ct_v_per_a, i.e. the channel that keeps the Pico's S9
+ * warn-only (config_store_current_sensing_commissioned()). Mirrors
+ * config_store_ct_channel_fitted_rec(): when a zone_ct_channel map has been
+ * committed (zone_ct_map_set) a channel is fitted iff some zone claims it,
+ * otherwise ct_topology decides (0 per_zone: all three; 1 summed: channel 2
+ * only). ct_installed == 0 means nothing is fitted. k_ct_positive[n] is true
+ * only for a SET k_ct_v_per_a[n] > 0. Pure, so host tests can pin it. */
+static inline uint8_t readiness_uncalibrated_fitted_ct_mask(uint8_t ct_installed_value, uint8_t ct_topology_value,
+                                                            bool zone_ct_map_set, const uint8_t zone_ct_channel[3],
+                                                            const bool k_ct_positive[3])
+{
+    uint8_t mask = 0u;
+    if (ct_installed_value == 0u) {
+        return 0u;
+    }
+    for (uint8_t ch = 0; ch < 3u; ch++) {
+        bool fitted;
+        if (zone_ct_map_set) {
+            fitted = zone_ct_channel[0] == ch || zone_ct_channel[1] == ch || zone_ct_channel[2] == ch;
+        } else {
+            fitted = (ct_topology_value == 1u) ? (ch == 2u) : true;
+        }
+        if (fitted && !k_ct_positive[ch]) {
+            mask |= (uint8_t)(1u << ch);
+        }
+    }
+    return mask;
+}
+
 static inline readiness_status_t readiness_commissioning_status(bool link_up, uint16_t cached_crc,
                                                                 size_t unset_count, size_t param_count)
 {

@@ -1,6 +1,7 @@
 // firing_compare.c -- see firing_compare.h. ITER_TUNE_REDESIGN.md
 // sec 2.3 + sec 3, step 2.
 
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "firing_compare.h"
 
 #include <math.h>
@@ -74,9 +75,9 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
     // own comment) so a caller can tell "the comparison never ran" apart from
     // "this pair has nothing to say". Never a crash and never a false ACCEPT.
     size_t raw_bytes = sizeof(float) * FIRING_SUBSCORE_COUNT * FIRING_COMPARE_MAX_PAIRS;
-    float *raw_mem = (float *)malloc(raw_bytes);
-    float *norm_mem = (float *)malloc(raw_bytes);
-    float *in_band = (float *)malloc(sizeof(float) * FIRING_COMPARE_MAX_PAIRS);
+    float *raw_mem = (float *)persist_scratch_alloc(raw_bytes);
+    float *norm_mem = (float *)persist_scratch_alloc(raw_bytes);
+    float *in_band = (float *)persist_scratch_alloc(sizeof(float) * FIRING_COMPARE_MAX_PAIRS);
     if (!raw_mem || !norm_mem || !in_band) {
         free(raw_mem);
         free(norm_mem);

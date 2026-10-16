@@ -6,6 +6,7 @@
 // load-active detection and a power estimate only -- no guard reads any of
 // this yet (S3/S4/S9 need link_task's relay_recent_mask context, Phase 7).
 #include "current_task.h"
+#include "tick_timing.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -66,8 +67,10 @@ static current_sense_power_t  s_published_power;
 // taskENTER_CRITICAL()/EXIT discipline as s_published_snapshot above when
 // read from current_task_any_current_present(): small fixed fields, no
 // blocking call inside the guarded region.
-static bool    s_ct_installed_effective = true;
-static uint8_t s_ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+// Fitted-channel bitmask (config_store_fitted_channel_mask(): committed
+// zone_ct_channel map when its group bit is set, else ct_topology). Default
+// all three fitted == the old PER_ZONE/installed defaults.
+static uint8_t s_ct_fitted_mask = 0x7u;
 
 // CT_COMMISSIONING_PLAN.md step 2 -- see current_task.h's header comment for
 // why this accumulates incrementally here rather than calling current_
@@ -78,6 +81,7 @@ static uint8_t s_ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
 #define CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES 200u // >=10s at SAFTYFW_PERIOD_CURRENT_TASK_MS (50ms), CT_COMMISSIONING_PLAN.md step 2's ">= 200 samples at 20 Hz"
 static current_task_auto_zero_state_t s_auto_zero_state = CURRENT_TASK_AUTO_ZERO_IDLE;
 static uint8_t  s_auto_zero_channel = 0;
+static uint32_t s_auto_zero_last_ts_ms = 0; // A16: last snapshot timestamp consumed
 static uint32_t s_auto_zero_sum = 0;
 static uint16_t s_auto_zero_count = 0;
 static uint16_t s_auto_zero_target = CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES;
@@ -134,7 +138,11 @@ static void current_task_fn(void *arg)
         // never a blocking wait. snap.counts_avg[] is this SAME pass's raw,
         // pre-conversion ADC mean (snapshots.h), the identical source
         // SAFETY_CMD_POWER's counts_avg field already publishes.
-        if (s_auto_zero_state == CURRENT_TASK_AUTO_ZERO_IN_PROGRESS) {
+        // A16: a degraded window leaves the snapshot (and its timestamp) unchanged;
+        // fold each published snapshot into the average at most once.
+        bool snap_is_new = snapshot_is_new(snap.timestamp_ms, s_auto_zero_last_ts_ms);
+        s_auto_zero_last_ts_ms = snap.timestamp_ms;
+        if (s_auto_zero_state == CURRENT_TASK_AUTO_ZERO_IN_PROGRESS && snap_is_new) {
             s_auto_zero_sum += snap.counts_avg[s_auto_zero_channel];
             s_auto_zero_count++;
             if (s_auto_zero_count >= s_auto_zero_target) {
@@ -185,8 +193,8 @@ bool current_task_any_current_present(void)
     // op-amp DC offset floor, never real current information, so it must
     // not be able to contribute to this fact -- see that function's doc
     // comment for the full fail-safe-direction argument.
-    bool any = config_store_mask_current_present_to_fitted(
-        s_published_snapshot.present, s_ct_installed_effective, s_ct_topology);
+    bool any = config_store_mask_current_present_to_fitted_mask(
+        s_published_snapshot.present, s_ct_fitted_mask);
     taskEXIT_CRITICAL();
     return any;
 }
@@ -276,11 +284,9 @@ void current_task_reload_cal(void)
     // reads these two fields under; s_published_snapshot's own critical
     // section above this function's call site is a separate, already-
     // existing guarded region.
-    bool ct_installed_effective =
-        ((rec.fields_set & CONFIG_STORE_SET_CT_INSTALLED) == 0u) || (rec.ct_installed != 0u);
+    uint8_t fitted_mask = config_store_fitted_channel_mask(&rec);
     taskENTER_CRITICAL();
-    s_ct_installed_effective = ct_installed_effective;
-    s_ct_topology = rec.ct_topology;
+    s_ct_fitted_mask = fitted_mask;
     taskEXIT_CRITICAL();
 }
 

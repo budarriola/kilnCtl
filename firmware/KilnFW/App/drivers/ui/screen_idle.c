@@ -5,6 +5,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "settings.h"
 #include "stack_margin.h"
@@ -354,7 +355,11 @@ esp_err_t screen_idle_start(screen_idle_t *idle)
      * (kilnctrl MCP) must be checked against real headroom on hardware
      * after this change, same as any other task's stack size here. */
     BaseType_t created =
-        xTaskCreatePinnedToCore(screen_idle_task, "screen_idle", 6144, idle, 3, &s_task_handle, tskNO_AFFINITY);
+        xTaskCreatePinnedToCoreWithCaps(screen_idle_task, "screen_idle", 6144, idle, 3, &s_task_handle,
+                                        tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md): reaches no mmap call;
+     * dashboard_get_status()'s one lazy flash read is primed on app_main
+     * (dashboard_prime_flash_facts()). Pinned by tools/check_psram_task_stacks.ps1. */
     if (created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

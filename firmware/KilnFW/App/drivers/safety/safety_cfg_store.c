@@ -1,3 +1,4 @@
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "safety_cfg_store.h"
 
 #include <math.h> /* isfinite() -- safety_ct_cal_convert() */
@@ -1524,7 +1525,7 @@ static void SAFETY_CFG_STORE_NOINLINE safety_cfg_store_log_page_fetch_failed(uin
  * whatever this returns, success or failure. */
 static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t config_crc)
 {
-    safety_cfg_store_refetch_scratch_t *scr = malloc(sizeof(*scr));
+    safety_cfg_store_refetch_scratch_t *scr = persist_scratch_alloc(sizeof(*scr));
     if (!scr) {
         ESP_LOGE(TAG, "safety_cfg_store_refetch: malloc(%u) failed -- cache left unchanged",
                  (unsigned)sizeof(*scr));

@@ -208,7 +208,7 @@
 // inside S5's blind_grace_s default of 60.0s (safety_guards.c
 // BLIND_GRACE_S_DEFAULT) -- see this file's own comment where tc_valid is
 // set for what tripping tc_valid = false actually does.
-#define THERMO_MAX_AGE_MS 2000u
+#define THERMO_MAX_AGE_MS SNAPSHOT_THERMO_MAX_AGE_MS
 
 // CURRENT_MAX_AGE_MS: current_task publishes every SAFTYFW_PERIOD_CURRENT_
 // TASK_MS = 50ms (task_priorities.h). 2000ms mirrors update_task.c's own
@@ -218,7 +218,7 @@
 // the already-reviewed number rather than inventing a second one for the
 // identical fact. See this file's own comment at the any_current_present
 // computation for what a stale current reading is made to mean.
-#define CURRENT_MAX_AGE_MS 2000u
+#define CURRENT_MAX_AGE_MS SNAPSHOT_CURRENT_MAX_AGE_MS
 
 // Mirrors safety_guards.c's own CORRELATION_WINDOW_S_DEFAULT (safety_
 // guards.h's cfg field doc comment: "0 -> correlation_window_s=150.0s") --
@@ -1253,8 +1253,8 @@ static safety_guard_input_t safety_core_build_input(void)
     // existing gate.
     any_current_present =
         any_current_present &&
-        config_store_mask_current_present_to_fitted(current.present, !cts_disabled,
-                                                      cfg_rec.ct_topology);
+        config_store_mask_current_present_to_fitted_mask(
+            current.present, config_store_fitted_channel_mask(&cfg_rec));
 
     // S14 (COMMISSIONING_UX.md section 3.3). amps[ch] comes straight from
     // current_snapshot_t, gated by the SAME freshness fact any_current_
@@ -1286,7 +1286,7 @@ static safety_guard_input_t safety_core_build_input(void)
             // the same contract drifting apart ("reset one side of a pair").
             // !cts_disabled is already established by the loop guard above,
             // so this is the topology half of the predicate only.
-            if (!config_store_ct_channel_fitted((uint8_t)ch, true, cfg_rec.ct_topology)) {
+            if (!config_store_ct_channel_fitted_rec(&cfg_rec, (uint8_t)ch)) {
                 continue;
             }
             // Opus review finding 1: cs_counts_to_amps() (current_sense.c)
@@ -1445,6 +1445,36 @@ static safety_guard_input_t safety_core_build_input(void)
     };
 }
 
+// Publishes the TRIP_EVENT fields (seqlock write side) for the trip now latched in
+// s_guard_state. Shared by the newly-tripped path and by the refused-clear re-trip
+// path (guard audit 2026-10-14 A10).
+static void safety_core_capture_trip_event(const safety_guard_input_t *input)
+{
+    // Capture Frame D's "at the instant of the trip" values right
+    // here, same tick, before anything else runs -- LINK_PROTOCOL.md
+    // sec 6: "half a second later the temperature has changed... the
+    // evidence is gone." s_trip_seq incrementing LAST is deliberate:
+    // safety_core_get_trip_event() is lock-free, so a reader must
+    // never be able to observe the new seq before the fields it
+    // describes are already written.
+    // Seqlock write side: odd generation while the fields change, so a
+    // reader that overlaps a SECOND trip's capture (old seq, half-new
+    // fields) sees the generation move and retries instead of
+    // returning a torn mix. The seq itself is bumped after the fields.
+    s_trip_gen++;
+    HAL_DMB();
+    s_trip_reason = s_guard_state.reason;
+    s_trip_uptime_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
+    s_trip_tc_c = input->tc_valid ? input->tc_c : NAN;
+    s_trip_deciding_threshold = safety_guards_deciding_threshold_c(s_guard_state.reason,
+                                                                    &s_guard_cfg);
+    // F5: release -- every field above must be visible to the other core before the seq is.
+    HAL_DMB();
+    s_trip_seq = trip_seq_next(s_trip_seq); // wraps 255 -> 1, never 0 (F4); INSIDE the odd window
+    HAL_DMB();
+    s_trip_gen++; // even again: capture complete
+}
+
 static void safety_core_task(void *arg)
 {
     (void)arg;
@@ -1481,29 +1511,7 @@ static void safety_core_task(void *arg)
             s_trip_command_owed = true;
             boot_reason_latch_trip((uint32_t)s_guard_state.reason);
 
-            // Capture Frame D's "at the instant of the trip" values right
-            // here, same tick, before anything else runs -- LINK_PROTOCOL.md
-            // sec 6: "half a second later the temperature has changed... the
-            // evidence is gone." s_trip_seq incrementing LAST is deliberate:
-            // safety_core_get_trip_event() is lock-free, so a reader must
-            // never be able to observe the new seq before the fields it
-            // describes are already written.
-            // Seqlock write side: odd generation while the fields change, so a
-            // reader that overlaps a SECOND trip's capture (old seq, half-new
-            // fields) sees the generation move and retries instead of
-            // returning a torn mix. The seq itself is bumped after the fields.
-            s_trip_gen++;
-            HAL_DMB();
-            s_trip_reason = s_guard_state.reason;
-            s_trip_uptime_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
-            s_trip_tc_c = input.tc_valid ? input.tc_c : NAN;
-            s_trip_deciding_threshold = safety_guards_deciding_threshold_c(s_guard_state.reason,
-                                                                            &s_guard_cfg);
-            // F5: release -- every field above must be visible to the other core before the seq is.
-            HAL_DMB();
-            s_trip_seq = trip_seq_next(s_trip_seq); // wraps 255 -> 1, never 0 (F4); INSIDE the odd window
-            HAL_DMB();
-            s_trip_gen++; // even again: capture complete
+            safety_core_capture_trip_event(&input);
 
             // Step 4 of SAFETY_MODEL.md section 6's 4-step trip order:
             // log the trip itself. The log_task call below is a 0-tick
@@ -1631,6 +1639,14 @@ static void safety_core_task(void *arg)
                 clear_trip_diag_mark(CLEAR_TRIP_DIAG_STAGE_POST_TRY_CLEAR, reason_u8, fault_bits_u8,
                                       tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
                                       0u);
+            }
+            // A10 (guard audit 2026-10-14): a refused clear whose retest re-tripped under a
+            // DIFFERENT reason must publish that reason (new TRIP_EVENT occurrence), or the
+            // ESP keeps showing the old one. The relay is already tripped; no new command.
+            if (was_tripped && occurrence_matches && !try_clear_result && s_guard_state.is_tripped &&
+                s_guard_state.reason != (safety_trip_t)reason_u8) {
+                boot_reason_latch_trip((uint32_t)s_guard_state.reason);
+                safety_core_capture_trip_event(&input);
             }
             safety_clear_trip_outcome_t outcome = safety_guards_decide_clear_trip_outcome(
                 was_tripped, occurrence_matches, try_clear_result);
@@ -1941,6 +1957,14 @@ bool safety_core_request_enable(bool enable)
     // (e.g. an operator flipping a clear latched trip, or the normal
     // GRACE-to-IDLE path), never refused in that direction.
     if (enable) {
+        // A9 (guard audit 2026-10-14): defence in depth -- refuse the ON direction
+        // while a guard trip is latched, here as well as in relay_owner. A plain
+        // flag read (single writer, same reasoning as the s_trip_* fields).
+        if (s_guard_state.is_tripped) {
+            log_task_log(LOG_LEVEL_WARN, "request_enable", "refused: guard trip latched");
+            return false;
+        }
+
         config_store_record_t cfg_rec;
         config_store_get_full_record(&cfg_rec);
         if (cfg_rec.safety_tc_installed == 0u) {

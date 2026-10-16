@@ -94,6 +94,8 @@
 #include "kiln_io.h"
 #include "profile_executor_state.h"
 #include "thermo_owner.h"
+#include "thermo_channel_read.h"      /* thermo_zone_raw_from_readings() (AUDIT_THERMOCOUPLE LOW-1) */
+#include "zones_config_accessors.h" /* zones_config_get_thermo_mask() */
 #include "heat_enable.h"
 #include "danger_mode.h"
 #include "heat_owner_active_decide.h"
@@ -588,13 +590,22 @@ void safety_build_and_send_context(SafetyLinkClass *link)
         kilnlink_zone_context_t *z = &ctx.zones[i];
         z->zone_index = i;
 
-        const MAX31856Reading *reading = NULL;
+        const MAX31856Reading *reading = NULL; /* channel i: tc_type, fault bits, sample freshness */
         for (size_t r = 0; r < reading_count; r++) {
             if (readings[r].channel == i) {
                 reading = &readings[r];
                 break;
             }
         }
+        /* AUDIT_THERMOCOUPLE LOW-1: the temperature sent for zone i is the mean
+         * over the zone's own thermo_mask (what the executor controls on, raw
+         * i.e. before the ESP-side calibration offset so the Pico stays an
+         * independent cross-check), not blindly channel i. Identity mask ==
+         * channel i's own reading. */
+        uint8_t zone_tmask = (uint8_t)(1u << i);
+        (void)zones_config_get_thermo_mask(i, &zone_tmask);
+        bool zone_meas_valid = false;
+        float zone_meas_c = thermo_zone_raw_from_readings(readings, reading_count, zone_tmask, &zone_meas_valid);
 
         MAX31856Config cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -609,9 +620,8 @@ void safety_build_and_send_context(SafetyLinkClass *link)
         }
         z->tc_type = cfg.tc_type;
 
-        bool measured_valid =
-            reading && !reading->spi_failed && !isnan(reading->tc_temperature_c);
-        z->measured_c = measured_valid ? reading->tc_temperature_c : NAN;
+        bool measured_valid = zone_meas_valid;
+        z->measured_c = measured_valid ? zone_meas_c : NAN;
         z->tc_fault = reading ? reading->fault_status : 0u;
         /* LINK_PROTOCOL.md sec 4: increment only at the point a fresh
          * conversion is actually consumed -- reading->stale is exactly that

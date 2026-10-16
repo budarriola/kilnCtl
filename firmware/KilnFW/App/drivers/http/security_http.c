@@ -46,6 +46,29 @@ void security_totp_pending_clear(void)
     totp_pending_clear(&s_totp_pending);
 }
 
+// AUDIT_TOTP MED-1: the LCD reset gesture (LVGL task) posts a wipe request
+// (totp_http_core.h); this handler task applies it before touching the pending
+// secret, so a pending enrollment begun by a pre-reset session never survives
+// the reset. Each TOTP command below calls this first.
+static uint32_t s_sec_wipe_seen_gen;
+
+static void security_totp_apply_wipe_request(void)
+{
+    uint32_t gen = totp_wipe_request_gen();
+    if (gen != s_sec_wipe_seen_gen) {
+        s_sec_wipe_seen_gen = gen;
+        totp_pending_clear(&s_totp_pending);
+    }
+}
+
+// Passed to totp_config_enroll_commit(): runs under totp_config's state lock,
+// i.e. serialised against totp_config_clear() from the gesture.
+static bool security_totp_enroll_still_valid(void)
+{
+    security_totp_apply_wipe_request();
+    return totp_pending_is_valid(&s_totp_pending, security_http_now_ms());
+}
+
 static const char *TAG = "security_http";
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time -- same
@@ -256,6 +279,7 @@ static esp_err_t security_send_totp_web_auth_off(httpd_req_t *req)
 
 static esp_err_t security_totp_enroll_begin(httpd_req_t *req)
 {
+    security_totp_apply_wipe_request();
     time_sync_status_t st;
     time_sync_get_status(&st);
     if (!totp_http_clock_ready(st.ever_synced)) {
@@ -307,6 +331,7 @@ static esp_err_t security_totp_enroll_begin(httpd_req_t *req)
 
 static esp_err_t security_totp_enroll_confirm(httpd_req_t *req, const char *body)
 {
+    security_totp_apply_wipe_request();
     time_sync_status_t st;
     time_sync_get_status(&st);
     if (!totp_http_clock_ready(st.ever_synced)) {
@@ -332,8 +357,11 @@ static esp_err_t security_totp_enroll_confirm(httpd_req_t *req, const char *body
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false}");
     }
-    bool persisted =
-        totp_config_set_secret(s_totp_pending.secret) && totp_config_set_last_counter((uint32_t)matched_counter);
+    // AUDIT_TOTP LOW-2/MED-1: one commit under totp_config's lock -- counter first,
+    // then secret (a power cut between can never leave counter 0 with the used
+    // code replayable), aborted if a physical-reset wipe arrived meanwhile.
+    bool persisted = totp_config_enroll_commit(s_totp_pending.secret, (uint32_t)matched_counter,
+                                               security_totp_enroll_still_valid);
     totp_pending_clear(&s_totp_pending);
     if (!persisted) {
         totp_config_clear();
@@ -350,6 +378,7 @@ static esp_err_t security_totp_enroll_confirm(httpd_req_t *req, const char *body
 
 static esp_err_t security_totp_disable(httpd_req_t *req, const char *body)
 {
+    security_totp_apply_wipe_request();
     time_sync_status_t st;
     time_sync_get_status(&st);
     if (!totp_http_clock_ready(st.ever_synced)) {

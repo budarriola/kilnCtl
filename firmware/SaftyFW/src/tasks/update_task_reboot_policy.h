@@ -54,7 +54,20 @@ extern "C" {
 // out_reason/out_reason_code follow update_task_reboot_allowed()'s own
 // contract (update_task.h): either may be NULL, and out_reason_code is
 // KILNLINK_REBOOT_RESULT_REASON_NONE on an allowed decision.
-bool update_task_reboot_policy_decide(bool relay_energized, bool transfer_active,
+//   trip_ineffective -- S9 TRIP_INEFFECTIVE is latched (guard audit 2026-10-14 A1).
+//                        Refuses (KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE): a
+//                        reboot clears every latch at boot, so it must not be a way
+//                        around S9's CLEAR_TRIP refusal. Checked after ARMED, before
+//                        TRANSFER_ACTIVE. No other trip reason is refused.
+bool update_task_reboot_policy_decide(bool relay_energized, bool transfer_active, bool trip_ineffective,
+                                       const char **out_reason, uint8_t *out_reason_code);
+
+// The pure ARMED + S9 gate for SAFETY_CMD_ROLLBACK, run by
+// update_task_request_rollback() before any metadata is read. Returns true when
+// the rollback may proceed; on false fills out_reason/out_reason_code
+// (KILNLINK_ROLLBACK_RESULT_REASON_ARMED or _TRIP_INEFFECTIVE). Either out
+// pointer may be NULL; out_reason_code is left untouched when allowed.
+bool update_task_rollback_gate_decide(bool relay_energized, bool trip_ineffective,
                                        const char **out_reason, uint8_t *out_reason_code);
 
 #ifdef __cplusplus

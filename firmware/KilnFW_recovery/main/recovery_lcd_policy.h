@@ -57,6 +57,68 @@ static inline bool rlcd_draw_ok(int failed_lines)
     return failed_lines == 0;
 }
 
+// --- Wi-Fi join QR visibility ----------------------------------------------
+
+// Which text block the status screen shows under the network rows. The text
+// branch of draw_status() and the QR visibility below are BOTH derived from this
+// one function, so the QR and the passphrase text cannot drift apart.
+typedef enum {
+    RLCD_TEXT_ERROR = 0,    // error banner or AP down: overrides every network state
+    RLCD_TEXT_NET_FAIL = 1, // no network / Wi-Fi storage failure
+    RLCD_TEXT_NET_SET = 2,  // AP up, network configured: SSID and passphrase shown
+    RLCD_TEXT_STARTING = 3, // nothing known yet
+} rlcd_text_mode_t;
+
+static inline rlcd_text_mode_t rlcd_text_mode(bool err_head, bool ap_down, bool net_none, bool storage_fail,
+                                              bool net_set)
+{
+    if (err_head || ap_down) {
+        return RLCD_TEXT_ERROR;
+    }
+    if (net_none || storage_fail) {
+        return RLCD_TEXT_NET_FAIL;
+    }
+    return net_set ? RLCD_TEXT_NET_SET : RLCD_TEXT_STARTING;
+}
+
+// The join QR is shown exactly where the passphrase text is: the NET_SET text
+// mode, and a symbol actually encoded.
+static inline bool rlcd_qr_visible(bool err_head, bool ap_down, bool net_none, bool storage_fail,
+                                   bool net_set, int qr_size)
+{
+    return rlcd_text_mode(err_head, ap_down, net_none, storage_fail, net_set) == RLCD_TEXT_NET_SET &&
+           qr_size > 0;
+}
+
+typedef enum {
+    RLCD_QR_BEFORE_TEXT = 0,
+    RLCD_QR_AFTER_TEXT = 1,
+} rlcd_qr_phase_t;
+
+// Paints the QR area for one phase of draw_status() through `paint(show)`
+// (returns 0 on success; draw_qr_area in recovery_lcd.c). A visible symbol is
+// painted AFTER the text; the hidden (solid background) area is painted BEFORE
+// it, so a stale code never outlives its AP. Returns the number of failed
+// paints (0 or 1); `paint` is not called when the phase has nothing to do.
+static inline int rlcd_qr_paint(bool visible, rlcd_qr_phase_t phase, int (*paint)(bool show))
+{
+    if (phase == RLCD_QR_BEFORE_TEXT && !visible) {
+        return paint(false) != 0;
+    }
+    if (phase == RLCD_QR_AFTER_TEXT && visible) {
+        return paint(true) != 0;
+    }
+    return 0;
+}
+
+// Width of the text band whose rows are y..y+h-1: a visible QR owns the
+// top-right qr_px square, so a band that reaches into it stops at its left edge
+// (otherwise the QR would cut a fault band's background mid-line).
+static inline int rlcd_band_width(int y, int h, bool qr_visible, int panel_w, int qr_px)
+{
+    return (qr_visible && y < qr_px && y + h > 0) ? panel_w - qr_px : panel_w;
+}
+
 // --- boot_guard record classification ------------------------------------
 
 // Result of nvs_get_blob() for the "bootguard" key, mapped by the caller.

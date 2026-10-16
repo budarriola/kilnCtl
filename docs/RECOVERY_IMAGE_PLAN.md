@@ -130,8 +130,25 @@ status fields. `GET /api/recovery/status` reports `auth_mode:"lcd_passphrase"`. 
   still comes from `wifi_nvs` `ap_ssid` (default `kilnctl-recovery`).
 - LCD (480x320, no scrolling): SSID and passphrase in a large font, the AP IP 192.168.4.1, the
   Heat/relay status line and the latched hold-fault indication.
+- Join QR (2026-10-13): the same screen also draws a standard `WIFI:T:WPA;S:<ssid>;P:<pass>;;`
+  QR (`\ ; , : "` escaped) in the top-right 124x124 px, 3 px per module with a 4-module quiet
+  zone, dark modules in the background colour on white, so the bench camera can decode it and
+  the 5/S glyph ambiguity goes away. It sits right of the status text (at most 336 px wide) and
+  above the "Join Wi-Fi network:" line, so nothing overlaps; it is hidden whenever the status
+  text reports an error or no network (same condition as the passphrase). The payload builder and
+  encoder wrapper are `main/recovery_wifi_qr.c` (pure, host-tested by
+  `check_recovery_wifi_qr.ps1` with 15 mutants); the matrix comes from the vendored Project
+  Nayuki qrcodegen (MIT, `main/third_party/qrcodegen/`, de-LVGL'd), ECC L, versions 1..4 (default
+  names give version 3, 29 modules; a payload that needs more than version 4 simply shows no QR
+  and the text stays). Buffers are two static 138 B arrays plus a scanline row; nothing is
+  malloc'd, nothing is logged, and the payload and encoder scratch are wiped after encoding.
+  Image size: about +8.1 KB (795440 B, 60% of the 1966080 B partition free). Reading it:
+  `tools/PcTools/src/kilnctrl/lcd_ap_reader.py` (`join_board_ap.ps1 -Mode recovery`) decodes the
+  QR first (`zxing-cpp`, now a declared PcTools dependency) and validates a 12-character
+  recovery-alphabet passphrase; only if the QR is missing or invalid does it fall back to glyph
+  segmentation, with a warning in its JSON. Normal mode stays QR-only.
 - PcTools: `recovery_post_client.py` posts unsigned; no recovery tool reads
-  `KILNCTL_AP_PASSWORD`. No tool joins the AP; automation that does should read the passphrase
+  `KILNCTL_AP_PASSWORD`. `join_board_ap.ps1` joins it from a camera frame (QR, glyph fallback); other automation should read the passphrase
   from `KILNCTL_RECOVERY_AP_PASSPHRASE`. Removed with the auth: `recovery_auth.c`, the
   nonce-ring and mirror-drift checks. `check_recovery_page_crc.ps1` keeps the page-CRC test and
   asserts the page carries no auth code.

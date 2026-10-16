@@ -621,13 +621,13 @@ static void run_section5_screen_idle_stack_sized_for_dashboard(void)
                "Every OTHER dashboard_get_status() caller in this codebase runs on a task "
                "sized for it (lvgl_port.c's own task asks for 8192).");
 
-    const char *create = strstr(text, "xTaskCreatePinnedToCore(screen_idle_task, \"screen_idle\", ");
+    const char *create = strstr(text, "xTaskCreatePinnedToCoreWithCaps(screen_idle_task, \"screen_idle\", ");
     TEST_CHECK(create != NULL,
                "could not find screen_idle_task's xTaskCreatePinnedToCore() call -- update "
                "this test if it was renamed/restructured.");
     long stack_words = 0;
     if (create) {
-        const char *num = create + strlen("xTaskCreatePinnedToCore(screen_idle_task, \"screen_idle\", ");
+        const char *num = create + strlen("xTaskCreatePinnedToCoreWithCaps(screen_idle_task, \"screen_idle\", ");
         stack_words = strtol(num, NULL, 10);
     }
     TEST_CHECK(stack_words >= 6144,

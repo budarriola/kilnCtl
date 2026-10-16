@@ -77,6 +77,12 @@ typedef enum {
      * therefore reports "refused, reason unknown" -- never "accepted", and
      * never the wrong reason. */
     KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE = 3,
+    /* Refused: S9 TRIP_INEFFECTIVE (welded K4) is latched. S9 is unclearable by
+     * CLEAR_TRIP; a reboot clears every latch at boot, so it must not be a way
+     * around that (SaftyFW guard audit 2026-10-14 A1). Added WITHOUT a protocol
+     * bump for the same reason TRANSFER_ACTIVE was: request-triggered reply, an
+     * older ESP reads an out-of-range byte as UNKNOWN. */
+    KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE = 4,
 } kilnlink_reboot_result_reason_t;
 
 typedef enum {

@@ -20,18 +20,24 @@ update_get_settings/update_set_settings read and set the repo. Release
 signing was removed (owner decision 2026-10-07); the board accepts an image only
 when it is for this project (esp_app_desc project_name).
 
-There is deliberately NO ``update_apply``: installing a staged image is the
-recovery image's ``POST /api/recovery/apply_staged`` (WP5, wrapped by the
-``recovery_apply_staged`` tool). Nothing here reboots the board or touches the
-``app`` partition.
+There is deliberately NO ``update_apply``: the recovery image's
+``POST /api/recovery/apply_staged`` (WP5, ``recovery_apply_staged``) is the manual
+path. The unattended path is ``update_install_staged`` (POST /api/update/install):
+the board reboots into recovery, applies the VERIFIED stage by itself and boots the
+new app. Every other tool here only stages; none touches the ``app`` partition.
 Credentials never appear here; every request goes through http_auth.urlopen().
 """
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Optional
 
+from mcpkit import build_jobs
+
+from . import dashboard_http_client as dhc
+from . import http_auth
 from . import mcp_server_core as _core
 from . import update_http_client as uhc
 
@@ -303,7 +309,24 @@ def _fmt_fetch(st: dict) -> str:
             parts.append(f"sha256={st.get('sha256')}")
     if st.get("busy") and st.get("bytes_total"):
         parts.append(f"progress={st.get('bytes_done')}/{st.get('bytes_total')}")
+    heap = _fmt_heap(st.get("heap"))
+    if heap:
+        parts.append(heap)
     return ", ".join(parts)
+
+
+def _fmt_heap(h: Optional[dict]) -> str:
+    """The job's internal-RAM readings (UPDFX7): admission reading, the worst settle result over all redirect hops and the low-waters."""
+    if not isinstance(h, dict) or not h.get("sampled"):
+        return ""
+    text = (f"heap[start free={h.get('start_free')} dma={h.get('start_dma')} rtc={h.get('rtc_free')}; "
+            f"hop={h.get('hop')}")
+    if h.get("hop") in ("admitted", "refused"):
+        text += (f" (heap settle: worst over all hops, not one hop's result; "
+                 f"lowest free={h.get('hop_free')}, most re-samples={h.get('hop_settle_tries')})")
+    text += (f"; low-water free={h.get('min_free')} dma={h.get('min_dma')} "
+             f"largest_block={h.get('min_block')}]")
+    return text
 
 
 def _refusal_text(exc: uhc.UpdateHttpError) -> str:
@@ -549,3 +572,396 @@ def update_fetch_cancel(confirm: bool = False, host: Optional[str] = None) -> st
         return f"UNKNOWN: cancel accepted but the confirming status read failed: {exc} (host={resolved})"
     note = " (job still winding down; read update_fetch_status)" if after.get("busy") else ""
     return f"ok - cancel requested: {_fmt_fetch(after)}{note} (host={resolved})"
+
+
+def _install_line(st: dict) -> str:
+    li = st.get("last_install") or {}
+    return (f"running={st.get('running_version')!r}, staged={st.get('staged')} "
+            f"({st.get('staged_version')!r}), last_install={li.get('state')}/{li.get('code')}"
+            f"/{li.get('reason')}/{li.get('version')!r}"
+            + (f" detail={li.get('detail')} app_modified={li.get('app_modified')}"
+               if li.get("detail") not in (None, "none") else ""))
+
+
+#: Pending install evidence per host, kept across calls so a follow-up
+#: update_install_staged(confirm=False) can use the same reboot proof as the
+#: call that ran out of time (the install takes ~4 minutes on the bench, longer
+#: than one synchronous call may run).
+_PENDING_INSTALL: dict = {}
+
+#: Hosts whose pending record expired: host -> requested version. Lets a
+#: follow-up say "cannot confirm: record expired" instead of offering a fresh install.
+_EXPIRED_INSTALL: dict = {}
+
+#: Hosts with a confirmed install call in flight in THIS process (single flight:
+#: a second confirmed call for the same host is refused, never a second POST).
+#: The bench board lock is deliberately not taken: the release bench suite holds
+#: it while it calls this tool, so taking it here would refuse that run.
+_INSTALL_INFLIGHT: set = set()
+_INSTALL_INFLIGHT_LOCK = threading.Lock()
+
+#: A pending record older than this (seconds past its pre-POST read) is dropped:
+#: past the longest wait any call makes (``_BG_WAIT_S``), so a late reboot
+#: cannot count as this install.
+_PENDING_TTL_S = 900.0
+
+#: Slack for the whole-second truncation of two uptime_s readings: each reading
+#: is floored, so (after - before) can be off by just under 1 s either way, and
+#: the sum of both errors stays below 2 s.
+_UPTIME_SLACK_S = 2.0
+
+#: Synchronous call cap: the MCP client aborts a call after 300 s of silence.
+_SYNC_WAIT_CAP_S = 270.0
+
+#: Background (update_install_start) wait bound. Bench: the app answered again
+#: at board uptime ~231-235 s after the POST in benchupd4/benchupd5 (recovery
+#: boot, apply with up to 3 attempts, reboot, app boot, Wi-Fi), so 600 s is
+#: about 2.5x the observed time and still well inside the pending TTL.
+_BG_WAIT_S = 600.0
+
+#: Timeout for each of the two short reads after the poll loop (uptime probe, final status read).
+_TAIL_PROBE_S = 2.5
+
+#: Identity of "no id": legacy records, or a board predating the id field.
+_NO_ID = "00000000"
+
+
+def _read_uptime(host: str, timeout: float = 5.0) -> Optional[float]:
+    """Board uptime in seconds from GET /api/status, or None when unreadable."""
+    try:
+        v = dhc.get_status(host, timeout=timeout).get("uptime_s")
+    except Exception:  # noqa: BLE001 - any failure means "no evidence"
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def _reboot_proven(host: str, pend: dict, deadline: Optional[float] = None) -> bool:
+    """True when the uptime now is lower than the uptime before the POST plus
+    the time elapsed since then, i.e. the board restarted in between. The read
+    is charged to ``deadline`` (its timeout is clamped to what is left; none
+    left means no read and no proof)."""
+    before_up = pend.get("before_up")
+    if before_up is None:
+        return False
+    timeout = 5.0
+    if deadline is not None:
+        timeout = min(5.0, deadline - time.monotonic())
+        if timeout < 0.5:
+            return False
+    # "now" is taken BEFORE the read is sent, and t_pre AFTER the before-read
+    # returned: request transit time is then never counted as board time, so
+    # elapsed is a lower bound and a slow link cannot fake a reboot.
+    elapsed = time.monotonic() - pend["t_pre"]
+    after = _read_uptime(host, timeout)
+    if after is None:
+        return False
+    return after + _UPTIME_SLACK_S < before_up + elapsed
+
+
+def _id_of(li: dict) -> str:
+    """The record's install identity (8 hex chars), '' when absent or all-zero."""
+    v = li.get("id")
+    if isinstance(v, str) and len(v) == 8 and v != _NO_ID:
+        return v.lower()
+    return ""
+
+
+def _stale_id(li: dict, pend: dict) -> bool:
+    """A record carrying a non-zero identity different from the staged image's
+    belongs to some other install and is never evidence about this one."""
+    rid = _id_of(li)
+    return bool(rid and pend.get("id") and rid != pend["id"])
+
+
+def _ok_is_new(host: str, st: dict, pend: dict, deadline: Optional[float] = None) -> bool:
+    """Is a matching `ok` record evidence of THIS install (not a stale one)?"""
+    li = st.get("last_install") or {}
+    want = pend["want"]
+    if not (st.get("running_version") == want and li.get("state") == "recorded" and li.get("code") == "ok"):
+        return False
+    if _stale_id(li, pend):
+        return False
+    rid = _id_of(li)
+    if rid and rid == pend.get("id") and pend.get("before_ok_id") != rid:
+        return True  # an ok record for this image that was not there before the POST
+    if not pend["post_unknown"]:
+        return True  # the POST was answered: the board accepted this request
+    if pend["before_running"] != want:
+        return True  # the running version changed from an older one to the requested one
+    return _reboot_proven(host, pend, deadline)
+
+
+def _failure_is_this(li: dict, pend: dict) -> bool:
+    if not (li.get("state") == "recorded" and li.get("code") not in ("ok", None)
+            and not _stale_id(li, pend)):
+        return False
+    if pend.get("post_unknown") and pend.get("before_fail") == _fail_key(li):
+        # The POST got no answer and this record is identical to the one read before it:
+        # it may be a stale earlier failure, not evidence about this install.
+        return False
+    return True
+
+
+def _fail_key(li: dict) -> tuple:
+    return (li.get("code"), li.get("reason"), _id_of(li))
+
+
+def _staged_id(host: str) -> str:
+    """First 4 bytes of the staged image's sha256 as 8 hex chars, '' when unreadable."""
+    try:
+        sha = uhc.get_stage_status(host).get("sha256")
+    except uhc.UpdateHttpError:
+        return ""
+    if isinstance(sha, str) and len(sha) >= 8:
+        try:
+            int(sha[:8], 16)
+        except ValueError:
+            return ""
+        return sha[:8].lower()
+    return ""
+
+
+def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: float) -> str:
+    t0 = time.monotonic()
+    # Whole call (initial GET, POST, settle sleep and polling) stays under the
+    # caller's silence limit: deadline cap_s from entry, every read clamped to it.
+    deadline = t0 + max(10.0, min(float(wait_s), cap_s))
+    resolved = _resolve_host(host)
+    try:
+        before = uhc.get_install_status(resolved)
+    except uhc.UpdateHttpError as exc:
+        return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
+    if confirm is not True:
+        pend = _PENDING_INSTALL.get(resolved)
+        if pend is not None and time.monotonic() - pend["t_pre"] > _PENDING_TTL_S:
+            _PENDING_INSTALL.pop(resolved, None)  # expired: cannot confirm an old install
+            _EXPIRED_INSTALL[resolved] = pend["want"]
+            pend = None
+        if pend is not None:
+            if _ok_is_new(resolved, before, pend):
+                _PENDING_INSTALL.pop(resolved, None)
+                return (f"ok - installed {pend['want']!r} and running in the application "
+                        f"(confirmed by a follow-up read): {_install_line(before)} (host={resolved})")
+            li = before.get("last_install") or {}
+            if _failure_is_this(li, pend):
+                _PENDING_INSTALL.pop(resolved, None)
+                return f"FAILED: install recorded a failure: {_install_line(before)} (host={resolved})"
+            return (f"UNKNOWN: an earlier install of {pend['want']!r} is still pending, not yet proven: "
+                    f"{_install_line(before)}; poll again with update_install_staged(confirm=False) "
+                    f"(host={resolved})")
+        lost = _EXPIRED_INSTALL.get(resolved)
+        bli0 = before.get("last_install") or {}
+        if lost is None and not before.get("staged") and bli0.get("state") == "unreadable":
+            return (f"UNKNOWN: cannot confirm: the board cannot read its last install record "
+                    f"(last_install.state=unreadable), so whether an install happened is not provable "
+                    f"from here: {_install_line(before)}; compare running_version with the version you "
+                    f"meant to install via update_status (host={resolved})")
+        if lost is None and not before.get("staged") and bli0.get("state") != "recorded":
+            # Plain status read: nothing staged, no install ever recorded, no record of ours.
+            return (f"ok - nothing staged and no install recorded (read-only, nothing sent): "
+                    f"{_install_line(before)} (host={resolved})")
+        if lost is not None or not before.get("staged"):
+            what = (f"the pending record for {lost!r} expired" if lost is not None
+                    else "this server has no pending install record")
+            return (f"UNKNOWN: cannot confirm: {what} (records last {int(_PENDING_TTL_S)} s past the POST and "
+                    f"are lost when the MCP server restarts), so whether an install happened is not "
+                    f"provable from here: {_install_line(before)}; compare running_version with the "
+                    f"version you meant to install via update_status (host={resolved})")
+        return _refuse_unconfirmed(f"would install the staged image: {_install_line(before)} (host={resolved})")
+    with _INSTALL_INFLIGHT_LOCK:
+        if resolved in _INSTALL_INFLIGHT:
+            # "BUSY:", not "REFUSED:": callers (RL-D01) read REFUSED as "never sent, safe to clean up",
+            # but the other call's install is running and its stage must be left alone.
+            return (f"BUSY: another confirmed install call for this host is already in flight in this "
+                    f"server (nothing sent by this call; leave the stage alone); poll it (bench_test_job_status or update_install_staged(confirm=False)) "
+                    f"(host={resolved})")
+        _INSTALL_INFLIGHT.add(resolved)
+    old_pend = _PENDING_INSTALL.get(resolved)
+    try:
+        return _install_confirmed(resolved, before, deadline)
+    except Exception as exc:  # noqa: BLE001
+        cur = _PENDING_INSTALL.get(resolved)
+        if cur is not None and cur is not old_pend:
+            # This call's pending record exists, so the POST was already sent: the
+            # install may be running. Never let the wrapper's "error:" read as "never started".
+            return (f"UNKNOWN: install may be running; {type(exc).__name__} after the install POST was sent: "
+                    f"{exc}; poll again with update_install_staged(confirm=False) (host={resolved})")
+        raise
+    finally:
+        with _INSTALL_INFLIGHT_LOCK:
+            _INSTALL_INFLIGHT.discard(resolved)
+
+
+def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
+    if not before.get("staged") or before.get("stage_busy"):
+        return f"REFUSED: no verified stage ready (staged={before.get('staged')}, stage_busy={before.get('stage_busy')}) (host={resolved})"
+    _EXPIRED_INSTALL.pop(resolved, None)
+    want = before.get("staged_version")
+    inst_id = _staged_id(resolved)
+    bli = before.get("last_install") or {}
+    before_ok_id = _id_of(bli) if (bli.get("state") == "recorded" and bli.get("code") == "ok") else ""
+    before_up = _read_uptime(resolved)
+    t_pre = time.monotonic()  # after the read returned: transit time must not count as board time
+    post_unknown = False
+    try:
+        uhc.start_install(resolved)
+    except uhc.UpdateHttpError as exc:
+        if exc.status is not None:
+            return f"FAILED: install refused or lost: {_refusal_text(exc)} (host={resolved})"
+        if isinstance(exc.__cause__, http_auth.HttpAuthError):
+            # Relogin refused or failed on transport, lockout or no credential: the handler never ran. Definite,
+            # not "possibly applied". (AUTOFX2 INFO-3: the login can fail on transport too, so the text says "login".)
+            return f"FAILED: install not sent, login refused or failed: {exc} (host={resolved})"
+        # Transport failure/timeout: the board may have accepted the request and
+        # rebooted. Do not call it failed; let the follow-up reads decide.
+        post_unknown = True
+    pend = {"want": want, "post_unknown": post_unknown, "before_running": before.get("running_version"),
+            "before_up": before_up, "t_pre": t_pre, "id": inst_id, "before_ok_id": before_ok_id,
+            "before_fail": _fail_key(bli) if (bli.get("state") == "recorded" and bli.get("code") not in ("ok", None)) else None}
+    _PENDING_INSTALL[resolved] = pend
+    time.sleep(min(15.0, max(0.0, deadline - time.monotonic())))  # let the board go down before polling
+    last = None
+    n404 = 0
+    while time.monotonic() < deadline:
+        try:
+            st = uhc.get_install_status(resolved, timeout=max(1.0, min(5.0, deadline - time.monotonic())))
+        except uhc.UpdateHttpError as exc:
+            # 404: the recovery image answers the port and has no /api/update/status
+            # while it applies the stage; that is progress, not absence.
+            if exc.status == 404:
+                n404 += 1
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+            continue
+        last = st
+        li = st.get("last_install") or {}
+        if _ok_is_new(resolved, st, pend, deadline):
+            # After a POST with no HTTP answer an `ok` may predate this call (same-version reinstall):
+            # it counts only with proof of a reboot (uptime lower than before + elapsed).
+            _PENDING_INSTALL.pop(resolved, None)
+            return f"ok - installed {want!r} and running in the application: {_install_line(st)} (host={resolved})"
+        if _failure_is_this(li, pend):
+            _PENDING_INSTALL.pop(resolved, None)
+            return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
+        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+    tail_err = None
+    tail_neutral = None
+    if not last and n404 and _read_uptime(resolved, _TAIL_PROBE_S) is not None:
+        # The application answers now. It may have come up between the last poll and this probe
+        # (a good install lands near the end of the wait), so judge by one more status read, not by
+        # the 404 count. Both reads are short and capped, so the call overruns its wait by <~ 8 s.
+        try:
+            st = uhc.get_install_status(resolved, timeout=_TAIL_PROBE_S)
+        except uhc.UpdateHttpError as exc:
+            st = None
+            tail_err = exc
+        if st is not None:
+            last = st
+            li = st.get("last_install") or {}
+            tail_deadline = time.monotonic() + 2 * _TAIL_PROBE_S
+            if _ok_is_new(resolved, st, pend, tail_deadline):
+                _PENDING_INSTALL.pop(resolved, None)
+                return f"ok - installed {want!r} and running in the application: {_install_line(st)} (host={resolved})"
+            if _failure_is_this(li, pend):
+                _PENDING_INSTALL.pop(resolved, None)
+                return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
+        elif tail_err is not None and tail_err.status == 404:
+            n404 = -n404  # sentinel: app answers /api/status but the install route is absent
+        else:
+            # Timeout, failed relogin, 5xx...: the follow-up read says nothing about the route, so
+            # do not claim a downgrade (REVIEW_LOWFX10 LOW-1).
+            tail_neutral = tail_err
+    if last:
+        tail = _install_line(last)
+    elif tail_neutral is not None:
+        tail = (f"the application answers GET /api/status but the follow-up read of {uhc.INSTALL_STATUS_PATH} "
+                f"failed ({tail_neutral}); the install outcome is not known")
+    elif n404 < 0:
+        tail = (f"HTTP 404 on {uhc.INSTALL_STATUS_PATH} x{-n404} while GET /api/status answers: the board runs "
+                f"an application WITHOUT the install route (a downgrade?), not the recovery image applying")
+    elif n404:
+        tail = f"HTTP 404 on {uhc.INSTALL_STATUS_PATH} x{n404}: the recovery image is still applying the stage"
+    else:
+        tail = "board never answered the application API"
+    note = " The install POST got no HTTP answer (possibly applied)." if post_unknown else ""
+    if (post_unknown and last and (last.get("last_install") or {}).get("code") == "ok"
+            and last.get("running_version") == want):
+        note += (" The board shows an `ok` install for this version but no reboot is proven (uptime did not drop),"
+                 " so it may be a stale result from an earlier install, not this one.")
+    return (f"UNKNOWN: install may still be running, not confirmed within this call's wait: board not confirmed on "
+            f"{want!r} ({tail});{note} the bench install took about 4 minutes before the application answered "
+            f"again, which can exceed one call: use update_install_start(confirm=True) (background job, waits up "
+            f"to {int(_BG_WAIT_S)} s, poll bench_test_job_status) next time, and for this install poll again with "
+            f"update_install_staged(confirm=False) (host={resolved})")
+
+
+@_core._tool()
+def update_install_staged(confirm: bool = False, wait_s: float = _SYNC_WAIT_CAP_S, host: Optional[str] = None) -> str:
+    """Install the VERIFIED staged image unattended (POST /api/update/install,
+    ROUTE_TIER_ADMIN, form confirm=1). The board writes a one-shot request,
+    reboots into the recovery image, which applies the stage (bounded to 3
+    attempts), boots the new app and records the result. No Wi-Fi joining.
+    Without ``confirm=True`` (exactly) it reads GET /api/update/status
+    (including the last install result) and sends nothing; if an earlier call
+    of this tool timed out with the install still unconfirmed, that read also
+    decides it: ok once the requested version runs with an ok record and, where
+    the POST had no answer, the board's uptime proves a reboot. The record
+    carries the first 4 bytes of the installed image's sha256 (``id``); a
+    record with a different non-zero id is another install's and never counts.
+    With no pending record (expired after 15 minutes, or the MCP server
+    restarted) and nothing staged it answers UNKNOWN "cannot confirm", and so
+    it does when the board reports its last install record as unreadable.
+    A second confirmed call while one is in flight answers BUSY (nothing sent).
+    Refuses unless the stage reads staged. A firing or autotune makes the board
+    answer 409. After the POST it waits up to ``wait_s`` (default 270, the
+    cap; the bench application answered again at ~231-235 s; clamped to 270,
+    total call under 290 s) for the board to answer again in the application with
+    running_version equal to the staged version, then reports ok only if that
+    matches and last_install is ok. The whole install can take about 4 minutes,
+    longer than one call: prefer ``update_install_start`` (background job).
+    UNKNOWN means it may still be running, so poll again with
+    update_install_staged(confirm=False). FAILED means a recorded failure."""
+    if confirm is not True:
+        return _install_impl(False, wait_s, host, _SYNC_WAIT_CAP_S)
+    return _install_impl(True, wait_s, host, _SYNC_WAIT_CAP_S)
+
+
+def classify_install_report(report: str) -> str:
+    """Job state from an install report: ``ok`` / ``failed`` (FAILED, REFUSED,
+    error) / ``unknown`` (UNKNOWN: not confirmed within the wait)."""
+    first = (report or "").lstrip()
+    if first.startswith("ok"):
+        return "ok"
+    if first.startswith("UNKNOWN"):
+        return "unknown"
+    return "failed"
+
+
+@_core._tool()
+def update_install_start(confirm: bool = False, host: Optional[str] = None) -> str:
+    """Background twin of `update_install_staged`: returns a job id at once.
+
+    The job calls the real install routine with ``confirm`` unchanged, so the
+    exactly-True gate, the stage precheck and every refusal still apply inside
+    it and come back as the job's report. An unconfirmed call (confirm not
+    exactly True) is answered synchronously (the same read-only status /
+    pending-record answer as `update_install_staged(confirm=False)`) and
+    starts no job. The job waits up to 600 s for the application to answer
+    with the new version (the bench install took ~4 minutes: benchupd4/5 came
+    back at board uptime 231-235 s; a 404 on /api/update/status meanwhile
+    means the recovery image is still applying, or, if /api/status answers
+    while the install route does not, an application without the route). Poll
+    `bench_test_job_status(job_id, wait_s=100)`: OK / FAILED / UNKNOWN. A
+    server restart loses the job (the install itself continues on the board;
+    check update_status)."""
+    if confirm is not True:
+        return _install_impl(confirm, 0.0, host, _SYNC_WAIT_CAP_S)
+    job_id = build_jobs.start_job(
+        "update_install_staged",
+        lambda: _install_impl(True, _BG_WAIT_S, host, _BG_WAIT_S),
+        {"host": host, "wait_s": _BG_WAIT_S},
+        classify=classify_install_report)
+    return (f"bench-job {job_id}: STARTED (update_install_staged). Poll "
+            f"bench_test_job_status(job_id=\"{job_id}\", wait_s=100); the install keeps "
+            f"going on the board if you stop polling; waits up to {int(_BG_WAIT_S)} s.")

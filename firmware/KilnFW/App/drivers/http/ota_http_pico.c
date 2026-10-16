@@ -55,14 +55,24 @@
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 
-// Same static-not-stack reasoning as OTA_ESP_CHUNK_SIZE/s_ota_esp_chunk
-// above. A SEPARATE buffer rather than reusing s_ota_esp_chunk: the two
-// could technically share one (the cross-processor update mutex guarantees
-// only one of the ESP or Pico transfer is ever in flight at a time), but
-// keeping them distinct keeps each transfer's code readable on its own
-// without a reader having to go verify that cross-file invariant first.
+// Shares ota_http_esp.c's 4 KB internal chunk buffer (ota_http_esp_chunk_buf())
+// instead of a second static of its own (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md:
+// saves 4096 B of internal DRAM). Safe: the only users of either buffer are
+// httpd handlers (ESP upload, Pico upload, the refusal drains, WP4 stage
+// upload/status), httpd is a single task so two handlers never overlap, and the
+// Pico relay task started after staging never touches the chunk buffer.
+// ota_pico_chunk_buf() asserts the capacity is at least what this file's
+// transfer loop assumes.
 #define OTA_PICO_CHUNK_SIZE 4096
-static uint8_t s_ota_pico_chunk[OTA_PICO_CHUNK_SIZE];
+static uint8_t *ota_pico_chunk_buf(size_t *cap)
+{
+    uint8_t *b = ota_http_esp_chunk_buf(cap);
+    if (b == NULL || *cap < OTA_PICO_CHUNK_SIZE) {
+        return NULL;
+    }
+    *cap = OTA_PICO_CHUNK_SIZE;
+    return b;
+}
 
 // Streams the browser upload into `pico_img`, computing a running CRC32
 // alongside it via ota_image_crc.h -- NOT by calling esp_rom_crc32_le()
@@ -119,6 +129,8 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
     bool force_version = ota_pico_req_force_version(req);
     bool started_relay = false;
     char fail_reason[256] = "unknown failure";
+    size_t chunk_cap = 0;
+    uint8_t *chunk = ota_pico_chunk_buf(&chunk_cap);
     // Declared up here, not at first use, so every goto below (including
     // the very first check) can jump straight to the single cleanup block
     // without skipping past an initializer -- same discipline
@@ -195,6 +207,14 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
         }
     }
 
+    if (chunk == NULL) {
+        snprintf(fail_reason, sizeof(fail_reason), "shared OTA chunk buffer smaller than %u bytes",
+                 (unsigned)OTA_PICO_CHUNK_SIZE);
+        ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal buffer unavailable");
+        goto cleanup;
+    }
+
     // Stream the body into pico_img, one httpd_req_recv() per
     // esp_partition_write(), same "never read ahead of what has been
     // consumed" discipline as ota_esp_do_transfer() -- and the same reason
@@ -215,10 +235,10 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
             goto cleanup;
         }
         size_t want = content_len - stage.written;
-        if (want > sizeof(s_ota_pico_chunk)) {
-            want = sizeof(s_ota_pico_chunk);
+        if (want > chunk_cap) {
+            want = chunk_cap;
         }
-        int ret = httpd_req_recv(req, (char *)s_ota_pico_chunk, want);
+        int ret = httpd_req_recv(req, (char *)chunk, want);
         if (ret <= 0) {
             snprintf(fail_reason, sizeof(fail_reason), "body read failed/closed at %u/%u bytes (%d)",
                      (unsigned)stage.written, (unsigned)content_len, ret);
@@ -227,13 +247,13 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
             goto cleanup;
         }
 
-        if (!pico_img_stage_write_chunk(&stage, s_ota_pico_chunk, (size_t)ret, fail_reason, sizeof(fail_reason))) {
+        if (!pico_img_stage_write_chunk(&stage, chunk, (size_t)ret, fail_reason, sizeof(fail_reason))) {
             ESP_LOGE(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
             goto cleanup;
         }
         if (sha_op_active) {
-            (void)psa_hash_update(&sha_op, s_ota_pico_chunk, (size_t)ret);
+            (void)psa_hash_update(&sha_op, chunk, (size_t)ret);
         }
 
         int decile = (int)((stage.written * 10u) / content_len);
@@ -389,6 +409,11 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
     // next. Auth is route_tier_table.h's ADMIN tier, enforced by the
     // dispatcher before this handler runs at all (the AP-password HMAC
     // check this used to also require was retired 2026-09-29).
+    size_t chunk_cap = 0;
+    uint8_t *chunk = ota_pico_chunk_buf(&chunk_cap);
+    if (chunk == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal buffer unavailable");
+    }
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
@@ -398,7 +423,7 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: refused by interlock: %s", ip, reason);
         (void)ota_http_send_interlock_refusal(req, gate, reason);
-        return ota_http_refusal_drain(req, s_ota_pico_chunk, sizeof(s_ota_pico_chunk)); // see ota_esp_post_handler()
+        return ota_http_refusal_drain(req, chunk, chunk_cap); // see ota_esp_post_handler()
     }
 
     if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
@@ -406,14 +431,14 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ota_http_refusal_drain(req, s_ota_pico_chunk, sizeof(s_ota_pico_chunk));
+        return ota_http_refusal_drain(req, chunk, chunk_cap);
     }
 
     // From here, ota_pico_do_stage() owns the mutex -- either it releases
     // it itself (staging failure) or it starts the relay task, which then
     // owns release. See that function's own doc comment.
     if (ota_pico_do_stage(req, ip)) {
-        return ota_http_refusal_drain(req, s_ota_pico_chunk, sizeof(s_ota_pico_chunk));
+        return ota_http_refusal_drain(req, chunk, chunk_cap);
     }
     return ESP_OK;
 }

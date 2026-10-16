@@ -254,7 +254,7 @@ def cold_bench(bench):
 
 
 _FLASH_FIRMWARE_E2E_MODULES = {
-    "test_flash_board_pinning", "test_flash_firmware_erase_partitions",
+    "test_flash_board_pinning", "test_flash_firmware_erase_partitions", "test_flash_firmware_set_otadata",
     "test_flash_firmware_verify", "test_mcp_server_flash_partition_guard",
     "test_pico_image_provenance_note",
 }

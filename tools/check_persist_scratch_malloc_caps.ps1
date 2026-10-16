@@ -71,7 +71,17 @@ $extraFiles = @(
     "firmware/KilnFW/App/drivers/http/wifi_provision_http.c",
     "firmware/KilnFW/App/drivers/http/kiln_cfg_http.c",
     "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c",
-    "firmware/KilnFW/App/drivers/control/adaptive_tune_model.c"
+    "firmware/KilnFW/App/drivers/control/adaptive_tune_model.c",
+    "firmware/KilnFW/App/drivers/control/autotune_engine_guard.c",
+    "firmware/KilnFW/App/drivers/control/firing_compare.c",
+    "firmware/KilnFW/App/drivers/http/dashboard_autotune_http.c",
+    "firmware/KilnFW/App/drivers/http/dashboard_exec_http.c",
+    "firmware/KilnFW/App/drivers/http/http_auth_http.c",
+    "firmware/KilnFW/App/drivers/http/readiness_http.c",
+    "firmware/KilnFW/App/drivers/http/setup_progress_http.c",
+    "firmware/KilnFW/App/drivers/http/web_auth_login_http.c",
+    "firmware/KilnFW/App/drivers/http/zones_http.c",
+    "firmware/KilnFW/App/drivers/safety/safety_cfg_store.c"
 )
 $persistRoot = Join-Path $RepoRoot $persistDir
 if (-not (Test-Path $persistRoot)) { Write-Host "FAIL: $persistDir not found -- moved/renamed? update this script"; exit 1 }

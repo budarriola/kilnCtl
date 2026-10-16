@@ -1922,8 +1922,35 @@ static void test_bootloader_slot_and_end_states(void)
     }
 }
 
+static void test_keepalive(void)
+{
+    uint8_t p[KILNLINK_FRAME_MAX_PAYLOAD];
+    uint8_t wire[KILNLINK_FRAME_STUFFED_MAX];
+    uint8_t raw[KILNLINK_FRAME_STUFFED_MAX];
+    kilnlink_frame_t f;
+    size_t pl = rpp_pack_keepalive(p);
+    // Inert command only: GET_STATUS. Never CLEAR_TRIP/REQUEST_ENABLE/REBOOT/UPDATE_*.
+    CHECK(pl == 1 && p[0] == 0x01, "keepalive payload is the inert GET_STATUS");
+    size_t wn = rpp_build_frame(7, p, pl, wire, sizeof(wire));
+    CHECK(wn > 0 && decode_wire(wire, wn, raw, sizeof(raw), &f) == KILNLINK_FRAME_OK,
+          "keepalive frame decodes (CRC valid)");
+    // Pico liveness rule: src ESP, dst SAFETY.
+    CHECK(f.src_device == RPP_DEVICE_ESP && f.dst_device == RPP_DEVICE_SAFETY,
+          "keepalive is addressed ESP -> SAFETY (counts for S6b liveness)");
+    CHECK(f.msg_type == KILNLINK_MSG_BROADCAST, "keepalive is a BROADCAST");
+    // Period far inside the Pico's 120 s hard tier; bounded so a wedged image still trips.
+    CHECK(RPP_KEEPALIVE_PERIOD_MS * 10u < 120000u, "period is well inside the 120 s S6b tier");
+    CHECK(rpp_keepalive_active(0) && rpp_keepalive_active(RPP_KEEPALIVE_MAX_MS - 1),
+          "keepalive active inside its bound");
+    CHECK(!rpp_keepalive_active(RPP_KEEPALIVE_MAX_MS) && !rpp_keepalive_active(0xFFFFFFFFu),
+          "keepalive stops at its bound (S6b must still be able to trip)");
+    CHECK(RPP_KEEPALIVE_MAX_MS > 120000u, "bound covers an unattended install dwell");
+    CHECK(RPP_FAULT_GPIO == 6 && RPP_FAULT_IDLE_LEVEL == 0, "fault line idles LOW on GPIO6");
+}
+
 int main(void)
 {
+    test_keepalive();
     test_crc32();
     test_frames();
     test_deframer();

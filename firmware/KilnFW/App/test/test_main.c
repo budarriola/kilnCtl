@@ -22,6 +22,7 @@ void run_test_sim_mistune(void);
 void run_test_sim_factorial_design(void);
 void run_test_ota_auth(void);
 void run_test_login_backoff(void);
+void run_test_update_install_record(void);
 void run_test_update_semver(void);       // GITHUB_RELEASE_UPDATE_PLAN.md update/* (WP3)
 void run_test_update_stage_header(void);
 void run_test_update_policy(void);
@@ -67,6 +68,7 @@ void run_test_readiness_recovery_mode(void);
 void run_test_readiness_cfg_fs(void);
 void run_test_readiness_safety_context(void);
 void run_test_readiness_estop_verification(void);
+void run_test_readiness_uncalibrated_ct(void);
 void run_test_kiln_cfg_store(void);
 void run_test_iter_tune_store(void);
 void run_test_firing_shadow(void);
@@ -163,6 +165,7 @@ int main(void)
     run_test_sim_factorial_design();
     run_test_ota_auth();
     run_test_login_backoff();
+    run_test_update_install_record();
     run_test_update_semver();
     run_test_update_stage_header();
     run_test_update_policy();
@@ -205,6 +208,7 @@ int main(void)
     run_test_readiness_cfg_fs();
     run_test_readiness_safety_context();
     run_test_readiness_estop_verification();
+    run_test_readiness_uncalibrated_ct();
     run_test_kiln_cfg_store();
     run_test_iter_tune_store();
     run_test_firing_shadow();

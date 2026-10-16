@@ -155,7 +155,8 @@ STACK_BYTES = 6144
 # Honest free still above 10% of the declared stack; re-baselined for this stated cause only.
 # 2026-10-09 (stack analyser review F2): the nvs_save -> zones_autosave_job edge is now dropped everywhere except the
 # bx_flash_worker root (stack_budget_lib.WORKER_ONLY_EDGES), so the executor measures 3408 B (was 3920 B). Lowered to it.
-CEILING_BYTES = 3408
+# 2026-10-15: re-measured 3424 B (was 3408 B) on current dev; honest free 1500 B (24.4%).
+CEILING_BYTES = 3424
 
 # See "UNMODELED_OVERHEAD_BYTES" above -- this task's own live-measured figure,
 # not the httpd checker's 1800 B placeholder.

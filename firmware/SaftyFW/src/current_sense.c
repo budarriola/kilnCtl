@@ -51,6 +51,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "pico/time.h" // to_ms_since_boot(): snapshot stamps must use the clock safety_core.c ages them with (A2)
 
 #include "hal_adc.h"
 
@@ -140,14 +141,22 @@ static cs_accum_t s_accum[3];
 
 static uint32_t s_degraded_window_count;
 
+// A15 (guard audit 2026-10-14): the writers run on a different core from
+// current_sense_sample(); the copy happens inside a critical section and the
+// reader takes its own snapshot of s_cal under the same one, so a gain/offset
+// pair is never torn across a sampling window.
 void current_sense_set_cal(const current_sense_cal_t *cal)
 {
+    taskENTER_CRITICAL();
     s_cal = *cal;
+    taskEXIT_CRITICAL();
 }
 
 void current_sense_set_ct_cal(const ct_amps_cal_table_t *ct_cal)
 {
+    taskENTER_CRITICAL();
     s_cal.ct_cal = *ct_cal;
+    taskEXIT_CRITICAL();
 }
 
 void current_sense_init(void)
@@ -266,9 +275,9 @@ void current_sense_acquire_tick(void)
 // with `gain` (this file's compiled-default-if-zero) standing in for the
 // literal 0.715, and k_ct having NO safe default -- amps is 0 (cannot be
 // computed at all) when k_ct_v_per_a <= 0.
-static float cs_counts_to_amps(int n, uint32_t counts_avg)
+static float cs_counts_to_amps(const current_sense_cal_t *cal, int n, uint32_t counts_avg)
 {
-    float k_ct = s_cal.k_ct_v_per_a[n];
+    float k_ct = cal->k_ct_v_per_a[n];
     if (k_ct <= 0.0f) {
         // Not commissioned for this channel -- no unit conversion is
         // possible, and reporting 0 here is the same "obviously not a real
@@ -277,9 +286,9 @@ static float cs_counts_to_amps(int n, uint32_t counts_avg)
         return 0.0f;
     }
 
-    float gain = (s_cal.gain[n] > 0.0f) ? s_cal.gain[n] : CS_DEFAULT_GAIN;
+    float gain = (cal->gain[n] > 0.0f) ? cal->gain[n] : CS_DEFAULT_GAIN;
 
-    int32_t delta_counts = (int32_t)counts_avg - (int32_t)s_cal.zero_counts[n];
+    int32_t delta_counts = (int32_t)counts_avg - (int32_t)cal->zero_counts[n];
     if (delta_counts < 0) {
         delta_counts = 0; // "max(0, ...)" -- never a negative current
     }
@@ -363,9 +372,14 @@ void current_sense_sample(void)
         return;
     }
 
+    current_sense_cal_t cal;
+    taskENTER_CRITICAL();
+    cal = s_cal;
+    taskEXIT_CRITICAL();
+
     current_snapshot_t snap = {0};
-    snap.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-    snap.calibrated = s_cal.calibrated;
+    snap.timestamp_ms = to_ms_since_boot(get_absolute_time()); /* guard audit 2026-10-14 A2: same clock safety_core.c compares against */
+    snap.calibrated = cal.calibrated;
 
     for (int n = 0; n < 3; n++) {
         // Published unconditionally, independent of calibration state --
@@ -374,7 +388,7 @@ void current_sense_sample(void)
         snap.counts_avg[n] = (uint16_t)counts_avg[n];
 
         bool clipped = (counts_avg[n] >= CS_CLIP_THRESHOLD_COUNTS);
-        float amps = cs_counts_to_amps(n, counts_avg[n]);
+        float amps = cs_counts_to_amps(&cal, n, counts_avg[n]);
 
         // S3/S9/S11/S6b's presence fact, decoupled from k_ct_v_per_a -- see
         // current_presence_policy.h's header comment. Computed from the
@@ -383,9 +397,9 @@ void current_sense_sample(void)
         // "substitute CS_DEFAULT_GAIN when the cal field is <= 0" rule, so
         // the two functions never disagree about which gain a commissioned
         // channel is using).
-        float resolved_gain = (s_cal.gain[n] > 0.0f) ? s_cal.gain[n] : CS_DEFAULT_GAIN;
-        bool present = current_presence_is_flowing(counts_avg[n], s_cal.zero_counts[n],
-                                                     s_cal.i_present_a, s_cal.k_ct_v_per_a[n],
+        float resolved_gain = (cal.gain[n] > 0.0f) ? cal.gain[n] : CS_DEFAULT_GAIN;
+        bool present = current_presence_is_flowing(counts_avg[n], cal.zero_counts[n],
+                                                     cal.i_present_a, cal.k_ct_v_per_a[n],
                                                      resolved_gain);
 
         // Phase 9: end-to-end CT amps correction (ct_amps_cal.h), applied
@@ -396,7 +410,7 @@ void current_sense_sample(void)
         // returns `amps` completely unchanged -- see ct_amps_cal_apply()'s
         // own doc comment; this call never introduces a behavior change on
         // a channel nobody has calibrated.
-        amps = ct_amps_cal_apply(&s_cal.ct_cal, (uint8_t)n, amps);
+        amps = ct_amps_cal_apply(&cal.ct_cal, (uint8_t)n, amps);
 
         snap.amps[n] = amps;
         snap.clipped[n] = clipped;
@@ -406,20 +420,20 @@ void current_sense_sample(void)
         // the filter directly rather than ramping up from 0, so a channel
         // that is already conducting when current_sense_init() runs is not
         // seen as a fake multi-second ramp.
-        if (!s_filter_initialized[n]) {
-            s_filtered_amps[n] = amps;
-            s_filter_initialized[n] = true;
-        } else {
-            float alpha = CS_SAMPLE_PERIOD_S / (CS_FILTER_TAU_S + CS_SAMPLE_PERIOD_S);
-            s_filtered_amps[n] += alpha * (amps - s_filtered_amps[n]);
-        }
+        // AUDIT_CURRENT_SENSE LOW-1 residual: a non-finite sample (amps overflow to
+        // +inf) must not enter the filter -- inf - inf = NaN would stick forever and
+        // blank i_conducting_a/power. snap.amps keeps the raw value (S14 warns); the
+        // filter holds its last finite state, and reseeds from the next finite sample
+        // if its own state was ever non-finite.
+        current_filter_step(&s_filtered_amps[n], &s_filter_initialized[n], amps,
+                            CS_SAMPLE_PERIOD_S / (CS_FILTER_TAU_S + CS_SAMPLE_PERIOD_S));
 
         // Section 3b: i_conducting_a is "sampled only when above
         // i_present_a" -- so it holds the last conducting reading rather
         // than decaying to a number that is neither the conducting current
         // nor a real average (the same RC-artifact problem section 3b
         // warns against for a naive average).
-        bool conducting = (s_filtered_amps[n] > s_cal.i_present_a);
+        bool conducting = (s_filtered_amps[n] > cal.i_present_a);
         if (conducting) {
             s_power.i_conducting_a[n] = s_filtered_amps[n];
         }
@@ -427,8 +441,8 @@ void current_sense_sample(void)
         cs_update_window(n, conducting);
         s_power.conduction_fraction[n] = cs_window_fraction(n);
 
-        if (s_cal.mains_voltage_v > 0.0f) {
-            s_power.p_avg_w[n] = s_cal.mains_voltage_v
+        if (cal.mains_voltage_v > 0.0f) {
+            s_power.p_avg_w[n] = cal.mains_voltage_v
                                 * s_power.i_conducting_a[n]
                                 * s_power.conduction_fraction[n];
         } else {
@@ -436,8 +450,8 @@ void current_sense_sample(void)
         }
     }
 
-    s_power.mains_voltage_v = (s_cal.mains_voltage_v > 0.0f) ? s_cal.mains_voltage_v : NAN;
-    s_power.calibrated = s_cal.calibrated;
+    s_power.mains_voltage_v = (cal.mains_voltage_v > 0.0f) ? cal.mains_voltage_v : NAN;
+    s_power.calibrated = cal.calibrated;
     s_power.any_clipped = snap.clipped[0] || snap.clipped[1] || snap.clipped[2];
 
     // p_total_w: NAN if any contributing channel's p_avg_w is NAN (unset

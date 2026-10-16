@@ -58,7 +58,7 @@ static void test_cycle_reset(void)
     // Once the last lock has expired, the next touch resets the cycle.
     login_backoff_cycle_reset_if_due(&s, now);
     TEST_CHECK(s.failure_count == 0, "cycle resets once the top-step lock has expired");
-    TEST_CHECK(s.locked_until_ms == 0, "locked_until_ms cleared by the cycle reset");
+    TEST_CHECK(s.lock_dur_ms == 0, "lock window cleared by the cycle reset");
 
     // A subsequent failure starts back at the first (5s) step, not the 300s tier.
     login_backoff_record_failure(&s, now);
@@ -77,7 +77,7 @@ static void test_success_clears(void)
 
     login_backoff_record_success(&s);
     TEST_CHECK(s.failure_count == 0, "success clears failure_count");
-    TEST_CHECK(s.locked_until_ms == 0, "success clears locked_until_ms");
+    TEST_CHECK(s.lock_dur_ms == 0, "success clears the lock window");
     TEST_CHECK(!login_backoff_is_locked(&s, 5001), "not locked immediately after a success");
 
     // Next failure after a success starts back at the first step.
@@ -85,8 +85,46 @@ static void test_success_clears(void)
     TEST_CHECK(!login_backoff_is_locked(&s, 10000 + 5000u), "post-success failure uses the FIRST ladder step (5s)");
 }
 
+// AUDIT_LOGSTORE_TIME MED-1: no phantom lock when the uint32 ms tick passes 2^31 or wraps.
+static void test_wrap_safety(void)
+{
+    TEST_SECTION("login_backoff -- wrap safety at 2^31 ms and 2^32 ms");
+
+    static const uint32_t starts[] = { 1000u, 0x7FFFFFFFu - 2000u, 0xFFFFFFFFu - 2000u };
+    for (unsigned si = 0; si < sizeof(starts) / sizeof(starts[0]); si++) {
+        uint32_t t0 = starts[si];
+        login_backoff_state_t s;
+        memset(&s, 0, sizeof(s));
+        login_backoff_record_failure(&s, t0);
+        TEST_CHECK(login_backoff_is_locked(&s, t0 + 4999u), "locked inside the window (wrap-straddling starts included)");
+        TEST_CHECK(login_backoff_remaining_ms(&s, t0 + 1000u) == 4000u, "remaining_ms is wrap-safe");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 5000u), "unlocked exactly when the window ends");
+        TEST_CHECK(login_backoff_remaining_ms(&s, t0 + 5000u) == 0u, "remaining_ms 0 when not locked");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0x80000000u), "no phantom lock at +2^31 ms");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0x80000001u), "no phantom lock at +2^31+1 ms");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0x80001389u), "no phantom lock just after the window ends 2^31 ms on");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 0xFFFFFFFFu), "no phantom lock just before +2^32 ms");
+        // An idle slot is swept by the next lookup, so it cannot revive 2^32 ms later.
+        login_backoff_cycle_reset_if_due(&s, t0 + 0x40000000u);
+        TEST_CHECK(s.lock_dur_ms == 0u, "expired lock dropped by the next lookup");
+        TEST_CHECK(!login_backoff_is_locked(&s, t0 + 100u), "swept slot stays unlocked at +100 ms (time-travel alias)");
+    }
+
+    // Top-of-ladder slot: cycle reset must still work past the 2^31 point.
+    login_backoff_state_t s;
+    memset(&s, 0, sizeof(s));
+    uint32_t now = 0xFFFFF000u;
+    for (int i = 0; i < 5; i++) {
+        login_backoff_record_failure(&s, now);
+        now += LOGIN_BACKOFF_LADDER_MS[i];
+    }
+    login_backoff_cycle_reset_if_due(&s, now + 0x80000000u);
+    TEST_CHECK(s.failure_count == 0, "5-failure slot resets its cycle at +2^31 ms (not stuck locked)");
+}
+
 void run_test_login_backoff(void)
 {
+    test_wrap_safety();
     test_ladder_escalation();
     test_cycle_reset();
     test_success_clears();
