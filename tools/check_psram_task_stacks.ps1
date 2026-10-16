@@ -102,6 +102,37 @@ foreach ($f in $scanFiles) {
     if ($plainDeleteOk.ContainsKey($rel)) { continue }
     if ($code -match '(?<![A-Za-z0-9_])vTaskDelete\s*\(') { $bad += "${rel}: creates a task with xTaskCreate*WithCaps but calls plain vTaskDelete(; use vTaskDeleteWithCaps" }
 }
+# PSRAM-stack tasks must not call a guarded writer directly (hal_kv_write_safe_here() and the per-module
+# caller_stack_is_external() guards refuse a PSRAM stack, so the save is lost). Files that hold a PSRAM-stack
+# task entry may not call NVS/OTA/mmap-class APIs themselves; the write goes through a module whose public
+# entry hops to bx_flash_worker (flash_hop_run). PM-06: LVGL runs on a PSRAM stack, so its UI files may not
+# call esp_ota_* at all (ui_page_diagnostics reads the OTA state once at init via ..._prime_ota_state).
+$directBan = '(?<![A-Za-z0-9_])(nvs_(set_\w+|commit|erase_\w+)|esp_ota_\w+|esp_partition_(write|erase_range|mmap)|hal_kv_(write|set|erase|commit)\w*)\s*\('
+$psramFiles = @($tasks | ForEach-Object { $_[0] } | Select-Object -Unique)
+$psramFiles += 'firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c'
+$psramFiles += 'firmware/KilnFW/App/drivers/ui/lvgl_port.c'
+foreach ($rel in ($psramFiles | Select-Object -Unique)) {
+    $path = Join-Path $root $rel
+    if (-not (Test-Path $path)) { $bad += "$rel missing"; continue }
+    $code = Strip-C ([IO.File]::ReadAllText($path))
+    $code = [regex]::Replace($code, '(?s)void\s+ui_page_diagnostics_prime_ota_state\s*\(void\)\s*\{.*??
+\}', '') # sanctioned one-shot read, off the LVGL task
+    foreach ($m in [regex]::Matches($code, $directBan)) {
+        $bad += "${rel}: PSRAM-stack code calls guarded writer $($m.Groups[1].Value)( directly; hop it through flash_hop_run (bx_flash_worker)"
+    }
+}
+# Every module whose guarded writer is reachable from a PSRAM-stack task must hop it: the file must still
+# call flash_hop_run( and include flash_hop.h.
+$hopped = @(
+    'drivers/control/run_state.c', 'drivers/control/profile_executor_firing_stats.c',
+    'drivers/persist/kiln_cfg_store.c', 'drivers/persist/kiln_cfg_swap.c', 'drivers/persist/live_profile.c',
+    'drivers/persist/dualwrite_window.c', 'drivers/safety/safety_cfg_store.c', 'drivers/http/profiles_http.c'
+)
+foreach ($h in $hopped) {
+    $rel = "firmware/KilnFW/App/$h"
+    $code = Strip-C ([IO.File]::ReadAllText((Join-Path $root $rel)))
+    if ($code -notmatch '(?<![A-Za-z0-9_])flash_hop_run\s*\(') { $bad += "${rel}: no flash_hop_run( call; its NVS/cfg writes are reachable from PSRAM-stack tasks and must hop to bx_flash_worker" }
+}
 $defs = [IO.File]::ReadAllText((Join-Path $root 'firmware/KilnFW/sdkconfig.defaults'))
 if ($defs -notmatch '(?m)^CONFIG_SPIRAM_XIP_FROM_PSRAM=y') { $bad += 'sdkconfig.defaults: CONFIG_SPIRAM_XIP_FROM_PSRAM=y missing; PSRAM task stacks are only safe around flash writes with XIP on' }
 if ($bad.Count) { $bad | ForEach-Object { "FAIL: $_" }; exit 1 }

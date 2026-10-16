@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() */
 #include "nvs_key_check.h"
 
@@ -99,7 +100,7 @@ static bool load_locked(dualwrite_window_record_t *out)
 }
 
 /* Must be called with s_dw.lock held. */
-static esp_err_t persist_locked(const dualwrite_window_record_t *rec)
+static esp_err_t persist_locked_impl(const dualwrite_window_record_t *rec)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "persist_locked: REFUSING -- calling task's stack is in external RAM "
@@ -122,6 +123,28 @@ static esp_err_t persist_locked(const dualwrite_window_record_t *rec)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in persist_locked_impl stays strict. */
+typedef struct {
+    const dualwrite_window_record_t *rec;
+    esp_err_t ret;
+} persist_locked_hop_t;
+
+static void persist_locked_hop_job(void *arg)
+{
+    persist_locked_hop_t *c = (persist_locked_hop_t *)arg;
+    c->ret = persist_locked_impl(c->rec);
+}
+
+static esp_err_t persist_locked(const dualwrite_window_record_t *rec)
+{
+    persist_locked_hop_t ctx = { .rec = rec, .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(persist_locked_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 /* ---------------------------------------------------------------------

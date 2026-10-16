@@ -89,6 +89,7 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 #include "hal_kv.h"
 #include "fake_sysinfo.h"
 #include "fake_kv.h"
+#include "stubs/flash_hop_host_stub.h"
 
 typedef hal_kv_handle_t *nvs_handle_t;
 
@@ -5762,15 +5763,21 @@ static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
                  "underneath it (DRAM_PSRAM_PLAN.md section 7.2 safety net)");
     memset(&s_profiles, 0, sizeof(s_profiles));
 
+    flash_hop_stub_reset();
+    g_flash_hop_stub_fail = true; // worker unusable
     fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
     esp_err_t err = nvs_save_slot(0);
 
     TEST_CHECK(err == ESP_ERR_INVALID_STATE,
-               "the wrong-task guard refuses with a diagnosable error, not a crash -- exactly "
-               "the class of bug (an NVS write reached from a PSRAM-stack task) this net exists "
-               "to catch before a future task relocation (DRAM_PSRAM_PLAN.md section 7) makes it "
-               "reachable for real");
+               "with the flash worker unusable the PSRAM-stack save is refused with a diagnosable error, "
+               "not a crash and not a direct write");
+    TEST_CHECK(g_flash_hop_stub_dispatches == 0, "nothing was dispatched");
+
+    /* Worker usable: the save hops (dispatch counted) instead of being refused. */
+    g_flash_hop_stub_fail = false;
+    (void)nvs_save_slot(0);
+    TEST_CHECK(g_flash_hop_stub_dispatches == 1, "PSRAM-stack nvs_save_slot hops onto the flash worker");
 
     fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }

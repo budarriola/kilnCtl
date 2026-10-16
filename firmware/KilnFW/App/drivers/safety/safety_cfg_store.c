@@ -12,6 +12,7 @@
 #include "freertos/semphr.h" /* s_store_lock -- 2026-08-27 audit fix (H5), see its own comment */
 
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "nvs_key_check.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
                               * file's callers already branch on */
@@ -768,7 +769,7 @@ static void load_safety_relay_type(void)
 /* Direct write, no flash-worker indirection -- see this function's own doc
  * comment in safety_cfg_store.h for why that's safe here (httpd-worker-only
  * caller). */
-static esp_err_t save_safety_relay_type(void)
+static esp_err_t save_safety_relay_type_impl(void)
 {
     /* check_nvs_write_guard_coverage.ps1 requires every NVS write in a
      * PSRAM-stack-guarded module to carry the same caller_stack_is_external()
@@ -799,6 +800,27 @@ static esp_err_t save_safety_relay_type(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in save_safety_relay_type_impl stays strict. */
+typedef struct {
+    esp_err_t ret;
+} save_safety_relay_type_hop_t;
+
+static void save_safety_relay_type_hop_job(void *arg)
+{
+    save_safety_relay_type_hop_t *c = (save_safety_relay_type_hop_t *)arg;
+    c->ret = save_safety_relay_type_impl();
+}
+
+static esp_err_t save_safety_relay_type(void)
+{
+    save_safety_relay_type_hop_t ctx = { .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(save_safety_relay_type_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 relay_type_t safety_cfg_store_get_safety_relay_type(void)
@@ -916,7 +938,7 @@ static void load_ct_cal(void)
 /* Direct write, no flash-worker indirection -- same "httpd-worker-only
  * caller" reasoning as save_safety_relay_type()'s own comment; this is only
  * ever reached from the httpd worker's commissioning POST handler. */
-static esp_err_t save_ct_cal(void)
+static esp_err_t save_ct_cal_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "save_ct_cal: REFUSING -- calling task's stack is in external RAM (PSRAM). "
@@ -936,6 +958,27 @@ static esp_err_t save_ct_cal(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in save_ct_cal_impl stays strict. */
+typedef struct {
+    esp_err_t ret;
+} save_ct_cal_hop_t;
+
+static void save_ct_cal_hop_job(void *arg)
+{
+    save_ct_cal_hop_t *c = (save_ct_cal_hop_t *)arg;
+    c->ret = save_ct_cal_impl();
+}
+
+static esp_err_t save_ct_cal(void)
+{
+    save_ct_cal_hop_t ctx = { .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(save_ct_cal_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 /* SAFETY_CT_CAL_DEFAULT_GAIN (0.715, R46/R43 physical default) is declared in
@@ -1021,7 +1064,7 @@ static void load_rate_guard_meta(void)
 }
 
 /* Same "httpd-worker-only caller" discipline as save_ct_cal(). */
-static esp_err_t save_rate_guard_meta(void)
+static esp_err_t save_rate_guard_meta_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "save_rate_guard_meta: REFUSING -- calling task's stack is in external RAM "
@@ -1041,6 +1084,27 @@ static esp_err_t save_rate_guard_meta(void)
     }
     hal_kv_close(&h);
     return hal_status_to_esp_err(err);
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in save_rate_guard_meta_impl stays strict. */
+typedef struct {
+    esp_err_t ret;
+} save_rate_guard_meta_hop_t;
+
+static void save_rate_guard_meta_hop_job(void *arg)
+{
+    save_rate_guard_meta_hop_t *c = (save_rate_guard_meta_hop_t *)arg;
+    c->ret = save_rate_guard_meta_impl();
+}
+
+static esp_err_t save_rate_guard_meta(void)
+{
+    save_rate_guard_meta_hop_t ctx = { .ret = ESP_ERR_INVALID_STATE };
+    if (flash_hop_run(save_rate_guard_meta_hop_job, &ctx) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ctx.ret;
 }
 
 bool safety_cfg_store_get_rate_guard_meta(safety_rate_guard_source_t *out_source, float *out_value,

@@ -134,6 +134,7 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
     s_stub_relay_cycles_last_type = type;
 }
 
+bool g_hop_stub_internal_stack = false; // shared by the other main-executable tests (kiln_cfg_store, dualwrite_window)
 static int s_stub_flash_worker_calls = 0;
 static esp_err_t s_stub_flash_worker_submit_err = ESP_OK; // returned instead of running the job, if != ESP_OK
 
@@ -144,7 +145,14 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
         return s_stub_flash_worker_submit_err; // simulates "worker not started" -- job never runs
     }
     if (fn) {
+        // PSRAM-stack write hop (flash_hop.h): when the test models the real worker, the job runs with
+        // hal_kv_write_safe_here() true (the worker's stack is internal) and the caller's value is restored.
+        bool prev_safe = hal_kv_write_safe_here();
+        if (g_hop_stub_internal_stack) {
+            fake_kv_set_write_safe_here(true);
+        }
         fn(arg);
+        fake_kv_set_write_safe_here(prev_safe);
     }
     return ESP_OK;
 }
@@ -883,6 +891,32 @@ static void test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry(v
     fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
+static void test_psram_stack_safety_cfg_writers_hop_to_worker(void)
+{
+    TEST_SECTION("save_safety_relay_type/save_ct_cal/save_rate_guard_meta -- from a PSRAM stack they hop to the "
+                 "flash worker; with the worker unusable they are refused, never written directly");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    fake_kv_set_write_safe_here(false);
+    s_stub_flash_worker_submit_err = ESP_ERR_INVALID_STATE;
+    TEST_CHECK(save_safety_relay_type() == ESP_ERR_INVALID_STATE && save_ct_cal() == ESP_ERR_INVALID_STATE &&
+                   save_rate_guard_meta() == ESP_ERR_INVALID_STATE,
+               "worker unusable: all three refuse");
+    s_stub_flash_worker_submit_err = ESP_OK;
+
+    g_hop_stub_internal_stack = true;
+    s_stub_flash_worker_calls = 0;
+    esp_err_t a = save_safety_relay_type();
+    esp_err_t b = save_ct_cal();
+    esp_err_t c = save_rate_guard_meta();
+    g_hop_stub_internal_stack = false;
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(a == ESP_OK && b == ESP_OK && c == ESP_OK, "worker modelled: all three persist from a PSRAM stack");
+    TEST_CHECK(s_stub_flash_worker_calls == 3, "each write went through the flash worker");
+    fake_kv_reset_all();
+}
+
 static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("nvs_save_store -- refuses (does not crash) when called with a PSRAM stack underneath it");
@@ -1532,6 +1566,7 @@ void run_test_safety_cfg_store(void)
     test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry();
     test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
+    test_psram_stack_safety_cfg_writers_hop_to_worker();
     test_unset_param_reports_set_false();
     test_lookup_by_id();
     test_version_refuse_newer_than_firmware();

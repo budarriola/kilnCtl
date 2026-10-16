@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "nvs_key_check.h"
 
 #include "freertos/FreeRTOS.h"
@@ -776,7 +777,7 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
-static hal_status_t nvs_save_store(void)
+static hal_status_t nvs_save_store_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "nvs_save_store: REFUSING -- calling task's stack is in external RAM "
@@ -807,6 +808,30 @@ static hal_status_t nvs_save_store(void)
     }
     s_kiln_cfg_rev = new_rev;
     return HAL_OK;
+}
+
+/* PSRAM-stack callers (kiln_cfg_swap worker) hop the cfg write onto the
+ * internal-stack bx_flash_worker. The job takes no lock: the caller already
+ * holds kiln_cfg_store_lock and a worker job must never take it. The guard in
+ * nvs_save_store_impl stays strict. */
+typedef struct {
+    hal_status_t st;
+} nvs_save_store_ctx_t;
+
+static void nvs_save_store_job(void *arg)
+{
+    ((nvs_save_store_ctx_t *)arg)->st = nvs_save_store_impl();
+}
+
+static hal_status_t nvs_save_store(void)
+{
+    nvs_save_store_ctx_t ctx = { .st = HAL_NOT_READY };
+    esp_err_t e = flash_hop_run(nvs_save_store_job, &ctx);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store: flash worker hop failed: %s", esp_err_to_name(e));
+        return HAL_NOT_READY;
+    }
+    return ctx.st;
 }
 
 /* ---- Internal helpers ------------------------------------------------------ */

@@ -1686,6 +1686,28 @@ static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
     fake_kv_reset_all();
 }
 
+extern bool g_hop_stub_internal_stack; // test_safety_cfg_store.c's flash-worker stub model (main executable)
+
+static void test_nvs_save_store_hops_from_psram_stack(void)
+{
+    TEST_SECTION("nvs_save_store -- from a PSRAM-stack task (kiln_cfg_swap worker) the cfg write hops to the "
+                 "flash worker and persists; without the worker context it stays refused");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    fake_kv_set_write_safe_here(false);
+    g_hop_stub_internal_stack = false;
+    TEST_CHECK(nvs_save_store() == HAL_NOT_READY, "no worker context: refused");
+    uint32_t rev_before = s_kiln_cfg_rev;
+    g_hop_stub_internal_stack = true;
+    hal_status_t err = nvs_save_store();
+    g_hop_stub_internal_stack = false;
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(err == HAL_OK, "through the worker the PSRAM-stack save succeeds");
+    TEST_CHECK(s_kiln_cfg_rev == rev_before + 1, "the cfg file revision advanced: the write really landed");
+    cfg_fs_deinit();
+    fake_kv_reset_all();
+}
+
 // ---------------------------------------------------------------------------
 // kiln_cfg_store_cfg_fs.c coverage -- the `cfg` LittleFS read-through/
 // dual-write bridge for the WHOLE saved-configs store (one document, one
@@ -4535,6 +4557,7 @@ void run_test_kiln_cfg_store(void)
     test_nvs_load_store_current_version_full_size_happy_path();
     test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
+    test_nvs_save_store_hops_from_psram_stack();
 
     test_cfg_fs_partition_absent_falls_through_to_nvs_only();
     test_cfg_fs_mount_failed_falls_through_to_nvs_only();

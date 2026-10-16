@@ -18,6 +18,7 @@ int g_test_count = 0;
 #include <string.h>
 
 #include "fake_kv.h" /* fake_kv_set_write_safe_here() */
+#include "stubs/flash_hop_host_stub.h"
 #include "hal_kv.h"
 #include "live_profile.h"
 #include "profile_executor_live_pickup.h"
@@ -847,17 +848,31 @@ static void test_saves_refused_from_unsafe_stack(void)
     rec.pending = 1;
     strncpy(rec.origin_name, "Unsafe", sizeof(rec.origin_name) - 1);
     char err[160] = {0};
+    /* 1. Worker unavailable: the write is refused (guard stays strict), nothing persists. */
+    flash_hop_stub_reset();
+    g_flash_hop_stub_fail = true;
     fake_kv_set_write_safe_here(false);
     bool rec_ok = live_profile_save_record(&rec, err, sizeof(err));
-    bool rec_msg = strstr(err, "not write-safe") != NULL;
+    bool rec_msg = strstr(err, "hop failed") != NULL;
     err[0] = '\0';
     bool work_ok = live_profile_save_working(&origin, err, sizeof(err));
-    bool work_msg = strstr(err, "not write-safe") != NULL;
+    bool work_msg = strstr(err, "hop failed") != NULL;
     fake_kv_set_write_safe_here(true);
-    TEST_CHECK(!rec_ok && rec_msg, "save_record refused from an unsafe stack");
-    TEST_CHECK(!work_ok && work_msg, "save_working refused from an unsafe stack");
+    TEST_CHECK(!rec_ok && rec_msg, "save_record refused from a PSRAM stack when the worker hop fails");
+    TEST_CHECK(!work_ok && work_msg, "save_working refused from a PSRAM stack when the worker hop fails");
     TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "no record file was written");
     TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH), "no working file was written");
+    /* 2. Worker available: the PSRAM-stack caller's write hops and persists. */
+    flash_hop_stub_reset();
+    err[0] = '\0';
+    fake_kv_set_write_safe_here(false);
+    rec_ok = live_profile_save_record(&rec, err, sizeof(err));
+    work_ok = live_profile_save_working(&origin, err, sizeof(err));
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(rec_ok && work_ok, "PSRAM-stack save_record/save_working succeed through the flash worker");
+    TEST_CHECK(g_flash_hop_stub_dispatches >= 2, "both writes were dispatched to the flash worker");
+    TEST_CHECK(lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "record file persisted via the worker");
+    TEST_CHECK(lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH), "working file persisted via the worker");
     TEST_CHECK(live_profile_save_record(&rec, err, sizeof(err)), "the same record saves once the stack is safe");
 }
 

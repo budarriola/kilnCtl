@@ -11,6 +11,7 @@
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
                               * module's callers already branch on */
 #include "nvs_key_check.h"
+#include "flash_hop.h" /* PSRAM-stack callers hop the write onto bx_flash_worker */
 #include "legacy_default_nvs.h" /* erase of the legacy default-partition record after a verified migration */
 
 static const char *TAG = "run_state";
@@ -291,6 +292,54 @@ static esp_err_t persist_locked(const run_state_record_t *rec)
     return hal_status_to_esp_err(err);
 }
 
+/* PSRAM-stack hop (owner decision 2026-10-16, KNOWN_ISSUES "PSRAM-stack tasks reach
+ * guarded NVS writers"). run_state_note()/_progress() are called from the executor
+ * and its watchdog, both on PSRAM stacks, where persist_locked()'s guard (kept
+ * strict) refuses. The write therefore runs through flash_hop_run(): inline on a
+ * safe stack or on the worker itself, else on bx_flash_worker, blocking the caller
+ * until it returns so a halt/DONE/FAULTED ending is on flash before the caller
+ * proceeds.
+ *
+ * s_rs.lock is NOT held across the hop: a job running on the worker (a halt
+ * dispatched over the UART bridge) can itself call run_state_note() and would
+ * deadlock against a caller holding the lock while waiting for the worker. The
+ * job takes the lock itself and writes the NEWEST live record, so two racing
+ * callers cannot land an older snapshot after a newer one. */
+typedef struct {
+    bool boot;      /* true: write s_rs.boot (acknowledge); false: write s_rs.live */
+    esp_err_t err;
+} rs_persist_ctx_t;
+
+static void rs_persist_job(void *arg)
+{
+    rs_persist_ctx_t *c = (rs_persist_ctx_t *)arg;
+    if (!ensure_lock()) {
+        c->err = ESP_ERR_NO_MEM;
+        return;
+    }
+    xSemaphoreTake(s_rs.lock, portMAX_DELAY);
+    if (c->boot) {
+        /* Once a firing wrote this boot the key holds THAT run's record; writing the
+         * acknowledged old copy back would overwrite a live breadcrumb. Re-checked
+         * here, under the lock, because the lock was released before the hop. */
+        c->err = s_rs.wrote_this_boot ? ESP_OK : persist_locked(&s_rs.boot);
+    } else {
+        c->err = persist_locked(&s_rs.live);
+        if (c->err == ESP_OK) {
+            s_rs.wrote_this_boot = true;
+        }
+    }
+    xSemaphoreGive(s_rs.lock);
+}
+
+/* Must be called WITHOUT s_rs.lock held. */
+static esp_err_t persist_via_hop(bool boot)
+{
+    rs_persist_ctx_t ctx = { .boot = boot, .err = ESP_FAIL };
+    esp_err_t hop = flash_hop_run(rs_persist_job, &ctx);
+    return hop != ESP_OK ? hop : ctx.err;
+}
+
 static void copy_str(char *dst, size_t cap, const char *src)
 {
     if (!src) {
@@ -429,11 +478,8 @@ void run_state_note(run_state_phase_t phase, const run_state_snapshot_t *snap)
     }
     xSemaphoreTake(s_rs.lock, portMAX_DELAY);
     fill_live_locked(phase, snap);
-    esp_err_t err = persist_locked(&s_rs.live);
-    if (err == ESP_OK) {
-        s_rs.wrote_this_boot = true;
-    }
     xSemaphoreGive(s_rs.lock);
+    esp_err_t err = persist_via_hop(false);
 
     if (err != ESP_OK) {
         /* A failed transition write is the case that makes the record lie:
@@ -457,20 +503,22 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
      * re-open an ending that was already recorded. */
     bool due = s_rs.live.phase == RUN_STATE_PHASE_RUNNING &&
                ((int64_t)hal_time_now_us() - s_rs.last_write_us) >= (int64_t)RUN_STATE_REFRESH_INTERVAL_S * 1000000;
-    esp_err_t err = ESP_OK;
     if (due) {
         fill_live_locked(RUN_STATE_PHASE_RUNNING, snap);
-        err = persist_locked(&s_rs.live);
-        if (err == ESP_OK) {
-            s_rs.wrote_this_boot = true;
-        } else {
+    }
+    xSemaphoreGive(s_rs.lock);
+    esp_err_t err = ESP_OK;
+    if (due) {
+        err = persist_via_hop(false);
+        if (err != ESP_OK) {
             /* Don't retry-storm a failing flash: last_write_us is only
              * advanced on success, so the next attempt is one tick later.
              * Losing a refresh costs progress resolution, not the record. */
+            xSemaphoreTake(s_rs.lock, portMAX_DELAY);
             s_rs.last_write_us = (int64_t)hal_time_now_us();
+            xSemaphoreGive(s_rs.lock);
         }
     }
-    xSemaphoreGive(s_rs.lock);
 
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "periodic run-state refresh failed: %s (record kept in RAM, will retry)",
@@ -525,11 +573,12 @@ bool run_state_acknowledge(void)
      * writing the acknowledged copy back would overwrite a live firing's
      * breadcrumb with a dead one, which is the exact failure this module
      * exists to prevent. Dropping the RAM copy is then the whole job. */
-    esp_err_t err = ESP_OK;
-    if (!s_rs.wrote_this_boot) {
-        err = persist_locked(&s_rs.boot);
-    }
+    bool need_write = !s_rs.wrote_this_boot;
     xSemaphoreGive(s_rs.lock);
+    esp_err_t err = ESP_OK;
+    if (need_write) {
+        err = persist_via_hop(true); /* re-checks wrote_this_boot under the lock */
+    }
 
     if (err != ESP_OK) {
         /* The banner is gone from the UI either way (the RAM copy is

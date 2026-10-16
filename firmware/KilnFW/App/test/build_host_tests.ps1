@@ -36,6 +36,8 @@ if (-not (Test-Path $vcvars)) {
 
 $testDir = $PSScriptRoot
 $driversDir = Join-Path $testDir "..\drivers"
+# flash_hop.h host stand-ins (PSRAM-stack write hop, 2026-10-16): full = run+is_on stub that flips fake_kv write-safe; isOn = is_on only.
+$hopStubFull = "`"$testDir\stubs\flash_hop_host_stub.c`" `"$testDir\stubs\flash_hop_host_stub_is_on.c`" "
 $hwAbsDir = Join-Path $testDir "..\..\..\hwAbstraction"
 $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
@@ -152,6 +154,7 @@ try {
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
         (Join-Path $testDir "test_estop_verification.c"),
         (Join-Path $testDir "test_dualwrite_window.c"),
+        (Join-Path $testDir "stubs\flash_hop_host_stub_is_on.c"),
         (Join-Path $testDir "test_watchdog_cfg.c"),
         (Join-Path $testDir "test_ramp_assist_cfg.c"),
         (Join-Path $testDir "test_ui_page_home_graph.c"),
@@ -859,6 +862,7 @@ try {
     $exe33 = Join-Path $outDir "kilnctl_host_tests_kiln_cfg_swap.exe"
     $cmd33 = "cl @`"$hostTestsRsp`" /std:c11 " +
              "/Fo:`"$outDir\\`" /Fe:`"$exe33`" `"$(Join-Path $testDir 'test_kiln_cfg_swap.c')`" " +
+            $hopStubFull +
              "`"$(Join-Path $hwAbsDir 'host\fake_kv.c')`" " +
              "`"$(Join-Path $driversDir 'persist\web_auth_store.c')`" " +
              "`"$(Join-Path $hwAbsDir 'common\hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp\common\hal_esp_common.c')`""
@@ -1064,6 +1068,7 @@ try {
     # (see this file's own comment above them).
     $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PROFILES_LOADED_TEST_HOOK " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
@@ -1160,6 +1165,7 @@ try {
     # documented MSVC switch that turns it on.
     $cmdLp = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
@@ -1202,6 +1208,7 @@ try {
     New-Item -ItemType Directory -Force -Path $efaObjDir | Out-Null
     $cmdEfa = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$efaObjDir\\`" /Fe:`"$exeEfa`" `"$(Join-Path $testDir 'test_ui_edit_firing_apply.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
