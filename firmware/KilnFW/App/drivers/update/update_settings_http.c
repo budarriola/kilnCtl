@@ -8,6 +8,7 @@
 
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "http_form.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- restore fence */
 #include "cfg_fs_refusal_http.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "system_mode_gate.h"
@@ -65,6 +66,11 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
 {
     if (cfg_fs_http_refuse_if_unmounted(req)) {
         return ESP_OK;
+    }
+    /* backup-import LOW-3: a restore's commit pass owns the stores; refuse a concurrent write (409). */
+    if (backup_import_restore_in_flight()) {
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
     }
     if (req->content_len <= 0 || req->content_len > SETTINGS_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
