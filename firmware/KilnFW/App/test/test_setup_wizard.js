@@ -442,7 +442,29 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(badOffset.valid === false, 'step3: an out-of-bound cal_offset_c is refused');
 
   const nanOffset = ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: NaN }], -50.0, 50.0);
-  assert(nanOffset.valid === false, 'step3: NaN cal_offset_c is refused');
+  assert(nanOffset.valid === false, 'step3: NaN cal_offset_c is refused');
+})();
+
+(function testStep3SheathTau() {
+  const ctx = loadPageScript(noopFetch);
+  const v = (t) => ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: 0, tc_sheath_tau_s: t }], -50.0, 50.0).valid;
+  assert(v(0) && v(60) && v(600), 'step3: sheath tau 0/60/600 accepted');
+  assert(!v(601) && !v(-1) && !v(NaN) && !v(59.5) && !v('60'), 'step3: sheath tau out of range/non-integer refused');
+  assert(ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: 0 }], -50.0, 50.0).valid, 'step3: absent sheath tau is not an error');
+  assert(ctx.SHEATH_TAU_MIN_S === 0 && ctx.SHEATH_TAU_MAX_S === 600 && ctx.SHEATH_TAU_TUBED_DEFAULT_S === 60,
+    'step3: sheath tau bounds/default');
+  const base = { name: 'Z', cal_offset_c: 0 };
+  const q0 = ctx.zoneToPostParams(base, 0).join('&');
+  assert(q0.indexOf('sheath_tau') < 0, 'zoneToPostParams: absent tau is omitted (preserved), never replayed as 0');
+  const q1 = ctx.zoneToPostParams(Object.assign({}, base, { tc_sheath_tau_s: 180 }), 0).join('&');
+  assert(q1.indexOf('z0_sheath_tau=180') >= 0, 'zoneToPostParams: tau from GET is echoed');
+  const q2 = ctx.zoneToPostParams(Object.assign({}, base, { tc_sheath_tau_s: 0 }), 0).join('&');
+  assert(q2.indexOf('z0_sheath_tau=0') >= 0, 'zoneToPostParams: tau 0 is echoed');
+  const bare = ctx.step3SheathHtml(0, { tc_sheath_tau_s: 0 });
+  assert(/value="0" selected/.test(bare) && /value="60"/.test(bare), 'step3: bare TC defaults to No, tau field pre-filled 60');
+  const tubed = ctx.step3SheathHtml(0, { tc_sheath_tau_s: 240 });
+  assert(/value="1" selected/.test(tubed) && /value="240"/.test(tubed), 'step3: stored tau shows tube Yes with its value');
+  assert(/does not check this value/.test(tubed), 'step3: hint says verify does not check tau');
 })();
 
 // ---- Task requirement 4 / plan section 2: 0 means UNSET for max_temp_c and

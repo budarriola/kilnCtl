@@ -643,8 +643,16 @@ function validateStep2(thermoCount, zones) {
   return { valid: errors.length === 0, errors: errors };
 }
 
-// Step 3 (thermocouple types + calibration offsets) commit-time validator.
-// `zones` is an array of { tc_type, cal_offset_c } for indices [0, thermoCount).
+// TC protection-tube (sheath) lag tau, seconds. Must match the firmware
+// parser (zones_http_post_parse.c z%u_sheath_tau, ZONE_TC_SHEATH_TAU_MIN_S/
+// MAX_S); tools/PcTools/tests/test_sheath_tau_client_bounds.py pins that.
+var SHEATH_TAU_MIN_S = 0;
+var SHEATH_TAU_MAX_S = 600;
+var SHEATH_TAU_TUBED_DEFAULT_S = 60; // owner 2026-10-16: tubed default, editable
+
+// Step 3 (thermocouple types + calibration offsets + sheath tau) commit-time validator.
+// `zones` is an array of { tc_type, cal_offset_c, tc_sheath_tau_s } for indices
+// [0, thermoCount). tc_sheath_tau_s absent = not edited here (preserved).
 function validateStep3(thermoCount, zones, calMinC, calMaxC) {
   var errors = [];
   for (var i = 0; i < thermoCount; i++) {
@@ -657,6 +665,12 @@ function validateStep3(thermoCount, zones, calMinC, calMaxC) {
         z.cal_offset_c < calMinC || z.cal_offset_c > calMaxC) {
       errors.push('Zone ' + (i + 1) + ' calibration offset must be a number between ' +
         calMinC + ' and ' + calMaxC + ' °C.');
+    }
+    if ('tc_sheath_tau_s' in z && (typeof z.tc_sheath_tau_s !== 'number' ||
+        !isFinite(z.tc_sheath_tau_s) || Math.round(z.tc_sheath_tau_s) !== z.tc_sheath_tau_s ||
+        z.tc_sheath_tau_s < SHEATH_TAU_MIN_S || z.tc_sheath_tau_s > SHEATH_TAU_MAX_S)) {
+      errors.push('Zone ' + (i + 1) + ' protection tube lag must be a whole number of seconds between ' +
+        SHEATH_TAU_MIN_S + ' and ' + SHEATH_TAU_MAX_S + '.');
     }
   }
   return { valid: errors.length === 0, errors: errors };
@@ -710,6 +724,9 @@ function zoneToPostParams(z, i) {
   add('ct_mask', z.ct_mask || 0);
   add('tctype', (z.tc_type != null) ? z.tc_type : 3);
   add('cal', z.cal_offset_c || 0);
+  // Omit preserves (parser): only echo a tau GET actually reported or this
+  // step set. Never default a missing value to 0 -- that would clear it.
+  if (typeof z.tc_sheath_tau_s === 'number') add('sheath_tau', z.tc_sheath_tau_s);
   add('kp', z.pid_kp || 0);
   add('ki', z.pid_ki || 0);
   add('kd', z.pid_kd || 0);
@@ -2147,7 +2164,26 @@ function step3ZoneRowHtml(i, z) {
     tcTypeOptionsHtml(z.tc_type) + '</select></div>' +
     '<div class="wfield"><label>Calibration offset (&deg;C)</label>' +
     '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '"' + kgRawAttrs(z.cal_offset_c) + ' value="' + kgR6(z.cal_offset_c) + '"></div>' +
+    step3SheathHtml(i, z) +
     '<p class="hint">Verify: <span class="s3verify" data-zone="' + i + '">not yet checked</span></p></div>';
+}
+
+// Sheath lag: "protection tube fitted?" (no = 0) plus tau when yes. Applied
+// after the calibration offset, to the ESP control reading only; the Pico
+// reading and its tc_offset_c are separate (step 7).
+function step3SheathHtml(i, z) {
+  var tau = (typeof z.tc_sheath_tau_s === 'number') ? z.tc_sheath_tau_s : 0;
+  var tubed = tau > 0;
+  return '<div class="wfield"><label>Protection tube fitted over this thermocouple?</label>' +
+    '<select class="s3tube" data-zone="' + i + '"><option value="0"' + (tubed ? '' : ' selected') +
+    '>No (bare thermocouple)</option><option value="1"' + (tubed ? ' selected' : '') + '>Yes</option></select></div>' +
+    '<div class="wfield"><label>Tube lag tau (s, ' + SHEATH_TAU_MIN_S + '-' + SHEATH_TAU_MAX_S + ')</label>' +
+    '<input type="number" step="1" min="' + SHEATH_TAU_MIN_S + '" max="' + SHEATH_TAU_MAX_S + '" class="s3tau" data-zone="' + i +
+    '" value="' + (tubed ? tau : SHEATH_TAU_TUBED_DEFAULT_S) + '"></div>' +
+    '<p class="hint">Used only when a tube is fitted. Thin tubes are tens of seconds, thick mullite up to a few ' +
+    'minutes; ' + SHEATH_TAU_TUBED_DEFAULT_S + ' s is a reasonable start. To measure: step the kiln (or move the ' +
+    'tubed probe into a hot hold) and time how long the reading takes to cover 63% of the change. ' +
+    'The verify below does not check this value.</p>';
 }
 
 function step3ReadCurrentZones(thermoCount, existingZones) {
@@ -2156,10 +2192,16 @@ function step3ReadCurrentZones(thermoCount, existingZones) {
     var card = document.querySelector('#stepBody3 .zonecard[data-zone="' + i + '"]');
     var prev = existingZones[i] || {};
     if (!card) { zones.push(prev); continue; }
-    zones.push({
+    var row = {
       tc_type: parseInt(card.querySelector('.s3type').value, 10),
       cal_offset_c: parseFloat(kgPost(card.querySelector('.s3cal'))),
-    });
+    };
+    var tube = card.querySelector('.s3tube');
+    var tauEl = card.querySelector('.s3tau');
+    // No tube control on the card: tau not edited here, leave it absent
+    // so zoneToPostParams() omits it and the board preserves it.
+    if (tube && tauEl) row.tc_sheath_tau_s = (tube.value === '1') ? Number(tauEl.value) : 0;
+    zones.push(row);
   }
   return zones;
 }
@@ -2207,6 +2249,7 @@ function renderStep3() {
         var copy = Object.assign({}, zones[mi] || {});
         copy.tc_type = liveZones[mi].tc_type;
         copy.cal_offset_c = liveZones[mi].cal_offset_c;
+        if ('tc_sheath_tau_s' in liveZones[mi]) copy.tc_sheath_tau_s = liveZones[mi].tc_sheath_tau_s;
         mergedZones.push(copy);
       }
       submitZonesConfig(data, mergedZones).then(function () {
@@ -2220,7 +2263,7 @@ function renderStep3() {
         return pollVerifyAfterWrite(thermoCount, 5, 800);
       }).then(function (allVerified) {
         if (allVerified) {
-          okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
+          okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting (tube lag tau saved, not verified).</p>';
           return postStepState(3, 'done').then(function (r) {
             if (stepSaveFailed(r)) {
               okEl.innerHTML = '<p class="hint">The thermocouple settings were written, but this step was NOT marked done.</p>';
@@ -2228,7 +2271,7 @@ function renderStep3() {
             }
             armStepMessage(3, function () {
               var ok2 = document.getElementById('step3Ok');
-              if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
+              if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting (tube lag tau saved, not verified).</p>';
             });
             loadAll();
           });
