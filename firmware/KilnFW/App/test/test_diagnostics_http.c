@@ -380,6 +380,9 @@ static dashboard_relay_result_t g_dm_relay_rr = DASHBOARD_RELAY_OK;
 static uint8_t g_dm_relay_arg;
 static bool g_dm_relay_on;
 static int g_dm_relay_calls;
+/* HR-01: controllable run state for the cfgfs file POST mode gate. */
+static bool g_run_profile, g_run_autotune;
+void relay_authority_heat_run_active(bool *profile, bool *autotune) { *profile = g_run_profile; *autotune = g_run_autotune; }
 bool danger_mode_active(void) { return g_dm_active; }
 bool danger_mode_get_heat_requested(void) { return false; }
 bool danger_mode_get_relay_status(bool *e, bool *h) { *e = true; *h = false; return true; }
@@ -470,6 +473,8 @@ static httpd_req_t s_req;
 
 static void world_reset(void)
 {
+    g_run_profile = false;
+    g_run_autotune = false;
     resp_reset();
     s_post_len = 0;
     s_post_body[0] = '\0';
@@ -1027,6 +1032,18 @@ static void test_cfgfs(void)
     TEST_CHECK(s_status == 200 && g_chk_raw && g_cfg_write_calls == 1 && g_cfg_write_len == 4 &&
                strcmp(g_cfg_write_name, "zones.json") == 0, "cfgfs file POST: raw=1 reaches the validator and the write lands");
     TEST_CHECK(g_worker_calls == 1, "cfgfs file POST: write dispatched through the flash worker");
+
+    /* HR-01: refused 409 (system_mode_gate) while a firing or autotune is active; nothing validated or written. */
+    for (int mode = 0; mode < 2; mode++) {
+        world_reset();
+        g_run_profile = (mode == 0);
+        g_run_autotune = (mode == 1);
+        set_query("name=zones.json&raw=1");
+        set_body("data");
+        cfgfs_file_post_handler(&s_req);
+        TEST_CHECK(s_status == 409 && g_cfg_write_calls == 0 && g_chk_calls == 0 && g_worker_calls == 0,
+                   "cfgfs file POST (HR-01): 409 while a firing/autotune run is active, nothing written");
+    }
 
     world_reset();
     set_query("name=zones.json&raw=10");

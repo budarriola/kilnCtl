@@ -167,9 +167,8 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
 
         snprintf(key, sizeof(key), "seg%u_target", i);
         len = http_form_find_field(body, key, val, sizeof(val));
-        fend = NULL;
-        float target = len > 0 ? strtof(val, &fend) : NAN;
-        if (len <= 0 || fend == val || isnan(target) || target < PROFILE_TARGET_C_MIN ||
+        float target = NAN;
+        if (len <= 0 || !http_form_parse_float(val, len, &target) || isnan(target) || target < PROFILE_TARGET_C_MIN ||
             target > PROFILE_TARGET_C_MAX) {
             snprintf(err_msg, err_cap, "segment %u: target_c missing or out of range (%.0f-%.0f)", i + 1,
                      (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX);
@@ -179,9 +178,8 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
 
         snprintf(key, sizeof(key), "seg%u_ramp", i);
         len = http_form_find_field(body, key, val, sizeof(val));
-        fend = NULL;
-        float ramp = len > 0 ? strtof(val, &fend) : NAN;
-        if (len <= 0 || fend == val || isnan(ramp) || ramp < PROFILE_RAMP_C_PER_HR_MIN ||
+        float ramp = NAN;
+        if (len <= 0 || !http_form_parse_float(val, len, &ramp) || isnan(ramp) || ramp < PROFILE_RAMP_C_PER_HR_MIN ||
             ramp > PROFILE_RAMP_C_PER_HR_MAX) {
             snprintf(err_msg, err_cap, "segment %u: ramp_c_per_hr missing or out of range (0-1000)", i + 1);
             return false;
@@ -287,10 +285,9 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
 
         snprintf(key, sizeof(key), "rule%u_temp_c", i);
         len = http_form_find_field(body, key, val, sizeof(val));
-        fend = NULL;
-        r->temp_threshold_c = len > 0 ? strtof(val, &fend) : 0.0f;
-        if (len > 0 && !isfinite(r->temp_threshold_c)) {
-            snprintf(err_msg, err_cap, "rule %u: temp_c not finite", i);
+        r->temp_threshold_c = 0.0f;
+        if (len > 0 && !http_form_parse_float(val, len, &r->temp_threshold_c)) {
+            snprintf(err_msg, err_cap, "rule %u: temp_c not a finite number", i);
             return false;
         }
         /* A dormant threshold (no temperature condition) is never stored. */

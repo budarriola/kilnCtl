@@ -70,14 +70,13 @@ void lcd_keypad_state_init(lcd_keypad_state_t *ks)
     memset(ks, 0, sizeof(*ks));
 }
 
-lcd_keypad_submit_result_t lcd_keypad_state_submit(lcd_keypad_state_t *ks, uint32_t now_ms,
-                                                    lcd_pin_role_t *out_role)
+bool lcd_keypad_state_submit_begin(lcd_keypad_state_t *ks, uint32_t now_ms, lcd_keypad_submit_result_t *early)
 {
-    if (out_role) {
-        *out_role = LCD_PIN_ROLE_NONE;
-    }
     if (!ks) {
-        return LCD_KEYPAD_SUBMIT_TOO_SHORT;
+        if (early) {
+            *early = LCD_KEYPAD_SUBMIT_TOO_SHORT;
+        }
+        return false;
     }
 
     // "The cycle resets" (login_backoff.h) once the ladder's last step has
@@ -89,27 +88,61 @@ lcd_keypad_submit_result_t lcd_keypad_state_submit(lcd_keypad_state_t *ks, uint3
     // A locked-out panel never even reaches the verify seam -- the PIN is
     // not checked, so no information about it leaks through timing either.
     if (login_backoff_is_locked(&ks->lockout, now_ms)) {
-        return LCD_KEYPAD_SUBMIT_LOCKED_OUT;
+        if (early) {
+            *early = LCD_KEYPAD_SUBMIT_LOCKED_OUT;
+        }
+        return false;
     }
 
     if (!lcd_pin_entry_can_submit(&ks->entry)) {
         // Defensive only -- the keypad's OK handler must never call this
         // below 4 digits in the first place ("OK is inert below 4 digits").
         // Not a real attempt: the lockout counter is untouched.
+        if (early) {
+            *early = LCD_KEYPAD_SUBMIT_TOO_SHORT;
+        }
+        return false;
+    }
+    return true;
+}
+
+lcd_pin_role_t lcd_keypad_state_verify(const char *digits, uint8_t len)
+{
+    return s_verify_fn(digits, len);
+}
+
+lcd_keypad_submit_result_t lcd_keypad_state_submit_finish(lcd_keypad_state_t *ks, uint32_t now_ms,
+                                                           lcd_pin_role_t role, lcd_pin_role_t *out_role)
+{
+    if (out_role) {
+        *out_role = LCD_PIN_ROLE_NONE;
+    }
+    if (!ks) {
         return LCD_KEYPAD_SUBMIT_TOO_SHORT;
     }
-
-    lcd_pin_role_t role = s_verify_fn(ks->entry.digits, ks->entry.len);
     if (role == LCD_PIN_ROLE_NONE) {
         login_backoff_record_failure(&ks->lockout, now_ms);
         return LCD_KEYPAD_SUBMIT_DENIED;
     }
-
     login_backoff_record_success(&ks->lockout);
     if (out_role) {
         *out_role = role;
     }
     return LCD_KEYPAD_SUBMIT_GRANTED;
+}
+
+lcd_keypad_submit_result_t lcd_keypad_state_submit(lcd_keypad_state_t *ks, uint32_t now_ms,
+                                                    lcd_pin_role_t *out_role)
+{
+    if (out_role) {
+        *out_role = LCD_PIN_ROLE_NONE;
+    }
+    lcd_keypad_submit_result_t early = LCD_KEYPAD_SUBMIT_TOO_SHORT;
+    if (!lcd_keypad_state_submit_begin(ks, now_ms, &early)) {
+        return early;
+    }
+    lcd_pin_role_t role = lcd_keypad_state_verify(ks->entry.digits, ks->entry.len);
+    return lcd_keypad_state_submit_finish(ks, now_ms, role, out_role);
 }
 
 // --- Inactivity lock + 10s prompt ----------------------------------------

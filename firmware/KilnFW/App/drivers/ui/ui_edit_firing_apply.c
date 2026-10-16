@@ -234,13 +234,14 @@ bool edit_firing_apply(const profile_t *candidate, edit_firing_ctx_t *ctx, char 
         bool did_fork = false;
         bool forked = fork_out && live_profile_fork_gen(st.profile_id, origin_is_builtin, origin_name, origin,
                                                          fork_out, &rec, &fork_gen, &did_fork, err, err_cap);
+        const bool fork_alloc_ok = (fork_out != NULL); /* LU-03: never read fork_out after the free */
         if (fork_out) {
             heap_caps_free(fork_out);
         }
         if (!forked) {
             heap_caps_free(origin);
             if (!err[0]) {
-                snprintf(err, err_cap, fork_out ? "fork failed" : "out of memory");
+                snprintf(err, err_cap, fork_alloc_ok ? "fork failed" : "out of memory");
             }
             return false;
         }

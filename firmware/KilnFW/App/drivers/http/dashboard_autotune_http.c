@@ -447,19 +447,24 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
      * "adopt" does and does not overwrite. */
     bool ack_unsettled = false;
     bool adopt_ceiling = false;
-    if (req->content_len > 0 && req->content_len < 96) {
+    if (req->content_len >= 96) {
+        /* HR-04: an oversized body is a broken request; it must not change state with defaults. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "request body too large");
+        return ESP_OK;
+    }
+    if (req->content_len > 0) {
         char body[96];
         size_t received = 0;
-        bool read_ok = true;
         while (received < (size_t)req->content_len) {
             int ret = httpd_req_recv(req, body + received, req->content_len - received);
             if (ret <= 0) {
-                read_ok = false;
-                break;
+                /* HR-04: a failed read answers 400 and never reaches autotune_engine_accept(). */
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "request body read failed");
+                return ESP_OK;
             }
             received += (size_t)ret;
         }
-        if (read_ok) {
+        {
             body[received] = '\0';
             /* Sized [8], not [4]: http_form_url_decode() (http_form.h)
              * requires o+1 < out_cap for every decoded byte it writes, so a

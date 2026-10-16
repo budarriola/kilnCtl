@@ -838,7 +838,8 @@ try {
             "`"$(Join-Path $driversDir 'http/http_async_job.c')`" " +
             "`"$(Join-Path $driversDir 'safety/safety_cfg_writer_guard.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
+            "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
@@ -1996,7 +1997,7 @@ try {
     $diagObjDir = Join-Path $outDir "diaghttp"
     New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
     $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`""
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
