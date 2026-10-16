@@ -121,7 +121,8 @@ Fields, by owner:
 **ESP `zones_cfg_t` (`persist/zones_config_json.h`, `ZONES_CFG_VERSION 23`), via `GET/POST /api/zones`:**
 - global: `thermo_count`, `relay_count`, `max_simultaneous_relays` (0 = unlimited),
   `continue_on_zone_trip`, `safety_tc_type`, `timing_profile_count` + `timing_profiles[]`
-- per zone: `name`, `thermo_mask`, `tc_type`, `cal_offset_c`, `relay_mask`,
+- per zone: `name`, `thermo_mask`, `tc_type`, `cal_offset_c`, `tc_sheath_tau_s`
+  (protection-tube lag, 0..600 s, 0 = off; `docs/TC_SHEATH_LAG_SIM.md`), `relay_mask`,
   `relay_type` (ssr/contactor/mercury), `ct_mask`, `control_mode`,
   `zone_type` (HEATER vs ON_OFF_DEVICE) + `failsafe_state`/`hyst_c`/`min_on_s`/`min_off_s`,
   `max_temp_c` (**0 = not set**), `min_temp_c`, `max_ramp_c_per_hr` (**0 = never
@@ -157,7 +158,7 @@ time zone (`/api/settings/tz`), units (`/api/unit_pref`), display power
 | 0 | Welcome / preflight | — | read-only | `/api/readiness`, `/api/status`, `/api/crash_report`. Refuse to start on an unacknowledged crash |
 | 1 | Network + time + units | — | `/provision`, `/api/settings/tz`, `/api/unit_pref` | Skippable if already on the LAN. Time matters: firing logs |
 | 2 | Zone count + thermocouple channels | 0 | `POST /api/zones` (`thermo_count`, per-zone `thermo_mask`) | Live per-channel readings shown so mis-wiring is visible immediately (`/api/status`, `/api/thermo/faults`) |
-| 3 | Thermocouple types + calibration offsets | 2 | `POST /api/zones` (`tc_type`, `cal_offset_c`) | `tc_type` sets the sensor ceiling that bounds step 7's `abs_max_temp_c`. Offsets may be deferred (`deliberately_off`) |
+| 3 | Thermocouple types + calibration offsets + sheath tau | 2 | `POST /api/zones` (`tc_type`, `cal_offset_c`, `z%u_sheath_tau`) | `tc_type` sets the sensor ceiling that bounds step 7's `abs_max_temp_c`. Offsets may be deferred (`deliberately_off`). Sheath tau is entered, not measured: the verify text says the lag is configured, never verified. Blank keeps the stored value |
 | 4 | Zone type: HEATER vs ON_OFF_DEVICE ◆ | 2 | `POST /api/zones` (`zone_type`, `failsafe_state`, `hyst_c`, `min_on_s`, `min_off_s`) | ON_OFF disables guards 1/2/3/4/9 and zeroes its coupling row/column (`d58492c9`, `172e3081`). Radio-card must say exactly that. Fail-safe default OFF, confirm-gated opt-in to ON |
 | 5 | Relays: count, per-zone mask, names, type, `max_simultaneous_relays` ◆ | 2, 4 | `POST /api/zones`, `zones_config_set_relay_name()` | Uses `/api/diagnostics/danger/relay` to click one relay at a time so the owner can *hear* which is which — dry contacts, heat disabled |
 | 6 | Zone commissioning limits ▲ | 2, 4 | `POST /api/zones` (`max_temp_c`, `min_temp_c`, `max_ramp_c_per_hr`, `sanity_rate_c_per_min`, `cross_zone_max_delta_c`) | **0 = uncommissioned, refuse to start.** Must render as NOT SET, never 0 |
