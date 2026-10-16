@@ -9776,6 +9776,15 @@ static void test_firing_stats_persist_hops_from_psram_stack(void)
     memset(out, 0, sizeof(out));
     size_t n = profile_executor_get_firing_history(41, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
     TEST_CHECK(n == 1 && out[0].duration_s == 4242, "the record persisted via the worker and reads back");
+
+    before = s_stub_dispatch_count;
+    fake_kv_set_write_safe_here(false);
+    esp_err_t er = firing_stats_erase(41);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(er == ESP_OK && s_stub_dispatch_count == before + 1, "the erase was dispatched to the flash worker once");
+    memset(out, 0, sizeof(out));
+    TEST_CHECK(profile_executor_get_firing_history(41, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) == 0,
+               "the erase via the worker removed the history");
 }
 
 static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)

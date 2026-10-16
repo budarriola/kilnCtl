@@ -5779,6 +5779,11 @@ static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
     (void)nvs_save_slot(0);
     TEST_CHECK(g_flash_hop_stub_dispatches == 1, "PSRAM-stack nvs_save_slot hops onto the flash worker");
 
+    /* The erase entry hops the same way. */
+    flash_hop_stub_reset();
+    (void)nvs_erase_slot_locked(0);
+    TEST_CHECK(g_flash_hop_stub_dispatches == 1, "PSRAM-stack nvs_erase_slot_locked hops onto the flash worker");
+
     fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }
 

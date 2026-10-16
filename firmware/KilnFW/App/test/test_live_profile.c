@@ -874,6 +874,15 @@ static void test_saves_refused_from_unsafe_stack(void)
     TEST_CHECK(lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "record file persisted via the worker");
     TEST_CHECK(lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH), "working file persisted via the worker");
     TEST_CHECK(live_profile_save_record(&rec, err, sizeof(err)), "the same record saves once the stack is safe");
+    /* 3. clear from a PSRAM stack hops too and removes both files. */
+    flash_hop_stub_reset();
+    err[0] = '\0';
+    fake_kv_set_write_safe_here(false);
+    bool clr_ok = live_profile_clear(err, sizeof(err));
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(clr_ok, "PSRAM-stack live_profile_clear succeeds through the flash worker");
+    TEST_CHECK(g_flash_hop_stub_dispatches >= 1, "the clear was dispatched to the flash worker");
+    TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "record file removed via the worker");
 }
 
 static void test_save_refused_when_cfg_unmounted(void)
