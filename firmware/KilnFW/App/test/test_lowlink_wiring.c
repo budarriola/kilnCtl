@@ -50,6 +50,7 @@ static void check_up01(void)
     const char *recheck = claim ? strstr(claim, "relay_authority_heat_run_active") : NULL;
     TEST_CHECK(claim != NULL && recheck != NULL, "heat-run recheck must follow the claim");
     TEST_CHECK(recheck != NULL && strstr(recheck, "ota_http_check_interlocks") != NULL &&
+               strstr(recheck, "if (profile_running || autotune_running || gate2 != OTA_INTERLOCK_OK)") != NULL &&
                strstr(recheck, "ota_http_update_end") != NULL,
                "recheck must re-read interlocks and release the claim on refusal");
     free(fn);
@@ -80,7 +81,8 @@ static void check_bw02(void)
     while ((p = strstr(p, "esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);")) != NULL) {
         const char *clr = strstr(p, "ap_fallback_active = false");
         const char *ret = strstr(p, "will retry");
-        TEST_CHECK(clr != NULL && ret != NULL && ret < clr,
+        const char *rr = ret ? strstr(ret, "return;") : NULL;
+        TEST_CHECK(clr != NULL && ret != NULL && rr != NULL && rr < clr,
                    "flag clear must come after the failure early return");
         n++;
         p += 10;
