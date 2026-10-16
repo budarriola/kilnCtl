@@ -79,3 +79,46 @@ Scope: S1..S16 trip/clear paths in `firmware/SaftyFW/src/safety_guards.c`, `task
   - Config store: the A/B sectors and torn-slot read-back verify (`24090c9a`, `98d237b0`) hold. One sector always keeps a valid record across the erase-then-program step.
   - `borrowed_zone_index` is bounded to 0..2 before it is used as an array index (`safety_core.c:1117`).
   - Status: no defect.
+
+## Review 2026-10-16: OTA/update
+
+Scope: KilnFW `drivers/update` (check/fetch/stage, heap admission, stage verify), `POST /api/update/install`
+(`ota_recovery_boot_run`), recovery `apply_staged`, boot_guard/otadata, Pico auto-update. Review only, at
+origin/dev. Items already marked fixed in `docs/audits/` (UPDATE_PATH_ROBUSTNESS_AUDIT_2026-10-13,
+AUDIT_UPDATE_FAULTS, AUDIT_PICO_UPDATE, RECOVERY_IMAGE_REVIEW etc.) are not repeated. No HIGH found: the
+apply copies only a header-VERIFIED stage whose sha256 is re-hashed before the first erase, re-hashes `app`
+after the copy, runs `esp_image_verify`, and only then sets the boot partition; otadata keeps pointing at
+recovery for the whole copy, so a power cut mid-copy reboots into recovery with the stage intact
+(bounded retry via `update_install_after_fail`). `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` covers a new app
+that dies before `esp_ota_mark_app_valid_cancel_rollback()`. Install, recovery_boot, stage writes and the
+fetch all refuse during a firing/autotune.
+
+- **UP-01** LOW, `firmware/KilnFW/App/drivers/net/pico_auto_update_boot.c:115-129`
+  (`attempt_update_acquire`). Problem: the interlock (no firing, no heat) is checked BEFORE
+  `ota_http_update_try_begin()`, and nothing re-checks after the claim. `ota_recovery_boot_run`
+  (`ota_http_recovery.c`) closes the same race with an authoritative relay/heat read after the claim.
+  Scenario: an operator starts a firing in the first seconds after boot; the profile start passes
+  `ota_http_heat_blocked_by_update()` (no claim yet) while the auto-update task passes its interlock
+  read (run not committed yet), then claims and pushes a SaftyFW image; the Pico reboots mid-firing
+  (fails safe: heat cut, run aborts). Fix: after the claim succeeds, re-run
+  `ota_http_check_interlocks()` and `relay_authority_heat_run_active()`; on refusal call
+  `ota_http_update_end()` and stand down. Status: open.
+- **UP-02** LOW, `firmware/KilnFW/App/drivers/update/update_install_http.c` (request write in
+  `install_prepare`) and `ota_http_recovery.c` `ota_recovery_boot_run` step 5. Problem: the one-shot install
+  request is removed only by `undo()` on an in-handler failure; the application never drops a lingering
+  request at boot. Scenario: power cut during `esp_ota_set_boot_partition(factory)`'s otadata erase leaves
+  one valid otadata sector, so the app boots again with the request still stored and the stage still
+  VERIFIED; days later an unrelated entry into recovery (boot_guard threshold after a crash loop) consumes
+  it and installs the staged image unattended, masking the crash cause and surprising the operator.
+  Fix: at app boot (after `boot_guard_init`, normal mode only) delete any stored install request and write
+  a result record `reason=stale_request`, or store the request's boot_count and have recovery refuse a
+  request not issued on the immediately preceding boot. Status: open.
+- **UP-03** INFO, `firmware/KilnFW/App/drivers/update/update_fetch_heap.c:4-12`,
+  `update_fetch_heap.h:154-189`. pre.3's `low_heap` refusal at "10752 B largest" was the FREE check, not the
+  block check: idle free 29815 B (INTERNAL_HEAP_MARGIN_2026-10-09) is below the 31728 B admission
+  (ABORT_BELOW 9216 + MODEL_DRAW 22512); 10752 B largest is above `FETCH_LARGEST_BLOCK_MIN` 6144 B. dev
+  (`6880bfefb`, XIP from PSRAM) measures about 45 KB idle free and a 16384 B largest block
+  (AUDIT_INTERNAL_RAM_XIP), so dev should admit with about 13 KB to spare. Not yet shown by a GitHub fetch
+  on a dev build: confirm with `update_check` + `update_stage_release` on the bench and record
+  `heap.start_free`. A pre.3 board can never self-update to dev over GitHub (its own admission refuses);
+  it needs JTAG or a recovery push. Status: open (bench confirmation).
