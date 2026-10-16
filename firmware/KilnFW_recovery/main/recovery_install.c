@@ -8,6 +8,7 @@
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_ota_ops.h"
 #include "nvs.h"
 
 #include "recovery_apply_esp.h"
@@ -221,6 +222,14 @@ static void load_last(void)
     uint8_t buf[UPD_INST_RES_SIZE];
     size_t n = 0;
     s_have_last = kv_read(UPD_INST_KEY_RES, buf, sizeof(buf), &n) == 0 && update_install_res_decode(buf, n, &s_last);
+    // MED-3: a last OK whose app image the bootloader aborted (never confirmed) is not an OK install.
+    const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+    if (s_have_last && bad && strcmp(bad->label, "app") == 0 && update_install_res_apply_rollback(&s_last, true)) {
+        uint8_t nb[UPD_INST_RES_SIZE];
+        if (update_install_res_encode(&s_last, nb) == UPD_INST_RES_SIZE) {
+            (void)kv_write(UPD_INST_KEY_RES, nb, sizeof(nb)); // best effort; the in-memory view is already corrected
+        }
+    }
 }
 
 static void show_failure(uint8_t reason)

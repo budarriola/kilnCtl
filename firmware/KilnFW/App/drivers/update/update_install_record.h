@@ -74,6 +74,7 @@ typedef enum {
     UPD_INST_REASON_ATTEMPTS_EXCEEDED,
     UPD_INST_REASON_COUNTER_FAILED,
     UPD_INST_REASON_OUTCOME_UNKNOWN, // poll task could not start; the copy may still run: do not power-cycle
+    UPD_INST_REASON_ROLLED_BACK,     // result record version 2 only: the new app was never confirmed and the bootloader rolled it back
     UPD_INST_REASON_COUNT
 } update_install_reason_t;
 
@@ -107,6 +108,17 @@ size_t update_install_req_encode(const update_install_req_t *r, uint8_t out[UPD_
 bool update_install_req_decode(const uint8_t *buf, size_t len, update_install_req_t *out);
 size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_INST_RES_SIZE]);
 bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_res_t *out);
+
+// Result record versions. v1 is the original layout. v2 is byte-identical except that it may carry reasons
+// >= UPD_INST_REASON_ROLLED_BACK. Encode writes v2 only for such a reason and v1 otherwise, so an older
+// image still decodes every ordinary record; it refuses a v2 record by version (reported as unreadable,
+// never misread). Decode accepts both, and refuses a v1 record whose reason is a v2 one.
+#define UPD_INST_RES_VERSION_1 1u
+#define UPD_INST_RES_VERSION_2 2u
+
+// MED-3 (AUDIT_UPDATE_FAULTS): recovery found the app image was aborted by the bootloader (never
+// confirmed on its first boot). Rewrites a last OK result to FAIL/rolled_back; returns true when it changed.
+bool update_install_res_apply_rollback(update_install_res_t *res, bool app_rolled_back);
 
 // Writes the identity as UPD_INST_ID_LEN*2 lowercase hex chars plus NUL into out (needs
 // UPD_INST_ID_HEX_LEN bytes). All-zero (no identity) prints as "00000000".
