@@ -697,7 +697,6 @@ $stackSkipAllowed = @{
     'safety_proto_rx' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'spi_owner' = 'register site only: created by spi_owner init under the name spi_owner_task with a parameter size (see spi_owner_task)'
     'uart_owner_evt_task' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
-    'lvgl' = 'create size is sizeof(static stack array)/sizeof(StackType_t): not a literal'
     'uart_proto_rx' = 'create size is a function parameter (stack_depth) in uart_protocol.c: not a literal'
 }
 # FreeRTOS create name -> stack_margin_register name, for ONE task created and registered under two names (the
