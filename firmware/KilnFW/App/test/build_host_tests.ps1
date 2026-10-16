@@ -67,6 +67,7 @@ try {
         (Join-Path $testDir "test_ota_auth.c"),
         (Join-Path $testDir "test_login_backoff.c"),
         # --- GITHUB_RELEASE_UPDATE_PLAN.md update/* tests (WP3); later WPs append their update_* entries here ---
+        (Join-Path $testDir "test_update_install_record.c"),
         (Join-Path $testDir "test_update_semver.c"),
         (Join-Path $testDir "test_update_stage_header.c"),
         (Join-Path $testDir "test_update_policy.c"),
@@ -250,6 +251,7 @@ try {
         (Join-Path $driversDir "net/login_backoff.c"),
         # --- GITHUB_RELEASE_UPDATE_PLAN.md update/* drivers (WP3); later WPs append here ---
         (Join-Path $driversDir "update/update_semver.c"),
+        (Join-Path $driversDir "update/update_install_record.c"),
         (Join-Path $driversDir "update/stage_header.c"),
         (Join-Path $driversDir "update/update_policy.c"),
         (Join-Path $driversDir "update/update_stage.c"),
@@ -1530,6 +1532,16 @@ try {
             "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
     Invoke-HostTestExe -Name "kiln_io_sx_fake" -ExePath $exeKsx -BuildCmd $cmdKsx
 
+    # ---- test_sx1509_reset_first.c: SX1509_start() pulses ~RESET before any I2C (boot audit MED-2)
+    $exeSrf = Join-Path $outDir "kilnctl_host_tests_sx1509_reset_first.exe"
+    $srfObjDir = Join-Path $outDir "srf"
+    New-Item -ItemType Directory -Force -Path $srfObjDir | Out-Null
+    $cmdSrf = "cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_SX1509_I2C_ADDR=0x3E " +
+            "/Fo:`"$srfObjDir\\`" /Fe:`"$exeSrf`" " +
+            "`"$(Join-Path $testDir 'test_sx1509_reset_first.c')`" " +
+            "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+    Invoke-HostTestExe -Name "sx1509_reset_first" -ExePath $exeSrf -BuildCmd $cmdSrf
+
     # ---- test_dashboard_http_relay.c: dashboard_set_relay() mapping + dashboard_http_get_safety_trip() (R2-E)
     $exeDhr = Join-Path $outDir "kilnctl_host_tests_dashboard_http_relay.exe"
     $dhrObjDir = Join-Path $outDir "dhr"
@@ -2135,6 +2147,7 @@ try {
             "/Fo:`"$max31856ObjDir\\`" /Fe:`"$exe25`" " +
             "`"$(Join-Path $testDir 'test_max31856_hal_spi.c')`" " +
             "`"$(Join-Path $driversDir 'hw/MAX31856.c')`" `"$(Join-Path $driversDir 'hw/max31856_codec.c')`" " +
+            "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" `"$(Join-Path $driversDir 'control/thermo_combine.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_spi.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`""
 
@@ -2691,6 +2704,30 @@ try {
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "auth_totp_http_fuzz" -ExePath $exeTf -BuildCmd $cmdTf
+
+    # ---- test_totp_enroll_gesture.c: AUDIT_TOTP fixes (MED-1, LOW-1, LOW-2, gaps 1/5/7) ----
+    # security_http.c + auth_totp_http.c #include'd directly; the REAL
+    # auth_reset_gesture_wiring.c, web_auth_store, totp_config and session
+    # table over fake_kv, so the gesture's wipe is asserted against real state.
+    $exeTg = Join-Path $outDir "kilnctl_host_tests_totp_enroll_gesture.exe"
+    $atgObjDir = Join-Path $outDir "tg"
+    New-Item -ItemType Directory -Force -Path $atgObjDir | Out-Null
+    $cmdTg = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$atgObjDir\\`" /Fe:`"$exeTg`" `"$(Join-Path $testDir 'test_totp_enroll_gesture.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_session_iface.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'net/auth_reset_gesture.c')`" `"$(Join-Path $driversDir 'net/auth_reset_gesture_wiring.c')`" " +
+            "`"$(Join-Path $driversDir 'http/security_http_core.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'net/login_backoff.c')`" `"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
+            "`"$(Join-Path $driversDir 'http/login_ip_scope.c')`" `"$(Join-Path $driversDir 'net/totp.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/totp_config.c')`" `"$(Join-Path $driversDir 'http/totp_http_core.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "totp_enroll_gesture" -ExePath $exeTg -BuildCmd $cmdTg
 
     # ---- test_aux_outputs_http_handlers.c: campaign 8 handler matrix ----
     # Real aux_outputs_cfg/_http_core/_http #include'd; fake relay board.
@@ -3603,7 +3640,8 @@ try {
     # 98 -> 99: test_main_reset_fence.c (REVIEW_DEVBREAKFX6 MED-1)
     # 99 -> 100: safety_link_tick10 (REBOOTFX5 LOW-1, 10 ms tick period build of test_safety_link_compile.c)
     # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
-    $totalExpected = 101
+    # 101 -> 103: sx1509_reset_first (boot audit MED-2) plus one executable already unaccounted for on dev (built count was 102)
+    $totalExpected = 103
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

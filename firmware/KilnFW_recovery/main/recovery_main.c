@@ -25,7 +25,9 @@
 #include "recovery_health.h"
 #include "recovery_health_policy.h"
 #include "recovery_http.h"
+#include "recovery_install.h"
 #include "recovery_io.h"
+#include "recovery_keepalive.h"
 #include "recovery_lcd.h"
 #include "recovery_wifi.h"
 
@@ -38,6 +40,11 @@ void app_main(void)
     // low and driven, verified by read-back. Never blocks boot on failure
     // (uploads must still work) but sets a fault flag. Needs no NVS.
     recovery_io_hold_relays_off();
+
+    // Drive the isolated fault line (GPIO6) to its de-asserted level and keep
+    // the Pico's S6b link-dead timer fed from here on, before the slow Wi-Fi/
+    // HTTP bring-up and any unattended install (audit MED-1/LOW-1).
+    recovery_keepalive_start();
 
     ESP_LOGI(TAG, "KilnFW recovery image starting");
 
@@ -122,6 +129,9 @@ void app_main(void)
         recovery_lcd_clear_error();
         recovery_health_clear_http();
     }
+
+    // Unattended install: a request left by the application install route.
+    recovery_install_boot();
 
     // wifi/lcd are snapshots (the LCD retry task may be mid re-init).
     if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {

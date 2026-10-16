@@ -491,6 +491,87 @@ bool web_auth_store_password_configured(web_auth_role_t role)
     return web_auth_store_load_password(role, &rec) == WEB_AUTH_LOAD_OK && rec.configured;
 }
 
+// REVIEW_FIXERS LOW-2 (totpfx): a credential wipe (physical reset / web
+// clear_credentials) must not be overwritten by a password setter that loaded
+// the old blob before the wipe and is still hashing (seconds) while it runs.
+// The wipe functions bump this epoch before AND after writing; a setter reads
+// it before it loads, and re-reads it after hashing, just before the write,
+// refusing if it moved. Atomic: setters run on httpd, wipes on the LVGL task.
+static volatile uint32_t s_cred_wipe_epoch;
+
+static uint32_t cred_wipe_epoch_get(void)
+{
+#if defined(__GNUC__)
+    return __atomic_load_n(&s_cred_wipe_epoch, __ATOMIC_SEQ_CST);
+#else
+    return s_cred_wipe_epoch; /* host (MSVC) tests are single-threaded */
+#endif
+}
+
+static void cred_wipe_epoch_bump(void)
+{
+#if defined(__GNUC__)
+    (void)__atomic_add_fetch(&s_cred_wipe_epoch, 1u, __ATOMIC_SEQ_CST);
+#else
+    s_cred_wipe_epoch++;
+#endif
+}
+
+// Store lock: held by a setter across its final epoch re-check AND the NVS
+// write, and by a wipe across its bump/impl/bump, so a wipe can never land
+// between a setter's check and its write (REVIEW_ALL_FIXES L1). The KDF runs
+// outside the lock. Lazily created under a critical section (first use can
+// race between httpd and LVGL).
+#define CRED_STORE_LOCK_WAIT_MS 5000
+static volatile uint32_t s_cred_store_busy;
+
+// Test seam (host tests include this file directly): called once, then cleared,
+// just before a setter/wipe acquires the store lock, to model another task acting
+// in the window between a setter's KDF and its write.
+void (*g_web_auth_store_test_pre_lock_hook)(void);
+
+static bool cred_store_try_lock(void)
+{
+#if defined(__GNUC__)
+    return __atomic_exchange_n(&s_cred_store_busy, 1u, __ATOMIC_ACQUIRE) == 0u;
+#else
+    if (s_cred_store_busy) {
+        return false;
+    }
+    s_cred_store_busy = 1u;
+    return true; /* host (MSVC) tests are single-threaded */
+#endif
+}
+
+static void cred_store_unlock(void)
+{
+#if defined(__GNUC__)
+    __atomic_store_n(&s_cred_store_busy, 0u, __ATOMIC_RELEASE);
+#else
+    s_cred_store_busy = 0u;
+#endif
+}
+
+// Polls with vTaskDelay (the critical sections under the lock are NVS writes,
+// ~ms). timeout_ms < 0 waits forever (wipes must not give up).
+static bool cred_store_lock(int32_t timeout_ms)
+{
+    if (g_web_auth_store_test_pre_lock_hook) {
+        void (*h)(void) = g_web_auth_store_test_pre_lock_hook;
+        g_web_auth_store_test_pre_lock_hook = NULL;
+        h();
+    }
+    int32_t waited = 0;
+    while (!cred_store_try_lock()) {
+        if (timeout_ms >= 0 && waited >= timeout_ms) {
+            return false;
+        }
+        vTaskDelay(1);
+        waited += (int32_t)portTICK_PERIOD_MS;
+    }
+    return true;
+}
+
 hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *username,
                                           const char *password,
                                           const uint8_t salt[WEB_AUTH_SALT_LEN],
@@ -501,6 +582,7 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
         return HAL_INVALID_ARG;
     }
 
+    const uint32_t wipe_epoch = cred_wipe_epoch_get();
     web_auth_web_blob_t blob;
     memset(&blob, 0, sizeof(blob));
     hal_status_t existing = load_blob(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
@@ -530,10 +612,24 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
     rec->must_change = must_change;
     rec->configured = true;
 
+    if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
+        memset(&blob, 0, sizeof(blob));
+        return HAL_BUSY;
+    }
+    if (cred_wipe_epoch_get() != wipe_epoch) {
+        // A credential wipe ran while the KDF was hashing: writing now would
+        // resurrect the pre-wipe blob with this password in it.
+        cred_store_unlock();
+        memset(&blob, 0, sizeof(blob));
+        return HAL_BUSY;
+    }
+
     blob.version = WEB_AUTH_STORE_VERSION;
     blob.crc32 = web_blob_crc(&blob);
 
-    return set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
+    hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
+    cred_store_unlock();
+    return wst;
 }
 
 // --- LCD PINs -----------------------------------------------------------------
@@ -594,6 +690,7 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
         return HAL_INVALID_ARG;
     }
 
+    const uint32_t wipe_epoch = cred_wipe_epoch_get();
     web_auth_lcd_blob_t blob;
     memset(&blob, 0, sizeof(blob));
     hal_status_t existing = load_blob(WEB_AUTH_KEY_LCD, &blob, sizeof(blob));
@@ -614,10 +711,23 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
     rec->digits = (uint8_t)plen;
     rec->configured = true;
 
+    if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
+        memset(&blob, 0, sizeof(blob));
+        return HAL_BUSY;
+    }
+    if (cred_wipe_epoch_get() != wipe_epoch) {
+        // REVIEW_ALL_FIXES L2: a wipe ran during the PIN hash; do not bring the PIN back.
+        cred_store_unlock();
+        memset(&blob, 0, sizeof(blob));
+        return HAL_BUSY;
+    }
+
     blob.version = WEB_AUTH_STORE_VERSION;
     blob.crc32 = lcd_blob_crc(&blob);
 
-    return set_blob_verified(WEB_AUTH_KEY_LCD, &blob, sizeof(blob));
+    hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_LCD, &blob, sizeof(blob));
+    cred_store_unlock();
+    return wst;
 }
 
 // --- Policy -------------------------------------------------------------------
@@ -735,7 +845,7 @@ web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_pol
 
 // --- Physical credential reset (item 10) -------------------------------------
 
-bool web_auth_store_clear_for_physical_reset(void)
+static bool web_auth_store_clear_for_physical_reset_impl(void)
 {
     // Item 4a fix (2026-09-17 adversarial review, 1179e2d3): this used to
     // clear only the web administrator PASSWORD record (WEB_AUTH_KEY_WEB),
@@ -848,7 +958,7 @@ bool web_auth_store_clear_for_physical_reset(void)
 // which must never touch this namespace). Clears both roles in both blobs;
 // deliberately leaves auth_policy untouched, same reasoning as
 // web_auth_store_clear_for_physical_reset() above.
-bool web_auth_store_clear_all_credentials(void)
+static bool web_auth_store_clear_all_credentials_impl(void)
 {
     web_auth_web_blob_t blob;
     memset(&blob, 0, sizeof(blob));
@@ -918,4 +1028,26 @@ bool web_auth_store_clear_all_credentials(void)
         return false;
     }
     return true;
+}
+
+// Both wipes bump the epoch before AND after, so a setter that captured the
+// epoch at any point inside a wipe still sees it move (see s_cred_wipe_epoch).
+bool web_auth_store_clear_for_physical_reset(void)
+{
+    (void)cred_store_lock(-1);
+    cred_wipe_epoch_bump();
+    bool ok = web_auth_store_clear_for_physical_reset_impl();
+    cred_wipe_epoch_bump();
+    cred_store_unlock();
+    return ok;
+}
+
+bool web_auth_store_clear_all_credentials(void)
+{
+    (void)cred_store_lock(-1);
+    cred_wipe_epoch_bump();
+    bool ok = web_auth_store_clear_all_credentials_impl();
+    cred_wipe_epoch_bump();
+    cred_store_unlock();
+    return ok;
 }

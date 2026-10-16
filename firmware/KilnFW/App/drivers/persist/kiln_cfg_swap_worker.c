@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -215,9 +217,14 @@ esp_err_t kiln_cfg_swap_worker_start(void)
      * bookkeeping, and the whole transaction is refused outright by its own
      * interlock check if a firing is running. Same priority and the same
      * reasoning as ota_pico_rollback's own worker. */
-    if (xTaskCreate(swap_worker_task, "kiln_cfg_swap", SWAP_WORKER_STACK_BYTES, NULL, tskIDLE_PRIORITY + 1,
-                    &s_task) != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreate(kiln_cfg_swap) failed -- kiln config apply unavailable this boot");
+    /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md): the swap writes NVS/cfg
+     * files, which no longer freeze the cache under XIP, and reaches no mmap
+     * call (no esp_ota, esp_image or core-dump API). tools/check_psram_task_stacks.ps1
+     * pins this. */
+    if (xTaskCreatePinnedToCoreWithCaps(swap_worker_task, "kiln_cfg_swap", SWAP_WORKER_STACK_BYTES, NULL,
+                                        tskIDLE_PRIORITY + 1, &s_task, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(kiln_cfg_swap) failed -- kiln config apply unavailable this boot");
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }

@@ -138,6 +138,7 @@ static void test_lifecycle(void)
 {
     TEST_SECTION("danger_mode start / touch / expiry / stop");
     g_test_stub_semaphore_take_default = 1;
+    g_stub_task_create_result = pdPASS; /* WithCaps create stub defaults to pdFAIL */
     danger_mode_init((SafetyLinkClass *)0);
     CHECK(s_dm.initialized);
     reset_counters();

@@ -1208,10 +1208,14 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * lock and at the SAME commit point as the state_is_running() check just
      * above, so a reservation held right now can never be raced by a start
      * that reads "not running" a moment before the reservation was taken. */
-    if (s_at.external_write_reserved && s_at.external_write_reserved_zone == zone_index) {
+    if (s_at.external_write_reserved) {
+        /* AUDIT_CONTROL_EXECUTOR MED-4: ANY reservation refuses a start, not only one on the same zone.
+         * accept() holds its reservation through its slow setters and then finishes its own DONE state;
+         * a start on another zone in that window would be orphaned by it. */
+        uint8_t held_zone = s_at.external_write_reserved_zone;
         xSemaphoreGive(s_at.lock);
         if (err_msg) {
-            snprintf(err_msg, err_cap, "a gain write is in progress on zone %u", (unsigned)zone_index);
+            snprintf(err_msg, err_cap, "a gain write is in progress on zone %u", (unsigned)held_zone);
         }
         return false;
     }
@@ -1344,6 +1348,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
     s_at.trace_count = 0;
     s_at.abort_reason[0] = '\0';
     s_at.per_zone_blocked = false;
+    s_at.blocked_during_measure = false;
 
     /* TODO.md 6A.6: claim this zone's relays for the duration of the run, same
      * shape as profile_executor.c's RELAY_OWNER_PROFILE claim -- see

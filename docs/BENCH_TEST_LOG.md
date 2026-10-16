@@ -3261,3 +3261,197 @@ Board dev firmware d93cf774a, MCP server fresh at 129586d4f with KILNCTL_AUX_BEN
 Plan step 9 (convert ON_OFF zones to aux) is a one-way owner-offered conversion, not a bench step; not run. End state: idle, link up, armed, no trip; no BENCH_AUX_RULE slot (profiles_list shows only M18C_TEST, B1_THROWAWAY); aux enabled_mask 0.
 - `20261009T215021Z_web_benchweb` suite=`web` exit_code=1 PASS=78 FAIL=24 INCONCLUSIVE=3 NOT_RUN=13 SKIP=2 esp_fw=Oct  9 2026 14:44:39 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261009T215021Z_web_benchweb/`
 - `20261010T180128Z_aux_bench1` suite=`aux` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=5 SKIP=2 esp_fw=Oct 10 2026 10:11:00 pico_fw=Pico build: e6a0ff34 built 2026-10-10 04:59:54Z log=`logs/bench_test/20261010T180128Z_aux_bench1/`
+
+## 2026-10-12 -- GitHub auto-update chain against v1.0.0-pre.3 (benchupd)
+
+Built and flashed origin/dev 721b3fc7e (flash_firmware verified). Post-flash: link up, armed, no trip, heap_internal free 30299 B, min_free 11419 B.
+
+- update_get_settings, update_check (allow_prerelease): PASS, verdict refuse_needs_force (dev build has no semver). Two more back-to-back update_checks: PASS, no fetch_busy, no claim leak.
+- update_stage_release attempt 1: FAIL `low_heap_free`: "internal free 27855 (need 28532), largest block 7680 (need 6144), download" (http_status 302). Idle free is 30299 B; the TLS/redirect step drops free internal heap about 2.4 KB below the download admission threshold (update_fetch.c ~205, update_fetch_heap.h).
+  - Superseded by REVIEW_UPDFX3 fixes: the 28532/28672/29556 B needs are now capped at the idle minimum 29647 B (28623 B with scratch held); the hop reading 27855 B is settled for up to 3 s before refusal. Bench rerun pending.
+- update_stage_release attempt 2 (force, confirm_downgrade): FAIL `version_mismatch` right after the writer was created (http_status 200, verdict allow_reinstall). The manifest gate set at update_fetch.c ~370 compares against the image app_desc version; update_stage.c flush_head ~260 rejects it (comment there says only hand-upload stagers are gated).
+- Not run (blocked by staging): stage_clear/restart, fetch_cancel mid-download, full stage of pre.3, recovery_enter, recovery_apply_staged, post-apply verify.
+
+After failures: update_fetch_status failed/version_mismatch, busy False, writer not wedged; stage partition still staged=True semver 1.0.0-pre.1 (old); update_check still works; link up, armed, no trip; heap free 30299 B, min_free 11419 B.
+
+## 2026-10-12 -- GitHub auto-update chain against v1.0.0-pre.3 (benchupd2)
+
+Built origin/dev c549a144c in a minted worktree (build_kilnfw_start, kiln_fw_root) and flashed with flash_firmware (verified on retry; only the ESP reset, no S6a trip). Post-flash: link up, armed, no trip, no crash report, running version v1.0.0-pre.1-1645-gc549a144c.
+
+- Idle heap (uptime ~49 s): internal free 30299 B, largest 7680 B, min_free 15519 B; DMA free 22511 B, largest 7680 B, min_free 7731 B; spiram free 7875400 B.
+- update_check without allow_prerelease: FAIL http_status=404 ("no release published"). Expected: pre.3 is a GitHub pre-release and /releases/latest never returns one. update_check(allow_prerelease): PASS, tag v1.0.0-pre.3, app_size 2956144, verdict refuse_needs_force (dev build, running version unknown), sha256 6afbe3b5...ee0c5.
+- update_stage_release(allow_prerelease, force, confirm_downgrade=tag): PASS. Stage read-back verified, source github, sha256 6afbe3b5c56a4f77abcd23b5ba3e6a17faec3168cd16eef7d9e93f04269ee0c5, 2956144 B. Heap after: internal free 30299, largest 7680; low-water during job: internal min_free 15519 -> 8339 B (only 147 B above the 8192 B floor), DMA min_free 7731 -> 551 B. Per-hop values not exposed.
+- Cancel test: stage_clear OK (blank). Cancel in stage=manifest and again in stage=asset: both end state=failed error=cancelled, busy False, stage blank, heap back to idle (30299 free, min_free unchanged at 8339). Full re-stage PASS, verified as above.
+- recovery_enter: accepted (was running v1.0.0-pre.1-1645-gc549a144c); board rebooted into the recovery image. recovery_status times out on the LAN IP and port 80 is closed: the recovery image is AP-only (no STA, docs/RECOVERY_IMAGE_PLAN.md), reachable only by joining its SoftAP with the passphrase shown on the LCD. No PcTools tool joins the AP and the join was not attempted from the agent session (blocked). recovery_apply_staged, recovery_exit, post-apply verification and the dev re-flash NOT run. Board left in recovery mode with pre.3 staged.
+
+## 2026-10-13 -- TOTP, release suite and GitHub fetch heap measurement (benchupd3)
+
+Board 192.168.1.156 in app mode (reset reason esp_restart, uptime ~1500 s at start), running c549a144c (tree clean, built 2026-10-13 05:58:30Z, UART protocol 13), which is 56 commits behind origin/dev 38b98a114. That image PREDATES the UPDFX3/UPDFX4 heap admission code, so this run measures the old firmware, not the new hop rule or settle. Backup before any test: `logs/backup_export/kilnctl_backup_20261013T181159Z.json`.
+
+- Safety: the board came out of the recovery image shortly before the run, and the recovery dwell left an S6b trip latched (trip_reason 7, mask 0x0040, no other bits, link up). Cleared with safety_clear_trip under the owner decision for an S6b caused by the recovery image; read-back trip_reason 0, mask 0x0000, readiness safety_trip ok. The first totp attempt (`20261013T181206Z_totp`) was NOT_RUN on that preflight.
+- totp (`20261013T181305Z_totp`): TP-R01 PASS, TP-R02 PASS, TP-R03 PASS, TP-M01 SKIP (needs KILNCTL_TOTP_CODE and KILNCTL_WEB_PASSWORD_NEW; not available to the agent).
+- release (`20261013T181308Z_release`, confirm, ota_install=False): RL-A01 FAIL (readiness items not ok: guard_cross_zone=deliberately_off, calibration=deliberately_off, safety_commissioned=not_done (3 of 68 unset), ct_attribution=cannot_yet); RL-B01, RL-D01, RL-E01, RL-F01 NOT_RUN (stopped by phase A); RL-C01 SKIP (allow_heat=False); RL-V01 FAIL. These are bench commissioning state, not a device fault; the release suite cannot pass on this board until they are resolved or accepted.
+- Heap, idle before: internal free 30427 B, largest 10752 B, min_free 14555 B; DMA min_free 6767 B.
+- update_check (allow_prerelease): PASS, tag v1.0.0-pre.3, verdict refuse_needs_force (running version unknown), sha256 6afbe3b5...ee0c5. Heap unchanged (min_free 14555 B).
+- update_stage_release without confirm_downgrade: refused before any download (refuse_needs_force, needs typed confirm); heap unchanged. With force + confirm_downgrade=v1.0.0-pre.3: PASS, stage verified by read-back, source github, sha256 6afbe3b5c56a4f77abcd23b5ba3e6a17faec3168cd16eef7d9e93f04269ee0c5, 2956144 B. The 302 hop was NOT refused on this firmware (old rule), and no `low_heap_free` appeared.
+- Heap after the fetch: internal free 30319 B, largest 10752 B, min_free 14555 -> 10079 B (draw about 20240 B from idle free, vs measured 20936 B before; 1887 B above the 8192 B floor). Internal largest-block low-water 7680 B at uptime 1641. DMA min_free 6767 -> 2291 B (below the 4096 B DMA abort floor UPDFX4 introduced; the new 3-read rule would have been exercised by this dip, see REVIEW_UPDFX4 MED-2). link_reply timeouts rose 0 -> 5 during the fetch (max 315684 us); link recovered, safety link up, armed, no trip afterward.
+- Not run: update_install_staged, recovery_apply, any recovery_* tool. Per-hop min_free and the `heap settle:` line were not captured (old firmware has neither). UPDFX3 MED-2 stays open: it needs the same run on a board flashed with 38b98a114 or later.
+
+## 2026-10-13 -- Unattended GitHub update end to end on dev 36f3ad031 (benchupd4)
+
+Worktree C:\wt\benchupd4_ci557d at origin/dev 36f3ad031. Board 192.168.1.156 was healthy and idle before (readiness 20 ok, boot_guard persisted 0, link up, armed). Backup: logs/backup_export/kilnctl_backup_20261013T194431Z.json (v7, 3 zones, 2 profiles).
+
+- Build: build_kilnfw_start OK in 703 s, KilnCtrl.bin 2962576 B. Recovery image built with check_00_kilnfw_recovery_target_build.ps1 (787280 B, sha256 709966a0...). PASS.
+- Flash: flash_firmware verified OK (bootloader + table + app, boot_guard cleared), flash_recovery written and read-back verified. PASS.
+- After the flash: readiness showed hardware io=DOWN, startup "LCD touch input" failed and an S6a latch (diag_trip_mask 0x0020), link up. Heap: internal min_free 52039 B. The first update_stage_release attempt was refused 409 "zone 0 heater is commanded on" (ota_interlock treats io-unreadable as heater on, by design). A second debug_reset(peer=esp) (known SX1509 post-reset init case; reset command itself reported a halt timeout but markers showed the reset happened) brought io=up, startup ok and the trip cleared on its own (no safety_clear_trip needed). Not a firmware verdict, but note: a plain JTAG flash+recovery flash left io down on this boot.
+- update_get_settings OK (budarriola/kilnCtl default). update_check without allow_prerelease: FAIL no_stable_release 404 (expected, pre.3 is a pre-release). update_stage_release(allow_prerelease) without force: refused refuse_needs_force (running version unknown, dev build). With force + confirm_downgrade=v1.0.0-pre.3: PASS, verified read-back, source github, sha256 6afbe3b5c56a4f77abcd23b5ba3e6a17faec3168cd16eef7d9e93f04269ee0c5, 2956144 B.
+- Heap during/after the fetch (uptime 34 s to 101 s): internal free 47191 B constant, largest block 18432 B, min_free 27587 -> 24679 B (draw 2908 B below the pre-fetch low-water), DMA min_free 19799 -> 16891 B. Floor 8192 B respected. Per-hop numbers and the settle time were not captured: update_stage_release blocks until done and update_fetch_status returned only the final state.
+- Link stats around the fetch: before timeouts 1, crc/framing errors 1, crc mismatch 0, length mismatch 2 (sent 69 received 66); after timeouts 3, crc/framing 9, crc mismatch 8, length mismatch 18 (sent 173 received 192). link_reply timeouts rose by 2 and CRC mismatches by 8 during the fetch, so the link disturbance during a fetch is NOT eliminated on this firmware (older firmware: 0 to 5). link_reply_us max 224653 us.
+- update_install_staged(confirm=True): tool returned UNKNOWN "board never answered the application API" within its wait. Afterwards (about 4 min later, uptime 231 s) the board answered as the application: stage cleared (blank), get_fw_version commit b9fa1748e (v1.0.0-pre.3), boot_guard persisted 0, recovery_mode False, readiness 20 ok, no trip, no crash, link up. Install and unattended apply therefore SUCCEEDED; only the tool's wait window was too short to confirm it. Exact reboot-to-app time was not timestamped. Heap on pre.3 at uptime 231 s: internal free 30559, min_free 15523, DMA min_free 7735 B.
+- Return to dev: flash_firmware verified OK on retry (known benign Verify-Failed quirk), boot_guard cleared. Final: commit 36f3ad031 clean, readiness 20 ok (only safety_commissioned not_done), no trip, no crash, io=up. control_get_zones identical to before (gains, plant model, coupling); backup_import not needed.
+- Failures: (1) first stage attempt 409 heater commanded on because io=down after flash (see above); (2) install tool returned UNKNOWN though the install succeeded.
+
+## 2026-10-13 linkcrc: kilnlink errors during update staging (UART ISR in IRAM)
+Board on dev d0e9fdc19 builds. Control (ISR not in IRAM): `update_stage_release` v1.0.0-pre.3 gave
+crc/framing 14, timeouts 8, crc mismatch 12, length mismatch 28 (baseline 0/0/0/0). 60 GETs of the
+web UI (5 MB): 0 errors. Fix (`CONFIG_UART_ISR_IN_IRAM=y` + rings 2048/1024): two fetches, 0/0/0/0
+each; heap_internal min_free 14267 B (floor 8192), largest-block low-water 7936 B during TLS
+handshake. With the key but rings still 4096/4096 the fetch refused `low_heap_free` (-22.7 KB
+internal). Stage cleared after each run; board left on the fix build, link up, no trip.
+See docs/audits/LINK_CRC_DURING_FETCH.md.
+
+## 2026-10-13 -- Unattended GitHub update on dev 468f0c5cb: UPDFX6 admission + UART ISR in IRAM together (benchupd5)
+
+Worktree C:\wt\benchupd5_aj4fqn at origin/dev 468f0c5cb. Board 192.168.1.156 healthy before (readiness 20 ok, link up, armed, no trip). Backup: logs/backup_export/kilnctl_backup_20261013T214552Z.json. Build OK in 556 s (KilnCtrl.bin 2962512 B). flash_firmware verified OK, boot_guard cleared. First boot was clean: io=up, no S6a latch, no second reset needed.
+
+- Idle on dev tip (uptime 8-12 s): internal free 34783 B, largest block 11776 B, DMA free 26995 B, min_free 19623 B. Admission margin: 34783 - 34248 (start) = +535 B; DMA 26995 vs 25436 = +1559 B. Smaller than the +650 B to +1.2 KB the reviews estimated, but positive.
+- update_check (allow_prerelease): ok, pre.3, verdict refuse_needs_force (running version unknown on a dev build). update_stage_release (force, confirm_downgrade=v1.0.0-pre.3, confirm=True): ADMITTED, no low_heap_free refusal. Staged and verified by read-back: source github, sha256 6afbe3b5c56a4f77abcd23b5ba3e6a17faec3168cd16eef7d9e93f04269ee0c5 (matches the release), 2956144 B, fetch_writer_wedged False.
+- After the fetch (uptime 97 s): internal free 34515 B, min_free 14115 B (draw 5508 B below the pre-fetch low-water; floor 8192 respected, +5.9 KB), DMA min_free 6327 B, internal largest-block low-water 7680 B first seen at uptime 43 s (under the SK-04 alarm 8704, above FETCH_LARGEST_BLOCK_MIN 6144; the same transient as REVIEW_LINKCRC LOW-4). The `heap settle:` line at the 302 hop was NOT captured: update_stage_release blocks and update_fetch_status returns only the final state, so whether the hop needed its 3 s settle is unmeasured. The hop was admitted either way.
+- Link counters (safety_get_link_stats): before and after the fetch all 0 (crc/framing, timeouts, crc mismatch, length mismatch, resync). After the whole run (uptime ~235 s on pre.3) still 0. link_reply_us max 294804 us, timeouts 0. The UART ISR in IRAM fix holds together with UPDFX6.
+- update_install_staged(confirm=True): tool returned UNKNOWN "board never answered the application API" (same as benchupd4); confirm=False read then got 404 on /api/update/status (neither image's route at that moment). Within the next minutes the application answered: get_fw_version commit b9fa1748e (pre.3), stage blank, recovery_mode False, readiness 20 ok, no trip, no crash, link up. Install and unattended apply SUCCEEDED; only the tool's wait window is too short (second consecutive run). pre.3 heap at uptime 235 s: internal free 30407, min_free 15615, DMA min_free 7827.
+- Return to dev: flash_firmware verified OK, boot_guard cleared. Final: commit 468f0c5cb clean, link up, no trip, readiness unchanged (only safety_commissioned not_done), stage blank, control_get_zones gains/coupling unchanged (z0 tuning_valid=no as before). No recovery involvement, no recovery_exit needed, no safety_clear_trip needed. Dev idle after reflash (uptime 15 s): internal free 34907 B.
+- Takeaway: margin on dev is thin (+535 B at an 8-12 s idle reading; one boot only). Tool follow-up still open: update_install_staged wait window too short to confirm.
+
+## 2026-10-13 benchap1 -- GitHub update over the board's self-hosted AP
+
+Owner-authorized (join script use and fixes, AP update tests). No passphrase
+recorded anywhere; scratch captures deleted.
+
+Recovery AP (SoftAP `kilnctl-recovery`, 192.168.4.1): board staged
+v1.0.0-pre.3 from GitHub itself over the LAN, `recovery_enter`, then
+`join_board_ap.ps1` joined (candidate 1 of 1), `recovery_status` and
+`recovery_apply_staged` (host=192.168.4.1) reported done/ok, stage cleared,
+pre.3 booted and ran on the LAN. PASS. The glyph read failed on 2 of 3 live
+frames ("a glyph does not match any font character closely enough"), so the
+script now retries on a fresh capture (`-ReadAttempts`, default 4).
+
+App AP (`kilnCtl`, `wifi_set_mode ap`, AP-only, no internet): `-Mode normal`
+failed with "no WIFI: QR code found" because the QR is ~90 camera px wide;
+`read_normal` now retries on grayscale 2x-4x upscales and the join worked.
+Over the AP (host=192.168.4.1): `update_status`, `update_fetch_status`,
+`wifi_get_status` ok; `update_stage_upload` of the local JTAG dev image staged
+and verified by read-back (needed `force` + `confirm_downgrade` because the
+running version reads unknown), then `update_stage_clear` verified. After
+`wifi_set_mode home` the board went APSTA: STA connected, AP stayed up while
+the PC was joined (ap_pending_teardown=True), and the AP stayed reachable.
+`update_check` fails `low_heap_free` over the AP AND on the LAN (internal
+free ~29.9 KB on the dev tip), so that is not AP-specific; GitHub reachability
+from the AP-only mode is none by design (no uplink).
+
+Restore: `-Disconnect`, PC back on the LAN, board mode home, STA connected
+192.168.1.156, stage cleared, link up, no trip, no crash, readiness unchanged.
+S6b from the recovery dwell was cleared once after the dev reflash.
+
+## 2026-10-14 benchap3 -- app-AP fetch check and XIP bench trial (variant C, no land)
+
+Board found healthy on the LAN (app, dev tip b3cc27846 clean, no trip, home Wi-Fi,
+nothing staged); only the kilnctrl MCP serial hub on 8765 had died, restarted
+with `mcp_servers.ps1 restart -Server kilnctrl`. No rebuild/flash needed for
+phase A step 1 (board already ran the dev tip build); backup_export taken.
+
+Phase A. `wifi_set_mode ap`; LCD showed the AP card with credentials (an LCD
+admin session was already open); `join_board_ap.ps1 -Mode normal` joined
+(candidate 1 of 1, no fix needed). Over 192.168.4.1 `update_check` and
+`update_stage_release` (pre.3, force, allow_downgrade) both FAILED
+`low_heap_free`: the board refused at admission (internal free 29267 B in AP
+mode against the 32752 B FETCH_HEAP_PRECHECK_MIN), with no uplink in AP-only mode
+anyway. Idle dev tip internal free settles at ~30.0 KB (34.2 KB right after
+boot), min_free 19463 B, largest block 11264 B (SK-04 alarm 7168 B not tripped);
+readings at uptime 34831/35127/35185/35295/35419 s all stable. Link errors 0.
+Restore: `-Disconnect`, `wifi_set_mode home`, STA 192.168.1.156.
+
+Phase B (variant C = XIP_FROM_PSRAM=y + FETCH_INSTRUCTIONS=y + RODATA=y
+confirmed in build/config/sdkconfig.h, UART_ISR_IN_IRAM off; worktree sdkconfig
+only, restored). Booted healthy, boot_count 1, persisted 0, no trip, link up.
+Idle internal free 45163 B / largest 15872 B / min 28143 B (A: ~30.0 KB / 11264 /
+19463). PSRAM total 5.37 MB (A 8.24 MB: ~2.9 MB copied for XIP). GitHub fetch
+pre.3 over the LAN: staged and verified, fetch start free 43887 B, low-water
+free 28111 B, DMA low-water 20303 B, largest 15872 B; link crc/len/timeouts 0
+before and after (445 frames). Stage cleared. latency_soak 120 s: 0 errors, 0
+clustered stalls (status p95 524 ms, max 587 ms). LCD renders home page; one
+display_flush max 574 ms seen during the soak. Not run: forced panic (no tool),
+recovery apply on C, variant C+Q (the sdkconfig QIO edit was denied by the
+auto-mode classifier). Dev tip rebuilt and flashed back, healthy.
+
+## 2026-10-14 xipland -- XIP from PSRAM (variant C) landed on dev
+
+Owner decision 2026-10-14 "Finish trial, then land". Change: `sdkconfig.defaults`
+sets `CONFIG_SPIRAM_XIP_FROM_PSRAM=y` and leaves `CONFIG_UART_ISR_IN_IRAM` unset;
+`check_sdkconfig_defaults_applied.ps1` pins both. The recovery image has its own
+sdkconfig and is unchanged. Board ran the variant C JTAG build (e9b50d8f8) for the
+whole trial; backup_export taken first.
+
+| Metric | A (dev tip) | C (XIP, ISR off) |
+|---|---|---|
+| Boot to HTTP answer | 18.7 s | 19.2 s |
+| Boot to UART link answer | 16.1 s | 16.1 s |
+| Idle internal free | 30.0-34.7 KB | 45.4-45.9 KB |
+| Largest free block | 11264 B | 16384 B |
+| Internal min_free | 18-19.5 KB | 28.8 KB |
+| PSRAM total | 8.24 MB | 5.37 MB |
+| GitHub fetch admission | refused (low_heap_free) | admitted |
+| Fetch start free / low-water free / DMA low-water | n/a | 44399 / 28463 / 20655 B |
+| Link crc/len/timeouts during fetch | n/a | 0/0/0 |
+
+Steps: boot PASS; six idle readings over about 19 min PASS (SK-04 7168 B never
+tripped); GitHub fetch and stage of pre.3 PASS; full install via
+`update_install_start` PASS in effect (board came up on pre.3 with the right
+commit, but the job itself ended UNKNOWN after 600 s with 404 on
+/api/update/status: the old app lacks that route and the recovery apply ran
+longer than the earlier ~4 min; treated as a job-tracking artifact); JTAG flash of
+C back PASS; short firing PASS (link counters flat, cfg_fs and storage ok);
+latency_soak PASS (0 errors, 0 clustered stalls); LCD capture PASS (normal UI);
+forced panic coredump SKIP (no tool exists).
+
+Device bug found and fixed: a fetch refused at admission reported
+`heap.start_free = 0` ("start free=0"), because `start_free` was only written on
+the admitted path. `heap_admit()` now records the refusing reading; host test
+`test_update_fetch` covers it. Negtest: dropping the write is CAUGHT by the new
+assertion (test_update_fetch.c:777); the four sdkconfig-pin mutants are CAUGHT by
+`check_sdkconfig_defaults_applied.ps1`.
+
+## 2026-10-14 benchap4: update over the board AP, then JTAG wedge (BLOCKED)
+
+Board: XIP dev build, then pre.3 (b9fa1748e). Owner authorized the AP join script
+and testing updates over the self-hosted AP.
+
+| Step | Result |
+|---|---|
+| backup_export | PASS |
+| LCD navigate to Network page (LCD auth off) | PASS |
+| `join_board_ap.ps1 -Mode normal` | PASS (candidate 1 of 1) |
+| Keep AP up alongside STA uplink (3 attempts) | BLOCKED by design: AP torn down at GOT_IP, mode=ap has no uplink |
+| `update_stage_release` pre.3 over LAN (fetch admitted on XIP heap), link counters flat | PASS |
+| `update_install_start` over the AP | board came up on pre.3 (commit b9fa1748e); job UNKNOWN after 600 s |
+| Rejoin home Wi-Fi (`wifi_set_mode home`, STA 192.168.1.156) | PASS |
+| Build dev tip 153c12cf5 in worktree | PASS (2002 s, machine heavily loaded) |
+| `flash_firmware` dev tip back | FAIL x3: erase of 2965504 B completes, write then fails |
+| `debug_reset` after that | FAIL: `esp_usb_jtag: IN buffer overflow` |
+| Recovery-AP path, release suite, coredump | NOT RUN: board has no app and JTAG is wedged |
+
+The install job ended UNKNOWN because the pre.3 app has no `/api/update/status`
+(404 x23); the board answering on pre.3 is the confirmation. Board state at the
+end: app partition erased, no Wi-Fi, no link; needs a physical USB power cycle
+(the flash tool's own hint), then a flash of the dev tip. No firmware bug is
+proven; the wedge looks like the flash-write-protect-stuck state or a USB-JTAG
+fault.

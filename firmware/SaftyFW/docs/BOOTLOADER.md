@@ -79,7 +79,8 @@ The Pico module has 2 MB of flash, memory-mapped for execute-in-place at
 0x101B1000  +--------------------------------+
             | config                      64 K|  runtime configuration
 0x101C1000  +--------------------------------+
-            | reserved                   ~252K|  headroom
+            | metadata backup              4 K|  wrap safety copy (0x101C1000)
+            | reserved                   ~248K|  headroom
 0x10200000  +--------------------------------+
 ```
 
@@ -108,7 +109,7 @@ loss during a metadata write always leaves one valid copy:
 | `slot[2].length`, `slot[2].crc32` | Verified before every boot, not just after an update |
 | `slot[2].version[16]`, `build_commit[20]`, `build_epoch` | Reported over the link |
 | `slot[2].signature[64]` | **Reserved, unused.** Space for an Ed25519 (or similar) signature over `[0, length)` of the slot, so turning on signing later (§6) is a format-version bump inside the *same* record layout, not a new field that has to be squeezed in around existing data. All-zero means "no signature present" and is what every image ships with until signing is turned on. |
-| `boot_attempts` | Incremented before jumping, cleared on check-in |
+| `boot_attempts` | Incremented before jumping **only while the active slot is not yet confirmed (not `VALID`)**; the app's check-in sets `VALID` and clears it, so ordinary resets never accumulate against a confirmed slot (AUDIT_PICO_UPDATE HIGH-1). A stale nonzero count on a `VALID` slot is cleared, never turned into `BAD`. |
 | `sig_required` | **Reserved, unused, defaults to 0.** A future format version could set this per-record to require a valid `signature` before a slot is considered bootable; until then the bootloader must treat it as always-false regardless of its stored value, so a stray nonzero byte in an old record can never accidentally start enforcing a check the current bootloader build cannot perform. |
 | `crc32` | Over the whole record |
 
@@ -139,12 +140,16 @@ On every reset, in this order:
    a bootloader that leaves the safety relay in an unknown state for even a few
    milliseconds of flash-CRC time is not acceptable.
 2. Read and validate metadata. If both copies are bad, enter recovery.
-3. Check `boot_attempts` on the active slot. Above the limit (3), mark the slot
+3. For an active slot that is `VALID` skip the attempt counting (boot it; clear a stale count). Otherwise check `boot_attempts`: above the limit (3), mark the slot
    `BAD`, switch to the other slot if it is `VALID`, and record why.
 4. CRC the active slot against its recorded length and CRC. **Every boot**, not
    just the first after an update — this is what catches flash degradation and a
    partially-erased slot.
-5. Increment `boot_attempts`, write metadata, jump to the application.
+5. Increment `boot_attempts` (unconfirmed slots only), write metadata, jump to the application.
+
+   **Trade-off: a confirmed slot that later crash-loops (REVIEW_SAFTYFX_PICOFX LOW-5):** because a `VALID` slot skips attempt counting (above), an image that confirmed once and then hard-faults on every boot (for example after a later persisted `SET_PARAM` value or a sensor state breaks its init) is never marked `BAD` and the bootloader never falls back to the other `VALID` slot; the watchdog resets loop. Before AUDIT_PICO_UPDATE HIGH-1 three resets of any slot did switch slots, but that also demoted healthy images on ordinary resets, which was the bug. The failure direction is safe (relays stay de-energized, the ESP sees S6b); the cost is availability, and recovery needs BOOTSEL or SWD. Accepted. A possible later refinement is a separate fault-reset counter incremented only by a watchdog reset.
+
+   **Log wrap (MED-1):** the metadata log is 16 records in one 4 K sector. Before the wrap erases that sector, the newest record is copied to the backup sector at `BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET` (0x1C1000) and read back; if the copy does not verify the main sector is not erased and the write fails. Readers use `bootloader_metadata_find_latest_ab()`: the main log wins unless it is empty or the backup is newer, so power loss at any step of the wrap leaves at least one valid record.
    Immediately before the jump `jump_to_app()` arms an **8000 ms watchdog**
    (`BOOTLOADER_APP_WATCHDOG_MS`, `bootloader/main.c`; the RP2040 maximum is
    8388 ms). The application's own `main()` re-arms it at 1000 ms as its

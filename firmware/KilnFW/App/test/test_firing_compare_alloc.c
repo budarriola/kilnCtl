@@ -48,9 +48,12 @@ static void fc_test_free(void *p)
     free(p);
 }
 
+#include "../drivers/persist/persist_scratch.h" // real header first (guarded), then redirect
 #define malloc fc_test_malloc
+#define persist_scratch_alloc fc_test_malloc
 #define free fc_test_free
 #include "../drivers/control/firing_compare.c"
+#undef persist_scratch_alloc
 #undef malloc
 #undef free
 

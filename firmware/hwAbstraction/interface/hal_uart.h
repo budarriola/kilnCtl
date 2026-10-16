@@ -105,7 +105,7 @@ hal_status_t hal_uart_send(hal_uart_t *u, const uint8_t *data, size_t len);
  * save_and_disable_interrupts), ring-drained-not-wire-complete. Host: instant.
  *
  * ESP partial-send caveat: for `len` larger than one TX ring
- * (HAL_UART_ESP_TX_RING_BUF_SIZE, 4096 B today), the ESP backend sends in
+ * (HAL_UART_ESP_TX_RING_BUF_SIZE less 64 B, 960 B today), the ESP backend sends in
  * ring-sized chunks and a HAL_TIMEOUT on a later chunk does not mean
  * nothing was queued -- earlier chunks already reached the driver/wire with
  * no way for this call to report or retract that count. Every real caller's

@@ -4,7 +4,9 @@
 
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -421,12 +423,15 @@ void danger_mode_init(SafetyLinkClass *safety)
     s_dm.safety = safety;
     s_dm.initialized = true;
 
-    /* Plain xTaskCreate, internal-RAM stack -- this task can call
-     * esp_restart(), and boot_button.c/ota_http.c's own task-creation
-     * comments already establish why a PSRAM-stack task must never be the
-     * one holding a stack frame across a reboot path in this codebase. */
-    if (xTaskCreate(danger_mode_task, "danger_mode", 3072, NULL, tskIDLE_PRIORITY + 1, &s_task_handle) != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreate(danger_mode_task) failed -- danger mode will not be available "
+    /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md). The old comment here
+     * said this task can call esp_restart(); it does not (the timeout path
+     * only drops relays and releases heat-enable, "no reboot"), and the
+     * reboot tasks elsewhere already run esp_restart() from PSRAM stacks.
+     * Reaches no mmap call. Pinned by tools/check_psram_task_stacks.ps1. */
+    if (xTaskCreatePinnedToCoreWithCaps(danger_mode_task, "danger_mode", 3072, NULL, tskIDLE_PRIORITY + 1,
+                                        &s_task_handle, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(danger_mode_task) failed -- danger mode will not be available "
                       "this boot");
         startup_fault_note(STARTUP_FAULT_DANGER_MODE);
         s_dm.initialized = false;

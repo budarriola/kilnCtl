@@ -180,6 +180,12 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req);    // ota_http_pico.
 esp_err_t ota_pico_rollback_status_get_handler(httpd_req_t *req); // ota_http_pico.c
 esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req);    // ota_http_recovery.c
 esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req);    // ota_http_recovery.c
+/* Hooks for the unattended install route (update_install_http.c); see ota_recovery_boot_run(). */
+typedef struct {
+    bool (*prepare)(char *msg, size_t cap, int *http_status); /* false = refuse with msg (409, or 500) */
+    void (*undo)(void);                                        /* removes what prepare() wrote */
+} ota_recovery_boot_hooks_t;
+esp_err_t ota_recovery_boot_run(httpd_req_t *req, const ota_recovery_boot_hooks_t *hooks); // ota_http_recovery.c
 esp_err_t ota_interlock_get_handler(httpd_req_t *req);         // ota_http_recovery.c
 esp_err_t ota_boot_guard_reset_post_handler(httpd_req_t *req); // ota_http_recovery.c
 esp_err_t ota_boot_guard_status_get_handler(httpd_req_t *req); // ota_http_recovery.c

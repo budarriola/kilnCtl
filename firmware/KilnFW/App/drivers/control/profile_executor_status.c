@@ -417,6 +417,21 @@ bool profile_executor_resume(void)
             seed_bumpless_with_ff(z, zi, 0.0f);
             z->fuzzy_prev_effective_ki = z->pid_cfg.ki; /* see reload_zone_config()'s same reasoning */
         }
+        /* AUDIT_CONTROL_EXECUTOR MED-1: the guards were not ticked while PAUSED and the kiln may have
+         * cooled. Restart their rolling windows from the first post-resume sample; the guards stay fully
+         * armed (same thresholds) and any latched trip is kept. */
+        if (z->active) {
+            thermal_guard_restart_windows(&z->guard_state);
+            /* AUDIT_CONTROL_EXECUTOR LOW-1 / ON_OFF_ZONE.md sec 5: pause opened the relay, so resume starts
+             * the on/off device in its fail-safe state -- the same three resets a fresh run applies in
+             * profile_executor_run(). Without them on_off_actuated_on stayed true and apply_relay(true)
+             * re-energised a relay that was open all pause, for up to min_on_s. Aux outputs hold their
+             * last state through a pause (profile_executor.c), so they are deliberately not reset here. */
+            on_off_trigger_state_reset(&z->on_off_trigger_state);
+            z->on_off_actuated_on = false;
+            profile_executor_on_off_seed_hold(&z->on_off_trigger_state, &z->on_off_actuated_held_s,
+                                              z->relay_mask);
+        }
     }
     s_exec.state = PROFILE_EXEC_RUNNING;
     s_exec.pause_reason[0] = '\0';

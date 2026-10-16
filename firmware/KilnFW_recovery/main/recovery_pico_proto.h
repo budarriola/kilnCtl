@@ -241,6 +241,32 @@ size_t rpp_pack_end(uint8_t *payload, uint32_t crc32);
 size_t rpp_pack_abort(uint8_t *payload);
 size_t rpp_pack_reboot(uint8_t *payload);
 
+// --- link keepalive (audit AUDIT_LINK_UPDATE_LIFECYCLE MED-1) ----------------
+// The recovery image otherwise sends nothing to the Pico, so an unattended
+// install (recovery boot, Wi-Fi/HTTP bring-up, ~3 MB stage->app copy, verify)
+// counts entirely against the Pico's 120 s S6b link-dead tier and can latch it.
+// Any frame that decodes cleanly, ESP -> SAFETY, refreshes the Pico's
+// s_last_valid_frame_tick (link_task.c link_task_handle_raw_frame, before the
+// command switch), so a periodic GET_STATUS BROADCAST (no dispatch case on the
+// Pico: ignored after the refresh) keeps S6b's liveness fed WITHOUT clearing a
+// trip, requesting heat or changing any state. It is bounded: after
+// RPP_KEEPALIVE_MAX_MS of uptime the keepalive stops, so a recovery image that
+// is wedged (rather than working) still lets S6b trip within the hard tier.
+#define RPP_KEEPALIVE_PERIOD_MS 2000u
+#define RPP_KEEPALIVE_MAX_MS (15u * 60u * 1000u)
+// True while a keepalive frame should still be sent at this uptime.
+bool rpp_keepalive_active(uint32_t uptime_ms);
+// Payload of the keepalive frame (GET_STATUS, 1 byte). Never a command that
+// clears a trip, requests heat or changes state.
+size_t rpp_pack_keepalive(uint8_t *payload);
+
+// --- isolated fault line (audit LOW-1) ---------------------------------------
+// ESP GPIO6 -> U1 -> Pico mainFault. The application latches it LOW (fault
+// de-asserted, safety_link.c) before anything else; recovery drives the same
+// level instead of leaving a floating gate.
+#define RPP_FAULT_GPIO 6
+#define RPP_FAULT_IDLE_LEVEL 0
+
 // --- receive: streaming deframer ------------------------------------------
 typedef struct {
     uint8_t wire[KILNLINK_FRAME_STUFFED_MAX];

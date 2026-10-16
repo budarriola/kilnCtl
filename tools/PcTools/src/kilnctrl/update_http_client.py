@@ -48,6 +48,8 @@ CHECK_PATH = "/api/update/check"
 DOWNLOAD_PATH = "/api/update/download"
 SETTINGS_PATH = "/api/update/settings"
 FETCH_CANCEL_PATH = "/api/update/fetch/cancel"
+INSTALL_PATH = "/api/update/install"
+INSTALL_STATUS_PATH = "/api/update/status"
 
 ESP_IMAGE_MAGIC = 0xE9
 #: stage_header.h STAGE_SEMVER_FIELD_LEN / STAGE_COMMIT_HEX_LEN.
@@ -211,7 +213,9 @@ def get_fetch_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dic
     """GET /api/update/fetch. Keys: state (idle/checking/downloading/done/failed),
     kind, stage, error, http_status, bytes_done, bytes_total, busy, repo,
     tag, prerelease, app_size, running, commit, sha256, verdict, reason, allowed,
-    needs_typed_confirm, zones_cfg_lower."""
+    needs_typed_confirm, zones_cfg_lower, and heap (internal-RAM admission readings, UPDFX7:
+    sampled, rtc_free, start_free, start_dma, hop = none|admitted|refused (the worst over all redirect hops), hop_free (lowest over all hops),
+    hop_settle_tries (most over all hops; the two can come from different hops), min_free, min_dma, min_block; min_* are 0 until sampled)."""
     req = urllib.request.Request(_url(host, FETCH_PATH), method="GET")
     data = _request(req, FETCH_PATH, timeout)
     if "state" not in data or "busy" not in data:
@@ -287,3 +291,25 @@ def set_settings(host: str, repo: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) 
 
 def sha256_hex(image: bytes) -> str:
     return hashlib.sha256(image).hexdigest()
+
+
+def get_install_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
+    """GET /api/update/status. Keys: running_version, stage_busy, staged,
+    staged_version, last_install{state (recorded/none/unreadable), code, reason, version,
+    id, detail, app_modified}. ``detail`` names the specific apply result (stage_hash_mismatch,
+    start_low_heap, ...) and ``app_modified`` says whether the app partition had been erased when
+    the install failed; both are absent on a board that predates them. ``id`` is the first 4 bytes of the installed image's sha256 as 8 hex chars
+    ("00000000" for a legacy record, absent on a board that predates the field)."""
+    req = urllib.request.Request(_url(host, INSTALL_STATUS_PATH), method="GET")
+    data = _request(req, INSTALL_STATUS_PATH, timeout)
+    if "running_version" not in data or not isinstance(data.get("last_install"), dict):
+        raise UpdateHttpError(f"GET {INSTALL_STATUS_PATH} response lacks running_version/last_install: {data!r}")
+    return data
+
+
+def start_install(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) -> dict:
+    """POST /api/update/install (form body confirm=1). The board writes a one-shot
+    request and reboots into the recovery image, which applies the stage unattended."""
+    req = urllib.request.Request(_url(host, INSTALL_PATH), data=b"confirm=1", method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    return _request(req, INSTALL_PATH, timeout)

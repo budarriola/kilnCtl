@@ -261,6 +261,22 @@ if ($NotesFile) {
 }
 
 # ---------------------------------------------------------------- build / collect
+# REVIEW_XIPLAND MED-1: a release must never be built from (or sit next to) a sdkconfig that
+# disagrees with the pins in sdkconfig.defaults (ESP-IDF keeps the generated value over the
+# default, so XIP_FROM_PSRAM / UART_ISR_IN_IRAM would silently be off). check_00 verifies the
+# config it copies in; this fails fast before the long build, and re-verifies the config the
+# build actually published (also covers -SkipBuild).
+function Assert-SdkconfigPins([string]$Sdkconfig, [string]$What) {
+    $ErrorActionPreference = 'Continue'  # native stderr must not become a terminating error
+    $pinCheck = Join-Path $repoRoot "firmware\KilnFW\App\test\check_sdkconfig_defaults_applied.ps1"
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $pinCheck -DefaultsPath (Join-Path $repoRoot "firmware\KilnFW\sdkconfig.defaults") -SdkconfigPath $Sdkconfig 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $out; Fail "$What ($Sdkconfig) disagrees with sdkconfig.defaults on a pinned key -- refusing to build or ship a release with a pinned setting silently off." }
+}
+if (-not $SkipBuild) {
+    $preSdk = Join-Path $repoRoot "firmware\KilnFW\sdkconfig"
+    if (-not (Test-Path -LiteralPath $preSdk)) { $preSdk = Join-Path "C:\Users\budar\OneDrive\Desktop\kilnCtl" "firmware\KilnFW\sdkconfig" }
+    if (Test-Path -LiteralPath $preSdk) { Assert-SdkconfigPins $preSdk "the sdkconfig the release build would use" }
+}
 if (-not $SkipBuild) {
     # The build embeds the tag as FW_RELEASE_VERSION (gen_build_info.cmake) so the board can tell
     # a downgrade from an upgrade when it fetches a release itself.
@@ -284,6 +300,8 @@ $elf = Join-Path $BuildDir "KilnCtrl.elf"
 foreach ($p in @($appBin, $elf, $RecoveryBin)) {
     if (-not (Test-Path -LiteralPath $p)) { Fail "missing build artifact: $p" }
 }
+$builtSdk = Join-Path $BuildDir "sdkconfig"
+if (Test-Path -LiteralPath $builtSdk) { Assert-SdkconfigPins $builtSdk "the sdkconfig the build published" }
 $appSize = (Get-Item -LiteralPath $appBin).Length
 if ($appSize -gt $MaxAppSize) { Fail "KilnCtrl.bin is $appSize bytes, over the $MaxAppSize (0x400000) gate (planned post-split app size, GITHUB_RELEASE_UPDATE_PLAN.md WP2)." }
 Test-DramBssBudget $python $elf $DramCeilingBytes

@@ -259,7 +259,8 @@ static struct {
     char json[512];
 } s_gate;
 
-static update_stage_err_t policy_gate(void *vctx, const char *semver, const char *commit, const update_image_id_t *id)
+static update_stage_err_t policy_gate(void *vctx, const char *semver, const char *commit, const update_image_id_t *id,
+                                         bool dirty)
 {
     const policy_gate_ctx_t *gc = vctx;
     httpd_req_t *req = gc->req;
@@ -268,6 +269,7 @@ static update_stage_err_t policy_gate(void *vctx, const char *semver, const char
     memset(&s_gate.ur, 0, sizeof(s_gate.ur));
     s_gate.ur.version = semver;
     s_gate.ur.commit = commit;
+    s_gate.ur.dirty = dirty;
     s_gate.ur.have_image_id = id != NULL;
     if (id != NULL) {
         s_gate.ur.image_id = *id;

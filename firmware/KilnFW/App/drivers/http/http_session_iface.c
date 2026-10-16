@@ -39,6 +39,35 @@ web_auth_table_t *http_session_table(void) {
     return &s_web_auth_table;
 }
 
+// REVIEW_ALL_FIXES L3: slot timestamps are 32-bit ms. A table idle for more
+// than 2^32 ms (49.7 days) would see an expired session's elapsed time wrap
+// back to "young". Every table access goes through here first: the 64-bit gap
+// since the previous access is a lower bound on every slot's idle time (a slot
+// was last touched at or before the previous access), so a gap of 2^31 ms or
+// more with a finite timeout means every session has long expired and the
+// table is cleared instead of trusting the wrapped 32-bit difference.
+#define SESSION_WRAP_GAP_MS 0x80000000ULL
+static uint64_t s_last_access_ms;
+static bool s_have_last_access;
+
+static bool session_table_gap_wrapped(uint32_t timeout_s)
+{
+    if (!s_have_last_access || timeout_s == 0u) {
+        return false;
+    }
+    uint64_t now64 = (uint64_t)hal_time_now_ms();
+    return now64 >= s_last_access_ms && (now64 - s_last_access_ms) >= SESSION_WRAP_GAP_MS;
+}
+
+static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
+{
+    if (session_table_gap_wrapped(timeout_s)) {
+        web_auth_table_init(t);
+    }
+    s_last_access_ms = (uint64_t)hal_time_now_ms();
+    s_have_last_access = true;
+}
+
 // Plain SHA-256 of the raw bearer token -- NOT HMAC (there is no shared
 // secret involved here; the token itself is the secret, minted randomly at
 // login by whichever module creates the session). Same PSA hash primitive
@@ -167,9 +196,12 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     // resolver at all once that has already said auth is on -- see this
     // seam's own header comment for why passing the real flag again here
     // would be redundant, not more correct.
+    uint32_t resolve_now = (uint32_t)hal_time_now_ms();
+    session_wrap_guard(http_session_table(), timeout.timeout_s);
+    (void)web_auth_table_reap_expired(http_session_table(), timeout.timeout_s, resolve_now);
     web_auth_session_role_t role = web_auth_effective_role(http_session_table(), /*web_enabled=*/true,
                                                              token_hash, client_ip, timeout.timeout_s,
-                                                             (uint32_t)hal_time_now_ms());
+                                                             resolve_now);
     return to_enforce_role(role);
 }
 
@@ -199,12 +231,14 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
     sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
+    uint32_t now = (uint32_t)hal_time_now_ms();
+    session_wrap_guard(t, timeout.timeout_s);
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now); // LOW-1: no 49.7-day revival
     int idx = web_auth_table_find_by_token(t, token_hash);
     if (idx < 0) {
         return false;
     }
 
-    uint32_t now = (uint32_t)hal_time_now_ms();
     if (!web_auth_session_is_valid(t->slots[idx].last_seen_ms, timeout.timeout_s, now)) {
         return false;
     }
@@ -237,17 +271,18 @@ void http_auth_session_touch(const char *token, const char *client_ip, bool via_
     sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
-    int idx = web_auth_table_find_by_token(t, token_hash);
-    if (idx < 0) {
-        return;
-    }
-
     uint32_t now = (uint32_t)hal_time_now_ms();
     resolved_timeout_t timeout = resolve_timeout_s();
     // Item 3's fail-closed rule: an unreadable policy record must not
     // resolve against a substitute "never expires" timeout, so treat it as
     // not touchable rather than guessing.
     if (timeout.unreadable) {
+        return;
+    }
+    session_wrap_guard(t, timeout.timeout_s);
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now); // LOW-1: no 49.7-day revival
+    int idx = web_auth_table_find_by_token(t, token_hash);
+    if (idx < 0) {
         return;
     }
     // Never revive an already-expired session -- this is the server-side
@@ -280,6 +315,8 @@ bool http_auth_any_session_active(void) {
     }
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
+    session_wrap_guard(t, timeout.timeout_s);
+    (void)web_auth_table_reap_expired(t, timeout.timeout_s, now);
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
         if (!t->slots[i].in_use) {
             continue;
@@ -300,7 +337,13 @@ bool http_auth_any_ap_session_active(bool ap_station_present) {
     }
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
-    if (!web_auth_table_any_ap_session_active(t, timeout.timeout_s, now)) {
+    // REVIEW_FIXERS LOW-1 (lockfx): READ-ONLY on purpose. This runs on the
+    // wifi_prov_owner task while httpd creates/resolves sessions in the same
+    // unlocked table; a reap here could wipe a login mid-creation (in_use set,
+    // last_seen_ms not yet written). Expired slots are simply not counted by
+    // web_auth_table_any_ap_session_active(); httpd-context calls reap them.
+    if (session_table_gap_wrapped(timeout.timeout_s) ||
+        !web_auth_table_any_ap_session_active(t, timeout.timeout_s, now)) {
         return false;
     }
     // Review fix (2026-09-29, round 2): a WEB_AUTH_TIMEOUT_NEVER_S session is

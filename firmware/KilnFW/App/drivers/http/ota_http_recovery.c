@@ -261,6 +261,18 @@ static void ota_recovery_boot_reboot_task(void *arg)
 
 esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
 {
+    return ota_recovery_boot_run(req, NULL);
+}
+
+// Shared by POST /api/ota/esp/recovery_boot (hooks == NULL) and the unattended
+// install route (update_install_http.c). With hooks, prepare() runs once the
+// update claim and the relay check have passed and before the boot target is
+// touched; it may refuse (status + message) or write the one-shot install
+// request. undo() removes that request again when the boot target could not be
+// set or the reboot task could not start, so a request never outlives a
+// failed hand-off to recovery.
+esp_err_t ota_recovery_boot_run(httpd_req_t *req, const ota_recovery_boot_hooks_t *hooks)
+{
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate */
 
@@ -307,6 +319,20 @@ esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    if (hooks != NULL && hooks->prepare != NULL) {
+        char prep_msg[96];
+        int prep_status = 409;
+        prep_msg[0] = '\0';
+        if (!hooks->prepare(prep_msg, sizeof(prep_msg), &prep_status)) {
+            ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: install refused: %s", ip, prep_msg);
+            ota_http_update_end();
+            httpd_resp_set_status(req, prep_status == 500 ? "500 Internal Server Error" : "409 Conflict");
+            httpd_resp_set_type(req, "text/plain");
+            httpd_resp_send(req, prep_msg, HTTPD_RESP_USE_STRLEN);
+            return ESP_OK;
+        }
+    }
+
     // 5. Verify the recovery image, then point the bootloader at it. The
     // verify-then-set helper is shared with the boot_guard threshold path
     // (recovery_switch.h); it refuses a missing/factory-running layout and an
@@ -319,6 +345,9 @@ esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
         const bool restored = recovery_switch_restore_running();
         ESP_LOGE(OTA_HTTP_TAG, "recovery_boot from %s: selecting recovery failed (%s) -- boot target restore %s",
                  ip, sel_msg, restored ? "succeeded" : "FAILED (the next reset may boot recovery)");
+        if (hooks != NULL && hooks->undo != NULL) {
+            hooks->undo();
+        }
         ota_http_update_end();
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "text/plain");
@@ -330,6 +359,9 @@ esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
     }
     if (sel != RECOVERY_SWITCH_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused: %s -- NOT rebooting", ip, sel_msg);
+        if (hooks != NULL && hooks->undo != NULL) {
+            hooks->undo();
+        }
         ota_http_update_end();
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
@@ -358,6 +390,9 @@ esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
         if (!recovery_switch_restore_running()) {
             ESP_LOGE(OTA_HTTP_TAG, "recovery_boot: restoring the boot target failed -- the NEXT reset "
                           "will boot recovery");
+        }
+        if (hooks != NULL && hooks->undo != NULL) {
+            hooks->undo();
         }
         ota_http_update_end();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not start the reboot task");

@@ -1,6 +1,9 @@
 // tick_timing.c -- see tick_timing.h.
 #include "tick_timing.h"
 
+#include <math.h>
+#include <stddef.h>
+
 float tick_dt_compute_s(uint32_t now_ms, uint32_t prev_now_ms, bool have_prev_now_ms,
                          bool clock_stalled, float nominal_dt_s, float min_dt_s, float max_dt_s)
 {
@@ -35,6 +38,28 @@ bool snapshot_is_fresh(uint32_t now_ms, uint32_t timestamp_ms, uint32_t max_age_
     // numerically larger.
     uint32_t age_ms = now_ms - timestamp_ms;
     return age_ms < max_age_ms;
+}
+
+void status_amps_for_wire(bool published, uint32_t now_ms, uint32_t timestamp_ms, const float in[3],
+                          float out[3])
+{
+    // timestamp_ms == 0 is the zeroed pre-first-publish snapshot (REVIEW_SAFTYFX_PICOFX
+    // LOW-1): in the first 2 s after boot now-0 < max age would read it as fresh.
+    bool live = published && timestamp_ms != 0u && in != NULL &&
+                snapshot_is_fresh(now_ms, timestamp_ms, SNAPSHOT_CURRENT_MAX_AGE_MS);
+    for (int i = 0; i < 3; i++) {
+        out[i] = live ? in[i] : NAN;
+    }
+}
+
+uint32_t config_check_period_effective_s(uint32_t period_s)
+{
+    return (period_s > CONFIG_CHECK_PERIOD_MAX_S) ? CONFIG_CHECK_PERIOD_MAX_S : period_s;
+}
+
+bool snapshot_is_new(uint32_t timestamp_ms, uint32_t last_consumed_ms)
+{
+    return timestamp_ms != 0u && timestamp_ms != last_consumed_ms;
 }
 
 bool reboot_grace_evaluate(bool announced, uint32_t announced_at_ms, uint32_t now_ms,

@@ -30,15 +30,58 @@ uint8_t g_fake_flash[FAKE_FLASH_SIZE];
 
 uint64_t time_us_64(void) { return 0u; }
 
+// Power-loss injection (test_bootloader_persist.c): the Nth flash operation
+// (0-based, counted from g_flash_ops = 0) is torn -- a partial erase/program --
+// and every later operation is dropped, as if power failed mid-operation.
+// g_flash_op_limit < 0 disables injection.
+int g_flash_op_limit = -1;
+int g_flash_ops = 0;
+bool g_power_lost = false;
+// Silent corruption: programs into the metadata backup sector land with one bit flipped.
+bool g_corrupt_backup_program = false;
+
+static bool flash_op_begin(bool *torn)
+{
+    *torn = false;
+    if (g_power_lost) {
+        return false;
+    }
+    if (g_flash_op_limit >= 0 && g_flash_ops == g_flash_op_limit) {
+        g_power_lost = true;
+        *torn = true;
+    }
+    g_flash_ops++;
+    return true;
+}
+
 void flash_range_erase(uint32_t flash_offs, size_t count)
 {
+    bool torn;
+    if (!flash_op_begin(&torn)) {
+        return;
+    }
+    if (torn) {
+        memset(&g_fake_flash[flash_offs], 0xFF, count / 3u); // front erased, rest half-erased
+        for (size_t i = count / 3u; i < count; i++) {
+            g_fake_flash[flash_offs + i] &= 0x5Au;
+        }
+        return;
+    }
     memset(&g_fake_flash[flash_offs], 0xFF, count);
 }
 
 void flash_range_program(uint32_t flash_offs, const uint8_t *data, size_t count)
 {
-    for (size_t i = 0; i < count; i++) {
+    bool torn;
+    if (!flash_op_begin(&torn)) {
+        return;
+    }
+    size_t n = torn ? count / 2u : count;
+    for (size_t i = 0; i < n; i++) {
         g_fake_flash[flash_offs + i] &= data[i];
+    }
+    if (g_corrupt_backup_program && flash_offs == BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET) {
+        g_fake_flash[flash_offs + 9] ^= 0x01u;
     }
 }
 

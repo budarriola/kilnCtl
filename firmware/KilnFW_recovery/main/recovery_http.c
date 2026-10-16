@@ -23,6 +23,7 @@
 // recovery_upload.c; an upload route calls recovery_upload_stream() with its
 // own validator and sink.
 #include "recovery_http.h"
+#include "recovery_install.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -117,14 +118,29 @@ static bool app_has_valid_image(const esp_partition_t *part)
 // esp_image_verify() on `app` reads the whole image (~2.5 MB of flash) and
 // hashes it, so it must never run per status GET. The result is cached and
 // invalidated when an upload starts or ends; the next status/exit read refills
-// it lazily. httpd is effectively single-task here, so no lock is needed.
+// it lazily. The cache is also touched from other tasks (recovery_http_app_verifies() from the
+// install recover task, recovery_http_app_verify_invalidate() from the apply start), so every
+// access takes s_verify_mux and a verify only publishes its result if no invalidate ran meanwhile
+// (generation counter; REVIEW_OTA_BOOT_FIXES recfx leftover).
+static portMUX_TYPE s_verify_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_verify_known;
 static bool s_verify_valid;
 static uint32_t s_verify_image_len; // meta.image_len of the last successful verify, else 0
+static uint32_t s_verify_gen;
 
 static void app_verify_invalidate(void)
 {
+    portENTER_CRITICAL(&s_verify_mux);
     s_verify_known = false;
+    s_verify_valid = false;
+    s_verify_image_len = 0;
+    s_verify_gen++;
+    portEXIT_CRITICAL(&s_verify_mux);
+}
+
+void recovery_http_app_verify_invalidate(void)
+{
+    app_verify_invalidate();
 }
 
 static bool app_image_verified(const esp_partition_t *part)
@@ -132,14 +148,25 @@ static bool app_image_verified(const esp_partition_t *part)
     if (!part) {
         return false;
     }
-    if (!s_verify_known) {
-        const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
-        esp_image_metadata_t meta;
-        s_verify_valid = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK;
-        s_verify_image_len = s_verify_valid ? meta.image_len : 0;
+    portENTER_CRITICAL(&s_verify_mux);
+    bool known = s_verify_known;
+    bool cached = s_verify_valid;
+    uint32_t gen = s_verify_gen;
+    portEXIT_CRITICAL(&s_verify_mux);
+    if (known) {
+        return cached;
+    }
+    const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
+    esp_image_metadata_t meta;
+    bool valid = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK;
+    portENTER_CRITICAL(&s_verify_mux);
+    if (gen == s_verify_gen) {
+        s_verify_valid = valid;
+        s_verify_image_len = valid ? meta.image_len : 0;
         s_verify_known = true;
     }
-    return s_verify_valid;
+    portEXIT_CRITICAL(&s_verify_mux);
+    return valid;
 }
 
 // Bytes of the image esp_image_verify() accepted (header + segments + padding +
@@ -147,7 +174,10 @@ static bool app_image_verified(const esp_partition_t *part)
 // app_image_verified(), which fills the cache.
 static uint32_t app_image_len(void)
 {
-    return s_verify_valid ? s_verify_image_len : 0;
+    portENTER_CRITICAL(&s_verify_mux);
+    uint32_t len = s_verify_valid ? s_verify_image_len : 0;
+    portEXIT_CRITICAL(&s_verify_mux);
+    return len;
 }
 
 static bool clear_boot_guard(char *msg, size_t cap);
@@ -233,6 +263,10 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return recovery_upload_send_error(req, http_status, msg);
     }
 
+    // Before the boot target is set (as recovery_exit_post does): a power loss between the two must not
+    // leave a pending auto-install request that replays over the image just pushed at the next entry.
+    int supersede_rc = recovery_install_supersede();
+
     esp_err_t err = recovery_boot_partition_set_and_verify(target);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -244,11 +278,12 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     // L3: a staged image of a different version must not stay installable
     // behind the image just pushed. Best effort: reported, never fatal.
     esp_err_t stage_err = stage_clear_after_upload();
-    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s; stage clear: %s)",
-             bg_msg, esp_err_to_name(stage_err));
-    char body[224];
-    snprintf(body, sizeof(body), "ok, rebooting into new application image; %s; stage %s", bg_msg,
-             stage_err == ESP_OK ? "cleared" : "clear FAILED (staged image may still be installable)");
+    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s; stage clear: %s; install request clear rc=%d)",
+             bg_msg, esp_err_to_name(stage_err), supersede_rc);
+    char body[320];
+    snprintf(body, sizeof(body), "ok, rebooting into new application image; %s; stage %s; install request %s", bg_msg,
+             stage_err == ESP_OK ? "cleared" : "clear FAILED (staged image may still be installable)",
+             supersede_rc == 0 ? "cleared" : "clear FAILED (a pending auto-install may replay at the next recovery entry)");
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
@@ -596,11 +631,35 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                       (unsigned)ls.draw_failures, (unsigned)ls.task_stack_free_bytes);
     }
     if (e == ESP_OK) {
+        update_install_res_t ir;
+        bool have_ir = recovery_install_last_result(&ir);
+        char ir_ver[UPD_INST_SEMVER_LEN];
+        for (size_t i = 0; i < sizeof(ir_ver); i++) {
+            unsigned char c = have_ir ? (unsigned char)ir.semver[i] : 0;
+            ir_ver[i] = (c == 0) ? 0 : ((c < 0x20 || c > 0x7e || c == '"' || c == '\\') ? '?' : (char)c);
+        }
+        ir_ver[sizeof(ir_ver) - 1] = '\0';
+        char ir_id[UPD_INST_ID_HEX_LEN];
+        static const uint8_t no_id[UPD_INST_ID_LEN];
+        update_install_id_hex(have_ir ? ir.id : no_id, ir_id);
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
-                           "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
+                           "\"heap_internal_min_free\":%u,\"free_heap\":%u,",
                       nvs_failed ? "true" : "false", nvs_failed,
                       (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                       (unsigned)esp_get_free_heap_size());
+        // last_install goes out as its own fragment: the longest reason name (34 chars) plus a 31-char version
+        // is ~125 B and must never share a 200 B fragment with the numeric fields (it was cut short at 14-char versions).
+        if (e == ESP_OK) {
+            e = send_frag(req, "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\"",
+                          have_ir ? update_install_code_name(ir.code) : "none",
+                          have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver, ir_id);
+        }
+        // detail + app_modified (result blob byte 7) in their own fragment: the longest detail name is 23 chars.
+        if (e == ESP_OK) {
+            e = send_frag(req, ",\"detail\":\"%s\",\"app_modified\":%s}}",
+                          have_ir ? update_install_detail_name(ir.detail) : "none",
+                          (have_ir && ir.app_modified) ? "true" : "false");
+        }
     }
     if (e != ESP_OK) {
         return ESP_FAIL; // truncated stream: close the connection
@@ -741,6 +800,7 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
+    (void)recovery_install_supersede(); // a leftover auto-install request must not replay at a later entry
     esp_err_t serr = recovery_boot_partition_set_and_verify(app);
     if (serr == ESP_ERR_OTA_VALIDATE_FAILED) {
         app_verify_invalidate();
@@ -799,6 +859,10 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
 {
     if (recovery_apply_busy()) {
         return refuse_while_applying(req);
+    }
+    if (recovery_pico_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
     }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE,
@@ -1029,6 +1093,39 @@ static int apply_pre_boot(void)
     return boot_guard_clear_or_na(msg, sizeof(msg)) ? 0 : -1;
 }
 
+// Manual apply: boot_guard clear, then drop any leftover auto-install request and stale result.
+static int manual_apply_pre_boot(void)
+{
+    int rc = apply_pre_boot();
+    if (rc == 0) {
+        (void)recovery_install_supersede();
+    }
+    return rc;
+}
+
+bool recovery_http_app_verifies(void)
+{
+    app_verify_invalidate();
+    const esp_partition_t *app = find_app_partition();
+    return app_has_valid_image(app) && app_image_verified(app);
+}
+
+int recovery_http_select_app_and_restart(void)
+{
+    const esp_partition_t *app = find_app_partition();
+    if (!app || recovery_boot_partition_set_and_verify(app) != ESP_OK) {
+        return -1;
+    }
+    restart_soon(500);
+    return 0;
+}
+
+// Same clear for the unattended-install pre-boot hook (recovery_install.c).
+int recovery_http_boot_guard_clear(void)
+{
+    return apply_pre_boot();
+}
+
 // Erases the stage header sector (what a finished apply does) so the stage is
 // blank and not installable. ESP_OK also when there is no stage partition.
 static esp_err_t stage_clear_after_upload(void)
@@ -1082,7 +1179,7 @@ static esp_err_t apply_staged_post(httpd_req_t *req)
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
     app_verify_invalidate(); // `app` is about to be erased
-    esp_err_t e = recovery_apply_esp_start(app, apply_pre_boot);
+    esp_err_t e = recovery_apply_esp_start(app, manual_apply_pre_boot, NULL);
     if (e != ESP_OK) {
         httpd_resp_set_status(req, e == ESP_ERR_INVALID_STATE ? "409 Conflict" : "500 Internal Server Error");
         return httpd_resp_send(req, "could not start the apply", HTTPD_RESP_USE_STRLEN);
@@ -1134,7 +1231,7 @@ static esp_err_t apply_status_get(httpd_req_t *req)
 
 esp_err_t recovery_http_start(void)
 {
-    // Handlers' static buffers (send_frag's frag, s_verify_*) assume every
+    // Handlers' static buffers (send_frag's frag) assume every
     // handler runs on this ONE httpd task. Starting a second server would
     // silently break that, so refuse it outright. Set only once a start
     // succeeds, so a failed attempt (which stops its server) can be retried.

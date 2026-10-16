@@ -115,6 +115,7 @@ static SafetyLinkClass *s_safety;
 typedef enum {
     SW_RESET_PICO_ACCEPTED = 0,
     SW_RESET_PICO_REFUSED_ARMED,     /* relay energized -- heating permission is live */
+    SW_RESET_PICO_REFUSED_S9,        /* S9 TRIP_INEFFECTIVE latched on the Pico (A1, 2026-10-14) */
     SW_RESET_PICO_REFUSED_TRANSFER,  /* a firmware transfer into the inactive slot is in flight */
     SW_RESET_PICO_REFUSED_OTHER,     /* refused for a reason this build does not recognize --
                                        * an older or newer peer; NEVER render this as a specific
@@ -223,7 +224,18 @@ static void sw_reset_reboot_task(void *arg)
     ESP_LOGW(TAG, "sw_reset: rebooting ESP now (no configuration touched)");
     free(ctx);
     hal_wdt_reboot(); /* esp_restart() under the hood -- never returns on real hardware */
-    vTaskDelete(NULL); /* defensive only, see factory_reset.c's identical comment */
+    vTaskDeleteWithCaps(NULL); /* defensive only, see factory_reset.c's identical comment */
+}
+
+// Guard audit 2026-10-14 A1: the Pico clears every latch at boot, including S9
+// TRIP_INEFFECTIVE (welded K4, which CLEAR_TRIP refuses unconditionally). A dual
+// reset must therefore not be a way around that. Pure so the host test can pin it.
+// `fresh` = DIAG received since the Pico's last reboot and link up; stale or
+// unknown state does NOT refuse (the Pico itself also refuses REBOOT while S9).
+// Only S9 refuses: other trip reasons keep resetting (owner decisions).
+bool sw_reset_s9_refusal_needed(bool fresh, uint8_t diag_trip_reason)
+{
+    return fresh && diag_trip_reason == SAFETY_LINK_TRIP_REASON_INEFFECTIVE;
 }
 
 // Translates safety_link_send_reboot()'s outcome into this file's reporting
@@ -264,6 +276,8 @@ sw_reset_pico_report_t sw_reset_classify_pico_outcome(esp_err_t err,
             return SW_RESET_PICO_REFUSED_ARMED;
         case KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE:
             return SW_RESET_PICO_REFUSED_TRANSFER;
+        case KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE:
+            return SW_RESET_PICO_REFUSED_S9;
         case KILNLINK_REBOOT_RESULT_REASON_NONE:
         case KILNLINK_REBOOT_RESULT_REASON_UNKNOWN:
         default:
@@ -302,6 +316,10 @@ const char *sw_reset_pico_sentence(sw_reset_pico_report_t report)
     case SW_RESET_PICO_REFUSED_ARMED:
         return "The safety processor REFUSED to reboot (its heating relay is armed). It stays "
                "running; only this controller is rebooting.";
+    case SW_RESET_PICO_REFUSED_S9:
+        return "The safety processor REFUSED to reboot (S9 TRIP_INEFFECTIVE is latched: the heater "
+               "contactor may be welded, and a reboot would clear that latch). It stays running; "
+               "only this controller is rebooting. Remove power at the breaker.";
     case SW_RESET_PICO_REFUSED_TRANSFER:
         return "The safety processor REFUSED to reboot (a firmware transfer into it is in "
                "progress). It stays running; only this controller is rebooting. Retry after the "
@@ -387,6 +405,24 @@ static esp_err_t sw_reset_post_handler(httpd_req_t *req)
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(TAG, "sw_reset from %s: refused by interlock: %s", ip, interlock_reason);
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
+    }
+
+    // Guard audit 2026-10-14 A1: refuse while the Pico reports S9 TRIP_INEFFECTIVE
+    // (welded K4). A dual reset would clear that latch at the Pico's boot, which
+    // CLEAR_TRIP refuses to do. Nothing has been touched yet at this point.
+    if (s_safety) {
+        bool diag_fresh = false;
+        uint8_t diag_reason = 0;
+        if (safety_link_get_diag_trip_reason(s_safety, &diag_fresh, &diag_reason) == ESP_OK &&
+            sw_reset_s9_refusal_needed(diag_fresh, diag_reason)) {
+            ESP_LOGW(TAG, "sw_reset from %s: refused, safety processor reports S9 TRIP_INEFFECTIVE", ip);
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_set_type(req, "text/plain");
+            return httpd_resp_sendstr(req,
+                "Refused: the safety processor has S9 TRIP_INEFFECTIVE latched (the heater contactor "
+                "may be welded). Rebooting would clear that latch. Remove power at the breaker; "
+                "nothing was rebooted.");
+        }
     }
 
     // No body to read: unlike /api/factory_reset, this route has no scope

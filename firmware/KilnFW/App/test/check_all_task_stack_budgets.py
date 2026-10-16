@@ -780,7 +780,7 @@ TASKS = [
              r'xTaskCreatePinnedToCoreWithCaps\(task_entry,\s*"autotune_engine",\s*(\d+)')),
     dict(name="profile_exec_wdt", root="watchdog_task_entry",
          stack=lambda: extract_int_literal("drivers/control/profile_executor_start.c",
-             r'xTaskCreatePinnedToCore\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
     dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_esp.c",
              r'xTaskCreate\(ota_rollback_reboot_task,\s*"ota_rollback_reboot",\s*(\d+)')),
@@ -895,7 +895,7 @@ TASKS = [
              r'xTaskCreatePinnedToCoreWithCaps\(telemetry_log_task,\s*"telemetry_log",\s*(\d+)')),
     dict(name="danger_mode", root="danger_mode_task",
          stack=lambda: extract_int_literal("drivers/safety/danger_mode.c",
-             r'xTaskCreate\(danger_mode_task,\s*"danger_mode",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(danger_mode_task,\s*"danger_mode",\s*(\d+)')),
     dict(name="safety_owner_evt", root="hal_uart_esp_event_task",
          stack=lambda: extract_sdkconfig_macro("drivers/safety/safety_link.c",
              r'uart_owner_init\(&link->owner,.*?UART_OWNER_STACK_SIZE',
@@ -950,7 +950,7 @@ TASKS = [
          extra_roots=_LVGL_ROOTS),
     dict(name="screen_idle", root="screen_idle_task",
          stack=lambda: extract_int_literal("drivers/ui/screen_idle.c",
-             r'xTaskCreatePinnedToCore\(screen_idle_task,\s*"screen_idle",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(screen_idle_task,\s*"screen_idle",\s*(\d+)')),
     dict(name="uart_owner_evt_task", root="hal_uart_esp_event_task",
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
              r'uart_owner_init\(&ctx->uart_owner,.*?UART_OWNER_STACK_SIZE',
@@ -971,7 +971,7 @@ TASKS = [
          # reaches the whole deep path with no indirect-dispatch gap to model.
          stack=lambda: extract_local_macro("drivers/persist/kiln_cfg_swap_worker.c",
              r'#define SWAP_WORKER_STACK_BYTES\s+(\d+)',
-             r'xTaskCreate\(swap_worker_task,\s*"kiln_cfg_swap",\s*SWAP_WORKER_STACK_BYTES')),
+             r'xTaskCreatePinnedToCoreWithCaps\(swap_worker_task,\s*"kiln_cfg_swap",\s*SWAP_WORKER_STACK_BYTES')),
     dict(name="wifi_prov_owner", root="owner_task", expect_path="wifi_prov.c",
          # Registered 5cd11231 (2026-09-28): the ONE task that ever writes
          # s_wifi, created once in wifi_prov_start() and never torn down (a
@@ -982,7 +982,7 @@ TASKS = [
          # symbol, so `expect_path` disambiguates the same way those two rows
          # do.
          stack=lambda: extract_int_literal("drivers/net/wifi_prov.c",
-             r'xTaskCreatePinnedToCore\(owner_task,\s*"wifi_prov_owner",\s*(\d+)')),
+             r'xTaskCreatePinnedToCoreWithCaps\(owner_task,\s*"wifi_prov_owner",\s*(\d+)')),
     dict(name="dns_hijack", root="dns_hijack_task",
          # Registered for stack-margin reporting by the Wi-Fi batch (864ef649c,
          # WIFI_REVIEW LOW-6) after a stale "self-deletes" exemption; the task is
@@ -1037,7 +1037,7 @@ CEILING_BYTES = {
     # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
-    "bx_flash_worker": 6352,  # 2026-10-12: re-measured 6352 B (was 6336 B) after 44289aa41 uart_proto_message_t.rx_ms; honest free 3588 B (35.0%), so only the regression ceiling moves
+    "bx_flash_worker": 6464,  # 2026-10-15 re-measured; honest free 33.9%. Prev:  # 2026-10-12: re-measured 6352 B (was 6336 B) after 44289aa41 uart_proto_message_t.rx_ms; honest free 3588 B (35.0%), so only the regression ceiling moves
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3328,
@@ -1104,7 +1104,7 @@ CEILING_BYTES = {
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
     "ota_pico_rollback": 2912,
-    "ota_confirm": 3760,  # measured 2026-10-12 against a fresh target build (lower bound: indirect call)
+    "ota_confirm": 3808,  # 2026-10-15 re-measured  # measured 2026-10-12 against a fresh target build (lower bound: indirect call)
     # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
     # WRONG -- it was borrowed from ota_pico_rollback on the assumption the
     # two tasks were a comparable shape, but ota_pico_rollback's OWN resolved
@@ -1148,7 +1148,8 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7728,  # 2026-10-12: re-measured 7728 B (was 7632 B): backup_import_job chain 5728 B after 44289aa41 uart_proto_message_t.rx_ms; honest free 2212 B (21.6%)
+    "http_async_job": 7744,  # 2026-10-15 re-measured; honest free 21.4%
+    # (prev note follows)  # 2026-10-12: re-measured 7728 B (was 7632 B): backup_import_job chain 5728 B after 44289aa41 uart_proto_message_t.rx_ms; honest free 2212 B (21.6%)
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
     # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +
@@ -1164,7 +1165,7 @@ CEILING_BYTES = {
     # (288 B). Measured on a target build; 1636 B (39.9%) of the 4096 B stack stays
     # free, so the stack is not raised (internal RAM floor, owner 2026-10-01).
     "kiln_io_owner": 2208,  # 2026-10-10: re-measured 2208 B (was 2160 B); honest free 1588 B of 4096 B, stack unchanged
-    "thermo_owner": 1616,
+    "thermo_owner": 1664,  # 2026-10-15 re-measured
     "telemetry_log": 3008,
     "danger_mode": 2256,
     "safety_owner_evt": 1184,
@@ -1295,7 +1296,7 @@ CEILING_BYTES = {
     # walk's own measured total, not headroom-padded: 1184 B of the declared
     # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
     # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
-    "wifi_prov_owner": 2944,
+    "wifi_prov_owner": 3056,  # 2026-10-15 re-measured
     # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
     # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
     # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.

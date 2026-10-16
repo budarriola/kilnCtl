@@ -10,7 +10,7 @@ free of a 3072 B internal-DRAM stack (29.0% raw headroom) -- one of the six
 "TODO.md section 13" candidate stacks never resized off a guess, per this
 task's own comment in uart_bridge_start_system_task(). Unlike
 `info_uart_bridge`/`telemetry_log`, this task's stack is plain internal DRAM
-(`xTaskCreatePinnedToCore`, no MALLOC_CAP_SPIRAM), the scarce resource this
+(was `xTaskCreatePinnedToCore`; PSRAM-capable since 2026-10-14), the scarce resource this
 codebase has already run out of once (see the "ESP internal DRAM exhaustion"
 class). `system_bridge_task` (uart_bridge_system.c) is a link-frame-command
 dispatcher -- IO_CMD_SET_RELAY[_MASK], CT cal, danger-mode, factory-reset,
@@ -118,7 +118,7 @@ def read_configured_stack(path=BRIDGE_SOURCE):
     # real create beside a decimal decoy used to leave the decoy as the only parseable match).
     any_create = re.findall(r'xTaskCreate\w*\s*\([^;]*?"system_uart_bridge"', src)
     any_reg = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"', src)
-    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*,', src)
+    created = re.findall(r'xTaskCreatePinnedToCoreWithCaps\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*,', src)
     regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*\)\s*;', src)
     if len(any_create) != 1 or len(any_reg) != 1 or len(created) != 1 or len(regd) != 1:
         return None, (f"expected exactly one xTaskCreate*(... \"system_uart_bridge\" ...) and one "

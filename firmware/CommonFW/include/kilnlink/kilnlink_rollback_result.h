@@ -106,6 +106,11 @@ typedef enum {
      * rule 6: untrusted input, do not let an unrecognized value alias a
      * real reason). */
     KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN = 4,
+    /* Rollback refused: S9 TRIP_INEFFECTIVE (welded K4) is latched; the reboot
+     * would clear it (SaftyFW guard audit 2026-10-14 A1). Appended after
+     * UNKNOWN to keep existing values stable; request-triggered reply, so no
+     * protocol bump (an older ESP reads it as unknown). */
+    KILNLINK_ROLLBACK_RESULT_REASON_TRIP_INEFFECTIVE = 5,
 } kilnlink_rollback_result_reason_t;
 
 typedef enum {

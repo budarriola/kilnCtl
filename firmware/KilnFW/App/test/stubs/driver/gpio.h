@@ -18,7 +18,7 @@
 typedef int gpio_num_t;
 #define GPIO_NUM_0 0
 
-typedef enum { GPIO_MODE_INPUT = 1, GPIO_MODE_OUTPUT = 2 } gpio_mode_t;
+typedef enum { GPIO_MODE_INPUT = 1, GPIO_MODE_OUTPUT = 2, GPIO_MODE_INPUT_OUTPUT_OD = 6 } gpio_mode_t;
 typedef enum { GPIO_PULLUP_DISABLE = 0, GPIO_PULLUP_ENABLE = 1, GPIO_PULLUP_ONLY = 2 } gpio_pullup_t;
 typedef enum { GPIO_PULLDOWN_DISABLE = 0, GPIO_PULLDOWN_ENABLE = 1 } gpio_pulldown_t;
 typedef enum { GPIO_INTR_DISABLE = 0 } gpio_int_type_t;
@@ -37,10 +37,18 @@ static inline esp_err_t gpio_config(const gpio_config_t *cfg)
     return ESP_OK;
 }
 
+/* Optional input model for a test that must drive gpio_get_level() (the SX1509
+ * I2C bus-clear test); NULL keeps the historic constant 1. */
+#ifdef _MSC_VER
+__declspec(selectany) int (*g_stub_gpio_get_level_hook)(int gpio) = 0;
+#else
+__attribute__((weak)) int (*g_stub_gpio_get_level_hook)(int gpio) = 0;
+#endif
+
 static inline int gpio_get_level(gpio_num_t gpio)
 {
-    (void)gpio;
-    return 1; /* not pressed (ACTIVE LOW) -- never read by any host test */
+    if (g_stub_gpio_get_level_hook) return g_stub_gpio_get_level_hook((int)gpio);
+    return 1; /* not pressed (ACTIVE LOW) -- otherwise never read by a host test */
 }
 
 /* Added for safety_link.c's host build (App/test/test_safety_link_compile.c)
@@ -70,9 +78,19 @@ static inline int gpio_get_level(gpio_num_t gpio)
  * needs -- no cross-TU definition to link. */
 static int g_stub_gpio_set_level_calls = 0;
 
+/* Optional observer for a test that must see gpio_set_level() calls in order
+ * against other events (test_sx1509_reset_first.c). selectany merges the one
+ * definition across every TU, so tests that never set it need no extra link
+ * input. */
+#ifdef _MSC_VER
+__declspec(selectany) void (*g_stub_gpio_level_hook)(int gpio, int level) = 0;
+#else
+__attribute__((weak)) void (*g_stub_gpio_level_hook)(int gpio, int level) = 0;
+#endif
+
 static inline esp_err_t gpio_set_level(gpio_num_t gpio, int level)
 {
-    (void)gpio; (void)level;
+    if (g_stub_gpio_level_hook) g_stub_gpio_level_hook((int)gpio, level);
     g_stub_gpio_set_level_calls++;
     return ESP_OK;
 }

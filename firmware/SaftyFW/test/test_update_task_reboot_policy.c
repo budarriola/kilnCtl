@@ -24,6 +24,7 @@
 #include "test_common.h"
 
 #include "kilnlink/kilnlink_reboot_result.h"
+#include "kilnlink/kilnlink_rollback_result.h"
 #include "tasks/update_task_reboot_policy.h"
 
 static void test_neither_armed_nor_transfer_allows(void)
@@ -32,7 +33,7 @@ static void test_neither_armed_nor_transfer_allows(void)
 
     const char *reason = NULL;
     uint8_t reason_code = 0xFF;
-    bool allowed = update_task_reboot_policy_decide(false, false, &reason, &reason_code);
+    bool allowed = update_task_reboot_policy_decide(false, false, false, &reason, &reason_code);
 
     TEST_CHECK(allowed, "neither condition is true -- the reboot is allowed");
     TEST_CHECK(reason_code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_NONE,
@@ -47,7 +48,7 @@ static void test_armed_alone_refuses_with_armed_reason(void)
 
     const char *reason = NULL;
     uint8_t reason_code = 0xFF;
-    bool allowed = update_task_reboot_policy_decide(true, false, &reason, &reason_code);
+    bool allowed = update_task_reboot_policy_decide(true, false, false, &reason, &reason_code);
 
     TEST_CHECK(!allowed, "an energized relay refuses the reboot");
     TEST_CHECK(reason_code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_ARMED,
@@ -63,7 +64,7 @@ static void test_transfer_alone_refuses_with_transfer_reason(void)
 
     const char *reason = NULL;
     uint8_t reason_code = 0xFF;
-    bool allowed = update_task_reboot_policy_decide(false, true, &reason, &reason_code);
+    bool allowed = update_task_reboot_policy_decide(false, true, false, &reason, &reason_code);
 
     TEST_CHECK(!allowed, "an in-progress transfer refuses the reboot");
     TEST_CHECK(reason_code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE,
@@ -82,7 +83,7 @@ static void test_both_true_prefers_armed(void)
 
     const char *reason = NULL;
     uint8_t reason_code = 0xFF;
-    bool allowed = update_task_reboot_policy_decide(true, true, &reason, &reason_code);
+    bool allowed = update_task_reboot_policy_decide(true, true, false, &reason, &reason_code);
 
     TEST_CHECK(!allowed, "both conditions true still refuses");
     TEST_CHECK(reason_code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_ARMED,
@@ -96,20 +97,75 @@ static void test_null_out_params_tolerated(void)
 {
     TEST_SECTION("update_task_reboot_policy_decide -- NULL out_reason/out_reason_code do not crash");
 
-    bool allowed_a = update_task_reboot_policy_decide(true, false, NULL, NULL);
+    bool allowed_a = update_task_reboot_policy_decide(true, false, false, NULL, NULL);
     TEST_CHECK(!allowed_a, "ARMED refusal still returned with both out-params NULL");
 
     uint8_t reason_code = 0xFF;
-    bool allowed_b = update_task_reboot_policy_decide(false, true, NULL, &reason_code);
+    bool allowed_b = update_task_reboot_policy_decide(false, true, false, NULL, &reason_code);
     TEST_CHECK(!allowed_b, "TRANSFER_ACTIVE refusal returned with out_reason NULL");
     TEST_CHECK(reason_code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_TRANSFER_ACTIVE,
                "out_reason_code is still written when out_reason is NULL");
 
     const char *reason = NULL;
-    bool allowed_c = update_task_reboot_policy_decide(false, false, &reason, NULL);
+    bool allowed_c = update_task_reboot_policy_decide(false, false, false, &reason, NULL);
     TEST_CHECK(allowed_c, "allowed decision returned with out_reason_code NULL");
     TEST_CHECK(reason != NULL && strcmp(reason, "ok") == 0,
                "out_reason is still written when out_reason_code is NULL");
+}
+
+// Guard audit 2026-10-14 A1: S9 (welded K4) latched refuses reboot and rollback.
+static void test_a1_s9_latched_refuses_reboot(void)
+{
+    TEST_SECTION("A1 reboot policy -- S9 latched, relay open, no transfer -> refused TRIP_INEFFECTIVE");
+
+    const char *reason = NULL;
+    uint8_t code = 0xFF;
+    bool allowed = update_task_reboot_policy_decide(false, false, true, &reason, &code);
+    TEST_CHECK(!allowed, "S9 latched refuses the reboot (a reboot would clear the latch)");
+    TEST_CHECK(code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE,
+               "refusal reports TRIP_INEFFECTIVE");
+    TEST_CHECK(reason != NULL && strstr(reason, "S9") != NULL, "reason string names S9");
+
+    code = 0xFF;
+    allowed = update_task_reboot_policy_decide(true, false, true, &reason, &code);
+    TEST_CHECK(!allowed && code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_ARMED,
+               "ARMED is still reported first when both ARMED and S9");
+
+    code = 0xFF;
+    allowed = update_task_reboot_policy_decide(false, true, true, &reason, &code);
+    TEST_CHECK(!allowed && code == (uint8_t)KILNLINK_REBOOT_RESULT_REASON_TRIP_INEFFECTIVE,
+               "S9 is reported before TRANSFER_ACTIVE");
+
+    allowed = update_task_reboot_policy_decide(false, false, true, NULL, NULL);
+    TEST_CHECK(!allowed, "S9 refusal survives NULL out-params");
+
+    allowed = update_task_reboot_policy_decide(false, false, false, &reason, &code);
+    TEST_CHECK(allowed, "no S9 -> other trip reasons are NOT refused (benign reboot resumes)");
+}
+
+static void test_a1_rollback_gate(void)
+{
+    TEST_SECTION("A1 rollback gate -- ARMED, S9, and allowed");
+
+    const char *reason = NULL;
+    uint8_t code = 0xFF;
+    TEST_CHECK(!update_task_rollback_gate_decide(true, false, &reason, &code) &&
+                   code == (uint8_t)KILNLINK_ROLLBACK_RESULT_REASON_ARMED,
+               "ARMED refuses with ARMED");
+    code = 0xFF;
+    TEST_CHECK(!update_task_rollback_gate_decide(false, true, &reason, &code) &&
+                   code == (uint8_t)KILNLINK_ROLLBACK_RESULT_REASON_TRIP_INEFFECTIVE,
+               "S9 latched refuses with TRIP_INEFFECTIVE");
+    TEST_CHECK(reason != NULL && strstr(reason, "S9") != NULL, "S9 reason string names S9");
+    code = 0xFF;
+    TEST_CHECK(!update_task_rollback_gate_decide(true, true, &reason, &code) &&
+                   code == (uint8_t)KILNLINK_ROLLBACK_RESULT_REASON_ARMED,
+               "both -> ARMED first");
+    code = 0xFE;
+    TEST_CHECK(update_task_rollback_gate_decide(false, false, &reason, &code) && code == 0xFE,
+               "neither -> allowed, code untouched");
+    TEST_CHECK(!update_task_rollback_gate_decide(false, true, NULL, NULL),
+               "NULL out-params tolerated");
 }
 
 void run_test_update_task_reboot_policy(void)
@@ -119,4 +175,6 @@ void run_test_update_task_reboot_policy(void)
     test_transfer_alone_refuses_with_transfer_reason();
     test_both_true_prefers_armed();
     test_null_out_params_tolerated();
+    test_a1_s9_latched_refuses_reboot();
+    test_a1_rollback_gate();
 }

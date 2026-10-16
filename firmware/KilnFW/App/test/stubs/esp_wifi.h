@@ -135,6 +135,7 @@ typedef struct {
  * wifi_prov.c directly) can read/reset them between test cases. */
 extern wifi_mode_t g_stub_wifi_mode;
 extern int g_stub_wifi_set_mode_calls;
+extern esp_err_t g_stub_wifi_set_mode_result; /* ESP_OK unless a test injects a failure */
 
 /* Controls esp_wifi_sta_get_ap_info()'s result -- defaults to "associated,
  * rssi -50" so do_ev_got_ip()'s RSSI capture doesn't fail; a test can force
@@ -165,8 +166,11 @@ static inline esp_err_t esp_wifi_set_config(wifi_interface_t iface, wifi_config_
 
 static inline esp_err_t esp_wifi_set_mode(wifi_mode_t mode)
 {
-    g_stub_wifi_mode = mode;
     g_stub_wifi_set_mode_calls++;
+    if (g_stub_wifi_set_mode_result != ESP_OK) {
+        return g_stub_wifi_set_mode_result; /* failure injection: mode unchanged */
+    }
+    g_stub_wifi_mode = mode;
     return ESP_OK;
 }
 

@@ -7,6 +7,19 @@
 #include "max31856.h"
 #include "relay_owner.h"
 #include "watchdog_task.h"
+#include "task_harness.h"
+#include "pico/time.h"
+
+// A2 (2026-10-14): hardware-timer clock = harness tick (1 tick = 1 ms) + a skew the
+// test can set, so it can prove snapshots are stamped from THIS clock, not the tick.
+uint32_t g_test_hw_skew_ms = 0;
+absolute_time_t get_absolute_time(void)
+{
+    absolute_time_t t;
+    t.us = ((uint64_t)th_get_tick() + g_test_hw_skew_ms) * 1000u;
+    return t;
+}
+uint32_t to_ms_since_boot(absolute_time_t t) { return (uint32_t)(t.us / 1000u); }
 
 static float    s_tc_offset_c;
 static bool     s_tc_type_set = true;

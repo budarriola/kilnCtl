@@ -1017,6 +1017,55 @@ static inline void config_store_backfill_legacy_ct_topology(config_store_record_
     rec->ct_topology = config_store_ct_topology_from_zone_ct_channel(rec->zone_ct_channel);
 }
 
+// config_store_ct_channel_fitted_rec() -- CT audit 2026-10-14 HIGH-1: the
+// RECORD-aware fitted predicate every guard path must use. When the operator
+// has committed a zone_ct_channel map (CONFIG_STORE_SET_ZONE_CT_CHANNEL set)
+// the map is authoritative (a channel is fitted iff some zone claims it);
+// only with the bit clear does the legacy ct_topology rule apply. The
+// back-fill in config_store_backfill_legacy_ct_topology() collapses every
+// split map to SUMMED, so the topology-only predicate called a committed
+// {0,0,1} map "channel 2 only" and blinded S3/S9/S6b/S11/S14/S15 on the
+// channels that actually carry the CTs. This only WIDENS what guards see for
+// split maps; for both legacy maps it is bit-identical to the old rule.
+static inline bool config_store_ct_installed_effective(const config_store_record_t *rec)
+{
+    return ((rec->fields_set & CONFIG_STORE_SET_CT_INSTALLED) == 0u) || (rec->ct_installed != 0u);
+}
+
+static inline bool config_store_ct_channel_fitted_rec(const config_store_record_t *rec, uint8_t ch)
+{
+    bool installed = config_store_ct_installed_effective(rec);
+    if ((rec->fields_set & CONFIG_STORE_SET_ZONE_CT_CHANNEL) != 0u) {
+        return config_store_ct_channel_fitted_map(ch, installed, rec->zone_ct_channel);
+    }
+    return config_store_ct_channel_fitted(ch, installed, rec->ct_topology);
+}
+
+// Bit n set iff channel n is fitted (see _rec above).
+static inline uint8_t config_store_fitted_channel_mask(const config_store_record_t *rec)
+{
+    uint8_t m = 0u;
+    for (uint8_t ch = 0; ch < 3u; ch++) {
+        if (config_store_ct_channel_fitted_rec(rec, ch)) {
+            m |= (uint8_t)(1u << ch);
+        }
+    }
+    return m;
+}
+
+// Same OR as config_store_mask_current_present_to_fitted(), keyed on a
+// precomputed fitted-channel mask (config_store_fitted_channel_mask()).
+static inline bool config_store_mask_current_present_to_fitted_mask(const bool present[3],
+                                                                      uint8_t fitted_mask)
+{
+    for (uint8_t ch = 0; ch < 3u; ch++) {
+        if ((fitted_mask & (1u << ch)) != 0u && present[ch]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // config_store_current_sensing_commissioned() -- THE single place S9's
 // "is the current reading a MEASUREMENT or a heuristic" gate is decided.
 // safety_core.c's s_current_sensing_commissioned caches this per COMMIT_
@@ -1049,12 +1098,10 @@ static inline void config_store_backfill_legacy_ct_topology(config_store_record_
 // relaxed commissioned gate to arm against.
 static inline bool config_store_current_sensing_commissioned(const config_store_record_t *rec)
 {
-    bool ct_installed_effective =
-        ((rec->fields_set & CONFIG_STORE_SET_CT_INSTALLED) == 0u) || (rec->ct_installed != 0u);
     bool any_channel_fitted = false;
     bool every_fitted_channel_calibrated = true;
     for (uint8_t ch = 0; ch < 3u; ch++) {
-        if (!config_store_ct_channel_fitted(ch, ct_installed_effective, rec->ct_topology)) {
+        if (!config_store_ct_channel_fitted_rec(rec, ch)) {
             continue;
         }
         any_channel_fitted = true;

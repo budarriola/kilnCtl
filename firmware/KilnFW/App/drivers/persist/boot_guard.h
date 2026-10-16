@@ -329,7 +329,18 @@ bool boot_guard_counter_is_stuck(uint32_t rtc_magic, uint32_t rtc_marked_healthy
  * ota_routes_ok is the new half replacing the safety-link check: "the OTA
  * HTTP routes this whole recovery mechanism depends on actually came up" is
  * a real precondition for "safe to update again", where "an isolated
- * safety-processor link happens to be wired up and answering" never was. */
+ * safety-processor link happens to be wired up and answering" never was.
+ *
+ * Deliberate trade-off (AUDIT_BOOT_SEQUENCE LOW-1, 2026-10-15): web_ok and
+ * ota_routes_ok are REQUIRED to clear the counter even though control, the
+ * safety link and the LCD do not depend on them. A board whose radio or
+ * httpd fails on every boot therefore reaches RECOVERY_MODE_BOOT_THRESHOLD
+ * after 3 power cycles and boots the recovery image. That is intended:
+ * "the web/OTA surface is reachable" is what proves an update usable, and a
+ * persistent radio fault is exactly the state in which the operator must
+ * reach the recovery image (and its own AP) to repair or re-update. Do not
+ * split the criterion without an owner decision; the truth table is pinned
+ * in test_boot_guard.c. */
 bool boot_confirm_is_healthy(bool nvs_ok, bool web_ok, bool ota_routes_ok);
 
 /* What ota_rollback_confirm_task() (main.c) should do this poll, given the
@@ -364,6 +375,68 @@ typedef enum {
 
 boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok, bool web_ok,
                                            bool ota_routes_ok);
+
+/* First-boot confirm, re-sampled (audit AUDIT_UPDATE_FAULTS MED-3). The health inputs
+ * used to be fixed at boot and mark-valid was tried once, so a transient fault in the
+ * boot-time NVS snapshot or one failed esp_ota_mark_app_valid_cancel_rollback() left
+ * the image PENDING_VERIFY for the whole boot; the next reset then rolled back into
+ * recovery. boot_confirm_step() is called every poll: it re-samples nvs_ok through the
+ * injected callback, and on an OTA slot retries mark-valid until it reports success.
+ * boot_guard clear is only ever called from here, behind the health decision (never
+ * from an unconditional boot path). DONE only when everything required has verified. */
+typedef struct {
+    void *ctx;
+    bool (*resample_nvs)(void *ctx); /* re-run the NVS check, true = all mounted */
+    bool (*mark_valid)(void *ctx);   /* true = esp_ota_mark_app_valid_cancel_rollback() == ESP_OK */
+    bool (*read_valid)(void *ctx);   /* true = otadata state read back as VALID (never trust one mmap read:
+                                        XIP-from-PSRAM audit MED-1); NULL = no read-back available */
+    bool (*clear_counter)(void *ctx);/* true = boot_guard_mark_healthy() verified */
+    int32_t (*ms_since_boot_complete)(void *ctx); /* MED-1 gate: < 0 = boot not complete or confirm
+                                        withheld; else ms since the end of main_bridges_bringup().
+                                        Required: NULL keeps boot_confirm_step() PENDING forever. */
+} boot_confirm_ops_t;
+
+/* MED-1 (docs/audits/AUDIT_BOOT_SEQUENCE.md): neither mark-valid nor the guard clear may run
+ * until app_main has finished AND this soak has elapsed after it. The soak must exceed
+ * RTC_WATCHDOG_TIMEOUT_MS (20000 ms, rtc_watchdog.h, armed in main_boot_early.c): a failed
+ * monitor_task_start() (the only rtc_watchdog_feed() caller) resets the chip ~20 s after
+ * arming, so 30 s leaves a 10 s margin. */
+#define BOOT_CONFIRM_SOAK_MS 30000
+
+/* Elapsed ms between two 32-bit tick counts (wrap-safe), saturating at INT32_MAX so the
+ * value never goes negative on a board that stays unhealthy for weeks (REVIEW_OTA_BOOT_FIXES LOW-3). */
+int32_t boot_guard_soak_elapsed_ms(uint32_t now_ticks, uint32_t start_ticks, uint32_t tick_ms);
+
+/* boot_guard_boot_complete_signal(): end of main_bridges_bringup(). boot_guard_confirm_withhold():
+ * sticky for the boot, called when monitor_task_start() failed. Both cleared by boot_guard_init(). */
+void boot_guard_boot_complete_signal(void);
+void boot_guard_confirm_withhold(void);
+bool boot_guard_boot_complete(void);       /* signalled and not withheld */
+bool boot_guard_confirm_is_withheld(void);
+
+typedef struct {
+    bool is_factory;
+    bool web_ok;
+    bool ota_ok;
+    bool nvs_ok;           /* last resampled value */
+    bool mark_valid_done;  /* OTA slot: mark-valid succeeded AND read back VALID (sticky) */
+    bool mark_unverified;  /* gave up waiting for the read-back to say VALID; mark-valid returned OK */
+    uint8_t mark_fails;    /* failed/unverified mark-valid attempts so far */
+    uint8_t mark_skip;     /* polls left to skip before the next attempt (bounded backoff) */
+    bool clear_done;       /* boot_guard clear verified (sticky) */
+} boot_confirm_state_t;
+
+typedef enum {
+    BOOT_CONFIRM_STEP_PENDING = 0, /* call again next poll */
+    BOOT_CONFIRM_STEP_DONE,
+} boot_confirm_step_result_t;
+
+/* Mark-valid attempts that fail or do not read back VALID back off 1,2,4,8,16,16.. polls; after
+ * BOOT_CONFIRM_MARK_MAX_FAILS the image is accepted on mark-valid's own ESP_OK (flagged
+ * mark_unverified) so a read-back that can never say VALID cannot rewrite otadata forever. */
+#define BOOT_CONFIRM_MARK_MAX_FAILS 10u
+
+boot_confirm_step_result_t boot_confirm_step(boot_confirm_state_t *st, const boot_confirm_ops_t *ops);
 
 #ifdef __cplusplus
 }

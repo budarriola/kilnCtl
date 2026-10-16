@@ -118,6 +118,11 @@ from pathlib import Path
 # above. Say which pattern and why in the comment, the same way every
 # existing entry does.
 ALLOWLIST = {
+    # Pattern 3 (internal-SRAM-stack caller): the unattended-install request
+    # record (kiln_nvs / upd_inst) is written and erased only from
+    # update_install_http.c's POST handler, on the httpd task's internal-SRAM
+    # stack -- never the flash worker, never a PSRAM stack.
+    "update_install_http.c",
     # Pattern 1 (worker dispatch): save_kibase_job() runs via
     # uart_bridge_ext_run_on_flash_worker(), checking
     # uart_bridge_ext_is_on_flash_worker() first for the re-entrant case
@@ -402,10 +407,10 @@ ALLOWLIST = {
     # already worked the same way. Safe because every one of them, and
     # every caller in wifi_prov_api.c/wifi_prov_link.c, runs exclusively on
     # owner_task() (see wifi_prov.c's DEADLOCK RULE comment and
-    # wifi_prov.c:399's xTaskCreatePinnedToCore(owner_task, ...) -- a
-    # plain, non-WithCaps create, so its stack is internal SRAM, never
-    # PSRAM), which is wifi_prov's single serializing writer task, not a
-    # PSRAM-stacked httpd/handler task.
+    # wifi_prov.c's xTaskCreatePinnedToCoreWithCaps(owner_task, ...), which
+    # since 2026-10-14 has a PSRAM stack -- fine, because under
+    # CONFIG_SPIRAM_XIP_FROM_PSRAM NVS writes no longer freeze the cache), which
+    # is wifi_prov's single serializing writer task, not a handler task.
     "wifi_prov_nvs.c",
     # Pattern 3 (init-time only): zones/relay-name/zone-normals config
     # loads/saves run from the settings HTTP handler's own

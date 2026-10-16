@@ -234,8 +234,10 @@ int main(void)
     // own needed for this step.
     const uint8_t *metadata_region =
         (const uint8_t *)(XIP_BASE + BOOTLOADER_METADATA_FLASH_OFFSET);
+    const uint8_t *metadata_backup =
+        (const uint8_t *)(XIP_BASE + BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET);
     bootloader_metadata_t meta;
-    size_t latest_slot = bootloader_metadata_find_latest(metadata_region, &meta);
+    size_t latest_slot = bootloader_metadata_find_latest_ab(metadata_region, metadata_backup, &meta);
     if (latest_slot == BOOTLOADER_METADATA_NO_SLOT) {
         // No record in the log validates -- docs/BOOTLOADER.md section 3
         // step 2's "if both copies are bad, enter recovery", generalised to

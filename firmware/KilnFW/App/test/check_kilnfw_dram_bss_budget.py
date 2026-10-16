@@ -100,10 +100,14 @@ DEFAULT_ELF = base.DEFAULT_ELF
 # .dram0.bss back down to a measured 99016 B -- back under the original
 # 101000 B ceiling (1984 B headroom), which is restored here rather than
 # left raised.
-CEILING_BYTES = 101000
+CEILING_BYTES = 81500  # IRAMGATE 2026-10-13: measured 80728 after s_store -> PSRAM (was 101000)
 
 GRADED_SECTION = ".dram0.bss"
-CONTEXT_SECTIONS = (".dram0.data", ".ext_ram.bss")
+# IRAMGATE 2026-10-13: .dram0.data is internal DRAM too and was ungraded. Baseline
+# 24503 B; ceiling = baseline + ~500 B allowance.
+DATA_SECTION = ".dram0.data"
+DATA_CEILING_BYTES = 25000
+CONTEXT_SECTIONS = (".ext_ram.bss",)
 
 # objdump -h row: "Idx Name Size VMA LMA File off Algn"
 SECTION_ROW_RE = re.compile(r"^\s*\d+\s+(\S+)\s+([0-9a-fA-F]{8})\s+([0-9a-fA-F]{8})")
@@ -135,8 +139,11 @@ def main():
     ap.add_argument("--elf", default=DEFAULT_ELF)
     ap.add_argument("--ceiling-bytes", type=int, default=None,
                     help="override CEILING_BYTES (used by the negative test)")
+    ap.add_argument("--data-ceiling-bytes", type=int, default=None,
+                    help="override DATA_CEILING_BYTES (used by the negative test)")
     args = ap.parse_args()
-    ceiling = args.ceiling_bytes if args.ceiling_bytes else CEILING_BYTES
+    data_ceiling = args.data_ceiling_bytes if args.data_ceiling_bytes is not None else DATA_CEILING_BYTES  # IRAMGATE LOW-3: an explicit 0 is a value
+    ceiling = args.ceiling_bytes if args.ceiling_bytes is not None else CEILING_BYTES
     name = "check_kilnfw_dram_bss_budget"
 
     if not os.path.isfile(args.elf):
@@ -172,6 +179,17 @@ def main():
         print("  Find the new static(s): xtensa-esp-elf-nm -S --size-sort <elf> | grep ' [bB] ' | tail")
         print("  Prefer EXT_RAM_BSS_ATTR (PSRAM .bss) for anything large that is not touched by an")
         print("  ISR, DMA, or a flash-write path. Raise CEILING_BYTES only per the module docstring.")
+        return 1
+    if DATA_SECTION not in sizes:
+        # IRAMGATE LOW-3: a renamed section must not silently stop grading initialised data.
+        print(f"{name}: FAIL -- {DATA_SECTION} section not present in {args.elf}; "
+              f"sections seen: {', '.join(sorted(sizes))}")
+        return 1
+    data = sizes[DATA_SECTION]
+    print(f"{name}: {DATA_SECTION} = {data} B, ceiling {data_ceiling} B (headroom {data_ceiling - data} B)")
+    if data > data_ceiling:
+        print(f"{name}: FAIL -- {DATA_SECTION} is {data} B, over the {data_ceiling} B ceiling by "
+              f"{data - data_ceiling} B (initialised statics are internal DRAM; make big tables const or PSRAM).")
         return 1
     print(f"{name}: PASS")
     return 0

@@ -586,7 +586,7 @@ static void reload_live_profile_if_changed(void)
                                                                    candidate->segment_count, PROFILE_MAX_SEGMENTS);
         for (uint8_t i = 0; i < seg_n; i++) {
             io_seg_runtime_t *r = &s_exec.io_segs[i];
-            if (!r->active || r->blocking) {
+            if ((!r->active && !r->resume_pending) || r->blocking) {
                 continue;
             }
             r->remaining_s = profile_live_pickup_rederive_remaining_s(s_exec.profile.segments[i].dwell_min,
@@ -765,7 +765,11 @@ void executor_task_entry(void *arg)
              * to honor a segment's leave_on_at_end -- see io_seg_finish()'s
              * doc comment. A segment already finished (DONE already swept
              * it, or it never started) costs nothing extra here. */
-            io_segs_force_all_off(false);
+            if (s_exec.state == PROFILE_EXEC_PAUSED) {
+                io_segs_pause_all_off(); /* MED-2: off during the pause, unfinished non-blocking segments resume */
+            } else {
+                io_segs_force_all_off(false);
+            }
             /* Spare-relay WP-3: retry a run-end aux OFF whose write failed.
              * Never while PAUSED (a pause holds aux at its last state while no fault is asserted -- see profile_executor_aux_fault_drop()) and a
              * no-op once the write has landed, so it cannot fight a later
@@ -852,6 +856,7 @@ void executor_task_entry(void *arg)
         /* TODO relay/IO segments: tick every active NON-BLOCKING segment's
          * own hold timer, independent of whichever ramp/dwell segment is
          * current below -- see io_segs_tick()'s doc comment. */
+        io_segs_resume_pending(pre_lock_pico_tripped); /* MED-2: segments kept across a pause */
         io_segs_tick(dt_s);
 
         /* Review-2 MEDIUM-1: retry pending OFF bits for relays this run does not own. */

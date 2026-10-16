@@ -690,6 +690,10 @@ void do_ap_fallback_tick(void)
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(APSTA) failed: %s", esp_err_to_name(err));
+        /* AUDIT_WIFI LOW-3: the timer is one-shot, so without a re-arm a
+         * transient driver failure leaves the board with no AP and no further
+         * fallback attempt until some unrelated event happens. Try again. */
+        start_ap_fallback_timer();
     } else {
         apply_ap_config();
         s_wifi.ap_fallback_active = true;
@@ -718,6 +722,8 @@ void ap_fallback_timer_cb(void *arg)
  * periodic cadence is still worth keeping for its own sake (it re-picks a
  * better candidate rather than retrying the same one), so nothing about the
  * policy changed, only which task executes it. */
+static bool s_connected_unassoc_seen; /* MED-1 debounce, owner task only */
+
 void do_rescan_tick(void)
 {
     /* 2026-09-28 owner request: home Wi-Fi already came back but the AP
@@ -729,6 +735,33 @@ void do_rescan_tick(void)
      * must run even though state == CONNECTED, which is why it is checked
      * and returned from before the early-return below that skips everything
      * else while connected. */
+    /* AUDIT_WIFI MED-1: a STA_DISCONNECTED event dropped by post_event()'s
+     * full 0-tick queue strands state at CONNECTED forever (the driver emits
+     * ONE event and never reconnects on its own). Ground-truth check: if the
+     * driver says we are not associated on two consecutive ticks (the
+     * debounce, ~one rescan interval, so a momentary blip that its own event
+     * is about to report is not double-handled), run the normal disconnect
+     * handling. One static flag, no new task or buffer. */
+    if (s_wifi.mode == WIFI_PROV_MODE_HOME && s_wifi.state == WIFI_PROV_STATE_CONNECTED &&
+        s_wifi.saved_nets.count > 0) {
+        wifi_ap_record_t ap_chk = { 0 };
+        if (esp_wifi_sta_get_ap_info(&ap_chk) != ESP_OK) {
+            if (s_connected_unassoc_seen) {
+                s_connected_unassoc_seen = false;
+                ESP_LOGW(WIFI_PROV_TAG, "state CONNECTED but station not associated -- missed disconnect event, "
+                                        "running disconnect handling");
+                do_ev_sta_disconnected();
+            } else {
+                s_connected_unassoc_seen = true;
+            }
+            return;
+        }
+    }
+    s_connected_unassoc_seen = false;
+
+    /* AUDIT_WIFI LOW-6 (wififx review): the deferred-teardown early return used
+     * to run BEFORE the association ground-truth check above, so a missed
+     * disconnect while the AP teardown was deferred was never noticed. */
     if (s_wifi.state == WIFI_PROV_STATE_CONNECTED && s_wifi.ap_pending_teardown) {
         if (ap_teardown_should_defer()) {
             return; /* still logged in / still a client on the AP -- try again next tick */
@@ -1145,6 +1178,14 @@ void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)arg;
     (void)base;
     (void)data;
+    if (id == IP_EVENT_STA_LOST_IP) {
+        /* AUDIT_WIFI LOW-2: losing the lease with the association intact emits
+         * no STA_DISCONNECTED. Run the normal disconnect handling, whose
+         * reconcile_sta_state() ground-truth check ignores it if the lease is
+         * in fact still held. */
+        post_event(CMD_EV_STA_DISCONNECTED);
+        return;
+    }
     if (id != IP_EVENT_STA_GOT_IP) {
         return;
     }
@@ -1220,7 +1261,7 @@ static void dns_hijack_task(void *arg)
     if (sock < 0) {
         ESP_LOGE(WIFI_PROV_TAG, "dns_hijack: socket() failed (errno %d) -- captive-portal redirect disabled", errno);
         startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
 
@@ -1232,7 +1273,7 @@ static void dns_hijack_task(void *arg)
         ESP_LOGE(WIFI_PROV_TAG, "dns_hijack: bind(:53) failed (errno %d) -- captive-portal redirect disabled", errno);
         startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
         close(sock);
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
 

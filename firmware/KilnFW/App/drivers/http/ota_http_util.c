@@ -36,6 +36,8 @@ const char *ota_http_pico_rollback_reason_str(uint8_t reason_code)
     switch (reason_code) {
         case KILNLINK_ROLLBACK_RESULT_REASON_ARMED:
             return "relay is ARMED -- rollback is refused while ARMED";
+        case KILNLINK_ROLLBACK_RESULT_REASON_TRIP_INEFFECTIVE:
+            return "S9 TRIP_INEFFECTIVE is latched (contactor may be welded) -- rollback would clear it";
         case KILNLINK_ROLLBACK_RESULT_REASON_NO_METADATA:
             return "no bootloader metadata to roll back from";
         case KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID:

@@ -51,7 +51,9 @@ class FetchFakeBoard(FakeBoard):
               "bytes_done": 0, "bytes_total": 0, "busy": False, "repo": "owner/kiln",
               "tag": "", "prerelease": False, "app_size": 0, "running": "", "commit": "", "sha256": "",
               "verdict": "", "reason": "", "allowed": False, "needs_typed_confirm": False,
-              "zones_cfg_lower": False}
+              "zones_cfg_lower": False,
+              "heap": {"sampled": False, "rtc_free": 0, "start_free": 0, "start_dma": 0, "hop": "none",
+                       "hop_free": 0, "hop_settle_tries": 0, "min_free": 0, "min_dma": 0, "min_block": 0}}
         if j is None:
             return st
         finished = j["polls"] >= self.polls_to_finish
@@ -157,6 +159,43 @@ class StatusTest(_Base):
     def test_unreachable(self):
         with unittest.mock.patch.object(uhc.http_auth, "urlopen", side_effect=urllib.error.URLError("down")):
             self.assertTrue(msu.update_fetch_status().startswith("error:"))
+
+    def test_heap_readings_are_printed(self):
+        # UPDFX7: the worst settle result over all redirect hops and the job's low-waters reach the status text.
+        orig = self.board._fetch_status
+
+        def with_heap():
+            st = orig()
+            st["heap"] = {"sampled": True, "rtc_free": 7788, "start_free": 34783, "start_dma": 26995,
+                          "hop": "admitted", "hop_free": 32339, "hop_settle_tries": 2,
+                          "min_free": 13295, "min_dma": 5507, "min_block": 7936}
+            return st
+
+        self.board._fetch_status = with_heap
+        out = msu.update_fetch_status()
+        for needle in ("start free=34783", "dma=26995", "rtc=7788", "hop=admitted", "heap settle:",
+                       "lowest free=32339", "most re-samples=2", "worst over all hops", "low-water free=13295", "dma=5507",
+                       "largest_block=7936"):
+            self.assertIn(needle, out)
+
+    def test_refused_hop_prints_its_settle_details(self):
+        # UPDFX9 INFO-3: a refused hop still carries the settle result (free reached, re-sample count).
+        orig = self.board._fetch_status
+
+        def with_heap():
+            st = orig()
+            st["heap"] = {"sampled": True, "rtc_free": 7788, "start_free": 34783, "start_dma": 26995,
+                          "hop": "refused", "hop_free": 29000, "hop_settle_tries": 12,
+                          "min_free": 13295, "min_dma": 5507, "min_block": 7936}
+            return st
+
+        self.board._fetch_status = with_heap
+        out = msu.update_fetch_status()
+        for needle in ("hop=refused", "heap settle:", "lowest free=29000", "most re-samples=12"):
+            self.assertIn(needle, out)
+
+    def test_unsampled_heap_is_not_printed(self):
+        self.assertNotIn("heap[", msu.update_fetch_status())
 
 
 class CheckTest(_Base):

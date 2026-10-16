@@ -40,6 +40,7 @@
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "update_http.h"
+#include "update_install_http.h"
 #include "update_settings.h"
 #include "update_settings_http.h"
 #include "factory_reset.h"
@@ -154,6 +155,87 @@ typedef struct {
 /* stack_margin_register() target for the ota_confirm task; cleared by the task before it self-deletes. */
 static TaskHandle_t s_ota_confirm_task;
 
+typedef struct {
+    bool rollback_cancel_ok;
+    bool link_up;
+    TickType_t complete_tick; /* 0 until boot_guard_boot_complete() first seen true */
+} main_ota_confirm_step_ctx_t;
+
+static bool main_ota_resample_nvs(void *c)
+{
+    (void)c;
+    nvs_report_capture(); /* re-runnable, read-only probe */
+    size_t                      n = 0;
+    const nvs_report_section_t *sec = nvs_report_get(&n);
+    bool                        ok = (n > 0);
+    for (size_t i = 0; i < n; i++) {
+        if (!sec[i].mounted) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static bool main_ota_mark_valid(void *c)
+{
+    main_ota_confirm_step_ctx_t *sc = (main_ota_confirm_step_ctx_t *)c;
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        sc->rollback_cancel_ok = true;
+        ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
+                      "-- this image is no longer PENDING_VERIFY");
+        if (!sc->link_up) {
+            ESP_LOGW(MAIN_TAG, "OTA rollback confirmed WITHOUT a live safety-link check "
+                          "(safety_link_up=0)");
+        }
+        return true;
+    }
+    ESP_LOGE(MAIN_TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s -- will retry",
+             esp_err_to_name(err));
+    return false;
+}
+
+/* Read back the running image's otadata state; never trust one mmap read (XIP audit MED-1). */
+static bool main_ota_read_valid(void *c)
+{
+    (void)c;
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    esp_ota_img_states_t   state = ESP_OTA_IMG_UNDEFINED;
+    if (!run || esp_ota_get_state_partition(run, &state) != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "ota state read-back failed -- will retry mark-valid");
+        return false;
+    }
+    if (state != ESP_OTA_IMG_VALID) {
+        ESP_LOGW(MAIN_TAG, "ota state reads %d (not VALID) after mark-valid -- will retry", (int)state);
+        return false;
+    }
+    return true;
+}
+
+/* MED-1: ms since boot_guard_boot_complete() first read true; -1 while not complete or withheld.
+ * The first-seen tick lives in the step ctx, so the soak counts from when this task saw completion. */
+static int32_t main_ota_ms_since_boot_complete(void *c)
+{
+    main_ota_confirm_step_ctx_t *sc = (main_ota_confirm_step_ctx_t *)c;
+    if (!boot_guard_boot_complete()) {
+        return -1;
+    }
+    if (sc->complete_tick == 0) {
+        sc->complete_tick = xTaskGetTickCount();
+        if (sc->complete_tick == 0) {
+            sc->complete_tick = 1;
+        }
+    }
+    return boot_guard_soak_elapsed_ms((uint32_t)xTaskGetTickCount(), (uint32_t)sc->complete_tick,
+                                      (uint32_t)portTICK_PERIOD_MS);
+}
+
+static bool main_ota_clear_counter(void *c)
+{
+    (void)c;
+    return boot_guard_mark_healthy();
+}
+
 static void main_ota_rollback_confirm_task(void *arg)
 {
     main_ota_confirm_ctx_t ctx = *(main_ota_confirm_ctx_t *)arg;
@@ -176,120 +258,58 @@ static void main_ota_rollback_confirm_task(void *arg)
 
     TickType_t start = xTaskGetTickCount();
     bool       warned = false;
-    bool       rollback_cancel_attempted = false; /* OTA-slot branch only -- see below */
-    bool       rollback_cancel_ok = false;        /* esp_ota_mark_app_valid_cancel_rollback() == ESP_OK */
-    bool       clear_warned = false;
+
+    /* MED-3 (docs/audits/AUDIT_UPDATE_FAULTS.md): nvs_ok is re-sampled every poll and
+     * mark-valid is retried until it reports ESP_OK, both through boot_confirm_step()
+     * (boot_guard.c, host-tested). web_ok/ota_ok are route-registration results that
+     * cannot change within this boot. */
+    main_ota_confirm_step_ctx_t sctx = { .rollback_cancel_ok = false, .link_up = false };
+    boot_confirm_ops_t          ops  = { .ctx = &sctx,
+                                         .resample_nvs = main_ota_resample_nvs,
+                                         .mark_valid = main_ota_mark_valid,
+                                         .read_valid = main_ota_read_valid,
+                                         .clear_counter = main_ota_clear_counter,
+                                         .ms_since_boot_complete = main_ota_ms_since_boot_complete };
+    boot_confirm_state_t        st   = { .is_factory = is_factory, .web_ok = ctx.web_ok,
+                                         .ota_ok = ctx.ota_ok, .nvs_ok = ctx.nvs_ok };
+    if (is_factory) {
+        ESP_LOGI(MAIN_TAG, "running from the factory partition -- OTA rollback confirmation does "
+                      "not apply here (no PENDING_VERIFY slot to cancel); boot_guard's counter is "
+                      "still cleared once NVS, web server and OTA routes are healthy.");
+    }
 
     for (;;) {
-        bool link_up = false;
+        sctx.link_up = false;
         if (ctx.safety) {
-            safety_link_status_t st;
-            if (safety_link_get_status(ctx.safety, &st) == ESP_OK) {
-                link_up = st.link_up;
+            safety_link_status_t lst;
+            if (safety_link_get_status(ctx.safety, &lst) == ESP_OK) {
+                sctx.link_up = lst.link_up;
             }
         }
 
-        boot_confirm_action_t action =
-            boot_confirm_decide(is_factory, ctx.nvs_ok, ctx.web_ok, ctx.ota_ok);
-
-        if (action == BOOT_CONFIRM_SKIP_FACTORY) {
-            if (!clear_warned) {
-                ESP_LOGI(MAIN_TAG, "running from the factory partition -- OTA rollback confirmation does "
-                              "not apply here (there is no PENDING_VERIFY slot to cancel; "
-                              "esp_ota_mark_app_valid_cancel_rollback() only means something after a "
-                              "real OTA into ota_0/ota_1). NVS, web server and OTA routes are healthy, "
-                              "so boot_guard's counter is still cleared below.");
-            }
-            /* 2026-09-08 recovery-loop audit (docs/audits/
-             * boot_guard_recovery_loop_2026-09-08.md): boot_guard_mark_healthy()
-             * now returns false when its own read-back verification shows the
-             * clear did NOT persist, even though the underlying NVS write call
-             * reported success. The old code called this once and deleted
-             * itself unconditionally -- exactly the bug that left a healthy
-             * board (NVS/web/OTA all up, 11+ minutes of uptime) stuck in
-             * recovery mode forever: the very first (and only) attempt's
-             * write silently failed to stick, nothing ever tried again, and
-             * the task exited believing it had succeeded. Now: keep polling
-             * (existing 500 ms cadence) and retrying the clear until it is
-             * actually verified, rather than trusting one shot. */
-            if (boot_guard_mark_healthy()) {
-                s_ota_confirm_task = NULL;
-                vTaskDelete(NULL);
-                return;
-            }
-            if (!clear_warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(MAIN_OTA_CONFIRM_WARN_MS)) {
-                ESP_LOGE(MAIN_TAG, "boot-guard clear still not verified %lu ms after boot -- will keep "
-                              "retrying every %d ms; this boot stays counted as unconfirmed until it "
-                              "succeeds",
-                         (unsigned long)MAIN_OTA_CONFIRM_WARN_MS, MAIN_OTA_CONFIRM_POLL_MS);
-                clear_warned = true;
-            }
-            vTaskDelay(pdMS_TO_TICKS(MAIN_OTA_CONFIRM_POLL_MS));
-            continue;
-        }
-
-        if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT) {
-            if (!rollback_cancel_attempted) {
-                esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-                rollback_cancel_ok = (err == ESP_OK);
-                if (err == ESP_OK) {
-                    ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
-                                  "-- this image is no longer PENDING_VERIFY");
-                } else {
-                    ESP_LOGE(MAIN_TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s "
-                                  "(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE off, or not an OTA slot?)",
-                             esp_err_to_name(err));
-                }
-                if (!link_up) {
-                    /* Degraded-but-recorded, per boot_guard.h's doc comment: this
-                     * confirmation did NOT wait for a live safety-link frame
-                     * exchange. Announced loudly rather than silently, so a board
-                     * that is SUPPOSED to have a safety processor answering does
-                     * not have that fact buried in an INFO line. */
-                    ESP_LOGW(MAIN_TAG, "OTA rollback confirmed WITHOUT a live safety-link check "
-                                  "(safety_link_up=0) -- if this board is expected to have a safety "
-                                  "processor answering, that is a separate problem worth investigating");
-                }
-                rollback_cancel_attempted = true; /* esp_ota_mark_app_valid_cancel_rollback() is a
-                                                    * one-shot bootloader-state transition -- do not
-                                                    * repeat it every poll while only the boot_guard
-                                                    * clear below is still being retried. */
-            }
-            /* Same predicate as the rollback decision just above, by
-             * construction (boot_confirm_is_healthy() was already
-             * satisfied) -- see boot_guard.h's doc comment for why these two
-             * must never be allowed to disagree again. Retried the same way
-             * as the factory-partition branch above -- see its comment. */
-            if (boot_guard_mark_healthy()) {
-                /* OT-G06: only now (marked valid, boot_guard cleared) drop a
-                 * stage that is the image we are running. Uses OUR mark-valid
-                 * result, not esp_ota_get_state_partition() (otadata[0], not the
-                 * active entry on this table). Never gates anything. The stack
-                 * high-water mark is logged once so the bench can size this task. */
-                (void)update_http_stale_stage_check(rollback_cancel_ok);
+        if (boot_confirm_step(&st, &ops) == BOOT_CONFIRM_STEP_DONE) {
+            if (!is_factory) {
+                /* OT-G06: only now (marked valid, boot_guard cleared) drop a stage that is the
+                 * image we are running. Uses OUR mark-valid result. Never gates anything. */
+                (void)update_http_stale_stage_check(st.mark_valid_done);
+                /* LOW-4: a leftover install request must not replay at a later recovery entry. */
+                (void)update_install_http_drop_stale_request();
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
-                s_ota_confirm_task = NULL;
-                vTaskDelete(NULL);
-                return;
             }
-            if (!clear_warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(MAIN_OTA_CONFIRM_WARN_MS)) {
-                ESP_LOGE(MAIN_TAG, "boot-guard clear still not verified %lu ms after boot -- will keep "
-                              "retrying every %d ms; this boot stays counted as unconfirmed until it "
-                              "succeeds",
-                         (unsigned long)MAIN_OTA_CONFIRM_WARN_MS, MAIN_OTA_CONFIRM_POLL_MS);
-                clear_warned = true;
-            }
-            vTaskDelay(pdMS_TO_TICKS(MAIN_OTA_CONFIRM_POLL_MS));
-            continue;
+            s_ota_confirm_task = NULL;
+            vTaskDelete(NULL);
+            return;
         }
 
         if (!warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(MAIN_OTA_CONFIRM_WARN_MS)) {
-            ESP_LOGW(MAIN_TAG, "OTA rollback not yet confirmed %lu ms after boot: nvs_ok=%d web_ok=%d "
-                          "ota_ok=%d (safety_link_up=%d, informational only) -- image stays "
-                          "PENDING_VERIFY until nvs/web/ota are all true",
-                     (unsigned long)MAIN_OTA_CONFIRM_WARN_MS, (int)ctx.nvs_ok, (int)ctx.web_ok,
-                     (int)ctx.ota_ok, (int)link_up);
+            ESP_LOGW(MAIN_TAG, "boot confirm not complete %lu ms after boot: nvs_ok=%d web_ok=%d "
+                          "ota_ok=%d mark_valid=%d guard_clear=%d (safety_link_up=%d, informational "
+                          "only) -- retrying every %d ms; the image stays PENDING_VERIFY and this "
+                          "boot counted as unconfirmed until it succeeds",
+                     (unsigned long)MAIN_OTA_CONFIRM_WARN_MS, (int)st.nvs_ok, (int)st.web_ok,
+                     (int)st.ota_ok, (int)st.mark_valid_done, (int)st.clear_done,
+                     (int)sctx.link_up, MAIN_OTA_CONFIRM_POLL_MS);
             warned = true;
         }
 
@@ -502,6 +522,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     } else if (update_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "update_http_start failed: %s -- no update-stage endpoints this boot",
                  esp_err_to_name(update_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
+    }
+
+    // Unattended install of the staged update (POST /api/update/install, GET /api/update/status).
+    esp_err_t update_install_http_err = update_install_http_start();
+    if (update_install_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "update_install_http_start failed: %s -- no install endpoint this boot",
+                 esp_err_to_name(update_install_http_err));
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
@@ -944,6 +972,10 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (monitor_task_start(&monitor) != pdPASS) {
         ESP_LOGE(MAIN_TAG, "Failed to start heartbeat monitor task");
         startup_fault_note(STARTUP_FAULT_HEARTBEAT_MONITOR);
+        /* MED-1: no heartbeat monitor means nothing feeds the RTC watchdog and the chip
+         * resets ~20 s after boot. Never confirm such a boot, so the boot_guard counter
+         * climbs and the board reaches recovery instead of reset-looping. */
+        boot_guard_confirm_withhold();
     }
 
     // --- PC link -----------------------------------------------------------

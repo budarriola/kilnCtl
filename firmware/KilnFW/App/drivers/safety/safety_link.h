@@ -1888,6 +1888,16 @@ esp_err_t safety_link_stop(SafetyLinkClass *link);
  * GET_STATUS from. */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out);
 
+/* Guard audit 2026-10-14 A1: SAFETY_TRIP_* value for S9 TRIP_INEFFECTIVE (welded
+ * K4), SaftyFW safety_guards.h. trip_mask bit is (reason - 1). */
+#define SAFETY_LINK_TRIP_REASON_INEFFECTIVE 10u
+
+/* Narrow DIAG read for sw_reset_http.c's S9 gate: the Pico's latched trip reason,
+ * and whether it is FRESH (a DIAG was received since the Pico's last reboot AND
+ * the link is up). *out_reason is 0 when not fresh. Same locking as
+ * safety_link_get_status() without copying the large status struct. */
+esp_err_t safety_link_get_diag_trip_reason(SafetyLinkClass *link, bool *out_fresh, uint8_t *out_reason);
+
 /* Narrow DIAG read for safety_cfg_write.c's F3 persisted check: just whether a
  * DIAG was ever received and its flags byte, without copying the whole (large)
  * safety_link_status_t onto a caller's task stack. Same locking as

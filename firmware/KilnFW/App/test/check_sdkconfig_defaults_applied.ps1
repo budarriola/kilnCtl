@@ -51,6 +51,7 @@ $kilnfwRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $DefaultsPath) {
     $DefaultsPath = Join-Path $kilnfwRoot "sdkconfig.defaults"
 }
+$explicitSdkconfig = [bool]$SdkconfigPath
 if (-not $SdkconfigPath) {
     $SdkconfigPath = Join-Path $kilnfwRoot "sdkconfig"
 }
@@ -70,7 +71,9 @@ $watchedKeys = @(
     'CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS',      # 2026-09-23: bench-proven 4 vs. IDF's regenerated 0
     'CONFIG_KILNCTL_ENABLE_GPIO_PROBE',     # 2026-09-23: pinned y so a clean worktree keeps gpio_probe
     'CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC',    # 2026-10-05 WP8: TLS option D; a stale sdkconfig keeps option B (does not fit)
-    'CONFIG_MBEDTLS_DYNAMIC_BUFFER'         # 2026-10-05 WP8: TLS option D, same reason
+    'CONFIG_MBEDTLS_DYNAMIC_BUFFER',        # 2026-10-05 WP8: TLS option D, same reason
+    'CONFIG_UART_ISR_IN_IRAM',              # 2026-10-14: stays OFF; XIP keeps the cache on during flash erase/write (XIP_PSRAM_INVESTIGATION.md)
+    'CONFIG_SPIRAM_XIP_FROM_PSRAM'          # 2026-10-14: kilnlink RX survives flash erase/write without internal RAM
 )
 
 function Get-ConfigValue {
@@ -123,6 +126,43 @@ if ($missingFromDefaults.Count -gt 0) {
     Write-Host "CHECK FAILED: watched key(s) missing from $DefaultsPath :" -ForegroundColor Red
     foreach ($k in $missingFromDefaults) { Write-Host "  $k" -ForegroundColor Red }
     throw "sdkconfig.defaults no longer sets $($missingFromDefaults.Count) watched key(s) -- see DRAM_PSRAM_STATUS.md section 5"
+}
+
+# Keys whose VALUE (not merely presence) is load-bearing. Deleting the line is caught above; flipping it to
+# "# ... is not set" (or any other value) is a valid pin the generic comparison would happily match against a
+# regenerated sdkconfig, so assert the expected value in sdkconfig.defaults itself (REVIEW_LINKCRC LOW-3).
+$mustBe = @{
+    'CONFIG_SPIRAM_XIP_FROM_PSRAM' = 'y'          # off (with the UART ISR not in IRAM) brings back the 14/8/12/28 link errors during a fetch (LINK_CRC_DURING_FETCH.md)
+    'CONFIG_UART_ISR_IN_IRAM' = '(not set)'       # on costs ~12 KB internal RAM (rings move from PSRAM) and starves the fetch admission
+}
+$wrongValue = @()
+foreach ($key in $mustBe.Keys) {
+    if ($defaultsValues[$key] -ne $mustBe[$key]) {
+        $wrongValue += "'$key' must be $($mustBe[$key]) in sdkconfig.defaults, found $($defaultsValues[$key])"
+    }
+}
+if ($wrongValue.Count -gt 0) {
+    Write-Host "CHECK FAILED: load-bearing sdkconfig.defaults value changed:" -ForegroundColor Red
+    foreach ($m in $wrongValue) { Write-Host "  $m" -ForegroundColor Red }
+    throw "$($wrongValue.Count) load-bearing sdkconfig.defaults value(s) are wrong -- see docs/audits/REVIEW_LINKCRC.md LOW-3"
+}
+
+# REVIEW_XIPLAND MED-1: a fresh worktree has no sdkconfig, but a stale one elsewhere is what a build
+# would actually use. Before settling for the WARNING, fall back to the config check_00 publishes
+# (build/sdkconfig), then the main worktree's sdkconfig (what check_00 copies in).
+if (-not $explicitSdkconfig -and -not (Test-Path $SdkconfigPath)) {
+    $cands = New-Object System.Collections.Generic.List[string]
+    $cands.Add((Join-Path $kilnfwRoot "build\sdkconfig"))
+    # Same constant check_00_kilnfw_target_build.ps1 uses for its fallback copy.
+    $mainRoot = if ($env:KILNCTL_MAIN_REPO_ROOT) { $env:KILNCTL_MAIN_REPO_ROOT } else { "C:\Users\budar\OneDrive\Desktop\kilnCtl" }
+    $cands.Add((Join-Path $mainRoot "firmware\KilnFW\sdkconfig"))
+    foreach ($c in $cands) {
+        if (Test-Path $c) {
+            Write-Host "NOTE: no sdkconfig at $SdkconfigPath; checking the pins against $c instead." -ForegroundColor Yellow
+            $SdkconfigPath = $c
+            break
+        }
+    }
 }
 
 if (-not (Test-Path $SdkconfigPath)) {

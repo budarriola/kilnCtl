@@ -37,7 +37,7 @@ static void test_lower_updates_and_alarm_fires_once(void)
     (void)dram_watch_update(&w, KILN_DRAM_LARGEST_ALARM_BYTES, 1);
     dram_watch_event_t ev = dram_watch_update(&w, KILN_DRAM_LARGEST_ALARM_BYTES - 1, 2);
     TEST_CHECK(ev.new_low && ev.alarm_first, "one byte under the alarm: new low and first alarm");
-    ev = dram_watch_update(&w, 8192, 3);
+    ev = dram_watch_update(&w, 7000, 3);
     TEST_CHECK(ev.new_low && !ev.alarm_first, "further drop: new low, alarm already reported");
     ev = dram_watch_update(&w, 9728, 4);
     ev = dram_watch_update(&w, 100, 5);
@@ -77,11 +77,11 @@ static void test_alarm_pending_once_with_its_own_sample(void)
 {
     dram_watch_t w;
     dram_watch_init(&w);
-    (void)dram_watch_update(&w, 8192, 57000);
+    (void)dram_watch_update(&w, KILN_DRAM_LARGEST_ALARM_BYTES - 1, 57000);
     (void)dram_watch_update(&w, 4096, 57002);
     dram_watch_pending_t p = dram_watch_take_pending(&w);
     TEST_CHECK(p.alarm, "alarm owed after the first sample under the floor");
-    TEST_CHECK(p.alarm_largest == 8192 && p.alarm_at_s == 57000,
+    TEST_CHECK(p.alarm_largest == KILN_DRAM_LARGEST_ALARM_BYTES - 1 && p.alarm_at_s == 57000,
                "the alarm reports the sample that crossed, not a later one");
     TEST_CHECK(p.new_low && p.low_largest == 4096, "the coalesced low is the current one");
     (void)dram_watch_update(&w, 9728, 57004);

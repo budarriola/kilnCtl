@@ -417,7 +417,12 @@ class BenchTestRunner:
     def run(self, suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
              allow_heat: bool = True, lcd_stop_heat: bool = False,
              lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
-             tag: Optional[str] = None) -> RunOutcome:
+             tag: Optional[str] = None, confirm: bool = False) -> RunOutcome:
+        # The release suite trips the latch, heats and stages firmware: gate it
+        # here too, not only in the MCP layer (REVIEW_RELSUITEFX LOW-1).
+        if suite == "release" and not dry_run and confirm is not True:
+            raise ValueError("suite 'release' trips the safety latch, heats and stages/installs "
+                             "firmware; confirm=True (exactly True) is required")
         requested = suite_case_ids(suite)
         if cases:
             unknown = [c for c in cases if c not in REGISTRY]
@@ -657,7 +662,7 @@ def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = Fal
               allow_heat: bool = True, lcd_stop_heat: bool = False,
              lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
               tag: Optional[str] = None, host: Optional[str] = None,
-              logs_root: Optional[str] = None) -> RunOutcome:
+              logs_root: Optional[str] = None, confirm: bool = False) -> RunOutcome:
     """Convenience entry point -- NOT what mcp_server_bench_test.py's
     bench_test_run() calls; that tool builds its own ctx directly (resolving
     `host` via `mcp_server_ota._ota_resolve_host_with_source` before it ever
@@ -673,4 +678,5 @@ def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = Fal
     runner = BenchTestRunner(ctx, logs_root=logs_root)
     return runner.run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
                        lcd_stop_heat=lcd_stop_heat,
-                       lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag)
+                       lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag,
+                       confirm=confirm)

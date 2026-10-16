@@ -178,6 +178,19 @@ bool totp_forgot_board_cap_blocked(const totp_forgot_board_cap_t *c);
 // (saturating); a success leaves it unchanged (see above).
 void totp_forgot_board_cap_record(totp_forgot_board_cap_t *c, bool verified);
 
+// --- Physical-reset wipe request (AUDIT_TOTP MED-1) -------------------------
+// The LCD four-corner reset runs on the LVGL task, but the RAM state it must
+// also destroy (the reset-token table in auth_totp_http.c, the pending
+// enrollment secret in security_http.c) is owned by the httpd worker and has
+// no lock. Instead of touching it cross-task, the gesture POSTS a request
+// (a monotonically increasing generation, one writer per call, no lock, no
+// RAM beyond one word) and each httpd-side owner APPLIES it on the next
+// request it serves, before it reads its state: it keeps its own "seen"
+// generation and wipes when totp_wipe_request_gen() differs. Two owners, two
+// independent seen counters, so neither consumes the other's request.
+void totp_wipe_request_post(void);
+uint32_t totp_wipe_request_gen(void);
+
 #ifdef __cplusplus
 }
 #endif

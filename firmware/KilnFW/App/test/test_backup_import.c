@@ -147,6 +147,7 @@ static bool test_backup_import_apply(const char *body, char *err_msg, size_t err
 // below can call its static POST/GET handlers directly (its other two symbols resolve against
 // the real http_auth_http.c / the NULL wifi_provision_http_get_server() fake in this executable).
 esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other httpd stubs
+void update_fetch_backoff_clear(void) {} /* UPDLOW MED-1: update_fetch.c is not linked here */
 #include "../drivers/update/update_settings_http.c"
 
 // LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) -- used by the
@@ -926,6 +927,11 @@ float zones_config_peek_slot_max_temp_c(uint8_t zone_index)
 {
     (void)zone_index;
     return 0.0f;
+}
+static float s_slot_max_ramp[8];
+float zones_config_peek_slot_max_ramp_c_per_hr(uint8_t zone_index)
+{
+    return zone_index < 8 ? s_slot_max_ramp[zone_index] : 0.0f;
 }
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
@@ -2941,6 +2947,53 @@ static void test_unknown_version_refused(void)
 
     TEST_CHECK(!ok, "version 8 is newer than this firmware's BACKUP_FORMAT_VERSION (7) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
+}
+
+static void test_fractional_and_huge_version_refused(void)
+{
+    TEST_SECTION("backup_import_apply -- fractional / out-of-range version is refused (LOW-1)");
+    const char *bodies[] = {
+        "{\"kind\":\"kilnctl_backup\",\"version\":7.9,\"profiles\":[],\"zones\":[]}",
+        "{\"kind\":\"kilnctl_backup\",\"version\":1.5,\"profiles\":[],\"zones\":[]}",
+        "{\"kind\":\"kilnctl_backup\",\"version\":1e300,\"profiles\":[],\"zones\":[]}",
+        "{\"kind\":\"kilnctl_backup\",\"version\":-1e300,\"profiles\":[],\"zones\":[]}",
+    };
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        reset_stub_state();
+        char err[160];
+        TEST_CHECK(!test_backup_import_apply(bodies[i], err, sizeof(err)), "non-integer/huge version refused");
+        TEST_CHECK(g_total_write_calls == 0, "nothing written");
+    }
+    reset_stub_state();
+    char err[160];
+    TEST_CHECK(test_backup_import_apply("{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}",
+                                        err, sizeof(err)),
+               "integer version 7 still accepted");
+}
+
+static void test_plan_cap_reports_dropped_lines(void)
+{
+    TEST_SECTION("kiln_cfg_plan -- lines past the cap are counted and rendered as a footer (LOW-2)");
+    kiln_cfg_plan_t *plan = calloc(1, sizeof(*plan));
+    char *out = malloc(KILN_CFG_PLAN_RENDER_CAP);
+    TEST_CHECK(plan && out, "alloc");
+    TEST_CHECK(KILN_CFG_PLAN_MAX_LINES >= 40, "cap holds the 30 worst-case kiln_configs lines plus topology/prefs/aux lines");
+    for (size_t i = 0; i < KILN_CFG_PLAN_MAX_LINES; i++) {
+        kiln_cfg_plan_add(plan, "line %u", (unsigned)i);
+    }
+    TEST_CHECK(plan->count == KILN_CFG_PLAN_MAX_LINES && plan->dropped == 0, "at the cap nothing dropped");
+    size_t n = kiln_cfg_plan_render(plan, out, KILN_CFG_PLAN_RENDER_CAP);
+    TEST_CHECK(strstr(out, "more lines not shown") == NULL, "no footer when nothing dropped");
+    kiln_cfg_plan_add(plan, "extra A");
+    kiln_cfg_plan_add(plan, "extra B");
+    kiln_cfg_plan_add(plan, "extra C");
+    TEST_CHECK(plan->count == KILN_CFG_PLAN_MAX_LINES && plan->dropped == 3, "three dropped counted");
+    n = kiln_cfg_plan_render(plan, out, KILN_CFG_PLAN_RENDER_CAP);
+    TEST_CHECK(strstr(out, "... 3 more lines not shown\n") != NULL, "footer names the dropped count");
+    TEST_CHECK(strstr(out, "extra A") == NULL, "dropped line not rendered");
+    TEST_CHECK(n == strlen(out) && n < KILN_CFG_PLAN_RENDER_CAP, "render length consistent and within cap");
+    free(plan);
+    free(out);
 }
 
 static void test_version1_body_imports_under_v2_reader(void)
@@ -5382,6 +5435,83 @@ static void test_backup_topology_only_restore_is_saved(void)
     reset_stub_state();
 }
 
+static void test_backup_ramp_precheck_uses_post_import_ceiling(void)
+{
+    TEST_SECTION("backup MED-1 -- the profile ramp pre-check judges the backup's own zone max_ramp, then the "
+                 "target slot, then live config");
+    char body[512];
+    char e[256] = "";
+    bool ok;
+    const char *prof = "\"profiles\":[{\"id\":0,\"name\":\"P1\",\"zone_mask\":1,"
+                       "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":%d,\"dwell_min\":30}]}]";
+    char pj[200];
+
+    /* 1: backup RAISES zone 0's ceiling above live (100) and its profile needs 150 -> accepted. */
+    reset_stub_state();
+    test_stub_zones_set_max_ramp(0, true, 100.0f);
+    snprintf(pj, sizeof(pj), prof, 150);
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,%s,\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,"
+             "\"pid_kd\":0,\"max_ramp_c_per_hr\":200}]}",
+             BACKUP_FORMAT_VERSION, pj);
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "backup raising max_ramp above live accepts a profile needing the higher rate");
+
+    /* 2: backup LOWERS the ceiling below its own profile while live is high -> clean refusal, no write. */
+    reset_stub_state();
+    test_stub_zones_set_max_ramp(0, true, 1000.0f);
+    snprintf(pj, sizeof(pj), prof, 50);
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,%s,\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,"
+             "\"pid_kd\":0,\"max_ramp_c_per_hr\":40}]}",
+             BACKUP_FORMAT_VERSION, pj);
+    g_total_write_calls = 0;
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(!ok && strstr(e, "ceiling") != NULL, "backup lowering max_ramp below its own profile is refused in pass 1");
+    TEST_CHECK(g_total_write_calls == 0, "nothing was written");
+
+    /* 3: unconfigured board (live getter answers false), topology + zone ceiling + ramped profile -> accepted. */
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    test_stub_zones_set_max_ramp(0, false, 0.0f);
+    snprintf(pj, sizeof(pj), prof, 50);
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4,%s,\"zones\":["
+             "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"max_ramp_c_per_hr\":100}]}",
+             BACKUP_FORMAT_VERSION, pj);
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "v7 one-file restore onto an unconfigured board with a ramped profile succeeds");
+
+    /* 4: unconfigured board, backup silent on max_ramp: the target slot's stored ceiling decides. */
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    test_stub_zones_set_max_ramp(0, false, 0.0f);
+    s_slot_max_ramp[0] = 80.0f;
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4,%s}",
+             BACKUP_FORMAT_VERSION, pj);
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "slot ceiling 80 accepts a 50 C/hr profile when topology is applied");
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    test_stub_zones_set_max_ramp(0, false, 0.0f);
+    s_slot_max_ramp[0] = 30.0f;
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(!ok, "slot ceiling 30 refuses a 50 C/hr profile");
+    s_slot_max_ramp[0] = 0.0f;
+
+    /* 5: configured board, backup silent: live ceiling decides (unchanged behavior). */
+    reset_stub_state();
+    test_stub_zones_set_max_ramp(0, true, 40.0f);
+    snprintf(body, sizeof(body), "{\"kind\":\"kilnctl_backup\",\"version\":%d,%s}", BACKUP_FORMAT_VERSION, pj);
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(!ok, "live ceiling 40 refuses a 50 C/hr profile when the backup is silent");
+    reset_stub_state();
+}
+
 static void test_backup_topology_round_trip(void)
 {
     TEST_SECTION("backup topology -- export carries thermo_count/relay_count; empty board takes them then the zones; "
@@ -7514,6 +7644,8 @@ void run_test_backup_import(void)
     test_group_a_header_fail_closed();
     test_wrong_kind_refused();
     test_unknown_version_refused();
+    test_fractional_and_huge_version_refused();
+    test_plan_cap_reports_dropped_lines();
     test_version1_body_imports_under_v2_reader();
     test_out_of_range_model_rejected();
     test_overlong_zone_name_rejected();
@@ -7569,6 +7701,7 @@ void run_test_backup_import(void)
     test_import_refuses_duplicate_zone_index();
     test_import_onto_empty_zones_config_refused_before_any_write();
     test_backup_topology_round_trip();
+    test_backup_ramp_precheck_uses_post_import_ceiling();
     test_backup_topology_only_restore_is_saved();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_import_gains_differ_invalidates_then_reinstates_matching_record();

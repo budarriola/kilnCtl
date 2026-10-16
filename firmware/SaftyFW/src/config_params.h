@@ -125,6 +125,15 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // calibrated channel must carry gain > 0.
 #define CONFIG_PARAMS_CT_CAL_GAIN_MAX 10.0f
 
+// k_ct_v_per_a[] / gain[] magnitude bounds (CT audit 2026-10-14, LOW-1).
+// 0 stays storable (uncommissioned default). Any nonzero value must lie in
+// [MIN, MAX]: a denormal/tiny value shrinks the presence threshold ~1000x
+// (false S3 trips) and overflows counts-to-amps to +inf (NaN in the reporting
+// filter); a negative value inverts the reading. Enforced at SET_PARAM time
+// and at load/validate time.
+#define CONFIG_PARAMS_CT_SCALE_MIN 1.0e-4f
+#define CONFIG_PARAMS_CT_SCALE_MAX 1.0e6f
+
 // tc_offset_c magnitude bound (SaftyFW guard review 2026-10-09, F2).
 // tc_offset_c is added to the hot-junction reading before EVERY guard sees
 // it, so an unbounded offset (e.g. -400) rescales S1's abs_max_temp_c
@@ -134,6 +143,21 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // offset unreachable. Enforced at SET_PARAM time and at load/validate time.
 #define CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C 50.0f
 #define CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A 50.0f
+
+// Upper bounds on trip thresholds, enforced at SET_PARAM time ONLY (guard audit
+// 2026-10-14 A5). Without them one ESP-side bug could persist e.g.
+// link_dead_hard_s = 65535 and effectively blind S6b/S5/S9 from the next boot.
+// Chosen as ~5x the compiled default (CONFIG_REFERENCE.md), loose enough for any
+// real commissioning, tight enough that a blinding value is unreachable. Only
+// refuses new writes; stored records are never invalidated (a load-time bound
+// needs the same owner decision as the rate_window_s item, so rate_window_s is
+// deliberately NOT bounded here). abs_max is never touched.
+#define CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S 600u     /* default 120 */
+#define CONFIG_PARAMS_BLIND_GRACE_MAX_S 300u        /* default 60 */
+#define CONFIG_PARAMS_TRIP_VERIFY_MAX_S 60u         /* default 10 */
+#define CONFIG_PARAMS_CJ_MAX_MAX_C 125.0f           /* MAX31856 limit; default 85 */
+#define CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C 300.0f /* default 75 */
+#define CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C 500.0f  /* default 200 */
 
 // True iff one channel's (calibrated, gain, offset) triple is acceptable to
 // store: both floats finite, 0 <= gain <= CONFIG_PARAMS_CT_CAL_GAIN_MAX,

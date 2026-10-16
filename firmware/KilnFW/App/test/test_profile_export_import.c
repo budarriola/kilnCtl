@@ -179,6 +179,20 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     (void)buf_len;
     return ESP_OK;
 }
+/* backup-import LOW-3 fence: restore-in-flight flag and 409 sender fakes. */
+static bool s_test_restore_in_flight;
+static int s_test_refusals;
+bool backup_import_restore_in_flight(void)
+{
+    return s_test_restore_in_flight;
+}
+esp_err_t system_mode_gate_http_send_refusal(httpd_req_t *req, const char *reason)
+{
+    (void)req;
+    (void)reason;
+    s_test_refusals++;
+    return ESP_OK;
+}
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r;
@@ -446,10 +460,21 @@ static void test_store_unreadable_save_refusal_is_409_with_remedy(void)
     snprintf(s_save_fail_msg, sizeof(s_save_fail_msg), "stub refusal");
 }
 
+static void test_import_fenced_during_restore(void)
+{
+    TEST_SECTION("import_post_handler -- refused (409 sender) while a backup restore is in flight (LOW-3)");
+    s_test_restore_in_flight = true;
+    s_test_refusals = 0;
+    TEST_CHECK(run_import("{}") == ESP_OK, "handler replies itself");
+    TEST_CHECK(s_test_refusals == 1, "answered by the mode-gate 409 sender");
+    s_test_restore_in_flight = false;
+}
+
 int main(void)
 {
     TEST_SECTION("profile_export_import");
     test_store_unreadable_save_refusal_is_409_with_remedy();
+    test_import_fenced_during_restore();
     test_aux_target_byte_round_trips_through_import();
 
     test_valid_dwell_min_is_accepted();

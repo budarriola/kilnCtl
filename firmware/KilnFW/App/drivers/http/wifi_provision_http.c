@@ -1256,7 +1256,8 @@ esp_err_t wifi_provision_http_start(void)
      *
      * Bumped 180 -> 184, 2026-10-05: after merging WP8 onto WP9 (settings routes) 175 routes
      * were registered, leaving 5 spare against 180; 184 restores the ~9-slot headroom. */
-    config.max_uri_handlers = 184;
+    /* Bumped 184 -> 190, 2026-10-13: POST /api/update/install and GET /api/update/status. */
+    config.max_uri_handlers = 190;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

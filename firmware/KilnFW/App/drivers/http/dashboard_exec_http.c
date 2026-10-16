@@ -6,6 +6,7 @@
  * s_dash/DASH_TAG seam. dashboard_plan_exec_fields() stays public API
  * (declared in dashboard_http.h) and is unchanged by this split. */
 
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "dashboard_http_internal.h"
 
 #include <math.h>
@@ -626,8 +627,8 @@ esp_err_t firing_history_get_handler(httpd_req_t *req)
 
 esp_err_t history_csv_get_handler(httpd_req_t *req)
 {
-    profile_history_entry_t *batch = malloc(sizeof(profile_history_entry_t) * HISTORY_CSV_BATCH);
-    char *line = malloc(HISTORY_CSV_LINE_CAP);
+    profile_history_entry_t *batch = persist_scratch_alloc(sizeof(profile_history_entry_t) * HISTORY_CSV_BATCH);
+    char *line = persist_scratch_alloc(HISTORY_CSV_LINE_CAP);
     if (!batch || !line) {
         free(batch);
         free(line);

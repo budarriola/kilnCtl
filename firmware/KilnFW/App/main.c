@@ -38,6 +38,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#include "dashboard_http.h"
 #include "dram_margin.h"
 #include "flash_worker.h"
 #include "kiln_io.h"
@@ -245,6 +246,9 @@ void app_main(void)
 
     static main_boot_ctx_t ctx;
 
+    /* Flash-facts read does an mmap (cache freeze) -- do it here on the internal
+     * app_main stack before any PSRAM-stack task can call dashboard_get_status(). */
+    dashboard_prime_flash_facts();
     main_boot_early(&ctx);
     main_control_bringup(&ctx);
     main_network_http_bringup(&ctx);

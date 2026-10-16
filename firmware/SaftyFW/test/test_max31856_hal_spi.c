@@ -167,23 +167,21 @@ static void test_read_open_fault_invalidates_tc_only(void)
 
 static void test_unscripted_read_returns_zero_not_garbage(void)
 {
-    TEST_SECTION("max31856_read() -- an unscripted (empty-queue) burst zero-fills, per fake_spi.h");
+    TEST_SECTION("max31856_read() -- an all-0x00 burst (MISO stuck low / unscripted) is a failed read (A6)");
     setup();
     TEST_CHECK(max31856_configure(MAX31856_TC_TYPE_K), "configure() before read()");
 
-    // fake_spi.h's documented contract for an empty scripted-rx queue: "A
-    // call with no scripted response left reads back all zero bytes...not
-    // an error." No fake_spi_script_rx() call here on purpose -- this
-    // proves max31856_read() still succeeds and reports a real, zero-valued
-    // reading (never max31856_reading_t's initial 0xAA poison) rather than
-    // leaking an uninitialized rx buffer through.
+    // No fake_spi_script_rx() call: fake_spi.h zero-fills an empty queue, which
+    // models MISO stuck low. Guard audit 2026-10-14 A6: that must NOT decode as a
+    // valid 0 C reading; it is a failed read with NaN temperatures and no poison.
     max31856_reading_t reading;
     memset(&reading, 0xAA, sizeof(reading));
-    TEST_CHECK(max31856_read(&reading),
-               "max31856_read() succeeds even with no scripted response queued");
-    TEST_CHECK(!reading.spi_failed, "spi_failed is false -- the transfer itself still succeeded");
-    TEST_CHECK(reading.fault_status == 0x00u,
-               "an all-zero (unscripted) SR byte carries no fault bits");
+    TEST_CHECK(!max31856_read(&reading), "A6: all-zero burst returns false");
+    TEST_CHECK(reading.spi_failed, "A6: spi_failed is set for an all-zero burst");
+    TEST_CHECK(reading.tc_temperature_c != reading.tc_temperature_c &&
+                   reading.cj_temperature_c != reading.cj_temperature_c,
+               "A6: temperatures are NaN, not 0 C");
+    TEST_CHECK(reading.fault_status == 0x00u, "A6: no poison leaks through fault_status");
 }
 
 // max31856_verify_live_config() -- 2026-09-23, the periodic config-drift

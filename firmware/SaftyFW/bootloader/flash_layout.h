@@ -67,6 +67,14 @@ extern "C" {
 // Application slots: A and B, identical size, both erase-block aligned
 // (4K sectors, and comfortably 64K-block aligned too: 0x11000 and 0xE1000
 // are both multiples of 0x1000).
+// AUDIT_PICO_UPDATE MED-1: backup sector for the metadata log. The log above
+// is one sector, so its 16th-record wrap erase has no surviving copy. Before
+// every wrap the writer copies the newest record here, so a power loss at any
+// point leaves a valid record in one of the two sectors. Lives in the free
+// headroom after the config region (0x1C1000..0x200000), not in a slot.
+#define BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET 0x001C1000u
+#define BOOTLOADER_METADATA_BACKUP_FLASH_SIZE   0x00001000u
+
 #define BOOTLOADER_SLOT_A_FLASH_OFFSET 0x00011000u
 #define BOOTLOADER_SLOT_B_FLASH_OFFSET 0x000E1000u
 #define BOOTLOADER_SLOT_FLASH_SIZE     0x000D0000u // 832K each
@@ -115,10 +123,12 @@ extern "C" {
     (SAFTYFW_CONFIG_STORE_FLASH_OFFSET + SAFTYFW_CONFIG_STORE_FLASH_SIZE)
 #define SAFTYFW_CONFIG_STORE_NUM_SECTORS 2u
 
-// Reserved headroom: 0x1B2000+0x1000 (sector B) ..0x1C2000, 56K, plus
-// 0x1C2000..0x200000, 252K. Not represented by a macro here -- nothing
-// addresses it yet, and giving unclaimed space a name invites something to
-// start using it without a doc update.
+// Reserved headroom: 0x1C2000..0x200000, 252K. The 0x1B3000..0x1C1000 gap and
+// the 0x1C1000 sector are NOT free: 0x1C1000 holds the metadata backup
+// (BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET above), which a torn metadata wrap
+// falls back to. Only 0x1C2000..0x200000 is unclaimed, and it is not
+// represented by a macro -- nothing addresses it yet, and giving unclaimed
+// space a name invites something to start using it without a doc update.
 
 #ifdef __cplusplus
 }

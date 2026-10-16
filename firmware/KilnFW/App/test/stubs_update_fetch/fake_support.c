@@ -41,6 +41,9 @@
 size_t g_fr_route_n;
 fr_route_t g_fr_routes[FR_MAX_ROUTES];
 int g_fr_open_count;
+int g_fr_live_clients;
+int g_fr_max_live_clients;
+int g_fr_open_while_live;
 char g_fr_last_url[512];
 
 uint8_t g_fr_flash[FR_STAGE_SIZE];
@@ -50,6 +53,12 @@ volatile long g_fr_wr_wait_after_wedge;
 volatile long g_fr_flash_blocked_n;
 int g_fr_flash_erase_n, g_fr_flash_write_n;
 static HANDLE s_flash_ev;
+bool g_fr_wr_missed_give;
+volatile long g_fr_wr_give_dropped;
+static HANDLE s_give_dropped_ev;
+static volatile DWORD s_wr_tid; // thread id of the most recently created update_fetch_wr task
+static HANDLE s_last_binary;    // most recently created binary semaphore
+static volatile HANDLE s_wr_done_h; // wr_done: the last binary semaphore created before the writer task
 
 bool g_fr_claim_deny;
 bool g_fr_claim_held;
@@ -57,8 +66,25 @@ int g_fr_claim_begin_n, g_fr_claim_end_n;
 int g_fr_interlock_result;
 bool g_fr_heat_profile, g_fr_heat_autotune;
 bool g_fr_clock_synced;
+long long g_fr_now_epoch;
+volatile long g_fr_hdr_eagain_n;
+volatile long g_fr_eagain_n;
 char g_fr_repo[96];
 size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
+int g_fr_delay_calls;
+unsigned long g_fr_delay_total_ticks;
+void (*g_fr_on_delay)(int call_no);
+size_t g_fr_dma_seq[FR_DMA_SEQ_MAX];
+int g_fr_dma_seq_n, g_fr_dma_seq_i;
+bool g_fr_dma_seq_armed;
+int g_fake_heap_recover_reads;      // >0: after this many internal-free reads, free becomes g_fake_heap_recover_to
+size_t g_fake_heap_recover_to;
+volatile long g_fr_internal_mallocs; // MALLOC_CAP_INTERNAL heap_caps_malloc/calloc calls that succeeded
+size_t g_fake_heap_dma_free_internal;
+size_t g_fr_dma_call_seq[FR_DMA_SEQ_MAX];
+size_t g_fr_int_call_seq[FR_DMA_SEQ_MAX];
+int g_fr_int_call_seq_n, g_fr_int_call_seq_i, g_fr_int_call_after;
+int g_fr_dma_call_seq_n, g_fr_dma_call_seq_i;
 bool g_fr_internal_alloc_fail;
 
 const char *g_fr_fail_task;
@@ -88,6 +114,9 @@ void fr_reset(void)
     g_fr_route_n = 0;
     memset(g_fr_routes, 0, sizeof(g_fr_routes));
     g_fr_open_count = 0;
+    g_fr_live_clients = 0;
+    g_fr_max_live_clients = 0;
+    g_fr_open_while_live = 0;
     g_fr_last_url[0] = 0;
     fr_flash_erase_all();
     g_fr_flash_write_fail = false;
@@ -99,15 +128,34 @@ void fr_reset(void)
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
     }
     ResetEvent(s_flash_ev);
+    g_fr_wr_missed_give = false;
+    g_fr_wr_give_dropped = 0;
+    if (s_give_dropped_ev == NULL) {
+        s_give_dropped_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
+    }
+    ResetEvent(s_give_dropped_ev);
     g_fr_claim_deny = false;
     g_fr_claim_held = false;
     g_fr_claim_begin_n = g_fr_claim_end_n = 0;
     g_fr_interlock_result = 0; // OTA_INTERLOCK_OK
     g_fr_heat_profile = g_fr_heat_autotune = false;
     g_fr_clock_synced = true;
+    g_fr_now_epoch = 1800000000LL;
+    g_fr_eagain_n = 0;
+    g_fr_hdr_eagain_n = 0;
     strcpy(g_fr_repo, "budarriola/kilnCtl");
     g_fake_heap_free_internal = 200000;
     g_fake_heap_largest_internal = 100000;
+    g_fake_heap_dma_free_internal = 100000;
+    g_fr_dma_call_seq_n = g_fr_dma_call_seq_i = 0;
+    g_fr_int_call_seq_n = g_fr_int_call_seq_i = g_fr_int_call_after = 0;
+    g_fake_heap_recover_reads = 0;
+    g_fr_delay_calls = 0;
+    g_fr_delay_total_ticks = 0;
+    g_fr_on_delay = NULL;
+    g_fr_dma_seq_n = g_fr_dma_seq_i = 0;
+    g_fr_dma_seq_armed = false;
+    g_fr_internal_mallocs = 0;
     g_fr_internal_alloc_fail = false;
     g_fr_fail_task = NULL;
     g_fr_time_div = 1;
@@ -125,6 +173,9 @@ void *heap_caps_malloc(size_t size, uint32_t caps)
     }
     void *p = malloc(size);
     if (p != NULL) {
+        if (caps & MALLOC_CAP_INTERNAL) {
+            InterlockedIncrement(&g_fr_internal_mallocs);
+        }
         InterlockedIncrement(&g_fr_heap_live);
     }
     return p;
@@ -147,7 +198,23 @@ void heap_caps_free(void *p)
     }
     free(p);
 }
-size_t heap_caps_get_free_size(uint32_t caps) { return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_free_internal : 4000000u; }
+size_t heap_caps_get_free_size(uint32_t caps)
+{
+    if ((caps & MALLOC_CAP_INTERNAL) && (caps & MALLOC_CAP_DMA)) {
+        if (g_fr_dma_call_seq_i < g_fr_dma_call_seq_n) {
+            return g_fr_dma_call_seq[g_fr_dma_call_seq_i++];  // scripted per-call readings, then the static value
+        }
+        return g_fake_heap_dma_free_internal;
+    }
+    if ((caps & MALLOC_CAP_INTERNAL) && g_fr_int_call_seq_i < g_fr_int_call_seq_n &&
+        g_fr_dma_call_seq_i >= g_fr_int_call_after) {
+        return g_fr_int_call_seq[g_fr_int_call_seq_i++];  // scripted per-call internal readings (UPDFX9)
+    }
+    if ((caps & MALLOC_CAP_INTERNAL) && g_fake_heap_recover_reads > 0 && --g_fake_heap_recover_reads == 0) {
+        g_fake_heap_free_internal = g_fake_heap_recover_to;
+    }
+    return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_free_internal : 4000000u;
+}
 size_t heap_caps_get_largest_free_block(uint32_t caps)
 {
     return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_largest_internal : 2000000u;
@@ -196,7 +263,12 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
     t->fn = fn;
     t->arg = arg;
     InterlockedIncrement(&g_fr_live_tasks);
-    uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, NULL);
+    unsigned tid = 0;
+    uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, &tid);
+    if (h != 0 && name != NULL && strcmp(name, "update_fetch_wr") == 0) {
+        s_wr_tid = tid;
+        s_wr_done_h = s_last_binary; // wr_start() creates wr_req, then wr_done, then this task
+    }
     if (h == 0) {
         InterlockedDecrement(&g_fr_live_tasks);
         free(t);
@@ -229,8 +301,17 @@ void vTaskDelete(TaskHandle_t t)
     }
 }
 void vTaskDeleteWithCaps(TaskHandle_t t) { vTaskDelete(t); }
-TickType_t xTaskGetTickCount(void) { return (TickType_t)GetTickCount(); }
-void vTaskDelay(TickType_t ticks) { Sleep(ticks); }
+long long g_fr_tick_skew_ms;
+TickType_t xTaskGetTickCount(void) { return (TickType_t)(GetTickCount() + g_fr_tick_skew_ms); }
+void vTaskDelay(TickType_t ticks)
+{
+    int n = ++g_fr_delay_calls;
+    g_fr_delay_total_ticks += (unsigned long)ticks;
+    if (g_fr_on_delay != NULL) {
+        g_fr_on_delay(n);
+    }
+    Sleep(ticks);
+}
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)1; }
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t t)
 {
@@ -286,6 +367,7 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void)
 {
     HANDLE h = CreateSemaphore(NULL, 0, 1, NULL);
     sem_note_live(h);
+    s_last_binary = h;
     return h;
 }
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
@@ -298,6 +380,12 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
 {
     if (sem_is_bad(s)) {
         return pdFALSE;
+    }
+    if (g_fr_wr_missed_give && ticks != portMAX_DELAY && ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) {
+        // Missed-give mode: the writer-op wait times out only once the writer has finished its op (arb DONE)
+        // and its completion give was dropped, so wr_call()'s second, short take is the one that fails.
+        WaitForSingleObject(s_give_dropped_ev, 30000);
+        return WaitForSingleObject((HANDLE)s, 0) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
     }
     if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS) && g_fr_flash_write_block) {
         if (update_fetch_writer_wedged()) {
@@ -336,6 +424,13 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
 {
     if (sem_is_bad(s)) {
         return pdFALSE;
+    }
+    // Only the writer's give of wr_done is dropped: a give of any other semaphore on the writer thread (the
+    // stage lock inside an op) would wedge the op itself and never reach the missed-give path.
+    if (g_fr_wr_missed_give && s_wr_tid != 0 && GetCurrentThreadId() == s_wr_tid && (HANDLE)s == s_wr_done_h &&
+        InterlockedCompareExchange(&g_fr_wr_give_dropped, 1, 0) == 0) {
+        SetEvent(s_give_dropped_ev); // the writer's first completion give is lost
+        return pdTRUE;
     }
     return ReleaseSemaphore((HANDLE)s, 1, NULL) ? pdTRUE : pdFALSE;
 }
@@ -476,6 +571,8 @@ struct esp_http_client {
     const fr_route_t *route;
     size_t pos;
     bool read_once;
+    int stalled;
+    int since_chunk;
 };
 
 static const fr_route_t *route_for(const char *url)
@@ -492,6 +589,9 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
 {
     struct esp_http_client *c = calloc(1, sizeof(*c));
     c->cfg = *config;
+    if (++g_fr_live_clients > g_fr_max_live_clients) {
+        g_fr_max_live_clients = g_fr_live_clients;
+    }
     return c;
 }
 esp_err_t esp_http_client_set_header(esp_http_client_handle_t c, const char *k, const char *v)
@@ -503,11 +603,22 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t c, int write_len)
 {
     (void)write_len;
     g_fr_open_count++;
+    if (g_fr_live_clients > 1) {
+        g_fr_open_while_live++;
+    }
+    if (route_for(c->cfg.url) != NULL && route_for(c->cfg.url)->on_open != NULL) {
+        route_for(c->cfg.url)->on_open();
+    }
     snprintf(g_fr_last_url, sizeof(g_fr_last_url), "%s", c->cfg.url);
     c->route = route_for(c->cfg.url);
     if (c->route == NULL || c->route->open_fail) {
         return ESP_FAIL;
     }
+    return ESP_OK;
+}
+esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t c, int timeout_ms)
+{
+    c->cfg.timeout_ms = timeout_ms;
     return ESP_OK;
 }
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c)
@@ -521,6 +632,42 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c)
         ev.header_value = (char *)r->location;
         ev.user_data = c->cfg.user_data;
         c->cfg.event_handler(&ev);
+    }
+    if (r->retry_after != NULL && c->cfg.event_handler != NULL) {
+        esp_http_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event_id = HTTP_EVENT_ON_HEADER;
+        ev.header_key = (char *)"Retry-After";
+        ev.header_value = (char *)r->retry_after;
+        ev.user_data = c->cfg.user_data;
+        c->cfg.event_handler(&ev);
+    }
+    if (r->ratelimit_reset != NULL && c->cfg.event_handler != NULL) {
+        esp_http_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event_id = HTTP_EVENT_ON_HEADER;
+        ev.header_key = (char *)"X-RateLimit-Reset";
+        ev.header_value = (char *)r->ratelimit_reset;
+        ev.user_data = c->cfg.user_data;
+        c->cfg.event_handler(&ev);
+    }
+    if (r->ratelimit_remaining != NULL && c->cfg.event_handler != NULL) {
+        esp_http_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event_id = HTTP_EVENT_ON_HEADER;
+        ev.header_key = (char *)"X-RateLimit-Remaining";
+        ev.header_value = (char *)r->ratelimit_remaining;
+        ev.user_data = c->cfg.user_data;
+        c->cfg.event_handler(&ev);
+    }
+    if (r->advertised == -6) {
+        Sleep((DWORD)c->cfg.timeout_ms); // header read blocks for the whole slice, like the real client
+        g_fr_hdr_eagain_n++;
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
+    if (r->advertised == -5) {
+        g_fr_hdr_eagain_n++;
+        return -ESP_ERR_HTTP_EAGAIN; // header read timeout
     }
     if (r->advertised == -4) {
         return -1;
@@ -544,9 +691,27 @@ int esp_http_client_read(esp_http_client_handle_t c, char *buf, int len)
             c->route->on_read();
         }
     }
+    if (c->route->read_stall_ms != 0 && (c->route->stall_reads == 0 || c->stalled < c->route->stall_reads)) {
+        c->stalled++;
+        Sleep((DWORD)(c->route->read_stall_ms < 0 ? c->cfg.timeout_ms : c->route->read_stall_ms)); // <0: block for the client's slice
+        g_fr_eagain_n++;
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
+    if (g_fr_dma_seq_armed) {
+        g_fake_heap_dma_free_internal = g_fr_dma_seq_i < g_fr_dma_seq_n ? g_fr_dma_seq[g_fr_dma_seq_i] : 100000;
+        g_fr_dma_seq_i++;
+    }
+    if (c->route->stall_per_chunk > 0 && c->since_chunk < c->route->stall_per_chunk &&
+        deliverable(c->route) > c->pos) {
+        c->since_chunk++;
+        Sleep((DWORD)(c->route->read_stall_ms > 0 ? c->route->read_stall_ms : 5));
+        g_fr_eagain_n++;
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
     size_t avail = deliverable(c->route) - c->pos;
     size_t n = avail < (size_t)len ? avail : (size_t)len;
     if (n > 0) {
+        c->since_chunk = 0;
         memcpy(buf, c->route->body + c->pos, n);
         c->pos += n;
     }
@@ -560,6 +725,7 @@ esp_err_t esp_http_client_close(esp_http_client_handle_t c)
 }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t c)
 {
+    g_fr_live_clients--;
     free(c);
     return ESP_OK;
 }
@@ -676,6 +842,7 @@ void time_sync_get_status(time_sync_status_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->ever_synced = g_fr_clock_synced;
+    out->now_epoch = (time_t)g_fr_now_epoch;
 }
 bool stack_margin_register(const char *name, void *slot, uint32_t bytes)
 {

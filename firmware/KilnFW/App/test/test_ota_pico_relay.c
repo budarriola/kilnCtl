@@ -807,6 +807,37 @@ static void test_start_refuses_while_running(void)
     CHECK(started == false);
 }
 
+// AUDIT_LOGSTORE_TIME LOW-3: the wait timeout is an unsigned elapsed test, so a wait that
+// STARTS just below the 2^32 ms tick wrap neither expires at once (since+timeout wraps to a
+// small deadline) nor runs past its timeout.
+static void test_wait_for_states_tick_wrap(void)
+{
+    static const uint32_t starts[] = { 0xFFFFFFFFu - 500u, 0x7FFFFFFFu - 500u, 0xFFFFFFFFu - 4999u };
+    for (unsigned i = 0; i < sizeof(starts) / sizeof(starts[0]); i++) {
+        test_reset_relay_state();
+        g_ota_pico_relay_fake_ticks = starts[i];
+        fake_status_push_stale(); // consumed without the clock moving: first poll misses
+        fake_status_push(SAFETY_LINK_UPDATE_STATE_COMPLETE, 0, 0, NULL);
+        safety_link_update_status_t out;
+        memset(&out, 0, sizeof(out));
+        bool ok = relay_wait_for_states(NULL, starts[i], 5000u, 1u << SAFETY_LINK_UPDATE_STATE_COMPLETE, &out);
+        CHECK(ok); // spurious immediate timeout at the wrap would return false here
+        CHECK(out.state == SAFETY_LINK_UPDATE_STATE_COMPLETE);
+    }
+
+    // A wait whose window straddles the wrap still times out after ~timeout, not 49.7 days.
+    test_reset_relay_state();
+    g_ota_pico_relay_fake_ticks = 0xFFFFFFFFu - 100u;
+    {
+        safety_link_update_status_t out;
+        for (int k = 0; k < 4; k++) {
+            fake_status_push_stale();
+        }
+        bool ok = relay_wait_for_states(NULL, 0xFFFFFFFFu - 100u, 5000u, 1u << SAFETY_LINK_UPDATE_STATE_COMPLETE, &out);
+        CHECK(!ok);
+    }
+}
+
 int main(void)
 {
     test_happy_path_with_erase();
@@ -821,6 +852,7 @@ int main(void)
     test_erase_then_wrong_state();
     test_retransmit_resends_named_gap();
     test_retransmit_missed_round_not_fatal();
+    test_wait_for_states_tick_wrap();
     test_retransmit_failed_mid_update();
     test_retransmit_overlap();
     test_retransmit_exhausted_rounds();

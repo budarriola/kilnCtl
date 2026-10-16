@@ -51,10 +51,10 @@ class _FakeRunner:
         _FakeRunner.instances.append(self)
 
     def run(self, suite, cases=None, dry_run=False, allow_heat=True, tag=None,
-            lcd_stop_heat=False, lcd_edit_heat=False, ota_allow_heat=False):
+            lcd_stop_heat=False, lcd_edit_heat=False, ota_allow_heat=False, confirm=False):
         self.run_kwargs = dict(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
                                tag=tag, lcd_stop_heat=lcd_stop_heat, lcd_edit_heat=lcd_edit_heat,
-                               ota_allow_heat=ota_allow_heat)
+                               ota_allow_heat=ota_allow_heat, confirm=confirm)
         if _FakeRunner.release is not None:
             _FakeRunner.release.wait(5)
         if _FakeRunner.raise_exc is not None:
@@ -138,7 +138,7 @@ class BenchTestStartTest(_Base):
         runner = _FakeRunner.instances[-1]
         self.assertEqual(runner.run_kwargs, dict(
             suite="lcd", cases=["LCD-19", "LCD-22"], dry_run=False, allow_heat=False, tag="t1",
-            lcd_stop_heat=True, lcd_edit_heat=True, ota_allow_heat=True))
+            lcd_stop_heat=True, lcd_edit_heat=True, ota_allow_heat=True, confirm=False))
         self.assertEqual(runner.ctx["host"], "10.9.9.9")
         self.assertIs(runner.ctx["attended"], True)
         self.assertIs(runner.ctx["allow_flash"], True)
@@ -184,6 +184,43 @@ class BenchTestStartTest(_Base):
                 self.assertNotIn("STARTED", out)
                 sj.assert_not_called()
         self.assertEqual(_FakeRunner.instances, [])
+
+    def test_release_target_reaches_ctx_and_default_is_bench(self):
+        self.finish(BT.bench_test_start(suite="release", confirm=True))
+        self.assertEqual(_FakeRunner.instances[-1].ctx["target"], "bench")
+        self.assertNotIn("ota_install", _FakeRunner.instances[-1].ctx)
+        self.finish(BT.bench_test_start(suite="release", target="kiln", confirm=True))
+        self.assertEqual(_FakeRunner.instances[-1].ctx["target"], "kiln")
+        self.assertIn("target must be", BT.bench_test_run(suite="release", target="oven"))
+
+    def test_release_requires_exact_confirm(self):
+        for bad in (False, "yes", 1, None):
+            with mock.patch.object(build_jobs, "start_job") as sj:
+                out = BT.bench_test_start(suite="release", confirm=bad)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("error: refused"), out)
+            sj.assert_not_called()
+            out = BT.bench_test_run(suite="release", confirm=bad)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("error: refused"), out)
+        self.assertEqual(_FakeRunner.instances, [])
+        self.finish(BT.bench_test_start(suite="release", dry_run=True))
+
+    def test_release_allow_heat_defaults_off_and_confirm_reaches_runner(self):
+        self.finish(BT.bench_test_start(suite="release", confirm=True))
+        kw = _FakeRunner.instances[-1].run_kwargs
+        self.assertIs(kw["allow_heat"], False)
+        self.assertIs(kw["confirm"], True)
+        self.finish(BT.bench_test_start(suite="release", confirm=True, allow_heat=True))
+        self.assertIs(_FakeRunner.instances[-1].run_kwargs["allow_heat"], True)
+
+    def test_release_ota_install_is_ota_gated(self):
+        with mock.patch.object(build_jobs, "start_job") as sj:
+            out = BT.bench_test_start(suite="release", ota_install=True)
+        self.assertTrue(out.startswith("error: refused"), out)
+        sj.assert_not_called()
+        out = BT.bench_test_run(suite="release", ota_install=True)
+        self.assertIn("refused", out)
+        self.finish(BT.bench_test_start(suite="release", ota_install=True, confirm=True))
+        self.assertIs(_FakeRunner.instances[-1].ctx["ota_install"], True)
 
     def test_start_dry_run_with_image_args_is_not_refused(self):
         out = BT.bench_test_start(suite="ota", dry_run=True, ota_image_path="C:/img/a.bin",

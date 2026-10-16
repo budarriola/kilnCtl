@@ -361,6 +361,14 @@ class BenchEvidence(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("no runs found", out)
 
+    def test_default_suites_include_release(self):
+        self.assertIn("release", rg.DEFAULT_EVIDENCE_SUITES.split(","))
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), tempfile.TemporaryDirectory() as d:
+            rg.main(["bench-evidence", "--fw-build", "B", "--logs-dir", d])
+        self.assertIn("release", buf.getvalue())
+
     def test_app_bin_and_arg_validation(self):
         import contextlib, io, tempfile
         def run(args):

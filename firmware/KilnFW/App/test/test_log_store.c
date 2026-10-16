@@ -74,11 +74,21 @@ static void fill_segment(const char *base, log_store_kind_t kind, size_t idx, si
     seg_path(base, kind, idx, path, sizeof(path));
     FILE *f = fopen(path, "wb");
     static const char pad[64] = "0123456789012345678901234567890123456789012345678901234567890\n";
+    /* Well-framed records (uint16 length prefix + payload) so the mount-time torn-tail check
+     * sees a clean segment of exactly `size` bytes. */
     size_t written = 0;
     while (written < size) {
-        size_t chunk = (size - written) < sizeof(pad) ? (size - written) : sizeof(pad);
-        fwrite(pad, 1, chunk, f);
-        written += chunk;
+        size_t rem = size - written;
+        size_t take = rem >= 66u ? 66u : rem;
+        size_t left = rem - take;
+        if (left == 1u || left == 2u) {
+            take -= 3u;
+        }
+        size_t plen = take - 2u;
+        uint8_t pre[2] = { (uint8_t)(plen & 0xFFu), (uint8_t)((plen >> 8) & 0xFFu) };
+        fwrite(pre, 1, 2, f);
+        fwrite(pad, 1, plen, f);
+        written += take;
     }
     fclose(f);
 }
@@ -113,6 +123,10 @@ static void reset_scratch_dir(const char *base, log_store_kind_t kind, size_t ma
     char path[600];
     manifest_path(base, kind, path, sizeof(path));
     remove(path);
+    for (int slot = 0; slot < 2; slot++) {
+        snprintf(path, sizeof(path), "%s/%s.manifest.%c", base, kind_prefix(kind), slot == 0 ? 'a' : 'b');
+        remove(path);
+    }
     for (size_t i = 0; i <= max_idx; i++) {
         seg_path(base, kind, i, path, sizeof(path));
         remove(path);       /* in case it is a file */
@@ -340,8 +354,148 @@ static void test_corrupt_oversized_length_prefix_never_reports_more_than_it_read
     rmdir_recursive_best_effort(base);
 }
 
+static bool file_exists_seg(const char *base, log_store_kind_t kind, size_t idx)
+{
+    char p[600];
+    seg_path(base, kind, idx, p, sizeof(p));
+    return file_exists(p);
+}
+
+static bool read_manifest_copy_for_test(const char *path, unsigned long *o, unsigned long *n, int *h, unsigned long *q)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+    char term = 0;
+    int got = fscanf(f, "%lu %lu %d %lu %c", o, n, h, q, &term);
+    fclose(f);
+    return got == 5 && term == '#';
+}
+
+static void write_raw(const char *path, const void *data, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(data, 1, n, f);
+        fclose(f);
+    }
+}
+
+// ---------------------------------------------------------------------
+// AUDIT_LOGSTORE_TIME LOW-4: a manifest copy torn by a power cut must not
+// orphan the segments; the other copy still describes the store.
+// ---------------------------------------------------------------------
+static void test_torn_manifest_recovers_from_other_copy(void)
+{
+    TEST_SECTION("log_store: torn/empty manifest copy falls back to the other copy (LOW-4)");
+    const char *base = "log_store_test_manifest";
+    log_store_kind_t kind = LOG_STORE_KIND_FIRING;
+    reset_scratch_dir(base, kind, 12);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "init");
+    static const char rec[] = "rec";
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(log_store_append(kind, rec, sizeof(rec)) == ESP_OK, "append");
+    }
+    fill_segment(base, kind, 0, LOG_STORE_SEGMENT_MAX_BYTES);
+    TEST_CHECK(log_store_append(kind, rec, sizeof(rec)) == ESP_OK, "append rolls to segment 1");
+    TEST_CHECK(log_store_append(kind, rec, sizeof(rec)) == ESP_OK, "append to segment 1");
+    TEST_CHECK(log_store_segment_count(kind) == 2, "two segments before the 'power cut'");
+
+    /* Truncate the copy that was written LAST (the one a cut mid-write would have emptied). */
+    char pa[600], pb[600];
+    snprintf(pa, sizeof(pa), "%s/firing.manifest.a", base);
+    snprintf(pb, sizeof(pb), "%s/firing.manifest.b", base);
+    unsigned long oa, na, qa, ob, nb, qb;
+    int ha, hb;
+    bool va = read_manifest_copy_for_test(pa, &oa, &na, &ha, &qa);
+    bool vb = read_manifest_copy_for_test(pb, &ob, &nb, &hb, &qb);
+    TEST_CHECK(va && vb, "both manifest copies exist and are complete");
+    write_raw((va && vb && qa > qb) ? pa : pb, "", 0);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "re-init after the torn write");
+    TEST_CHECK(log_store_segment_count(kind) >= 2, "old segments are still tracked, not restarted at idx 0");
+    TEST_CHECK(file_exists_seg(base, kind, 0), "segment 0 still on disk");
+
+    /* A half-written copy (no '#' terminator) is also rejected. */
+    write_raw(pa, "0 1 1 99", 8);
+    write_raw(pb, "", 0);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "re-init with both copies damaged");
+    TEST_CHECK(log_store_segment_count(kind) == 0, "an unterminated (half-written) copy is not trusted");
+}
+
+// With both copies complete, the higher sequence number wins in either slot.
+static void test_manifest_highest_sequence_wins(void)
+{
+    TEST_SECTION("log_store: both manifest copies valid -- the higher sequence wins (LOW-4)");
+    const char *base = "log_store_test_manifest_seq";
+    log_store_kind_t kind = LOG_STORE_KIND_FIRING;
+    reset_scratch_dir(base, kind, 13);
+    char pa[600], pb[600];
+    snprintf(pa, sizeof(pa), "%s/firing.manifest.a", base);
+    snprintf(pb, sizeof(pb), "%s/firing.manifest.b", base);
+    write_raw(pa, "0 0 1 5 #\n", 10);
+    write_raw(pb, "0 2 1 9 #\n", 10);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "init");
+    TEST_CHECK(log_store_segment_count(kind) == 3, "copy b (seq 9) wins over copy a (seq 5)");
+    write_raw(pa, "0 2 1 9 #\n", 10);
+    write_raw(pb, "0 0 1 5 #\n", 10);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "re-init");
+    TEST_CHECK(log_store_segment_count(kind) == 3, "copy a (seq 9) wins over copy b (seq 5)");
+}
+
+// ---------------------------------------------------------------------
+// AUDIT_LOGSTORE_TIME LOW-5: a torn tail must never have records appended after it.
+// ---------------------------------------------------------------------
+static void test_torn_tail_starts_new_segment(void)
+{
+    TEST_SECTION("log_store: torn final record -> new appends start a fresh segment (LOW-5)");
+    const char *base = "log_store_test_torn";
+    log_store_kind_t kind = LOG_STORE_KIND_FIRING;
+    reset_scratch_dir(base, kind, 4);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "init");
+    static const char r1[] = "first-good-record";
+    static const char r2[] = "second-good-record";
+    TEST_CHECK(log_store_append(kind, r1, sizeof(r1)) == ESP_OK, "append 1");
+    TEST_CHECK(log_store_append(kind, r2, sizeof(r2)) == ESP_OK, "append 2");
+
+    /* Power cut mid-record: a length prefix promising 20 bytes, only 5 present. */
+    char sp[600];
+    seg_path(base, kind, 0, sp, sizeof(sp));
+    FILE *f = fopen(sp, "ab");
+    uint8_t torn[] = { 20, 0, 'a', 'b', 'c', 'd', 'e' };
+    fwrite(torn, 1, sizeof(torn), f);
+    fclose(f);
+
+    TEST_CHECK(log_store_init(base) == ESP_OK, "re-init (reboot)");
+    static const char r3[] = "after-reboot-record";
+    TEST_CHECK(log_store_append(kind, r3, sizeof(r3)) == ESP_OK, "append after reboot");
+
+    log_store_reader_t *rd = log_store_reader_open(kind);
+    uint8_t buf[LOG_STORE_MAX_RECORD_LEN];
+    size_t n = 0;
+    int count = 0;
+    bool got_r3 = false;
+    while (log_store_reader_next(rd, buf, sizeof(buf), &n)) {
+        count++;
+        if (n == sizeof(r3) && memcmp(buf, r3, sizeof(r3)) == 0) {
+            got_r3 = true;
+        }
+    }
+    log_store_reader_close(rd);
+    TEST_CHECK(got_r3, "the post-reboot record is readable intact (not misaligned behind the torn tail)");
+    TEST_CHECK(count == 3, "exactly the two good records and the new one are returned (torn tail dropped)");
+
+    /* A clean store must NOT burn a segment per boot. */
+    size_t segs = log_store_segment_count(kind);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "re-init again");
+    TEST_CHECK(log_store_segment_count(kind) == segs, "a clean tail does not start a new segment");
+}
+
 void run_test_log_store(void)
 {
+    test_torn_manifest_recovers_from_other_copy();
+    test_manifest_highest_sequence_wins();
+    test_torn_tail_starts_new_segment();
     test_rotation_bounds_size();
     test_full_filesystem_degrades_safely();
     test_round_trip_asymmetric();

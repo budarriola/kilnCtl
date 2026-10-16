@@ -907,6 +907,19 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # point left every run that died earlier with an unreclaimable ~425 MB
     # markerless directory.)
 
+    # PINNED-KEY GUARD (REVIEW_XIPLAND MED-1). ESP-IDF keeps a generated sdkconfig's value over
+    # sdkconfig.defaults, so a stale board config silently builds without the pinned link fixes
+    # (XIP_FROM_PSRAM, UART_ISR_IN_IRAM) and every ELF-reading check then grades that ELF green.
+    # Verify the file we are about to build with, BEFORE copying it, against THIS tree's defaults.
+    # Fail loudly rather than regenerate: a regenerated config would discard board-tuned values
+    # that defaults does not pin.
+    $pinCheck = Join-Path $PSScriptRoot "check_sdkconfig_defaults_applied.ps1"
+    $pinOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $pinCheck -DefaultsPath (Join-Path $repoRoot "firmware\KilnFW\sdkconfig.defaults") -SdkconfigPath $MainSdkconfig 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host $pinOut
+        Fail "refusing to build: $MainSdkconfig disagrees with sdkconfig.defaults on a pinned key (output above), so the build would silently lack a pinned setting. Fix: back up that sdkconfig, delete it and run 'idf.py reconfigure' in its firmware\KilnFW directory (or edit the named keys), then re-run."
+    }
+
     Copy-Item -LiteralPath $MainSdkconfig -Destination $WorktreeSdkconfig -Force
     $mainHash = (Get-FileHash -LiteralPath $MainSdkconfig -Algorithm SHA256).Hash
     $worktreeHash = (Get-FileHash -LiteralPath $WorktreeSdkconfig -Algorithm SHA256).Hash
@@ -953,6 +966,18 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
         try { $previousBuiltHash = ([System.IO.File]::ReadAllText($SdkconfigHashMarker, [System.Text.Encoding]::UTF8)).Trim() } catch { $previousBuiltHash = $null }
     }
     $sdkconfigStale = ($previousBuiltHash -ne $mainHash)
+    # KILNCTL_RELEASE_VERSION is cached at configure time (KILN_CONFIGURED_RELEASE_VERSION) and a changed
+    # env var does not make idf.py rerun cmake; gen_build_info.cmake is FATAL on a mismatch in either
+    # direction (REVIEW_STAGEVERFX MED-1). Reconfigure when the cached value differs from the env.
+    $wantRelVer = if ($env:KILNCTL_RELEASE_VERSION) { $env:KILNCTL_RELEASE_VERSION } else { "" }
+    if (Test-Path -LiteralPath $CMakeCacheFile) {
+        $relMatch = Select-String -LiteralPath $CMakeCacheFile -Pattern '^KILN_CONFIGURED_RELEASE_VERSION:[A-Z]+=(.*)$' | Select-Object -First 1
+        $cachedRelVer = if ($relMatch) { $relMatch.Matches[0].Groups[1].Value.Trim() } else { "" }
+        if ($cachedRelVer -ne $wantRelVer) {
+            Write-Host "STALE CONFIG: build directory was configured with KILNCTL_RELEASE_VERSION='$cachedRelVer' but the environment has '$wantRelVer'; running idf.py reconfigure." -ForegroundColor Yellow
+            $sdkconfigStale = $true
+        }
+    }
     if ($sdkconfigStale -and (Test-Path -LiteralPath $CMakeCacheFile)) {
         $prevDisplay = if ($previousBuiltHash) { $previousBuiltHash } else { "(none recorded -- first run under this guard, or a build directory from before it existed)" }
         Write-Host "STALE CONFIG: build directory at $WorktreePath was last reconfigured against sdkconfig hash $prevDisplay; the sdkconfig just copied in hashes $mainHash. Running 'idf.py reconfigure' before building so cached CMake/Kconfig state (e.g. a component's compile-time CONFIG_* branch) cannot disagree with the config this run verified." -ForegroundColor Yellow

@@ -47,7 +47,35 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid)
+/* persfx4 MED-3: keep a copy of an undecodable kiln_configs file as "<path>.bad" before anything can replace it.
+ * An identical existing copy is not rewritten. Returns whether a copy of these bytes now exists. */
+static bool kcfg_preserve_rejected(const uint8_t *raw, size_t len)
+{
+    static const char kBad[] = KILN_CFG_STORE_FILE_PATH ".bad";
+    if (!raw || len == 0) {
+        return false;
+    }
+    uint8_t *old = persist_scratch_alloc(len);
+    if (old) {
+        size_t olen = 0;
+        bool same = cfg_fs_read(kBad, old, len, &olen) == ESP_OK && olen == len && memcmp(old, raw, len) == 0;
+        free(old);
+        if (same) {
+            return true;
+        }
+    }
+    esp_err_t err = s_write_fn(kBad, raw, len);
+    if (err == ESP_OK) {
+        ESP_LOGE(KCFG_FS_TAG, "rejected kiln config store file preserved as %s (%u bytes)", kBad, (unsigned)len);
+    } else {
+        ESP_LOGE(KCFG_FS_TAG, "could not preserve rejected kiln config store file as %s: %s", kBad,
+                 esp_err_to_name(err));
+    }
+    return err == ESP_OK;
+}
+
+void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid,
+                                       kiln_cfg_file_state_t *out_state, bool preserve)
 {
     if (out_blob) {
         memset(out_blob, 0, sizeof(*out_blob));
@@ -58,6 +86,9 @@ void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *o
     if (out_valid) {
         *out_valid = false;
     }
+    if (out_state) {
+        *out_state = KILN_CFG_FILE_ABSENT;
+    }
     if (!out_blob || !out_rev || !out_valid) {
         return;
     }
@@ -67,18 +98,28 @@ void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *o
 
     uint8_t *raw = persist_scratch_alloc(KCFG_FILE_BUF_MAX);
     if (!raw) {
-        ESP_LOGW(KCFG_FS_TAG, "file read buffer alloc failed (%u bytes) -- treating as file absent, NVS "
-                              "candidate decides",
+        /* persfx4 MED-3: an allocation failure is NOT "file absent" -- the file was never looked at. */
+        ESP_LOGE(KCFG_FS_TAG, "file read buffer alloc failed (%u bytes) -- file state UNKNOWN",
                  (unsigned)KCFG_FILE_BUF_MAX);
+        if (out_state) {
+            *out_state = KILN_CFG_FILE_UNKNOWN;
+        }
         return;
     }
     size_t len = 0;
     esp_err_t err = cfg_fs_read(KILN_CFG_STORE_FILE_PATH, raw, KCFG_FILE_BUF_MAX, &len);
     if (err != ESP_OK) {
-        /* Absent (never migrated yet), oversized, or unreadable -- none of
-         * these are "found but bad" on their own; the caller's resolve()
-         * decides whether that's worth a divergence warning. */
         free(raw);
+        if (err == ESP_ERR_NOT_FOUND) {
+            return; /* never saved/migrated: the only real absence */
+        }
+        if (out_state) {
+            /* ESP_ERR_INVALID_SIZE: bigger than any store this build writes, so newer firmware wrote it. Any
+             * other error is an unreadable file: state unknown, never treated as absent. */
+            *out_state = (err == ESP_ERR_INVALID_SIZE) ? KILN_CFG_FILE_NEWER : KILN_CFG_FILE_UNKNOWN;
+        }
+        ESP_LOGE(KCFG_FS_TAG, "kiln config store file read failed: %s -- file state %s", esp_err_to_name(err),
+                 err == ESP_ERR_INVALID_SIZE ? "NEWER (oversized)" : "UNKNOWN");
         return;
     }
     if (len != KCFG_FILE_BUF_MAX) {
@@ -86,35 +127,56 @@ void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *o
          * versioned file layout of its own to migrate from a shorter/older
          * shape (see this module's header comment) -- ANY size other than
          * exactly "rev + one current kiln_cfg_store_blob_t" is invalid,
-         * full stop. */
-        ESP_LOGW(KCFG_FS_TAG, "kiln config store file is %u bytes, expected %u -- ignoring, NVS candidate "
-                              "decides",
+         * full stop. It is also NOT absent: it is preserved, never replaced. */
+        ESP_LOGE(KCFG_FS_TAG, "kiln config store file is %u bytes, expected %u -- rejected (kept untouched)",
                  (unsigned)len, (unsigned)KCFG_FILE_BUF_MAX);
+        if (preserve) {
+            (void)kcfg_preserve_rejected(raw, len);
+        }
         free(raw);
+        if (out_state) {
+            *out_state = KILN_CFG_FILE_REJECTED;
+        }
         return;
     }
 
     uint32_t rev = get_u32_le(raw);
     /* Decoded straight into the caller's buffer rather than through a
-     * kiln_cfg_store_blob_t local: that local was ~7.5 KiB on the `main`
+     * kiln_cfg_store_blob_t local: that local was ~7.5 KiB on the main
      * task's 8192 B stack during boot -- half of the overflow that panicked
      * the board in docs/audits/boot_hang_2026-09-08.md. On a rejected file
      * out_blob is re-zeroed below, so a caller that ignores *out_valid
      * still sees the same all-zero blob it did before. */
     memcpy(out_blob, raw + 4, sizeof(*out_blob));
-    free(raw);
 
     if (out_blob->version != KILN_CFG_STORE_VERSION) {
-        ESP_LOGW(KCFG_FS_TAG,
-                 "kiln config store file (rev %lu) claims version %u, this firmware wants %u -- ignoring "
-                 "file, NVS candidate decides",
-                 (unsigned long)rev, (unsigned)out_blob->version, (unsigned)KILN_CFG_STORE_VERSION);
+        bool newer = out_blob->version > KILN_CFG_STORE_VERSION;
+        ESP_LOGE(KCFG_FS_TAG,
+                 "kiln config store file (rev %lu) claims version %u, this firmware wants %u -- %s, kept untouched",
+                 (unsigned long)rev, (unsigned)out_blob->version, (unsigned)KILN_CFG_STORE_VERSION,
+                 newer ? "NEWER" : "rejected");
+        if (preserve && !newer) {
+            (void)kcfg_preserve_rejected(raw, len);
+        }
+        free(raw);
         memset(out_blob, 0, sizeof(*out_blob));
+        if (out_state) {
+            *out_state = newer ? KILN_CFG_FILE_NEWER : KILN_CFG_FILE_REJECTED;
+        }
         return;
     }
+    free(raw);
 
     *out_rev = rev;
     *out_valid = true;
+    if (out_state) {
+        *out_state = KILN_CFG_FILE_VALID;
+    }
+}
+
+void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid)
+{
+    kiln_cfg_store_cfg_fs_load_raw_ex(out_blob, out_rev, out_valid, NULL, false);
 }
 
 esp_err_t kiln_cfg_store_cfg_fs_save(const kiln_cfg_store_blob_t *blob, uint32_t rev)
@@ -146,6 +208,16 @@ esp_err_t kiln_cfg_store_cfg_fs_save(const kiln_cfg_store_blob_t *blob, uint32_t
 bool kiln_cfg_store_cfg_fs_resolve(const kiln_cfg_store_blob_t *nvs_blob, bool nvs_valid, uint32_t nvs_rev,
                                     kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_used_file)
 {
+    return kiln_cfg_store_cfg_fs_resolve_ex(nvs_blob, nvs_valid, nvs_rev, out_blob, out_rev, out_used_file, NULL);
+}
+
+bool kiln_cfg_store_cfg_fs_resolve_ex(const kiln_cfg_store_blob_t *nvs_blob, bool nvs_valid, uint32_t nvs_rev,
+                                      kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_used_file,
+                                      kiln_cfg_file_state_t *out_state)
+{
+    if (out_state) {
+        *out_state = KILN_CFG_FILE_ABSENT;
+    }
     if (out_blob) {
         memset(out_blob, 0, sizeof(*out_blob));
     }
@@ -163,16 +235,28 @@ bool kiln_cfg_store_cfg_fs_resolve(const kiln_cfg_store_blob_t *nvs_blob, bool n
     if (!file_blob) {
         /* Cannot even attempt the file side this call -- degrade to the NVS
          * candidate exactly like "partition absent"/"file absent" would. */
-        ESP_LOGW(KCFG_FS_TAG, "resolve: scratch buffer alloc failed -- falling back to NVS candidate");
-        *out_blob = *nvs_blob;
-        *out_rev = nvs_rev;
-        *out_used_file = false;
-        return nvs_valid;
+        /* persfx4 MED-3: the file side could not even be attempted. Do not decide from NVS and do not write:
+         * report UNKNOWN so the caller quarantines (refuses mutators) instead of running on a frozen copy. */
+        ESP_LOGE(KCFG_FS_TAG, "resolve: scratch buffer alloc failed -- file state UNKNOWN, nothing written");
+        if (out_state) {
+            *out_state = KILN_CFG_FILE_UNKNOWN;
+        }
+        return false;
     }
 
     uint32_t file_rev = 0;
     bool file_valid = false;
-    kiln_cfg_store_cfg_fs_load_raw(file_blob, &file_rev, &file_valid);
+    kiln_cfg_file_state_t fstate = KILN_CFG_FILE_ABSENT;
+    kiln_cfg_store_cfg_fs_load_raw_ex(file_blob, &file_rev, &file_valid, &fstate, true);
+    if (out_state) {
+        *out_state = fstate;
+    }
+    if (fstate == KILN_CFG_FILE_UNKNOWN || fstate == KILN_CFG_FILE_NEWER || fstate == KILN_CFG_FILE_REJECTED) {
+        /* persfx4 MED-3: a file that exists but cannot be used is never "absent". The frozen NVS blob does NOT
+         * replace it and nothing is written: out_blob stays zeroed, trustworthy=false, and the caller quarantines. */
+        free(file_blob);
+        return false;
+    }
 
     if (!file_valid) {
         /* No usable file. Fall back to the NVS candidate, and if it is

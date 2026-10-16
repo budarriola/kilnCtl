@@ -655,7 +655,7 @@ esp_err_t safety_link_stop(SafetyLinkClass *link)
     xSemaphoreTake(link->state_lock, portMAX_DELAY);
     link->initialized = false;
     if (link->poll_task) {
-        vTaskDelete(link->poll_task);
+        vTaskDeleteWithCaps(link->poll_task);
         link->poll_task = NULL;
     }
     xSemaphoreGive(link->state_lock);
@@ -714,6 +714,25 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
             out->diag_frame_age_ms = UINT32_MAX;
         }
     }
+    safety_unlock(link);
+    return ESP_OK;
+}
+
+esp_err_t safety_link_get_diag_trip_reason(SafetyLinkClass *link, bool *out_fresh, uint8_t *out_reason)
+{
+    if (!link || !out_fresh || !out_reason) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    const bool fresh = link->cached.diag_ever_received && link->cached.diag_since_reboot &&
+                       safety_link_up_locked(link);
+    *out_fresh = fresh;
+    *out_reason = fresh ? link->cached.diag_trip_reason : 0u;
     safety_unlock(link);
     return ESP_OK;
 }

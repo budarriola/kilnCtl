@@ -8,6 +8,15 @@
 # Negative-tested by hand 2026-10-07: each case's guard in land.ps1 was broken
 # in turn (see the commit message) and this check went RED, then restored.
 
+# Sharding: each land.ps1 run costs several powershell/git launches (3-8 s each on a
+# loaded box), and ~40 runs in one serial pass exceeded run_all_checks' 900 s cap.
+# The case groups are independent (each shard builds its own bare origin), so the
+# default invocation (-Shard 0) launches one child per group concurrently and
+# aggregates; a group is `if (On n) { ... }` below. Every assertion still runs.
+param([int]$Shard = 0)
+$script:ShardCount = 7
+function On([int]$n) { return ($script:Shard -eq $n) }
+
 $ErrorActionPreference = "Continue"
 $land = Join-Path $PSScriptRoot "land.ps1"
 $script:fails = 0
@@ -17,6 +26,36 @@ function Assert([bool]$cond, [string]$what) {
 
 $env:GIT_AUTHOR_NAME = "t"; $env:GIT_AUTHOR_EMAIL = "t@example.invalid"
 $env:GIT_COMMITTER_NAME = "t"; $env:GIT_COMMITTER_EMAIL = "t@example.invalid"
+
+if ($Shard -eq 0) {
+    $procs = @()
+    $outDir = Join-Path ([IO.Path]::GetTempPath()) ("land_shards_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $outDir | Out-Null
+    foreach ($i in 1..$script:ShardCount) {
+        $o = Join-Path $outDir "shard$i.out"; $e = Join-Path $outDir "shard$i.err"
+        $p = Start-Process -FilePath 'powershell.exe' -PassThru -NoNewWindow -RedirectStandardOutput $o -RedirectStandardError $e `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-Shard', "$i")
+        [void]$p.Handle
+        $procs += [pscustomobject]@{ I = $i; P = $p; O = $o; E = $e }
+    }
+    $bad = 0
+    $caseTotal = 0
+    foreach ($x in $procs) {
+        $x.P.WaitForExit()
+        Write-Host "=== shard $($x.I) (exit $($x.P.ExitCode)) ==="
+        $txt = if (Test-Path -LiteralPath $x.O) { Get-Content -LiteralPath $x.O -Raw } else { "" }
+        Write-Host $txt
+        $caseTotal += ([regex]::Matches("$txt", '(?m)^case: ')).Count
+        if ($x.P.ExitCode -ne 0) { $bad++; if (Test-Path -LiteralPath $x.E) { Write-Host (Get-Content -LiteralPath $x.E -Raw) } }
+    }
+    Remove-Item -LiteralPath $outDir -Recurse -Force -ErrorAction SilentlyContinue
+    $want = ([regex]::Matches([IO.File]::ReadAllText($PSCommandPath), '(?m)^\s*Write-Host "case: ')).Count
+    # the three hook-refusal variants share one Write-Host inside a loop (3 runs), the l2 loop is not a case line
+    if ($caseTotal -lt $want) { Write-Host "  FAIL: only $caseTotal case headers ran across shards, source has $want (a case is outside every shard)" -ForegroundColor Red; $bad++ }
+    if ($bad -gt 0) { Write-Host "check_land: $bad shard problem(s)" -ForegroundColor Red; exit 1 }
+    Write-Host "check_land: all cases passed" -ForegroundColor Green
+    exit 0
+}
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("land_test_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -68,6 +107,7 @@ try {
     git -C $seed push origin HEAD:dev *>$null
     $log = Join-Path $tmp "run.log"
 
+    if (On 1) {
     Write-Host "case: nothing ahead"
     $c = New-Clone "c_ahead"
     $r = Run-Land $c @("-ChecksScript", $okStub)
@@ -136,6 +176,8 @@ try {
     git -C $origin merge-base --is-ancestor $r.Json.sha dev *>$null
     Assert ($LASTEXITCODE -eq 0) "sha is on origin/dev"
 
+    }
+    if (On 2) {
     Write-Host "case: FAIL in UTF-16 log refused; -AllowFail permits"
     $c = New-Clone "c_log"
     Commit-File $c "log.txt" "x" "log"
@@ -178,6 +220,8 @@ try {
         Assert (((Get-Date) - $t0).TotalSeconds -lt 120) "fail-fast well before the wait deadline"
     } finally { $hold.Dispose() }
 
+    }
+    if (On 3) {
     Write-Host "case: default target is dev; main untouched"
     $c = New-Clone "c_dev"
     git -C $c checkout -b work origin/dev *>$null
@@ -233,6 +277,8 @@ try {
     $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x", "-DryRun", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 0) "timed-out FAIL line is allowed only via explicit -AllowFail"
 
+    }
+    if (On 4) {
     Write-Host "case: [remote rejected] is not retried (F11)"
     $c = New-Clone "c_rej"
     Commit-File $c "rej.txt" "x" "rej"
@@ -276,6 +322,8 @@ try {
     $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
     Assert ($rebases -eq 3) "LOW-3: a persistent race stops after exactly 3 attempts (rebases: $rebases)"
 
+    }
+    if (On 5) {
     Write-Host "case: Get-PushRejectVerdict classification (porcelain status lines only)"
     $fnText = [regex]::Match([IO.File]::ReadAllText($land), '(?ms)^function Get-PushRejectVerdict.*?^\}').Value
     Assert ($fnText.Length -gt 50) "found Get-PushRejectVerdict in land.ps1"
@@ -311,6 +359,8 @@ try {
         Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote' -and $r.Out -match [regex]::Escape($variant.msg)) "$($variant.n): refused with its message"
         Assert ($rebases -le 1) "$($variant.n): not retried (rebases: $rebases)"
     }
+    }
+    if (On 1) {
     Write-Host "case: -RestartMcp really runs mcp_servers.ps1 restart then status (F3)"
     $c = New-Clone "c_mcp"
     Commit-File $c "mcp.txt" "x" "mcp"
@@ -330,6 +380,8 @@ try {
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'post-rebase checks failed') "refused"
     Assert ((OriginHead) -eq $before) "nothing pushed"
 
+    }
+    if (On 6) {
     Write-Host "case: unpushed submodule pin blocks push; submodule_pins=fail"
     $c = New-Clone "c_pin"
     $om = $origin -replace '\\','/'
@@ -374,6 +426,8 @@ try {
     Assert (-not (Test-Path -LiteralPath $wt)) "worktree directory is gone (no empty remnant)"
     Assert (-not ((git -C $mainc worktree list --porcelain) -match 'c_wt_linked')) "worktree unregistered"
 
+    }
+    if (On 7) {
     Write-Host "case: two comma-separated -AllowFail regexes; no GetFullPath noise"
     $c = New-Clone "c_two"
     Commit-File $c "two.txt" "x" "two"
@@ -437,6 +491,7 @@ try {
         Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true -and $rebases -eq 2) "$variant racer: landed after one retry (code $($r.Code), rebases $rebases)"
         $want = if ($variant -eq "gitlink") { 2 } else { 1 }
         Assert ((PinCalls) -eq $want) "$variant racer: pin check ran $(PinCalls) time(s), want $want"
+    }
     }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

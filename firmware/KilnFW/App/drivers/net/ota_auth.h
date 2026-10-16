@@ -101,15 +101,17 @@ typedef struct {
     uint32_t failure_count;   // failures accumulated since the last lock-out or the last success
     uint32_t lockout_tier;    // how many times this endpoint has been locked out in a row without
                                 // an intervening success -- 0 means never locked (or reset by success)
-    uint32_t locked_until_ms; // 0 = not currently locked; otherwise the tick at which the lock lifts
+    uint32_t lock_start_ms;   // tick at which the current lock began (valid only while lock_dur_ms != 0)
+    uint32_t lock_dur_ms;     // 0 = not currently locked; otherwise the lock length. Elapsed-time form
+                                // (like login_backoff): wrap-safe, an idle slot cannot alias back to locked
 } ota_auth_lockout_state_t;
 
 #define OTA_AUTH_LOCKOUT_THRESHOLD 3u        // failures before a lock is imposed
 #define OTA_AUTH_LOCKOUT_BASE_MS   60000u    // first lockout: 60 s
 #define OTA_AUTH_LOCKOUT_MAX_MS    900000u   // ceiling: 15 min
 
-// True iff `s` is currently locked (now_ms has not yet reached
-// locked_until_ms). A caller should refuse the attempt entirely (not even
+// True iff `s` is currently locked (less than lock_dur_ms has
+// elapsed since lock_start_ms, unsigned arithmetic). A caller should refuse the attempt entirely (not even
 // checking the password) while this is true.
 bool ota_auth_lockout_is_locked(const ota_auth_lockout_state_t *s, uint32_t now_ms);
 

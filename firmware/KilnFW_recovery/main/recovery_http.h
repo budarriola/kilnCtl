@@ -30,6 +30,20 @@ extern "C" {
 // an error is returned so the caller can retry.
 esp_err_t recovery_http_start(void);
 
+// boot_guard counter clear (0 = cleared or not applicable). Used by the
+// unattended-install pre-boot hook, same order as /api/recovery/exit.
+int recovery_http_boot_guard_clear(void);
+
+// Auto-exit helpers for a failed unattended install (recovery_install.c).
+// recovery_http_app_verifies(): `app` holds a valid image AND passes the full esp_image_verify. It drops the
+// cached verify result first (an apply may have rewritten `app` since it was cached).
+bool recovery_http_app_verifies(void);
+// Drops the cached verify result (call before `app` is erased or rewritten by a non-httpd task).
+void recovery_http_app_verify_invalidate(void);
+// Selects `app` as the boot target (set + read back) and schedules the restart. 0 = done; nonzero = nothing
+// changed or the switch failed (stay in recovery). The caller clears boot_guard and the request first.
+int recovery_http_select_app_and_restart(void);
+
 #ifdef __cplusplus
 }
 #endif

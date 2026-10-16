@@ -134,7 +134,9 @@ static void put_u16_le(uint8_t *out, uint16_t v)
 static size_t recovery_read_latest_metadata_or_default(bootloader_metadata_t *out_meta)
 {
     const uint8_t *metadata_region = (const uint8_t *)(XIP_BASE + BOOTLOADER_METADATA_FLASH_OFFSET);
-    size_t latest = bootloader_metadata_find_latest(metadata_region, out_meta);
+    const uint8_t *metadata_backup =
+        (const uint8_t *)(XIP_BASE + BOOTLOADER_METADATA_BACKUP_FLASH_OFFSET);
+    size_t latest = bootloader_metadata_find_latest_ab(metadata_region, metadata_backup, out_meta);
     if (latest == BOOTLOADER_METADATA_NO_SLOT) {
         memset(out_meta, 0, sizeof(*out_meta));
         out_meta->format_version = BOOTLOADER_METADATA_FORMAT_VERSION;
@@ -454,7 +456,13 @@ static void recovery_process_end(const uint8_t *payload, uint8_t length)
     meta.active_slot = s_target_slot;
     meta.boot_attempts = 0;
 
-    bootloader_persist_metadata(&meta, latest);
+    if (!bootloader_persist_metadata(&meta, latest)) {
+        // AUDIT_PICO_UPDATE LOW-3: never report COMPLETE for a record that did
+        // not read back; the slot is still STAGED in flash.
+        recovery_send_status_now(R_STATE_FAILED, STATUS_ERR_INTERNAL);
+        recovery_revert_target_slot();
+        return;
+    }
 
     recovery_send_status_now(R_STATE_COMPLETE, 0);
     s_transfer_active = false;

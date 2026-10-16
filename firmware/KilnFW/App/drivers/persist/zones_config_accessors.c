@@ -264,6 +264,11 @@ float zones_config_peek_slot_max_temp_c(uint8_t zone_index)
     return zone_index < MAX31856_CHANNEL_COUNT ? s_zones.cfg.zones[zone_index].max_temp_c : 0.0f;
 }
 
+float zones_config_peek_slot_max_ramp_c_per_hr(uint8_t zone_index)
+{
+    return zone_index < MAX31856_CHANNEL_COUNT ? s_zones.cfg.zones[zone_index].max_ramp_c_per_hr : 0.0f;
+}
+
 uint8_t zones_config_get_max_simultaneous_relays(void)
 {
     return s_zones.cfg.max_simultaneous_relays;

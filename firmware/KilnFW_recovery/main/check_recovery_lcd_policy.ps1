@@ -45,7 +45,7 @@ $realHttp = Join-Path $here "recovery_http.c"
 # $Header: header to build against (copied beside a copy of the test so the
 # quoted include resolves to it); $LcdSrc/$HttpSrc: the sources to scan.
 function Build-And-Run {
-    param([string]$Header, [string]$LcdSrc, [string]$HttpSrc, [string]$Tag)
+    param([string]$Header, [string]$LcdSrc, [string]$HttpSrc, [string]$Tag, [string]$ExtraName = "", [string]$ExtraPath = "")
     $dir = Join-Path $work $Tag
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     Copy-Item $Header (Join-Path $dir "recovery_lcd_policy.h")
@@ -68,7 +68,7 @@ function Build-And-Run {
     }
     $ErrorActionPreference = "Continue"
     # Every other recovery source is scanned too (no log/printf may carry the passphrase).
-    $extra = (Get-ChildItem $here -Filter "recovery_*.c" | Where-Object { $_.Name -ne "recovery_lcd.c" -and $_.Name -ne "recovery_http.c" } | ForEach-Object { "`"" + $_.FullName + "`"" }) -join " "
+    $extra = (Get-ChildItem $here -Filter "recovery_*.c" | Where-Object { $_.Name -ne "recovery_lcd.c" -and $_.Name -ne "recovery_http.c" } | ForEach-Object { $p = $_.FullName; if ($ExtraName -ne "" -and $_.Name -eq $ExtraName) { $p = $ExtraPath }; "`"" + $p + "`"" }) -join " "
     $ro = cmd /c "`"$exe`" `"$LcdSrc`" `"$HttpSrc`" $extra 2>&1"
     $rx = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
@@ -89,8 +89,11 @@ function Test-Mutant {
         $bad = Build-And-Run -Header $mpath -LcdSrc $realLcd -HttpSrc $realHttp -Tag $Tag
     } elseif ($File -eq "recovery_lcd.c") {
         $bad = Build-And-Run -Header $realHeader -LcdSrc $mpath -HttpSrc $realHttp -Tag $Tag
-    } else {
+    } elseif ($File -eq "recovery_http.c") {
         $bad = Build-And-Run -Header $realHeader -LcdSrc $realLcd -HttpSrc $mpath -Tag $Tag
+    } else {
+        # any other recovery_*.c is a scanned extra source: swap it in by name
+        $bad = Build-And-Run -Header $realHeader -LcdSrc $realLcd -HttpSrc $realHttp -Tag $Tag -ExtraName $File -ExtraPath $mpath
     }
     if ($bad.Exit -eq 0) {
         throw "NEGATIVE TEST FAILED ($Tag): the mutant still passed -- the host test is vacuous for it."
@@ -116,13 +119,40 @@ try {
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "case RLCD_GET_BAD_LENGTH: return RLCD_BG_INVALID;" -Replacement "case RLCD_GET_BAD_LENGTH: return RLCD_BG_NONE;" -Tag "badlen_none"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "return failed_lines == 0;" -Replacement "return true;" -Tag "drawalways"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "LCD NOT READY, passphrase not displayed" -Replacement "LCD ok" -Tag "msg"
-    # Source wiring.
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "           qr_size > 0;" -Replacement "           true;" -Tag "qr_ignores_netset"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "if (err_head || ap_down) {" -Replacement "if (err_head) {" -Tag "mode_ignores_apdown"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "if (net_none || storage_fail) {" -Replacement "if (net_none) {" -Tag "mode_ignores_storage"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "== RLCD_TEXT_NET_SET &&" -Replacement "!= RLCD_TEXT_ERROR &&" -Tag "qr_visible_in_starting"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "if (phase == RLCD_QR_BEFORE_TEXT && !visible) {" -Replacement "if (phase == RLCD_QR_BEFORE_TEXT && visible) {" -Tag "paint_before_inverted"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return paint(false) != 0;" -Replacement "return paint(true) != 0;" -Tag "paint_hidden_shows_qr"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "if (phase == RLCD_QR_AFTER_TEXT && visible) {" -Replacement "if (phase == RLCD_QR_AFTER_TEXT) {" -Tag "paint_after_unconditional"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return paint(true) != 0;" -Replacement "return paint(true) == 0;" -Tag "paint_failure_lost"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return (qr_visible && y < qr_px && y + h > 0) ? panel_w - qr_px : panel_w;" -Replacement "return panel_w;" -Tag "band_never_clipped"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "qr_visible && y < qr_px && y + h > 0" -Replacement "y < qr_px && y + h > 0" -Tag "band_clipped_when_hidden"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "y < qr_px && y + h > 0" -Replacement "y < 100 && y + h > 0" -Tag "band_y_bound_short"
+    # Source wiring (the draw_status call sites; the helpers above are compiled and run).
+    Test-Mutant -File "recovery_lcd.c" -Needle "s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT, draw_qr_area);" -Replacement "s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT, draw_qr_area);" -Tag "lcd_pre_phase_wrong"
+    Test-Mutant -File "recovery_lcd.c" -Needle "s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT, draw_qr_area);" -Replacement "" -Tag "lcd_no_prepaint_hidden"
+    Test-Mutant -File "recovery_lcd.c" -Needle "s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_AFTER_TEXT, draw_qr_area);" -Replacement "s_line_errs += rlcd_qr_paint(show_qr, RLCD_QR_BEFORE_TEXT, draw_qr_area);" -Tag "lcd_post_phase_wrong"
+    Test-Mutant -File "recovery_lcd.c" -Needle "bool show_qr = qr_visible_now();" -Replacement "bool show_qr = true;" -Tag "lcd_qr_shown_while_hidden"
+    Test-Mutant -File "recovery_lcd.c" -Needle "    } else if (mode == RLCD_TEXT_NET_SET) {" -Replacement "    } else if (s_net_set) {" -Tag "lcd_text_handcopy_netset"
+    Test-Mutant -File "recovery_lcd.c" -Needle "    if (mode == RLCD_TEXT_ERROR) {" -Replacement "    if (s_err_head[0] || mode == RLCD_TEXT_ERROR) {" -Tag "lcd_text_handcopy_err"
+    Test-Mutant -File "recovery_lcd.c" -Needle "return rlcd_text_mode(s_err_head[0] != 0, s_ap_down != 0," -Replacement "return rlcd_text_mode(s_err_head[0] != 0, 0," -Tag "lcd_text_ignores_apdown"
+    Test-Mutant -File "recovery_lcd.c" -Needle "return rlcd_qr_visible(s_err_head[0] != 0, s_ap_down != 0," -Replacement "return rlcd_qr_visible(s_err_head[0] != 0, 0," -Tag "lcd_qr_ignores_apdown"
+    Test-Mutant -File "recovery_lcd.c" -Needle "rlcd_band_width(y, h, qr_visible_now(), PANEL_W, RQR_AREA_PX)" -Replacement "PANEL_W" -Tag "lcd_bands_not_clipped"
+    Test-Mutant -File "recovery_lcd.c" -Needle "send_data(s_line, (size_t)w * 2)" -Replacement "send_data(s_line, sizeof(s_line))" -Tag "lcd_band_send_full"
     Test-Mutant -File "recovery_lcd.c" -Needle "        s_ready = false;`n        ESP_LOGE(TAG, `"status draw failed" -Replacement "        ESP_LOGE(TAG, `"status draw failed" -Tag "draw_keeps_ready"
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "(void)0;" -Tag "nowarn"
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "ESP_LOGE(TAG, RLCD_NOT_READY_MSG); ESP_LOGI(TAG, `"pw %s`", s_net_pass);" -Tag "passleak"
     Test-Mutant -File "recovery_lcd.c" -Needle "if (a > 0 && rlcd_rereset_allowed(s_expander_err, s_rereset_count)) {" -Replacement "if (a > 0) {" -Tag "burst_ungated"
     Test-Mutant -File "recovery_lcd.c" -Needle "s_bg_state = rlcd_classify_boot_guard(rc, decoded);" -Replacement "s_bg_state = RLCD_BG_NONE;" -Tag "noclassify"
+    Test-Mutant -File "recovery_http.c" -Needle "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (recovery_pico_busy()) {" -Replacement "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (false) {" -Tag "wifi_reset_no_pico_busy"
     Test-Mutant -File "recovery_http.c" -Needle "\`"lcd_ready\`"" -Replacement "\`"lcd_rdy\`"" -Tag "nolcdready"
+
+    Test-Mutant -File "recovery_http.c" -Needle "gen == s_verify_gen" -Replacement "true" -Tag "verify_publish_ungated"
+    Test-Mutant -File "recovery_http.c" -Needle "portENTER_CRITICAL(&s_verify_mux)" -Replacement "(void)s_verify_mux" -Tag "verify_unlocked"
+    Test-Mutant -File "recovery_install.c" -Needle "recovery_http_app_verify_invalidate();" -Replacement "(void)0;" -Tag "apply_no_invalidate"
+    Test-Mutant -File "recovery_install.c" -Needle "if (guard_clear() != 0) {" -Replacement "if (0) {" -Tag "apply_guard_unchecked"
 
     Write-Host "check_recovery_lcd_policy: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0

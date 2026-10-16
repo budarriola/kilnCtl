@@ -500,6 +500,18 @@ static void test_any_ap_session_active(void)
     fake_time_advance_ms(61000); // past the 60s timeout
     TEST_CHECK(!http_auth_any_ap_session_active(false),
                "an expired-but-still-in_use AP-tagged slot does NOT count");
+    {
+        // REVIEW_FIXERS LOW-1 (lockfx): the AP query runs on wifi_prov_owner and
+        // must not write the httpd-owned table (a reap could wipe a login that
+        // is mid-creation). The expired slot is still in_use afterwards.
+        size_t in_use = 0;
+        for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+            if (http_session_table()->slots[i].in_use) {
+                in_use++;
+            }
+        }
+        TEST_CHECK(in_use == 1, "http_auth_any_ap_session_active does not reap (no write from the non-httpd task)");
+    }
 
     // UNREADABLE policy still fails closed toward TRUE, same direction as
     // http_auth_any_session_active().
@@ -558,7 +570,53 @@ static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
     set_policy_timeout(60); // repair for later tests
 }
 
+// AUDIT_LOGSTORE_TIME LOW-1: an expired session left allocated would read valid again
+// once the uint32 ms tick wraps (2^32 ms = 49.7 days after its last use).
+static void test_expired_session_does_not_revive_after_tick_wrap(void)
+{
+    TEST_SECTION("expired session is freed and stays dead across the 2^32 ms tick wrap");
+
+    reset_all();
+    set_policy_timeout(60);
+    make_session("tok-wrap-1", WEB_AUTH_SESSION_ROLE_USER, 0);
+    fake_time_advance_ms(61000); // expired
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    uint32_t last_seen = 0;
+    uint32_t timeout_s = 0;
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "expired at 61 s");
+    // Total elapsed since last use is now exactly 2^32 ms: an unreaped slot reads elapsed==0, valid.
+    fake_time_advance_ms(0xFFFFFFFFu - 61000u + 1u);
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "still dead at last_seen + 2^32 ms");
+    http_auth_session_touch("tok-wrap-1", "10.0.0.5", false);
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "touch cannot resurrect it at +2^32 ms");
+}
+
+// REVIEW_ALL_FIXES L3: a table idle ~50 days (past the 32-bit ms wrap) must not
+// treat an expired session as fresh again.
+static void test_session_expired_after_idle_longer_than_tick_wrap(void)
+{
+    TEST_SECTION("session idle 2^32 ms + 2 s (32-bit ms wrapped) is not revived");
+    reset_all();
+    set_policy_timeout(3600);
+    make_session("tok-wrap-1", WEB_AUTH_SESSION_ROLE_USER, 0);
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    uint32_t last_seen = 0, timeout_s = 0;
+    TEST_CHECK(http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "the session is valid while fresh (also records the access time)");
+    /* Idle 2^32 ms + 2 s: the wrapped 32-bit elapsed time is only 2 s, inside the 3600 s timeout. */
+    fake_time_advance_ms(0x7FFFFFFFu);
+    fake_time_advance_ms(0x7FFFFFFFu);
+    fake_time_advance_ms(2002u);
+    TEST_CHECK(!http_auth_session_status("tok-wrap-1", "10.0.0.5", &role, &last_seen, &timeout_s),
+               "after a tick-wrap-length idle the session is expired, not revived by the wrapped 32-bit difference");
+}
+
 void run_test_http_session_iface(void) {
+    test_session_expired_after_idle_longer_than_tick_wrap();
+    test_expired_session_does_not_revive_after_tick_wrap();
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();
     test_touch_extends_valid_session();

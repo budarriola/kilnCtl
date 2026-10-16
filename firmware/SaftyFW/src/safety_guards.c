@@ -324,8 +324,9 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
     case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
         return in->context_valid && cfg->tc_placement_valid &&
                cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
-               in->tc_valid &&
-               in->tc_c > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
+               /* A8 (guard audit 2026-10-14): an unknown reading is not a pass -- refuse, as S1 does. */
+               (!in->tc_valid ||
+                in->tc_c > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT));
     case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 -- current still present with nothing commanded on */
         return in->context_valid && in->any_current_present && !in->relay_commanded_recently;
     case SAFETY_TRIP_FROZEN_SENSOR: /* S11 -- reading still sitting at the value that tripped it.
@@ -361,7 +362,8 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                       * happen in a real thermal system" reasoning, applied to "does
                                       * the evidence that caused the trip still hold" rather than to
                                       * whether heat happens to be commanded on this exact tick. */
-        return in->tc_valid && state->s11_window_active && in->tc_c == state->s11_last_c;
+        /* A8: unknown reading -> refuse (cannot show the frozen condition cleared). */
+        return state->s11_window_active && (!in->tc_valid || in->tc_c == state->s11_last_c);
     case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 -- cj_c still over cj_max_c right now */
         /* F4: an unknown cold junction (NaN / cj_invalid) means the
          * enclosure condition cannot be shown to have cleared -> still
@@ -398,6 +400,19 @@ bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg
      * visible with a reason before this function is even reached, not just
      * failing silently here. */
     if (state->is_tripped && state->trip_ineffective) {
+        return false;
+    }
+
+    /* SAFETYFW_GUARDS audit 2026-10-14 A4: refuse while S9's evidence is still
+     * accumulating. K4 has been commanded open (s9_verify_active) and a calibrated
+     * current chain still sees current, or the consecutive-tick streak toward the
+     * unclearable latch has already started. Granting the clear here would leave the
+     * tripped path before S9 finishes, re-arming a possibly welded K4. Independent of
+     * the latched reason; refusal only, so it can only keep a guard watching. An
+     * uncommissioned or disabled chain is excluded (S9 only warns there, see below). */
+    if (state->is_tripped && !in->current_sensing_disabled &&
+        ((state->s9_verify_active && in->any_current_present && in->current_sensing_commissioned) ||
+         state->s9_current_present_streak > 0u)) {
         return false;
     }
 
@@ -837,6 +852,13 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * enclosure guard is not blind; S5 is untouched. */
         if (!in->cj_invalid && !isnan(in->cj_c) && s12_evaluate(state, cfg, in)) {
             return true;
+        }
+        /* A11 (guard audit 2026-10-14): keep the S8 window's wall-clock honest across
+         * a bad read. Skipping dt here made elapsed shorter than real time while
+         * delta_c kept growing, inflating the rate (nuisance trip). The window stays
+         * as it is otherwise (not reset), so detection of a real climb is unchanged. */
+        if (state->s8_window_active && in->dt_s > 0.0f) {
+            state->s8_window_elapsed_s += in->dt_s;
         }
         tc_usable = false;
         goto context_guards;

@@ -689,6 +689,14 @@ dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint3
 esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
                                SafetyLinkClass *safety_or_null);
 
+/* One-time flash size / running-image-length read (esp_image_get_metadata
+ * mmaps flash, which freezes the cache and asserts an INTERNAL caller stack).
+ * Call from app_main (internal stack) before any task with a PSRAM stack can
+ * reach dashboard_get_status(). dashboard_get_status() never performs this
+ * read itself: until primed, flash_size_known/flash_used_known read false.
+ * Idempotent. */
+void dashboard_prime_flash_facts(void);
+
 /* Read-only accessor for readiness_http.c (TODO.md 8.3): the same three
  * hardware-answering flags /api/status reports as io_ready/thermo_ready/
  * safety_ready, without readiness_http.c needing its own copy of the

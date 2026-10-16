@@ -12,6 +12,15 @@
 
 #include "../drivers/common/dram_margin.h"
 
+static void test_largest_alarm_is_7168_one_byte_either_side(void)
+{
+    // Owner decision 2026-10-13 pins the literal, not just the macro.
+    TEST_CHECK(KILN_DRAM_LARGEST_ALARM_BYTES == 7168u, "largest alarm is exactly 7168 B");
+    TEST_CHECK(dram_margin_check(7167, 100000).largest_low, "7167: largest_low");
+    TEST_CHECK(!dram_margin_check(7168, 100000).largest_low, "7168: not low");
+    TEST_CHECK(!dram_margin_check(7169, 100000).largest_low, "7169: not low");
+}
+
 static void test_both_healthy_does_not_trip(void)
 {
     dram_margin_result_t r = dram_margin_check(31744, 47139);
@@ -68,8 +77,10 @@ static void test_current_bench_figures_do_trip(void)
     // because it is a real measured point that must still trip on `largest`,
     // but see KILN_DRAM_FREE_KNOWN_BYTES for the actual minimum.
     dram_margin_result_t r = dram_margin_check(7680, 12483);
-    TEST_CHECK(r.tripped, "2026-08-24 bench figures (largest=7680, free=12483): must trip the alarm");
-    TEST_CHECK(r.largest_low, "largest=7680 is below the 8704 alarm: largest_low set");
+    // Owner decision 2026-10-13: alarm lowered 8704 -> 7168, so the 7680
+    // fetch-time dip no longer trips (it is the accepted bench figure).
+    TEST_CHECK(!r.tripped, "2026-08-24 bench figures (largest=7680, free=12483): no longer trip the 7168 alarm");
+    TEST_CHECK(!r.largest_low, "largest=7680 is above the 7168 alarm: largest_low NOT set");
     TEST_CHECK(!r.free_low, "free=12483 is above the 11903 alarm: free_low NOT set at THIS stage");
 }
 
@@ -83,7 +94,7 @@ static void test_bench_figures_are_not_a_regression(void)
     dram_margin_result_t r = dram_margin_check(KILN_DRAM_LARGEST_KNOWN_BYTES,
                                                KILN_DRAM_FREE_KNOWN_BYTES);
     // 2026-08-27: the trough climbed clear of the failure zone (13824/22123
-    // against alarms of 8704/11903), so this no longer trips. That is the
+    // against alarms of 7168/11903), so this no longer trips. That is the
     // point of the change, not a weakened test -- the regression half below
     // is what this case exists to pin, and it still holds.
     TEST_CHECK(!r.tripped, "the known trough is now ABOVE the documented failure zone");
@@ -207,6 +218,7 @@ static void test_healthy_figures_are_neither(void)
 void run_test_dram_margin(void)
 {
     TEST_SECTION("dram_margin_check");
+    test_largest_alarm_is_7168_one_byte_either_side();
     test_both_healthy_does_not_trip();
     test_largest_alone_trips_it();
     test_free_alone_trips_it();

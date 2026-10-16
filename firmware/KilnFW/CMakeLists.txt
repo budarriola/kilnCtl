@@ -19,6 +19,61 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction/idf/hwabstraction_esp"
 )
 
+# A release build (tools/make_release.ps1 exports KILNCTL_RELEASE_VERSION) stamps the tag into
+# esp_app_desc_t.version, so the descriptor equals the release.json tag. Without this ESP-IDF uses
+# git describe --dirty and the published v1.0.0-pre.3 image reads "v1.0.0-pre.3-dirty".
+if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" STREQUAL "")
+    # esp_app_desc_t.version holds 32 bytes (31 chars + NUL): a longer tag would be truncated and
+    # then no longer equal the release.json tag. Fail configure rather than stamp a cut-off version.
+    string(LENGTH "$ENV{KILNCTL_RELEASE_VERSION}" _kiln_rv_len)
+    if(_kiln_rv_len GREATER 31)
+        message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='$ENV{KILNCTL_RELEASE_VERSION}' is ${_kiln_rv_len} "
+                            "characters; esp_app_desc_t.version holds at most 31.")
+    endif()
+    if(NOT "$ENV{KILNCTL_RELEASE_VERSION}" MATCHES "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$")
+        message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='$ENV{KILNCTL_RELEASE_VERSION}' is not a semver "
+                            "(vMAJOR.MINOR.PATCH[-prerelease], lowercase v, no leading zeros, as gen_build_info.cmake requires).")
+    endif()
+    set(PROJECT_VER "$ENV{KILNCTL_RELEASE_VERSION}")
+    set(KILN_CONFIGURED_RELEASE_VERSION "$ENV{KILNCTL_RELEASE_VERSION}")
+else()
+    set(KILN_CONFIGURED_RELEASE_VERSION "")
+    # Dev build: ESP-IDF would use `git describe --always --dirty`, which esp_app_desc_t.version cuts to
+    # 31 chars -- a long describe loses its trailing "-dirty" and the image would stage as a clean upgrade
+    # (REVIEW_STAGEVERFX2 MED-1). Compose the string here so "-dirty" always survives within 31 chars.
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" describe --always --tags --abbrev=7
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" OUTPUT_VARIABLE _kiln_gd
+                        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _kiln_gd_rc ERROR_QUIET)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" diff-index --quiet HEAD --
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" RESULT_VARIABLE _kiln_dirty_rc ERROR_QUIET)
+        if(_kiln_gd_rc EQUAL 0 AND NOT "${_kiln_gd}" STREQUAL "")
+            set(_kiln_dsfx "")
+            if(NOT _kiln_dirty_rc EQUAL 0)
+                set(_kiln_dsfx "-dirty")
+            endif()
+            string(LENGTH "${_kiln_gd}${_kiln_dsfx}" _kiln_vl)
+            if(_kiln_vl GREATER 31)
+                # Too long (tag-N-gHASH): fall back to the bare short hash, which always fits with "-dirty".
+                execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+                                WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" OUTPUT_VARIABLE _kiln_gd
+                                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                string(LENGTH "${_kiln_gd}${_kiln_dsfx}" _kiln_vl)
+            endif()
+            if(_kiln_vl GREATER 31 OR "${_kiln_gd}" STREQUAL "")
+                message(FATAL_ERROR "dev PROJECT_VER '${_kiln_gd}${_kiln_dsfx}' is ${_kiln_vl} characters; "
+                                    "esp_app_desc_t.version holds at most 31 and must keep '-dirty'.")
+            endif()
+            set(PROJECT_VER "${_kiln_gd}${_kiln_dsfx}")
+        endif()
+    endif()
+endif()
+# Remembered in the cache so a reused build dir shows what it was configured with. The env var does
+# not trigger a reconfigure by itself, so gen_build_info.cmake (run every build) compares the env
+# against this value and fails the build on a mismatch in either direction.
+set(KILN_CONFIGURED_RELEASE_VERSION "${KILN_CONFIGURED_RELEASE_VERSION}" CACHE INTERNAL "KILNCTL_RELEASE_VERSION at configure time" FORCE)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # --- Hard-error the missing-declaration class, TREE-WIDE -------------------

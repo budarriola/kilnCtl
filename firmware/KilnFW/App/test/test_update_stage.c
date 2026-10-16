@@ -878,13 +878,16 @@ typedef struct {
     char semver[STAGE_SEMVER_FIELD_LEN + 1];
     update_stage_err_t verdict;
     bool have_id;
+    bool dirty;
     update_image_id_t id;
 } gate_rec_t;
 
-static update_stage_err_t rec_gate(void *ctx, const char *semver, const char *commit, const update_image_id_t *id)
+static update_stage_err_t rec_gate(void *ctx, const char *semver, const char *commit, const update_image_id_t *id,
+                                  bool dirty)
 {
     gate_rec_t *r = ctx;
     (void)commit;
+    r->dirty = dirty;
     r->calls++;
     r->have_id = id != NULL;
     if (id != NULL) {
@@ -924,6 +927,75 @@ static void test_install_gate(void)
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK, "gate OK: staged");
     TEST_CHECK(r.calls == 1 && strcmp(r.semver, "1.2.3") == 0, "gate called once with the image's own version, v stripped");
     TEST_CHECK(is_staged(), "staged after an allowing gate");
+    TEST_CHECK(!r.dirty, "clean descriptor: dirty flag not set");
+
+    // STAGEVERFX MED-1: undeclared upload of a -dirty descriptor: suffix stripped, dirty flag handed to the gate.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3-dirty");
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK, "undeclared -dirty: staged");
+    TEST_CHECK(r.calls == 1 && strcmp(r.semver, "1.0.0-pre.3") == 0, "undeclared -dirty: suffix stripped from the gate semver");
+    TEST_CHECK(r.dirty, "undeclared -dirty: dirty flag set");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "V1.0.0-pre.3-dirty");
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && strcmp(r.semver, "1.0.0-pre.3") == 0 &&
+                   r.dirty,
+               "undeclared V...-dirty: stripped and dirty");
+    {
+        static const char *const refused[] = {"-dirty", "v-dirty", "-DIRTY", "v1.0.0-DIRTY", "V1.0.0-pre.3-DIRTY"};
+        for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+            reset_board();
+            memset(&r, 0, sizeof(r));
+            make_image(30000, refused[i]);
+            TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 &&
+                           !is_staged(),
+                       "undeclared odd -dirty spelling: refused before the gate, nothing staged");
+        }
+    }
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3");
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty && strcmp(r.semver, "1.0.0-pre.3") == 0,
+               "undeclared clean descriptor: not dirty");
+    // STAGEVERFX LOW-1: a DECLARED version derives dirty from the descriptor too.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3-dirty");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && r.calls == 1 &&
+                   strcmp(r.semver, "1.0.0-pre.3") == 0,
+               "declared, -dirty descriptor: staged by the stager, declared semver to the gate");
+    TEST_CHECK(r.dirty, "declared, -dirty descriptor: dirty flag set (declaring does not launder it)");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty,
+               "declared, clean descriptor: not dirty");
+    // REVIEW_STAGEVERFX2 LOW-1: the smallest case-variant suffix (dn is exactly "-DIRTY", dl == 6) is refused when declared too.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "-DIRTY");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 && !is_staged(),
+               "declared, exactly -DIRTY descriptor: refused");
+    // MED-1: a dev version composed by CMake to exactly fill the 31-char descriptor still ends in "-dirty": stripped and dirty.
+    {
+        const char *full = "v1.0.0-pre.3-123-gabcdef0-dirty";
+        TEST_CHECK(strlen(full) == 31, "fixture is exactly 31 chars");
+        reset_board();
+        memset(&r, 0, sizeof(r));
+        make_image(30000, full);
+        TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.dirty &&
+                       strcmp(r.semver, "1.0.0-pre.3-123-gabcdef0") == 0,
+                   "31-char dev version keeps -dirty: stripped and flagged dirty");
+    }
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.0.0-pre.3-DIRTY");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3-DIRTY", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 &&
+                   !is_staged(),
+               "declared verbatim -DIRTY descriptor: refused before the gate, nothing staged");
+    reset_board();
+    memset(&r, 0, sizeof(r));
 
     reset_board();
     r.calls = 0;
@@ -1048,15 +1120,15 @@ static void test_v1_record(void)
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.have_id &&
                    r.id.magic == UPDATE_IMAGE_ID_MAGIC_V1 && r.id.uart_version == 13,
                "R7 L4: v1-only record is found");
-    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
+    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id, false) == UPDATE_STAGE_ERR_POLICY,
                "R8 L2: v1 record is refused when the manifest declares a commit (image_id_v1_no_commit)");
     {
         update_identity_t nocommit = want;
         memset(nocommit.commit, 0, sizeof(nocommit.commit));
-        TEST_CHECK(update_stage_manifest_gate(&nocommit, "1.2.3", "", &r.id) == UPDATE_STAGE_OK,
+        TEST_CHECK(update_stage_manifest_gate(&nocommit, "1.2.3", "", &r.id, false) == UPDATE_STAGE_OK,
                    "R8 L2: v1 record passes when the manifest declares no commit");
         r.id.uart_version = 14;
-        TEST_CHECK(update_stage_manifest_gate(&nocommit, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
+        TEST_CHECK(update_stage_manifest_gate(&nocommit, "1.2.3", "", &r.id, false) == UPDATE_STAGE_ERR_POLICY,
                    "R7 L4: v1 record still gets the schema comparison");
         r.id.uart_version = 13;
     }
@@ -1087,7 +1159,7 @@ static void test_v1_record(void)
     }
     TEST_CHECK(oldmagic == UPDATE_IMAGE_ID_MAGIC_V1, "R7 L4: a v1-only scanner with a 320-byte head finds the v1 copy");
     memcpy(want.commit, "ffffffffffffffffffffffffffffffffffffffff", 40);
-    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
+    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id, false) == UPDATE_STAGE_ERR_POLICY,
                "R7 L4: a v2 record still gets the commit check");
 }
 
@@ -1131,6 +1203,32 @@ static void test_manifest_gate(void)
     put_record_c(24, 16, 13, "abc1234");
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.4", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_VERSION_MISMATCH,
                "descriptor version differs from the manifest version: refused");
+
+    // Published v1.0.0-pre.3: release.json tag "v1.0.0-pre.3" (manifest identity version) vs the image's
+    // esp_app_desc_t.version "v1.0.0-pre.3-dirty" (ESP-IDF git-describe PROJECT_VER). Real artifact strings.
+    reset_board();
+    make_image(30000, "v1.0.0-pre.3-dirty");
+    put_record_c(24, 16, 13, "abc1234");
+    TEST_CHECK(upload_gated(30000, 4096, "v1.0.0-pre.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
+               "pre.3: descriptor v1.0.0-pre.3-dirty vs manifest v1.0.0-pre.3: accepted");
+    reset_board();
+    make_image(30000, "v1.0.0-pre.3");
+    put_record_c(24, 16, 13, "abc1234");
+    TEST_CHECK(upload_gated(30000, 4096, "v1.0.0-pre.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
+               "pre.3: clean descriptor still accepted");
+    {
+        static const char *const bad[] = {"v1.0.0-pre.4-dirty", "v1.0.0-pre.4", "v1.0.0-dirty",
+                                          "v1.0.0-pre.3-dirtyx", "v1.0.0-pre.3-dirt", "v1.0.0-pre.3-dirtz", "v1.0.0-pre.3-xdirty", "v1.0.1-pre.3-dirty"};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            reset_board();
+            make_image(30000, bad[i]);
+            put_record_c(24, 16, 13, "abc1234");
+            TEST_CHECK(upload_gated(30000, 4096, "v1.0.0-pre.3", update_stage_manifest_gate, &want) ==
+                               UPDATE_STAGE_ERR_VERSION_MISMATCH &&
+                           !is_staged(),
+                       "pre.3 manifest vs a genuinely different descriptor version: refused");
+        }
+    }
 
     // Review 5 M1: the IMAGE embedded commit is compared with the manifest commit. The stager declared
     // commit is what production passes (the manifest own), so it is always the matching one here.

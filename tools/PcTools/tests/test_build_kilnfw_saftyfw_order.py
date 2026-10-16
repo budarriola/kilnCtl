@@ -117,3 +117,51 @@ def test_fullclean_target_does_not_build_saftyfw(monkeypatch):
     workbench.build_kilnfw(target="fullclean")
 
     assert calls == ["kilnfw"]  # fullclean has no embed step to protect
+
+
+def _write_cfg(tmp_path, defaults, generated):
+    d = tmp_path / "firmware" / "KilnFW"
+    (d / "sdkconfig.defaults").write_text(defaults, encoding="utf-8")
+    if generated is not None:
+        (d / "sdkconfig").write_text(generated, encoding="utf-8")
+
+
+_PINS = "CONFIG_SPIRAM_XIP_FROM_PSRAM=y\n# CONFIG_UART_ISR_IN_IRAM is not set\n"
+
+
+def test_stale_sdkconfig_pin_mismatch_refuses_build_before_anything_runs(monkeypatch, tmp_path):
+    """REVIEW_XIPLAND MED-1: build_kilnfw must not build against a sdkconfig that disagrees
+    with a pinned sdkconfig.defaults key (ESP-IDF keeps the generated value)."""
+    _write_cfg(tmp_path, _PINS, "# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set\n# CONFIG_UART_ISR_IN_IRAM is not set\n")
+    calls = []
+    monkeypatch.setattr(workbench, "build_saftyfw", lambda *a, **k: calls.append("s") or "saftyfw: OK")
+    monkeypatch.setattr(workbench, "_run_locked", lambda *a, **k: calls.append("k") or "kilnfw-build: OK")
+    monkeypatch.setattr(workbench, "_IDF_PROFILE", __file__)
+    out = workbench.build_kilnfw(target="build")
+    assert "REFUSED" in out and "CONFIG_SPIRAM_XIP_FROM_PSRAM" in out
+    assert "CONFIG_UART_ISR_IN_IRAM" not in out
+    assert calls == []
+
+
+def test_missing_pinned_key_in_generated_sdkconfig_refuses(tmp_path):
+    _write_cfg(tmp_path, _PINS, "CONFIG_FOO=1\n")
+    bad = workbench.sdkconfig_pin_mismatches(str(tmp_path / "firmware" / "KilnFW"))
+    assert len(bad) == 2
+
+
+def test_matching_or_absent_sdkconfig_is_not_a_mismatch(tmp_path):
+    kd = str(tmp_path / "firmware" / "KilnFW")
+    _write_cfg(tmp_path, _PINS, None)
+    assert workbench.sdkconfig_pin_mismatches(kd) == []
+    _write_cfg(tmp_path, _PINS, "CONFIG_SPIRAM_XIP_FROM_PSRAM=y\n# CONFIG_UART_ISR_IN_IRAM is not set\nCONFIG_X=2\n")
+    assert workbench.sdkconfig_pin_mismatches(kd) == []
+
+
+def test_pin_mismatch_does_not_block_reconfigure(monkeypatch, tmp_path):
+    """reconfigure is the remedy, so it must stay reachable."""
+    _write_cfg(tmp_path, _PINS, "# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set\n")
+    monkeypatch.setattr(workbench, "build_saftyfw", lambda *a, **k: "saftyfw: OK")
+    monkeypatch.setattr(workbench, "_run_locked", lambda tag, rk, argv, **k: f"{tag}: OK in 1s")
+    monkeypatch.setattr(workbench, "_IDF_PROFILE", __file__)
+    out = workbench.build_kilnfw(target="reconfigure")
+    assert "REFUSED" not in out

@@ -82,6 +82,7 @@ try {
         (Join-Path $testDir "test_config_store_ct_channel_fitted.c"),
         (Join-Path $testDir "test_config_store_zone_ct_channel.c"),
         (Join-Path $testDir "test_ct_summed_topology_call_sites.c"),
+        (Join-Path $testDir "test_ct_split_map_guards.c"),
         (Join-Path $testDir "test_ct_amps_cal.c"),
         (Join-Path $testDir "test_snapshots.c"),
         (Join-Path $testDir "test_boot_checkin_coverage.c"),
@@ -233,6 +234,7 @@ try {
         # pulled in above for relay_owner.c) plus fake_adc.c as its backend --
         # no new stub file, unlike relay_owner.c's task-creation surface.
         (Join-Path $srcDir "current_sense.c"),
+        (Join-Path $testDir "test_pico_time_clock.c"), # A2: settable hardware-timer clock for current_sense.c's snapshot stamp
         (Join-Path $hwAbstractionHostDir "fake_adc.c"),
         # current_task.c's current_task_start() is now exercised too (hal_adc_
         # init()/hal_adc_gpio_enable() x3, then xTaskCreate) -- reuses the same
@@ -279,6 +281,7 @@ try {
     $rspContent = "/nologo /MP$clMpN /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" /I `"$hwAbstractionPicoSpiDir`" " +
         "/I `"$hardwareGpioMinStubDir`" " +
+        "/I `"$testDir\stubs\pico_time_clock`" " +
         "/I `"$spiOwnerStubDir`" " +
         "/Fo:`"$outDir\obj_main\\`" /Fe:`"$exe`" " +
         (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")
@@ -519,7 +522,8 @@ try {
         (Join-Path $srcDir "tasks\link_task_tc_type_gate.c"),
         (Join-Path $srcDir "tasks\tc_type_reapply_policy.c"),
         (Join-Path $srcDir "link_diag_flags.c"),
-        (Join-Path $srcDir "tasks\reboot_announce.c")
+        (Join-Path $srcDir "tasks\reboot_announce.c"),
+        (Join-Path $srcDir "tasks\tick_timing.c")
     ) + @(Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
     $ltSourceArgs = ($ltSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $ltCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
@@ -543,6 +547,7 @@ try {
     $blRecoverySources = @(
         (Join-Path $testDir "test_bootloader_recovery_update_main.c"),
         (Join-Path $testDir "test_bootloader_recovery_update.c"),
+        (Join-Path $testDir "test_bootloader_persist.c"),
         (Join-Path $bootDir "persist.c"),
         (Join-Path $bootDir "metadata.c"),
         (Join-Path $bootDir "crc32.c"),
@@ -594,7 +599,7 @@ try {
     $thermoTaskSourceArgs = ($thermoTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $thermoTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
         "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
-        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir\stubs\pico_time_clock`" /I `"$testDir`" " +
         "/Fo:`"$thermoTaskObjDir\\`" /Fe:`"$thermoTaskExe`" $thermoTaskSourceArgs"
     Add-HostBuild -Name "thermo_task_tests.exe" -ExePath $thermoTaskExe -BuildCmd $thermoTaskCmd
 

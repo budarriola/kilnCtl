@@ -19,6 +19,7 @@ static const char *TAG = "recovery_apply";
 
 #define APPLY_TASK_STACK 8192
 #define APPLY_TASK_PRIO 4
+#define APPLY_POLL_STACK RECOVERY_INSTALL_POLL_STACK // recovery_install.c poll task stack (internal RAM)
 #define STAGE_LABEL "stage"
 // Same floor as the Pico relay (recovery_pico.c): free internal RAM that must
 // remain after the task stack is allocated.
@@ -28,6 +29,7 @@ typedef struct {
     const esp_partition_t *stage;
     const esp_partition_t *app;
     int (*pre_boot)(void);
+    int (*post_boot)(void);
     psa_hash_operation_t sha;
     bool sha_active;
 } apply_ctx_t;
@@ -132,7 +134,14 @@ static int cb_set_boot(void *c)
         ESP_LOGE(TAG, "pre-boot hook (boot_guard clear) failed; boot partition NOT changed");
         return -1;
     }
-    return recovery_boot_partition_set_and_verify(a->app) == ESP_OK ? 0 : -1;
+    if (recovery_boot_partition_set_and_verify(a->app) != ESP_OK) {
+        return -1;
+    }
+    // Only now is the install real: the caller clears its request and records OK.
+    if (a->post_boot && a->post_boot() != 0) {
+        ESP_LOGE(TAG, "post-boot hook failed; app already selected");
+    }
+    return 0;
 }
 
 static void cb_yield(void *c)
@@ -174,7 +183,7 @@ static void apply_task(void *arg)
         esp_restart();
     }
     ESP_LOGE(TAG, "apply FAILED: %s (app %s)", recovery_apply_result_name(r),
-             s_prog.app_modified ? "was modified: stays in recovery, apply again" : "untouched");
+             s_prog.app_modified ? "was modified: install recovery restarts or exits" : "untouched");
     // Failure: stay in recovery with the stage intact. Allow a retry.
     s_running = false;
     vTaskDelete(NULL);
@@ -185,7 +194,7 @@ static const esp_partition_t *find_stage(void)
     return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, STAGE_LABEL);
 }
 
-esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(void))
+esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(void), int (*post_boot)(void))
 {
     if (!app) {
         return ESP_ERR_INVALID_ARG;
@@ -194,18 +203,24 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     if (!stage) {
         return ESP_ERR_NOT_FOUND;
     }
-    if (s_running) {
+    // Atomic claim: the main task (unattended install) and an httpd handler can race here.
+    bool expected = false;
+    if (!__atomic_compare_exchange_n(&s_running, &expected, true, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < APPLY_INTERNAL_FLOOR + APPLY_TASK_STACK + 1024u) {
+    // The unattended-install poll task (recovery_install.c, APPLY_POLL_STACK) is created after this
+    // check, so its internal stack is counted here to keep the 8192 B floor.
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) <
+        APPLY_INTERNAL_FLOOR + APPLY_TASK_STACK + APPLY_POLL_STACK + 1024u) {
+        __atomic_store_n(&s_running, false, __ATOMIC_SEQ_CST);
         return ESP_ERR_NO_MEM; // nothing touched; the caller reports it
     }
-    s_running = true;
     s_stack_free = 0;
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.stage = stage;
     s_ctx.app = app;
     s_ctx.pre_boot = pre_boot;
+    s_ctx.post_boot = post_boot;
     s_prog.phase = RECOVERY_APPLY_CHECKING;
     s_prog.result = 0;
     s_prog.done_bytes = 0;

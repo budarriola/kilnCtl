@@ -1,3 +1,4 @@
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "autotune_engine_internal.h"
 #include "heat_enable.h"
 #include "profile_feasibility.h"
@@ -86,6 +87,19 @@ bool any_other_zone_profile_active(uint8_t zone_index)
 }
 
 
+bool autotune_reject_if_blocked_during_measure(void)
+{
+    if (!s_at.blocked_during_measure) {
+        return false;
+    }
+    force_relays_off();
+    s_at.state = AUTOTUNE_ENGINE_ABORTED;
+    snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+             "heat was blocked during the measurement -- the trace has an unheated gap; run again");
+    ESP_LOGW(AT_TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+    return true;
+}
+
 /* Must be called with s_at.lock held. */
 void autotune_apply_relay(bool want_on)
 {
@@ -112,6 +126,10 @@ void autotune_apply_relay(bool want_on)
                           "will be flat and the fit will fail for that reason, not the kiln's",
                      s_at.zone_index, (unsigned)sources);
             want_on = false;
+            if (s_at.state == AUTOTUNE_ENGINE_STEPPING || s_at.state == AUTOTUNE_ENGINE_RELAY_APPROACH ||
+                s_at.state == AUTOTUNE_ENGINE_RELAY_CYCLING) {
+                s_at.blocked_during_measure = true;
+            }
         }
     }
     if (s_at.io) {
@@ -253,7 +271,7 @@ autotune_sample_t *autotune_unpack_zone_trace(uint8_t zone, size_t count)
     if (count == 0) {
         return NULL;
     }
-    autotune_sample_t *out = malloc(count * sizeof(*out));
+    autotune_sample_t *out = persist_scratch_alloc(count * sizeof(*out));
     if (!out) {
         return NULL;
     }
@@ -574,8 +592,12 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
          *
          * The gains above are the entire result of this run. */
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
-        clear_block_if_any();
-        s_at.state = AUTOTUNE_ENGINE_IDLE;
+        /* AUDIT_CONTROL_EXECUTOR MED-4: only finish what this accept still owns. A start on another
+         * zone during the unlocked setter window has replaced the state; leave it alone. */
+        if (s_at.state == AUTOTUNE_ENGINE_DONE && s_at.zone_index == zone) {
+            clear_block_if_any();
+            s_at.state = AUTOTUNE_ENGINE_IDLE;
+        }
         xSemaphoreGive(s_at.lock);
         ESP_LOGI(AT_TAG, "autotune zone %u: relay-test gains accepted (no plant model written -- a relay test "
                       "measures none; any model from a previous step test is left untouched)", zone);
@@ -867,8 +889,11 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     }
 
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
-    clear_block_if_any();
-    s_at.state = AUTOTUNE_ENGINE_IDLE;
+    /* AUDIT_CONTROL_EXECUTOR MED-4: see the relay-method block above. */
+    if (s_at.state == AUTOTUNE_ENGINE_DONE && s_at.zone_index == zone) {
+        clear_block_if_any();
+        s_at.state = AUTOTUNE_ENGINE_IDLE;
+    }
     xSemaphoreGive(s_at.lock);
     if (!m.settled) {
         ESP_LOGW(AT_TAG, "autotune zone %u: LOW-CONFIDENCE gains accepted and written to zone config "

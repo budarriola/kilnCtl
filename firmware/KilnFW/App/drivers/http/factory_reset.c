@@ -167,7 +167,7 @@ static void reboot_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGW(TAG, "rebooting now to bring every module up clean against the erased partition(s)");
     hal_wdt_reboot(); /* esp_restart() under the hood on this backend; never returns -- see hal_wdt.h */
-    vTaskDelete(NULL); /* defensive only: hal_wdt_reboot() is not declared noreturn (the host
+    vTaskDeleteWithCaps(NULL); /* defensive only: hal_wdt_reboot() is not declared noreturn (the host
                          * fake deliberately returns so tests can observe the call -- see
                          * fake_wdt.c), so this guards a real backend that somehow returns
                          * instead of falling off the end of a FreeRTOS task function. */

@@ -54,6 +54,23 @@ esp_err_t SX1509_deinit(SX1509Class *e);
  * Logs and returns the error rather than asserting. */
 esp_err_t SX1509_start(SX1509Class *e, i2c_master_bus_handle_t bus);
 
+/* Pulse the ~RESET GPIO with no I2C access and no SX1509Class: drive it high,
+ * make it an output, pulse low >= t_PULSE (200 ns, datasheet p.8) and wait out
+ * t_RESET (2.5 ms max). A warm restart leaves the expander latching whatever
+ * the previous run drove, relays included; this clears that even when the bus
+ * or the part never answers. SX1509_start() calls it before its first probe;
+ * main_boot_early.c calls it when the I2C bus itself failed to come up.
+ * gpio < 0 is a no-op (pin not wired). Returns the gpio_config() result. */
+esp_err_t SX1509_pulse_reset_pin(int gpio);
+
+/* 9-clock I2C bus clear on raw GPIOs, to run BEFORE i2c_new_master_bus() takes
+ * the pins. If SDA reads low (a slave left mid-byte by a warm restart), clock
+ * SCL up to 9 times until SDA releases, then send a STOP. If SDA is already high
+ * nothing is driven. Returns ESP_ERR_INVALID_STATE if SDA is still low after
+ * the attempt (bus left as-is; the caller proceeds, the probe will then miss).
+ * Negative pin = no-op. */
+esp_err_t SX1509_i2c_bus_clear(int scl_gpio, int sda_gpio);
+
 /* Re-target this instance at a different address without a reboot: swaps the
  * I2C device handle, keeping the same bus and owner task. The target is probed
  * first -- if nothing answers there the instance stays where it is and

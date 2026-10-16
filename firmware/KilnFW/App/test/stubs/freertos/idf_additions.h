@@ -25,6 +25,8 @@
 
 static BaseType_t g_stub_task_create_result = pdFAIL;
 
+static inline void vTaskDeleteWithCaps(TaskHandle_t task) { vTaskDelete(task); }
+
 static inline BaseType_t xTaskCreatePinnedToCoreWithCaps(TaskFunction_t task, const char *name,
                                                           unsigned long stack_depth, void *arg,
                                                           UBaseType_t priority, TaskHandle_t *out_handle,

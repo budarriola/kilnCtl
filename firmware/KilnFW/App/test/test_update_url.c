@@ -180,6 +180,62 @@ static void test_repo_and_builders(void)
     TEST_CHECK(!update_tag_valid(NULL), "NULL tag");
 }
 
+static void test_rate_capture(void)
+{
+    update_rate_capture_t c;
+    update_rate_capture_init(&c);
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1000) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: 429 default");
+    TEST_CHECK(update_rate_backoff_s(&c, 503, 1000) == UPDATE_BACKOFF_DEFAULT_SERVER_S, "rate: 5xx default");
+    update_rate_capture_feed(&c, "Retry-After", "120");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1000) == 120, "rate: Retry-After seconds");
+    update_rate_capture_feed(&c, "x-ratelimit-reset", "1500");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == 120, "rate: Retry-After beats reset");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "X-RateLimit-Reset", "1500");
+    update_rate_capture_feed(&c, "X-RateLimit-Remaining", "0");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == 500, "rate: reset minus now");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 0) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: no clock -> default");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1499) == UPDATE_BACKOFF_MIN_S, "rate: clamped up to min");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "X-RateLimit-Reset", "1500");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == UPDATE_BACKOFF_DEFAULT_SERVER_S, "rate: 403 reset alone is not a rate limit");
+    TEST_CHECK(!update_status_is_rate_limited(&c, 403) && update_status_is_rate_limited(&c, 429), "rate: predicate");
+    update_rate_capture_feed(&c, "X-RateLimit-Remaining", "3");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == UPDATE_BACKOFF_DEFAULT_SERVER_S, "rate: Remaining 3 ignores reset");
+    update_rate_capture_feed(&c, "X-RateLimit-Remaining", "0");
+    TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == 500 && update_status_is_rate_limited(&c, 403), "rate: Remaining 0 uses reset");
+    TEST_CHECK(update_rate_backoff_s(&c, 503, 1000) == UPDATE_BACKOFF_DEFAULT_SERVER_S, "rate: 5xx never uses reset");
+    {
+        update_rate_capture_t c2;
+        update_rate_capture_init(&c2);
+        update_rate_capture_feed(&c2, "X-RateLimit-Reset", "1500");
+        update_rate_capture_feed(&c2, "X-RateLimit-Remaining", "3");
+        TEST_CHECK(update_rate_backoff_s(&c2, 429, 1000) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: 429 with Remaining 3 ignores reset");
+        update_rate_capture_init(&c2);
+        update_rate_capture_feed(&c2, "X-RateLimit-Reset", "900000");
+        TEST_CHECK(update_rate_backoff_s(&c2, 429, 1000) == UPDATE_BACKOFF_MAX_S, "rate: reset window clamped to max");
+    }
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "3600");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_MAX_S, "rate: max exactly");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "4000000000");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_MAX_S, "rate: huge Retry-After clamped at capture");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "1000000000000");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: over-long digit string ignored");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "999999");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_MAX_S, "rate: clamped down to max");
+    update_rate_capture_init(&c);
+    update_rate_capture_feed(&c, "Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT");
+    TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: HTTP-date ignored");
+    TEST_CHECK(update_status_is_rate_or_server(403) && update_status_is_rate_or_server(429) &&
+                   update_status_is_rate_or_server(500) && update_status_is_rate_or_server(599) &&
+                   !update_status_is_rate_or_server(404) && !update_status_is_rate_or_server(200),
+               "rate: status classes");
+}
+
 static void test_asset_pin(void)
 {
     TEST_SECTION("update_url -- asset URL pinned to repo, tag and name");
@@ -298,5 +354,6 @@ void run_test_update_url(void)
     test_redirects();
     test_repo_and_builders();
     test_asset_pin();
+    test_rate_capture();
     test_location_capture();
 }

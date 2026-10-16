@@ -162,10 +162,14 @@ void time_sync_get_status(time_sync_status_t *out)
 
 // ---- security backend: counting password setter -----------------------------
 static int s_setpw_calls;
+static bool s_setpw_inject_fail; // AUDIT_TOTP LOW-3: simulate a failed credential write
 static security_err_t fake_set_web_password(security_role_t role, const char *username, const char *password)
 {
     (void)role;
     (void)username;
+    if (s_setpw_inject_fail) {
+        return SECURITY_ERR_WEAK;
+    }
     // Mirror the real backend's strength gate: a weak password is refused and
     // changes nothing (handler delegates strength to the backend).
     if (!password || strlen(password) < 12) {
@@ -463,11 +467,116 @@ static void test_fuzz_reset(void)
     TEST_CHECK(fuzz_session_count() == 0, "control: valid reset drops sessions");
 }
 
+// AUDIT_LOGSTORE_TIME MED-2: one wrong TOTP code must lock for 5 s only, never again
+// 2^31 ms / 2^32 ms later.
+static void test_totp_backoff_tick_wrap(void)
+{
+    TEST_SECTION("forgot backoff -- no phantom 429 at +2^31 ms and +2^32 ms after a failure");
+    const char *good = "username=admin&code=000000";
+    size_t gl = strlen(good);
+    static const uint32_t gaps[] = { 0x80000000u, 0x80001389u, 0xFFFFFFFFu };
+    for (unsigned i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
+        fuzz_fresh();
+        int st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 202, "wrap: first wrong code answers 202 and records a failure");
+        st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 429, "wrap: immediate retry is inside the 5 s lock (429)");
+        fake_time_advance_ms(gaps[i]);
+        st = fuzz_post(forgot_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 202, "wrap: long-expired lock does not come back");
+    }
+}
+
+// AUDIT_TOTP LOW-3: a failed credential write must not burn the reset token.
+static void test_reset_failed_write_keeps_token(void)
+{
+    TEST_SECTION("reset -- failed password write gives the token back (AUDIT_TOTP LOW-3)");
+    fuzz_fresh();
+    char tok[TOTP_RESET_TOKEN_HEX_LEN + 1];
+    memset(tok, 'a', TOTP_RESET_TOKEN_HEX_LEN);
+    tok[TOTP_RESET_TOKEN_HEX_LEN] = '\0';
+    char good[256];
+    snprintf(good, sizeof(good), "username=admin&reset_token=%s&new_password=correct-horse-battery-staple-9", tok);
+    totp_reset_token_store(reset_tokens(), tok, "admin", now_ms());
+    s_setpw_inject_fail = true;
+    int st = fuzz_post(reset_post_handler, good, (long long)strlen(good), (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_setpw_calls == 0, "failed write answers 400, nothing changed");
+    s_setpw_inject_fail = false;
+    fake_time_advance_ms(6000); /* clear the 5 s failure backoff */
+    st = fuzz_post(reset_post_handler, good, (long long)strlen(good), (size_t)-1, 0);
+    TEST_CHECK(s_setpw_calls == 1 && strstr(s_sendstr, "\"ok\":true") != NULL,
+               "same token succeeds on retry after the failed write");
+}
+
+static bool status_blocked(void)
+{
+    s_sendstr[0] = '\0';
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    (void)totp_status_get_handler(&req);
+    if (strstr(s_sendstr, "\"forgot_blocked\":true") != NULL) {
+        return true;
+    }
+    TEST_CHECK(strstr(s_sendstr, "\"forgot_blocked\":false") != NULL, "status carries forgot_blocked");
+    return false;
+}
+
+// AUDIT_TOTP LOW-5: the owner can see /forgot is blocked board-wide.
+static void test_status_reports_forgot_blocked(void)
+{
+    TEST_SECTION("totp_status -- forgot_blocked (AUDIT_TOTP LOW-5)");
+    fuzz_fresh();
+    TEST_CHECK(!status_blocked(), "fresh board: not blocked");
+    for (unsigned i = 0; i < TOTP_FORGOT_BOARD_CAP; i++) {
+        totp_forgot_board_cap_record(&s_forgot_board_cap, false);
+    }
+    TEST_CHECK(status_blocked(), "board cap spent: blocked");
+    memset(&s_forgot_board_cap, 0, sizeof(s_forgot_board_cap));
+    TEST_CHECK(!status_blocked(), "cap cleared: not blocked");
+    uint32_t now = now_ms();
+    for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
+        totp_lockout_slot_t *s = &s_totp_lockouts[i];
+        memset(s, 0, sizeof(*s));
+        s->in_use = true;
+        snprintf(s->ip, sizeof(s->ip), "10.2.0.%u", i + 1);
+        s->last_activity_ms = now;
+        for (int k = 0; k < 5; k++) {
+            login_backoff_record_failure(&s->backoff, now);
+        }
+    }
+    TEST_CHECK(login_backoff_is_locked(&s_totp_lockouts[0].backoff, now), "setup: slots are locked");
+    TEST_CHECK(status_blocked(), "every slot locked: blocked");
+    s_totp_lockouts[3].in_use = false;
+    TEST_CHECK(!status_blocked(), "one free slot: not blocked");
+}
+
+// AUDIT_LOGSTORE_TIME LOW-2: LRU victim is the largest unsigned elapsed time.
+static void test_totp_lru_wrap(void)
+{
+    TEST_SECTION("totp lockout table -- LRU eviction across the tick wrap (AUDIT_LOGSTORE_TIME LOW-2)");
+    fuzz_fresh();
+    uint32_t now = 100u;
+    for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
+        totp_lockout_slot_t *s = &s_totp_lockouts[i];
+        memset(s, 0, sizeof(*s));
+        s->in_use = true;
+        snprintf(s->ip, sizeof(s->ip), "10.3.0.%u", i + 1);
+        s->last_activity_ms = 5u + i; /* touched just after the wrap */
+    }
+    s_totp_lockouts[7].last_activity_ms = 0xFFFFFF00u; /* idle across the wrap: the true LRU */
+    totp_lockout_slot_t *s = totp_lockout_slot_for("10.9.9.9", now);
+    TEST_CHECK(s == &s_totp_lockouts[7], "the slot idle across the wrap is evicted, not a fresh post-wrap one");
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1; /* pdTRUE */
     test_fuzz_forgot();
     test_fuzz_reset();
+    test_totp_backoff_tick_wrap();
+    test_reset_failed_write_keeps_token();
+    test_status_reports_forgot_blocked();
+    test_totp_lru_wrap();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

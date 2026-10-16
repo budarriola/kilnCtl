@@ -46,10 +46,10 @@ bool ota_auth_constant_time_equal(const uint8_t *a, const uint8_t *b, size_t len
 
 bool ota_auth_lockout_is_locked(const ota_auth_lockout_state_t *s, uint32_t now_ms)
 {
-    if (s->locked_until_ms == 0u) {
+    if (s->lock_dur_ms == 0u) {
         return false;
     }
-    return (int32_t)(s->locked_until_ms - now_ms) > 0;
+    return (uint32_t)(now_ms - s->lock_start_ms) < s->lock_dur_ms;
 }
 
 void ota_auth_lockout_record_failure(ota_auth_lockout_state_t *s, uint32_t now_ms)
@@ -71,7 +71,8 @@ void ota_auth_lockout_record_failure(ota_auth_lockout_state_t *s, uint32_t now_m
         backoff_ms = OTA_AUTH_LOCKOUT_MAX_MS;
     }
 
-    s->locked_until_ms = now_ms + backoff_ms;
+    s->lock_start_ms = now_ms;
+    s->lock_dur_ms = backoff_ms;
     s->lockout_tier++;
     s->failure_count = 0;
 }
@@ -80,5 +81,6 @@ void ota_auth_lockout_record_success(ota_auth_lockout_state_t *s)
 {
     s->failure_count = 0;
     s->lockout_tier = 0;
-    s->locked_until_ms = 0;
+    s->lock_start_ms = 0;
+    s->lock_dur_ms = 0;
 }

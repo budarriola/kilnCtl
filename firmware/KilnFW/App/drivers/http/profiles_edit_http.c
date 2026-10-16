@@ -14,6 +14,8 @@
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
 #include "cfg_fs_refusal_http.h"
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- restore fence */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409 */
 #include "zones_config_accessors.h"
 
 /* profiles_http_json_escape() now lives in profiles_http_internal.h (Opus review of
@@ -485,6 +487,11 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     if (cfg_fs_http_refuse_if_unmounted(req)) {
         return ESP_OK;
     }
+    /* backup-import LOW-3: a restore's commit pass owns the stores; refuse a concurrent write (409). */
+    if (backup_import_restore_in_flight()) {
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
+    }
     if (req->content_len <= 0 || req->content_len > PROFILE_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -818,6 +825,11 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
 {
     if (cfg_fs_http_refuse_if_unmounted(req)) {
         return ESP_OK;
+    }
+    /* backup-import LOW-3: a restore's commit pass owns the stores; refuse a concurrent write (409). */
+    if (backup_import_restore_in_flight()) {
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
     }
     if (req->content_len <= 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");

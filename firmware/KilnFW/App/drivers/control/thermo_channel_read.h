@@ -32,13 +32,34 @@ typedef struct {
                                             * bus did not answer for it; NOT cleared when `ok`
                                             * is false (a faulted channel keeps its finite
                                             * value) -- always read it together with `ok`. */
-    bool  ok[MAX31856_CHANNEL_COUNT];     /* !spi_failed && !isnan && !fault_bits_bad */
+    bool  ok[MAX31856_CHANNEL_COUNT];     /* thermo_reading_ok(): !spi_failed && !isnan && !fault_bits_bad && !too_old */
     float cj_c[MAX31856_CHANNEL_COUNT];   /* cold-junction reading, NAN where unavailable;
                                             * not gated by `ok` -- callers that use it
                                             * (autotune's SETTLING->STEPPING transition)
                                             * check isnan() themselves, same as before
                                             * this extraction. */
 } ThermoChannelSnapshot;
+
+/* The single validity rule behind ThermoChannelSnapshot::ok: no SPI failure,
+ * a finite temperature, no OPEN/OVUV/TCRANGE fault bit, and -- for a channel in
+ * automatic conversion -- age_ms <= MAX31856_CONTROL_MAX_AGE_MS (a never-seen or
+ * stale conversion is NOT ok). Pure; exposed for host tests. */
+bool thermo_reading_ok(const MAX31856Reading *r);
+
+/* AUDIT_THERMOCOUPLE LOW-1: the zone's combined RAW reading for the safety
+ * context frame -- the mean of every channel in `thermo_mask` whose reading has
+ * no SPI failure and is not NaN (the frame's long-standing validity rule), so
+ * the Pico sees the probe(s) the zone is actually controlled on rather than
+ * channel == zone index. *out_valid is false (return NaN) when no masked-in
+ * channel is usable. With the default identity mask this equals the single
+ * channel's raw reading. readings[] is indexed by .channel, not position. */
+float thermo_zone_raw_from_readings(const MAX31856Reading *readings, size_t count,
+                                    uint8_t thermo_mask, bool *out_valid);
+
+/* AUDIT_THERMOCOUPLE LOW-2: zones_config_apply_cal() takes a ZONE index; a
+ * per-channel display value may be calibrated only when that zone reads
+ * exactly this channel (mask == 1 << channel). Otherwise it is shown raw. */
+bool thermo_channel_cal_applies(uint8_t channel, uint8_t zone_thermo_mask);
 
 /* Reads every channel of `bus` (or the sim backend, if enabled -- `bus` may
  * be NULL in that case) into `out`, applying the same

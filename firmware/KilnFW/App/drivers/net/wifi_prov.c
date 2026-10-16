@@ -47,9 +47,11 @@
  * nothing retries it. Every event this module consumes self-heals:
  *   - a dropped STA_START: the join it would have kicked off is retried by
  *     rescan_timer_cb() within WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS.
- *   - a dropped STA_DISCONNECTED: the driver keeps emitting disconnect
- *     events while the link is down, and the rescan timer independently
- *     re-picks a candidate and reconnects.
+ *   - a dropped STA_DISCONNECTED: while not CONNECTED the rescan timer
+ *     re-picks a candidate and reconnects. While CONNECTED the driver emits
+ *     only ONE event, so do_rescan_tick() checks esp_wifi_sta_get_ap_info()
+ *     and, after two consecutive unassociated ticks, runs the disconnect
+ *     handling itself (AUDIT_WIFI MED-1).
  *   - a dropped GOT_IP: state stays CONNECTING/RECONNECTING one beat too
  *     long (the AP is left up -- the SAFE direction, never "reports
  *     connected when it isn't"); the next got-ip, disconnect, or rescan tick
@@ -81,6 +83,7 @@
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_reply_results below */
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -447,6 +450,36 @@ static void owner_task(void *arg);
 
 /* ---- Public API --------------------------------------------------------- */
 
+/* Create and start the periodic rescan timer if it is not already running.
+ * Called from wifi_prov_start() and, on failure there, retried by owner_task()
+ * (AUDIT_WIFI LOW-1). Returns true when the timer is running. */
+bool rescan_timer_ensure(void)
+{
+    if (s_wifi.rescan_timer) {
+        return true;
+    }
+    const esp_timer_create_args_t rescan_timer_args = {
+        .callback = &rescan_timer_cb,
+        .name = "wifi_ap_fallback_rescan",
+    };
+    esp_timer_handle_t h = NULL;
+    esp_err_t err = esp_timer_create(&rescan_timer_args, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_create failed: %s -- no periodic AP-fallback rescan (will retry)",
+                 esp_err_to_name(err));
+        return false;
+    }
+    err = esp_timer_start_periodic(h, (uint64_t)WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_start_periodic failed: %s -- no periodic AP-fallback rescan (will retry)",
+                 esp_err_to_name(err));
+        esp_timer_delete(h);
+        return false;
+    }
+    s_wifi.rescan_timer = h;
+    return true;
+}
+
 esp_err_t wifi_prov_start(void)
 {
     if (s_wifi.started) {
@@ -573,6 +606,7 @@ esp_err_t wifi_prov_start(void)
 
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL, NULL);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &on_ip_event, NULL, NULL);
 
     const esp_timer_create_args_t timer_args = {
         .callback = &ap_fallback_timer_cb,
@@ -591,21 +625,7 @@ esp_err_t wifi_prov_start(void)
      * cheap wakeup every WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS regardless of
      * state -- negligible next to the AP/STA radio work it occasionally
      * triggers. */
-    const esp_timer_create_args_t rescan_timer_args = {
-        .callback = &rescan_timer_cb,
-        .name = "wifi_ap_fallback_rescan",
-    };
-    err = esp_timer_create(&rescan_timer_args, &s_wifi.rescan_timer);
-    if (err != ESP_OK) {
-        ESP_LOGW(WIFI_PROV_TAG, "esp_timer_create failed: %s -- no periodic AP-fallback rescan", esp_err_to_name(err));
-        s_wifi.rescan_timer = NULL;
-    } else {
-        err = esp_timer_start_periodic(s_wifi.rescan_timer, (uint64_t)WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS * 1000);
-        if (err != ESP_OK) {
-            ESP_LOGW(WIFI_PROV_TAG, "esp_timer_start_periodic failed: %s -- no periodic AP-fallback rescan",
-                     esp_err_to_name(err));
-        }
-    }
+    (void)rescan_timer_ensure(); /* on failure owner_task() retries (AUDIT_WIFI LOW-1) */
 
     /* esp_wifi_set_config() fails with ESP_ERR_WIFI_MODE if the driver's
      * current mode doesn't already include the target interface -- right
@@ -710,10 +730,14 @@ esp_err_t wifi_prov_start(void)
      * this function, same pattern as every other registered task
      * (boot_button.c's s_task_handle, etc.). */
     static TaskHandle_t s_owner_task_handle;
-    BaseType_t task_created =
-        xTaskCreatePinnedToCore(owner_task, "wifi_prov_owner", 4096, NULL, 5, &s_owner_task_handle, tskNO_AFFINITY);
+    /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md): NVS writes no longer
+     * freeze the cache under XIP and nothing here reaches an mmap call.
+     * Pinned by tools/check_psram_task_stacks.ps1. */
+    BaseType_t task_created = xTaskCreatePinnedToCoreWithCaps(owner_task, "wifi_prov_owner", 4096, NULL, 5,
+                                                              &s_owner_task_handle, tskNO_AFFINITY,
+                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_created != pdPASS) {
-        ESP_LOGE(WIFI_PROV_TAG, "xTaskCreatePinnedToCore(wifi_prov_owner) failed");
+        ESP_LOGE(WIFI_PROV_TAG, "xTaskCreatePinnedToCoreWithCaps(wifi_prov_owner) failed");
         vQueueDelete(s_wifi_cmd_queue);
         s_wifi_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;
@@ -819,7 +843,14 @@ static void owner_task(void *arg)
 
     for (;;) {
         wifi_cmd_t cmd;
-        if (xQueueReceive(s_wifi_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) {
+        /* AUDIT_WIFI LOW-1: with no rescan timer (creation failed at start) wake
+         * on a timeout, retry creating it and run the tick ourselves. */
+        TickType_t wait = s_wifi.rescan_timer ? portMAX_DELAY : pdMS_TO_TICKS(WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS);
+        if (xQueueReceive(s_wifi_cmd_queue, &cmd, wait) != pdTRUE) {
+            if (!s_wifi.rescan_timer) {
+                (void)rescan_timer_ensure();
+                do_rescan_tick();
+            }
             continue;
         }
 

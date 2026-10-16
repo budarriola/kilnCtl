@@ -3402,6 +3402,46 @@ static void test_tc_offset_magnitude_bound(void)
     TEST_CHECK(!config_params_validate_ranges(&rec, &field, &rule, &reason), "stored -400 C offset fails validation");
 }
 
+// Guard audit 2026-10-14 A5: upper bounds on persistent trip thresholds at SET_PARAM time.
+static void test_a5_threshold_upper_bounds(void)
+{
+    TEST_SECTION("A5 -- trip-threshold upper bounds at SET_PARAM time (inclusive max, defaults accepted)");
+    static const struct { uint16_t id; uint8_t type; double max; const char *name; } k[] = {
+        { 0x0403u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S, "link_dead_hard_s" },
+        { 0x0206u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_BLIND_GRACE_MAX_S, "blind_grace_s" },
+        { 0x0307u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_TRIP_VERIFY_MAX_S, "trip_verify_s" },
+        { 0x020Cu, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_CJ_MAX_MAX_C, "cj_max_c" },
+        { 0x0202u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C, "overshoot_margin_c" },
+        { 0x0208u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C, "tc_disagreement_c" },
+    };
+    for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
+        config_store_record_t rec;
+        kilnlink_param_value_t v;
+        config_store_default(&rec);
+        memset(&v, 0, sizeof v);
+        if (k[i].type == KILNLINK_PARAM_TYPE_U16) { v.u16_val = (uint16_t)k[i].max; }
+        else { v.f32_val = (float)k[i].max; }
+        TEST_CHECK(config_params_set(&rec, k[i].id, k[i].type, v), k[i].name);
+        if (k[i].type == KILNLINK_PARAM_TYPE_U16) { v.u16_val = (uint16_t)(k[i].max + 1); }
+        else { v.f32_val = (float)k[i].max + 1.0f; }
+        TEST_CHECK(!config_params_set(&rec, k[i].id, k[i].type, v), "one above the bound is refused");
+        if (k[i].type == KILNLINK_PARAM_TYPE_U16) { v.u16_val = 65535u; }
+        else { v.f32_val = 1.0e30f; }
+        TEST_CHECK(!config_params_set(&rec, k[i].id, k[i].type, v), "a blinding value is refused");
+    }
+    /* Compiled defaults stay inside the bounds. */
+    config_store_record_t d;
+    config_store_default(&d);
+    TEST_CHECK(d.link_dead_hard_s <= CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S && d.blind_grace_s <= CONFIG_PARAMS_BLIND_GRACE_MAX_S &&
+               d.trip_verify_s <= CONFIG_PARAMS_TRIP_VERIFY_MAX_S && d.cj_max_c <= CONFIG_PARAMS_CJ_MAX_MAX_C &&
+               d.overshoot_margin_c <= CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C &&
+               d.tc_disagreement_c <= CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C, "defaults are within the bounds");
+    /* Load time is deliberately unbounded (owner decision pending): a stored big value still validates. */
+    d.link_dead_hard_s = 5000u;
+    const char *field = NULL, *rule = NULL; config_params_reject_reason_t reason;
+    TEST_CHECK(config_params_validate_ranges(&d, &field, &rule, &reason), "stored records are not invalidated");
+}
+
 // 2026-10-09 guard-fixes review LOW-1: a stored record whose tc_offset_c is
 // beyond the +/-50 C write bound must load (clamped), not fall back to
 // defaults and lose abs_max_temp_c. NaN is still refused.
@@ -3479,6 +3519,7 @@ static void test_unpack_clamps_tc_offset_on_v2_migration_and_reports(void)
 void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
+    test_a5_threshold_upper_bounds();
     test_pack_unpack_roundtrip();
     test_unpack_hostile();
     test_default();

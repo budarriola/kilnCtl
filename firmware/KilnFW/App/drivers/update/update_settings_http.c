@@ -12,6 +12,7 @@
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
+#include "update_fetch.h" /* update_fetch_backoff_clear() */
 #include "update_settings.h"
 #include "wifi_provision_http.h"
 
@@ -47,6 +48,18 @@ static esp_err_t send_settings(httpd_req_t *req)
 }
 
 static esp_err_t settings_get_handler(httpd_req_t *req) { return send_settings(req); }
+
+static bool repo_same_ci(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char x = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+        char y = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+        if (x != y) {
+            return false;
+        }
+    }
+    return *a == *b;
+}
 
 static esp_err_t settings_post_handler(httpd_req_t *req)
 {
@@ -97,6 +110,9 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (strlen(repo) != (size_t)len) {
         return send_json(req, "400 Bad Request", kBad, sizeof(kBad) - 1);
     }
+    // UPDBATCH LOW-1: remember the repo in force so the backoff is cleared only by a real change. The form body is
+    // dead after the field was extracted, so it is reused as the scratch (no extra stack, no internal RAM).
+    const bool had_old = update_settings_repo_copy(body, sizeof(body));
     esp_err_t err = update_settings_set(repo);
     if (err == ESP_ERR_INVALID_ARG) {
         return send_json(req, "400 Bad Request", kBad, sizeof(kBad) - 1);
@@ -104,6 +120,11 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         // Applied in RAM, not persisted: report it as a failure, never as success.
         return cfg_fs_http_persist_failed_for(req, UPDATE_SETTINGS_FILE_PATH, err);
+    }
+    // A different repo is not covered by the old rate-limit answer; re-saving the same one (GitHub treats owner/name
+    // case-insensitively) must not walk past the anti-hammer backoff. "" resets, so compare what is in force now.
+    if (!had_old || !update_settings_repo_copy(repo, sizeof(repo)) || !repo_same_ci(body, repo)) {
+        update_fetch_backoff_clear();
     }
     return send_settings(req);
 }

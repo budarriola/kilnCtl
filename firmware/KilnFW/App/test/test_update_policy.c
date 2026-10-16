@@ -297,6 +297,30 @@ static void test_upload_gate(void)
 {
     TEST_SECTION("update_policy -- hand upload (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6)");
     update_identity_t r = ident("v1.2.0", COMMIT_A);
+    {
+        // STAGEVERFX MED-1: an image whose descriptor said -dirty is refused by the dirty rule, on a newer
+        // running version (would otherwise be a downgrade) and on the same version alike.
+        update_identity_t rn = ident("v1.0.0-pre.4", COMMIT_A);
+        update_upload_request_t q;
+        memset(&q, 0, sizeof(q));
+        q.version = "1.0.0-pre.3";
+        q.commit = COMMIT_B;
+        q.have_image_id = true;
+        update_image_id_make(&q.image_id, rn.zones_cfg_version, rn.kilnlink_version, rn.uart_version, "abc1234");
+        q.dirty = true;
+        q.force = true;
+        q.allow_downgrade = true;
+        q.confirm = "1.0.0-pre.3";
+        TEST_CHECK(update_policy_decide_upload(&rn, &q).verdict == UPDATE_VERDICT_REFUSE_DIRTY,
+                   "dirty upload on a newer running version: refused as dirty, even with every override");
+        q.dirty = false;
+        TEST_CHECK(update_policy_decide_upload(&rn, &q).verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE,
+                   "same upload not dirty: typed downgrade allowed");
+        q.dirty = true;
+        q.version = "1.0.0-pre.4";
+        TEST_CHECK(update_policy_decide_upload(&rn, &q).verdict == UPDATE_VERDICT_REFUSE_DIRTY,
+                   "dirty upload of the running version: refused as dirty");
+    }
     update_decision_t d = up(&r, "1.3.0", COMMIT_B, 0, false, false, NULL);
     TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_UPGRADE && d.allowed, "newer upload allowed");
     d = up(&r, "1.2.0-rc.1", NULL, 0, false, false, NULL);

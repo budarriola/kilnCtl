@@ -56,7 +56,10 @@ static const char *TAG = "update_fetch";
 
 // ---- limits ---------------------------------------------------------------------------------
 #define FETCH_API_BODY_CAP (256u * 1024u)    // releases/latest or releases?per_page=N JSON; PSRAM
-#define FETCH_LIST_PER_PAGE 5u               // releases list size when pre-releases are allowed
+// Releases list size when pre-releases are allowed. 5 could hide the newest usable release behind
+// drafts/prereleases; 15 pages deeper. The list JSON (~1-3 KB per release, assets included) is read into
+// the 256 KB PSRAM body buffer, so this adds no internal RAM; update_url_build_list allows 1..30.
+#define FETCH_LIST_PER_PAGE 15u
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
@@ -65,18 +68,26 @@ static const char *TAG = "update_fetch";
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
 #define FETCH_TX_BUF_BYTES 2048u
-// Admission and mid-body abort thresholds (FETCH_HEAP_PRECHECK_MIN 28 KB on current free internal
-// heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 12288 B) live
-// in update_fetch_heap.h with their derivation and are host-tested. Every hop start uses the full
-// admission rule; the read loop uses only the abort floor.
+// LOW-1 (update_fetch_heap.h): FETCH_HEAP_MAX_STEP_BYTES is an empirical margin for concurrent tasks, not a bound
+// on a fetch allocation (the flash write uses a 32 B stack buffer, the read chunk and TLS records are PSRAM), so
+// no assert ties the chunk or client buffers to it.
+// Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
+// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 9216 B)
+// live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
+// admission rule, redirect hops after the first the hop rule (same need as a start, UPDFX4), and the
+// read loop only the abort floor plus the consecutive-sample DMA check.
 // The tx buffer stays 2048 B (a JWT-signed release-assets GET line can exceed 1 KB, so 1 KB would
 // risk a truncated request); that costs 1 KB over the spike and is inside the worst-case draw.
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
-// Per-socket-operation timeout. Cancel latency is bounded by it: the loop checks the cancel flag
-// between reads, and a read may block this long, with at most FETCH_EAGAIN_RETRIES retries after a
-// timed-out read, so a cancel takes effect within (1 + retries) * timeout = 10 s.
+// Socket timeout for the TLS connect/handshake inside esp_http_client_open (cannot be sliced; a cancel
+// issued there waits for it, at most 5 s). Header and body reads are sliced at FETCH_SLICE_MS and the
+// cancel flag is checked between slices, so a cancel takes effect within about 1 s there.
 #define FETCH_HTTP_TIMEOUT_MS 5000
-#define FETCH_EAGAIN_RETRIES 1u
+#define FETCH_SLICE_MS 1000
+// A header or body read that times out FETCH_STALL_SLICES slices in a row (10 s without a byte) is a
+// "timeout" failure (UPDLOW LOW-2: the pre-slicing patience was about 10 s, 5 s was too eager on a
+// slow GitHub CDN hop).
+#define FETCH_STALL_SLICES 10u
 // Stack sizes are still the WP7 spike's numbers. OWED ON THE BENCH: measure the production
 // high-water marks (stack_margin reports "update_fetch" and "update_fetch_wr") over a full
 // download that includes the redirect hop with a JWT-sized URL, and adjust. Not measured here.
@@ -100,6 +111,23 @@ typedef struct {
     char confirm[UPDATE_TAG_MAX];
 } job_params_t;
 
+// Heap evidence of the job (REVIEW_UPDFX6 MED-2 / UPDFX7): the first admission, the worst redirect hop's
+// settle result (UPDFX8: every hop is recorded), and the low-waters of every sample the job took. Exported in GET /api/update/fetch "heap".
+typedef enum { HOP_NONE = 0, HOP_ADMITTED, HOP_REFUSED } hop_result_t;
+typedef struct {
+    bool sampled;          // min_* are valid (at least one sample taken)
+    bool rtc_set;          // rtc_free was derived at the first admission
+    uint32_t rtc_free;     // internal free - DMA free at the first admission (RTC FAST heap, not DMA-capable)
+    uint32_t start_free;   // internal free at the first admission (scratch held)
+    uint32_t start_dma;    // DMA-capable internal free at the first admission
+    hop_result_t hop_result;
+    uint32_t hop_free;     // lowest internal free at any redirect hop's final admission sample
+    uint32_t hop_tries;    // most settle re-samples used at any hop
+    uint32_t min_free;     // low-waters over admission and read-loop samples
+    uint32_t min_dma;
+    uint32_t min_block;
+} job_heap_t;
+
 typedef struct {
     fetch_state_t state;
     fetch_kind_t kind;
@@ -121,6 +149,7 @@ typedef struct {
     bool needs_typed_confirm;
     bool zones_cfg_lower;
     bool have_decision;
+    job_heap_t heap;
 } job_status_t;
 
 typedef enum { WR_BEGIN = 1, WR_WRITE, WR_FINISH, WR_ABORT, WR_EXIT } wr_cmd_id_t;
@@ -147,6 +176,13 @@ typedef struct {
     SemaphoreHandle_t wr_req;
     SemaphoreHandle_t wr_done;
     volatile update_wr_arb_t wr_arb; // guarded by s_wr_mux; see update_wr_arb.h
+    // LOW-5: buffers of the job that wedged the writer. Exactly one side frees them, decided under
+    // s_wr_mux: the writer once its late op finally returns (wr_late_exited), or the job if the writer
+    // already returned first. At most one set is ever held (wr_wedged blocks every later job's writer).
+    void *leak_w;
+    void *leak_body;
+    void *leak_scratch;
+    volatile bool wr_late_exited;
     volatile bool wr_wedged;  // a writer op timed out: its task/buffers are abandoned until reboot
     wr_cmd_t wr;
 } fetch_ctx_t;
@@ -166,6 +202,7 @@ struct work {
     char url[UPDATE_URL_MAX];
     char loc[UPDATE_URL_MAX]; // response Location of the current hop (PSRAM, bounded)
     update_loc_capture_t loc_cap;
+    update_rate_capture_t rate_cap;
     update_release_info_t info;
     update_manifest_t man;
     uint8_t *body;
@@ -192,17 +229,171 @@ static uint32_t largest_internal_block(void)
     return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
-// Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
-static const char *heap_admit(void)
+static uint32_t dma_free_internal(void)
 {
-    uint32_t f = free_internal();
-    uint32_t l = largest_internal_block();
-    if (update_fetch_heap_admit(f, l) == FETCH_HEAP_OK) {
-        return NULL;
+    return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+}
+
+// Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
+// A LOW_FREE verdict is re-sampled (FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS, cancel-aware): the
+// previous request's TLS/lwIP teardown is still draining after a redirect hop or a previous http_get
+// (UPDFX2 LOW-1, UPDFX3 MED-1), so one early sample must not refuse a healthy fetch. Each settle tick
+// re-checks cancel, the job deadline (when armed: it is not at the first admission) and heat_run_active().
+static bool heat_run_active(void);
+static bool deadline_passed(const work_t *w);
+static void st_lock(void);
+static void st_unlock(void);
+
+// Fold one set of heap readings into the job's low-waters (UINT32_MAX = "not read this time").
+static void heap_note(uint32_t f, uint32_t dma, uint32_t blk)
+{
+    st_lock();
+    job_heap_t *h = &s_c->st.heap;
+    if (!h->sampled) {
+        h->sampled = true;
+        h->min_free = h->min_dma = h->min_block = UINT32_MAX;
     }
-    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u)", (unsigned)f,
-             (unsigned)FETCH_HEAP_PRECHECK_MIN, (unsigned)l, (unsigned)FETCH_LARGEST_BLOCK_MIN);
-    return "low_heap";
+    if (f < h->min_free) {
+        h->min_free = f;
+    }
+    if (dma < h->min_dma) {
+        h->min_dma = dma;
+    }
+    if (blk < h->min_block) {
+        h->min_block = blk;
+    }
+    st_unlock();
+}
+
+// A low-water that was never read (UINT32_MAX: e.g. a job refused before its first DMA reading) reports 0.
+static uint32_t heap_low_water(bool sampled, uint32_t v)
+{
+    return (sampled && v != UINT32_MAX) ? v : 0u;
+}
+
+static const char *heap_admit(const work_t *w, bool hop)
+{
+    const bool dl = w->p.kind == KIND_DOWNLOAD;
+    uint32_t f = 0;
+    uint32_t l = 0;
+    fetch_heap_verdict_t hv = FETCH_HEAP_LOW_FREE;
+    unsigned tries = 0;
+    for (;; tries++) {
+        f = free_internal();
+        l = largest_internal_block();
+        heap_note(f, UINT32_MAX, l);
+        hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
+        if (hv != FETCH_HEAP_LOW_FREE || tries >= FETCH_HEAP_SETTLE_TRIES) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS));
+        // UPDFX5 LOW-2: every tick re-checks cancel, the job deadline (once armed) and a firing start, and
+        // reports them as themselves, not as a heap refusal.
+        if (s_c->cancel) {
+            return "cancelled";
+        }
+        if (w->deadline_tick != 0 && deadline_passed(w)) {
+            return "timeout";
+        }
+        if (heat_run_active()) {
+            return "heat_run_active";
+        }
+    }
+    if (tries > 0) {
+        // REVIEW_UPDFX3 MED-2: bench evidence of the settle wait (re-samples used, where free ended up).
+        ESP_LOGI(TAG, "heap settle: %u re-sample(s) x %u ms, free %u, %s%s", tries, (unsigned)FETCH_HEAP_SETTLE_MS,
+                 (unsigned)f, hv == FETCH_HEAP_OK ? "admitted" : "still short", hop ? " (redirect hop)" : "");
+    }
+    // REVIEW_UPDFX9 INFO-2: a hop's DMA verdict is read BEFORE the hop record is written, so the record is written once
+    // (a status GET can never see a transient "admitted" for a hop that then refuses on DMA). The hop is never the
+    // job's first admission, so rtc_set is already latched and the offset is final.
+    uint32_t hop_dma = 0;
+    bool hop_dma_ok = true;
+    if (hop && hv == FETCH_HEAP_OK) {
+        hop_dma = dma_free_internal();
+        heap_note(UINT32_MAX, hop_dma, UINT32_MAX);
+        if (s_c->st.heap.rtc_set) {
+            hop_dma_ok = update_fetch_heap_dma_admit(hop_dma, s_c->st.heap.rtc_free, dl, true);
+        }
+    }
+    // Every hop is folded into the job's hop evidence (REVIEW_UPDFX7 LOW-2): the WORST result (a refusal sticks),
+    // the lowest admitting/refusing reading and the most settle re-samples used.
+    if (hop) {
+        st_lock();
+        job_heap_t *jh = &s_c->st.heap;
+        if (jh->hop_result == HOP_NONE) {
+            jh->hop_free = f;
+            jh->hop_tries = tries;
+        } else {
+            if (f < jh->hop_free) {
+                jh->hop_free = f;
+            }
+            if (tries > jh->hop_tries) {
+                jh->hop_tries = tries;
+            }
+        }
+        if (hv != FETCH_HEAP_OK || !hop_dma_ok) {
+            jh->hop_result = HOP_REFUSED;
+        } else if (jh->hop_result == HOP_NONE) {
+            jh->hop_result = HOP_ADMITTED;
+        }
+        st_unlock();
+    }
+    if (hv == FETCH_HEAP_OK) {
+        uint32_t dma = hop ? hop_dma : dma_free_internal();
+        if (!hop) {
+            heap_note(UINT32_MAX, dma, UINT32_MAX);
+        }
+        // LOW-2: the RTC FAST heap is internal but not DMA-capable; derive its free size at the first admission and
+        // hold it for every later DMA number. REVIEW_UPDFX7 LOW-1: f and dma are read at different instants, and a
+        // concurrent allocation between the two reads would inflate rtc_free and so LOWER the DMA floor for the whole
+        // job. Take FETCH_DMA_OFFSET_PAIRS pairs (pairs 1.. are back-to-back; pair 0's f was read earlier, before the largest-block
+        // read and a heap_note lock cycle, so it has the widest window) and keep the one with the smallest offset (the
+        // conservative direction: a concurrent free can only make the floor stricter).
+        if (!s_c->st.heap.rtc_set) {
+            uint32_t pf[FETCH_DMA_OFFSET_PAIRS];
+            uint32_t pd[FETCH_DMA_OFFSET_PAIRS];
+            pf[0] = f;
+            pd[0] = dma;
+            for (unsigned i = 1; i < FETCH_DMA_OFFSET_PAIRS; i++) {
+                pf[i] = free_internal();
+                pd[i] = dma_free_internal();
+                heap_note(pf[i], pd[i], UINT32_MAX);
+            }
+            const unsigned best = update_fetch_heap_dma_pick_pair(pf, pd, FETCH_DMA_OFFSET_PAIRS);
+            dma = pd[best];
+            st_lock();
+            s_c->st.heap.rtc_free = update_fetch_heap_dma_offset(pf[best], pd[best]);
+            s_c->st.heap.rtc_set = true;
+            s_c->st.heap.start_free = f;
+            s_c->st.heap.start_dma = dma;
+            st_unlock();
+        }
+        const uint32_t rtc = s_c->st.heap.rtc_free;
+        if (update_fetch_heap_dma_admit(dma, rtc, dl, hop)) {
+            return NULL;
+        }
+        ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u, rtc %u)", (unsigned)dma,
+                 (unsigned)update_fetch_heap_dma_need(dl, hop, rtc), (unsigned)rtc);
+        // A hop's REFUSED record was already written above from the same DMA verdict (UPDFX9 LOW-2, INFO-2).
+        return "low_heap_dma";
+    }
+    // XIP trial 2026-10-14: a refused first admission used to leave heap.start_free at 0 (it was set only on the
+    // admitted path), so the refusal text read "start free=0" while the log had the real shortfall. Record the
+    // refusing reading as the start reading; the admitted path overwrites it with the same value.
+    if (!hop) {
+        st_lock();
+        if (!s_c->st.heap.rtc_set) {
+            s_c->st.heap.start_free = f;
+        }
+        st_unlock();
+    }
+    const unsigned need_free = update_fetch_heap_need(dl, hop);
+    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s%s", (unsigned)f, need_free,
+             (unsigned)l, (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check",
+             hop ? " (redirect hop)" : "");
+    // Distinct strings per cause (UPDFX1): free-heap shortfall, fragmentation, and mid-body abort differ.
+    return hv == FETCH_HEAP_LOW_BLOCK ? "low_heap_block" : "low_heap_free";
 }
 
 // The start-time mode gate and the heat-side fetch_busy refusal read each other's state without a
@@ -224,6 +415,47 @@ static bool clock_synced(void)
     memset(&ts, 0, sizeof(ts));
     time_sync_get_status(&ts);
     return ts.ever_synced;
+}
+
+static int64_t now_epoch(void)
+{
+    time_sync_status_t ts;
+    memset(&ts, 0, sizeof(ts));
+    time_sync_get_status(&ts);
+    return ts.ever_synced ? (int64_t)ts.now_epoch : 0;
+}
+
+// LOW-2 backoff: after a rate-limited (403/429) or server-error (5xx) answer the check/download POST
+// handlers refuse with 429 until the "not before" tick passes, so a retrying UI or script cannot hammer
+// GitHub. RAM only (a reboot clears it); duration comes from Retry-After / X-RateLimit-Reset, clamped.
+static volatile bool s_backoff_valid;
+static volatile uint32_t s_backoff_start; // tick at note time
+static volatile uint32_t s_backoff_ticks; // duration; elapsed = unsigned tick difference (wrap-safe)
+
+static void backoff_note(uint32_t secs)
+{
+    s_backoff_start = xTaskGetTickCount();
+    s_backoff_ticks = pdMS_TO_TICKS(secs * 1000u);
+    s_backoff_valid = true;
+}
+
+// A repo change makes the old answer irrelevant (it was about a different repository).
+void update_fetch_backoff_clear(void)
+{
+    s_backoff_valid = false;
+}
+
+static uint32_t backoff_remaining_s(void)
+{
+    if (!s_backoff_valid) {
+        return 0;
+    }
+    const uint32_t elapsed = (uint32_t)(xTaskGetTickCount() - s_backoff_start);
+    if (elapsed >= s_backoff_ticks) {
+        s_backoff_valid = false;
+        return 0;
+    }
+    return ((s_backoff_ticks - elapsed) * portTICK_PERIOD_MS + 999u) / 1000u;
 }
 
 static bool deadline_passed(const work_t *w)
@@ -378,10 +610,23 @@ static void wr_task(void *arg)
         // Review 5 L1: one critical section decides whether the caller already timed out, so a finish in
         // the same tick as the timeout is either collected by the caller or undone here, never both
         // skipped.
+        void *reclaim_w = NULL, *reclaim_body = NULL, *reclaim_scratch = NULL;
         portENTER_CRITICAL(&s_wr_mux);
         const bool abandoned = update_wr_arb_writer_done(&s_c->wr_arb);
+        if (abandoned) {
+            // The op returned: nothing of the dead job's buffers is read again (the undo below uses only
+            // the stage). Take what the job handed off; if it has not yet, it will see wr_late_exited.
+            s_c->wr_late_exited = true;
+            reclaim_w = s_c->leak_w;
+            reclaim_body = s_c->leak_body;
+            reclaim_scratch = s_c->leak_scratch;
+            s_c->leak_w = s_c->leak_body = s_c->leak_scratch = NULL;
+        }
         portEXIT_CRITICAL(&s_wr_mux);
         if (abandoned) {
+            heap_caps_free(reclaim_scratch);
+            heap_caps_free(reclaim_body);
+            heap_caps_free(reclaim_w);
             // Review 3 LOW-1: this op was abandoned (the job already reported FAILED). Never let it leave
             // a valid stage behind: undo a late finish (clear) or begin/write (abort). The abort is scoped
             // to the fetch's own upload (review 5 L3) so it cannot kill a newer hand upload.
@@ -467,6 +712,11 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
         if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
             // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
             s_c->wr_wedged = true;
+            // LOW-1: the writer already finished this op (arb said so), so it will never hand off again:
+            // tell fetch_task to free the job buffers itself instead of leaking them to a writer that is gone.
+            portENTER_CRITICAL(&s_wr_mux);
+            s_c->wr_late_exited = true;
+            portEXIT_CRITICAL(&s_wr_mux);
             ESP_LOGE(TAG, "flash writer op %d: completion give missing after finishing in the timeout instant", (int)cmd);
             // No flash access here (the writer may still own the scratch): say from the op alone whether
             // an installable stage can exist. Only a completed WR_FINISH leaves a verified, installable stage.
@@ -502,7 +752,9 @@ static bool is_redirect(int s)
 static esp_err_t http_event(esp_http_client_event_t *e)
 {
     if (e->event_id == HTTP_EVENT_ON_HEADER && e->user_data != NULL) {
-        update_loc_capture_feed((update_loc_capture_t *)e->user_data, e->header_key, e->header_value);
+        work_t *w = (work_t *)e->user_data;
+        update_loc_capture_feed(&w->loc_cap, e->header_key, e->header_value);
+        update_rate_capture_feed(&w->rate_cap, e->header_key, e->header_value);
     }
     return ESP_OK;
 }
@@ -527,19 +779,20 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         if (heat_run_active()) {
             return "heat_run_active";
         }
-        // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
-        // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
-        // floor. Gate each esp_http_client_init on the full start threshold instead.
-        const char *adm = heap_admit();
+        // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so each
+        // esp_http_client_init is gated. The first request of this call uses the start rule, later hops
+        // the hop rule (same arithmetic, see update_fetch_heap.h); both settle-wait on a LOW_FREE reading.
+        const char *adm = heap_admit(w, hops > 0);
         if (adm != NULL) {
             return adm;
         }
         update_loc_capture_init(&w->loc_cap, w->loc, sizeof(w->loc));
+        update_rate_capture_init(&w->rate_cap);
         esp_http_client_config_t cfg = {
             .url = w->url,
             .timeout_ms = FETCH_HTTP_TIMEOUT_MS,
             .event_handler = http_event,
-            .user_data = &w->loc_cap,
+            .user_data = w,
             .buffer_size = 2048,
             .buffer_size_tx = FETCH_TX_BUF_BYTES,
             .disable_auto_redirect = true,
@@ -557,14 +810,26 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             esp_http_client_cleanup(c);
             return "connect_failed";
         }
-        int64_t clen = esp_http_client_fetch_headers(c);
+        esp_http_client_set_timeout_ms(c, FETCH_SLICE_MS);
+        int64_t clen = -1;
+        unsigned hslices = 0;
+        for (;;) {
+            clen = esp_http_client_fetch_headers(c);
+            if (clen != -ESP_ERR_HTTP_EAGAIN || s_c->cancel || deadline_passed(w) || ++hslices >= FETCH_STALL_SLICES) {
+                break;
+            }
+        }
         int status = esp_http_client_get_status_code(c);
         st_lock();
         s_c->st.http_status = status;
         st_unlock();
         const char *fail = NULL;
         bool again = false;
-        if (clen < 0) {
+        if (s_c->cancel) {
+            fail = "cancelled";
+        } else if (clen == -ESP_ERR_HTTP_EAGAIN) {
+            fail = "timeout"; // header read timed out (not a malformed response)
+        } else if (clen < 0) {
             fail = "bad_response";
         } else if (is_redirect(status)) {
             bool loc_refused = false;
@@ -583,6 +848,13 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     again = true;
                 }
             }
+        } else if (update_status_is_rate_or_server(status)) {
+            // LOW-2: rate limit / server error get their own reasons and a backoff the POST handlers honour.
+            // UPDLOW MED-1: only a real limit is "rate_limited"; a plain 403 is an access error.
+            fail = update_status_is_rate_limited(&w->rate_cap, status) ? "rate_limited"
+                   : (status == 403)                                   ? "access_denied"
+                                                                        : "server_error";
+            backoff_note(update_rate_backoff_s(&w->rate_cap, status, now_epoch()));
         } else if (status != 200) {
             fail = "http_status";
         } else {
@@ -590,6 +862,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             fail = sink->begin(w, known ? clen : -1);
             uint32_t chunks = 0;
             unsigned eagain = 0;
+            unsigned dma_hist = 0;  // bit history of recent between-read DMA samples (UPDFX5)
             int64_t total = 0;
             while (fail == NULL) {
                 if (s_c->cancel) {
@@ -600,13 +873,22 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     fail = "timeout";
                     break;
                 }
-                if (update_fetch_heap_abort(free_internal())) {
-                    fail = "low_heap";
+                const uint32_t f_now = free_internal();
+                heap_note(f_now, UINT32_MAX, (chunks & 7u) == 0 ? largest_internal_block() : UINT32_MAX);
+                if (update_fetch_heap_abort(f_now)) {
+                    fail = "low_heap_midrun";
                     break;
                 }
                 int n = esp_http_client_read(c, (char *)w->chunk, FETCH_CHUNK_LEN);
                 if (n > 0) {
                     eagain = 0;
+                    // UPDFX5 MED-2: sampled only after a read that returned data, never on a stalled slice.
+                    const uint32_t dma_now = dma_free_internal();
+                    heap_note(UINT32_MAX, dma_now, UINT32_MAX);
+                    if (update_fetch_heap_dma_abort(dma_now, s_c->st.heap.rtc_free, &dma_hist)) {
+                        fail = "low_heap_dma";
+                        break;
+                    }
                     total += n;
                     if (known && total > clen) {
                         fail = "overrun";
@@ -625,8 +907,12 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                         fail = "short_body";
                     }
                     break;
-                } else if (n == -ESP_ERR_HTTP_EAGAIN && ++eagain <= FETCH_EAGAIN_RETRIES) {
-                    continue;
+                } else if (n == -ESP_ERR_HTTP_EAGAIN) {
+                    if (++eagain >= FETCH_STALL_SLICES) {
+                        fail = "timeout";
+                        break;
+                    }
+                    continue; // cancel/deadline are re-checked at the top of the loop, once per slice
                 } else {
                     fail = "read_failed";
                     break;
@@ -723,7 +1009,7 @@ static const char *run_job(work_t *w)
     if (!clock_synced()) {
         return "clock_not_synced";
     }
-    const char *adm = heap_admit();
+    const char *adm = heap_admit(w, false);
     if (adm != NULL) {
         return adm;
     }
@@ -749,6 +1035,15 @@ static const char *run_job(work_t *w)
     w->mem_cap = FETCH_API_BODY_CAP;
     e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
     if (e != NULL) {
+        if (!use_list && strcmp(e, "http_status") == 0) {
+            // /releases/latest answers 404 when the repo has only pre-releases (or no release at all).
+            st_lock();
+            const int hs = s_c->st.http_status;
+            st_unlock();
+            if (hs == 404) {
+                return "no_stable_release";
+            }
+        }
         return e;
     }
     const uint32_t max_app = update_stage_capacity(update_http_stage());
@@ -853,10 +1148,13 @@ static void fetch_task(void *arg)
     const bool wedged_at_start = s_c->wr_wedged;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    // The stager scratch is internal on purpose (MED-1); one 2 KiB block per job, in the admission budget.
-    uint8_t *scratch = heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // The stager scratch is internal on purpose (MED-1); one block per DOWNLOAD job, in the admission budget.
+    // A check has no stager (memory sink), so it allocates none (UPDFX1 LOW-3).
+    uint8_t *scratch = p.kind == KIND_DOWNLOAD
+                           ? heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+                           : NULL;
     const char *err = NULL;
-    if (w == NULL || body == NULL || scratch == NULL) {
+    if (w == NULL || body == NULL || (p.kind == KIND_DOWNLOAD && scratch == NULL)) {
         err = "no_memory";
     } else {
         w->p = p;
@@ -875,9 +1173,25 @@ static void fetch_task(void *arg)
         err = "writer_wedged_reboot_required";
     }
     if (s_c->wr_wedged && !wedged_at_start) {
-        // This job's writer op timed out and may still be reading these; abandon them (a reboot recovers)
-        // rather than race it.
-        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
+        // This job's writer op timed out and may still be reading these: never race it. Hand them to the
+        // writer, which frees them when the late op finally returns (LOW-5); if it already returned, free
+        // them here. Decided under s_wr_mux so exactly one side frees.
+        portENTER_CRITICAL(&s_wr_mux);
+        const bool writer_gone = s_c->wr_late_exited;
+        if (!writer_gone) {
+            s_c->leak_w = w;
+            s_c->leak_body = body;
+            s_c->leak_scratch = scratch;
+        }
+        portEXIT_CRITICAL(&s_wr_mux);
+        if (writer_gone) {
+            heap_caps_free(scratch);
+            heap_caps_free(body);
+            heap_caps_free(w);
+            ESP_LOGE(TAG, "flash writer wedged earlier, already returned: job buffers freed, update claim released");
+        } else {
+            ESP_LOGE(TAG, "flash writer wedged: job buffers handed to the writer, update claim released");
+        }
     } else {
         heap_caps_free(scratch);
         heap_caps_free(body);
@@ -907,6 +1221,15 @@ static esp_err_t send_error_json(httpd_req_t *req, const char *status, const cha
     char json[96];
     snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name);
     httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t send_backoff_json(httpd_req_t *req, uint32_t secs)
+{
+    char json[96];
+    snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"backoff\",\"retry_after_s\":%u}", (unsigned)secs);
+    httpd_resp_set_status(req, "429 Too Many Requests");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, json);
 }
@@ -969,6 +1292,10 @@ static esp_err_t check_post_handler(httpd_req_t *req)
     } else if (qe != ESP_ERR_NOT_FOUND) {
         return send_error_json(req, "400 Bad Request", "bad_query");
     }
+    const uint32_t bo = backoff_remaining_s();
+    if (bo > 0) {
+        return send_backoff_json(req, bo);
+    }
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
@@ -1023,6 +1350,10 @@ static esp_err_t download_post_handler(httpd_req_t *req)
         return send_error_json(req, "400 Bad Request", "bad_query");
     }
 
+    const uint32_t bo = backoff_remaining_s();
+    if (bo > 0) {
+        return send_backoff_json(req, bo);
+    }
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
@@ -1071,6 +1402,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     typedef struct {
         char a[320];
         char b[768];
+        char h[320];
         char rp[UPDATE_REPO_MAX + 48];
         char repo_now[UPDATE_REPO_MAX];
         char running[UPDATE_VERSION_STR_MAX];
@@ -1086,9 +1418,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const job_status_t *s = &s_c->st;
     snprintf(bf->a, sizeof(bf->a),
              "{\"ok\":true,\"state\":\"%s\",\"kind\":\"%s\",\"stage\":\"%s\",\"error\":\"%s\","
-             "\"http_status\":%d,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
+             "\"http_status\":%d,\"retry_after_s\":%u,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
              state_name(s->state), s->kind == KIND_CHECK ? "check" : "download", s->stage ? s->stage : "",
-             s->error ? s->error : "", s->http_status, (unsigned)s->done, (unsigned)s->total,
+             s->error ? s->error : "", s->http_status, (unsigned)backoff_remaining_s(), (unsigned)s->done, (unsigned)s->total,
              s_c->busy ? "true" : "false");
     json_safe_copy(bf->repo_now, sizeof(bf->repo_now), s->repo);
     json_safe_copy(bf->running, sizeof(bf->running), s->running);
@@ -1096,10 +1428,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     snprintf(bf->b, sizeof(bf->b),
              "\"tag\":\"%s\",\"prerelease\":%s,\"app_size\":%u,\"running\":\"%s\",\"commit\":\"%s\","
              "\"sha256\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\",\"allowed\":%s,"
-             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s}",
+             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s,",
              s->tag, s->prerelease ? "true" : "false", (unsigned)s->app_size, bf->running, s->commit, s->sha256,
              s->verdict ? s->verdict : "", bf->reason, s->allowed ? "true" : "false",
              s->needs_typed_confirm ? "true" : "false", s->zones_cfg_lower ? "true" : "false");
+    // Heap evidence (UPDFX7): all zero until the job has taken a sample. min_* are the low-waters of the job.
+    const job_heap_t *jh = &s->heap;
+    snprintf(bf->h, sizeof(bf->h),
+             "\"heap\":{\"sampled\":%s,\"rtc_free\":%u,\"start_free\":%u,\"start_dma\":%u,"
+             "\"hop\":\"%s\",\"hop_free\":%u,\"hop_settle_tries\":%u,"
+             "\"min_free\":%u,\"min_dma\":%u,\"min_block\":%u}}",
+             jh->sampled ? "true" : "false", (unsigned)jh->rtc_free, (unsigned)jh->start_free, (unsigned)jh->start_dma,
+             jh->hop_result == HOP_ADMITTED ? "admitted" : jh->hop_result == HOP_REFUSED ? "refused" : "none",
+             (unsigned)jh->hop_free, (unsigned)jh->hop_tries, (unsigned)heap_low_water(jh->sampled, jh->min_free),
+             (unsigned)heap_low_water(jh->sampled, jh->min_dma), (unsigned)heap_low_water(jh->sampled, jh->min_block));
     st_unlock();
     // Before any job has run the repo is the configured setting.
     if (bf->repo_now[0] == '\0') {
@@ -1113,7 +1455,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     esp_err_t rc;
     if (httpd_resp_send_chunk(req, bf->a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
         httpd_resp_send_chunk(req, bf->rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
-        httpd_resp_send_chunk(req, bf->b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+        httpd_resp_send_chunk(req, bf->b, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, bf->h, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
         rc = ESP_FAIL;
     } else {
         rc = httpd_resp_send_chunk(req, NULL, 0);

@@ -337,6 +337,7 @@ update_decision_t update_policy_decide_upload(const update_identity_t *running, 
     cpy_field(run_s.partitions_sha256, placeholder_psha, sizeof(run_s.partitions_sha256));
     cpy_field(cand_s.partitions_sha256, placeholder_psha, sizeof(cand_s.partitions_sha256));
     cpy_field(cand_s.version, ver, sizeof(cand_s.version));
+    cand_s.dirty = req->dirty;
     if (req->commit != NULL && update_policy_commit_valid(req->commit)) {
         cpy_field(cand_s.commit, req->commit, sizeof(cand_s.commit));
     }

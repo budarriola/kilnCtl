@@ -57,6 +57,7 @@
 // 129-byte password, well under the ~256-byte budget
 // WEB_AUTH_PLAN.md section 4 documents for the KDF's own locals, and no
 // buffer here is enlarged beyond that.
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "web_auth_login_http.h"
 
 #include <stdint.h>
@@ -198,7 +199,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
 {
     int free_idx = -1;
     int lru_idx = -1;
-    uint32_t lru_time = UINT32_MAX;
+    uint32_t lru_age = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         login_lockout_slot_t *s = &s_login_lockouts[i];
         login_backoff_cycle_reset_if_due(&s->backoff, now);
@@ -209,8 +210,10 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
-        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) && s->last_activity_ms < lru_time) {
-            lru_time = s->last_activity_ms;
+        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
+            (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
+            /* largest unsigned elapsed wins: wrap-safe LRU */
+            lru_age = (uint32_t)(now - s->last_activity_ms);
             lru_idx = (int)i;
         }
     }
@@ -383,7 +386,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
             // instead, matching what a maximally-escalated genuine lock
             // would also show, so saturation is indistinguishable from an
             // ordinary long lock.
-            retry_after_ms = (slot != NULL) ? (slot->backoff.locked_until_ms - now)
+            retry_after_ms = (slot != NULL) ? login_backoff_remaining_ms(&slot->backoff, now)
                                              : LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1];
         }
         xSemaphoreGive(s_login_lock);
@@ -433,7 +436,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // split it across TCP segments, corrupting username/password field
     // parsing rather than failing loud. Loop until content_len bytes are
     // read, same shape as security_http.c's security_post_handler().
-    char *body = (char *)malloc(LOGIN_BODY_MAX);
+    char *body = (char *)persist_scratch_alloc(LOGIN_BODY_MAX);
     if (body == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;

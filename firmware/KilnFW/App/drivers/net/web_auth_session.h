@@ -344,6 +344,14 @@ web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool 
 // the home LAN, never via the AP) must never defer AP teardown by itself.
 bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms);
 
+// Frees every in_use slot that is expired under `timeout_s` at `now_ms`
+// (never when timeout_s is WEB_AUTH_TIMEOUT_NEVER_S). Returns the count freed.
+// web_auth_session_is_valid() is an unsigned elapsed test, so an expired slot
+// that is left allocated reads valid again once 2^32 ms (49.7 days) have
+// passed since its last use (AUDIT_LOGSTORE_TIME LOW-1). Callers sweep before
+// consulting the table so an expired slot is gone long before that point.
+size_t web_auth_table_reap_expired(web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms);
+
 // --- Admin-credential bootstrap state (plan items 10 & 11) ------------------
 //
 // Three paths can leave an interface "enabled" while its administrator

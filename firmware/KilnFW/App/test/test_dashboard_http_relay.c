@@ -110,6 +110,8 @@ esp_err_t safety_log_level_post_handler(httpd_req_t *req) { (void)req; return ES
 esp_err_t unit_pref_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 bool MAX31856_bus_spi_wedged(const MAX31856BusClass *bus) { (void)bus; return false; }
 uint8_t aux_outputs_cfg_enabled_mask(void) { return 0; }
+bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask) { (void)zone_index; if (out_mask) { *out_mask = 0; } return false; }
+bool thermo_channel_cal_applies(uint8_t channel, uint8_t zone_thermo_mask) { (void)channel; (void)zone_thermo_mask; return false; }
 bool cfg_fs_mount_format_confirmation_pending(void) { return false; }
 const char *cfg_fs_mount_format_pending_reason(void) { return ""; }
 esp_err_t esp_flash_get_size(esp_flash_t *chip, uint32_t *out_size) { (void)chip; (void)out_size; return ESP_FAIL; }

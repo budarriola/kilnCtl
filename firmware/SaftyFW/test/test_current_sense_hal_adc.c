@@ -21,6 +21,7 @@
 // the real constant changes what this test builds and checks too, in one
 // place.
 #include "test_common.h"
+#include "test_pico_time_clock.h"
 
 #include "fake_adc.h"
 #include "hal_adc.h"
@@ -514,6 +515,35 @@ static void test_current_sense_filter_step_response_at_100hz_acquisition(void)
                "pair' bug class)");
 }
 
+// Guard audit 2026-10-14 A2: the snapshot stamp must come from the hardware timer
+// safety_core.c ages it against, not the (here fixed-at-0) FreeRTOS tick.
+static void test_current_snapshot_stamped_from_hardware_timer(void)
+{
+    TEST_SECTION("current_sense_sample() -- snapshot timestamp_ms comes from the hardware timer (A2, 2026-10-14)");
+
+    fake_adc_reset();
+    hal_adc_init();
+    current_sense_init();
+    current_sense_cal_t cal = {0};
+    for (unsigned n = 0; n < 3; n++) {
+        cal.gain[n] = 1.0f;
+        cal.k_ct_v_per_a[n] = 1.0f;
+    }
+    cal.calibrated = true;
+    current_sense_set_cal(&cal);
+
+    (void)script_channel_dithered(0, 4095, 1000);
+    (void)script_channel_dithered(1, 0, 500);
+    (void)script_channel_dithered(2, 2047, 250);
+    test_hw_clock_set_ms(7654321u);
+    current_sense_sample();
+
+    current_snapshot_t snap;
+    current_sense_get_snapshot(&snap);
+    TEST_CHECK(snap.timestamp_ms == 7654321u,
+               "timestamp_ms equals to_ms_since_boot(get_absolute_time()), not the FreeRTOS tick");
+}
+
 void run_test_current_sense_hal_adc(void)
 {
     test_current_sense_discards_first_sample_and_oversamples_16x();
@@ -523,4 +553,5 @@ void run_test_current_sense_hal_adc(void)
     test_current_sense_partial_tick_timeouts_still_degrade();
     test_current_sense_noise_reduction_sqrt_n();
     test_current_sense_filter_step_response_at_100hz_acquisition();
+    test_current_snapshot_stamped_from_hardware_timer();
 }
