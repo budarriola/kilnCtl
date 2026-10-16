@@ -1005,6 +1005,100 @@ static void test_version_refuse_older_layout_without_a_migration(void)
 }
 
 // ---------------------------------------------------------------------------
+// v6 -> v7 migration (SR-31): three ids dropped from the middle of the table.
+// ---------------------------------------------------------------------------
+static void stage_raw_blob(const void *blob, size_t n)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "setup: stage handle opens");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAFETY_CFG, blob, n) == HAL_OK, "setup: blob stages");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: stage commits");
+    hal_kv_close(&h);
+}
+
+// Position of v7 row i in the v6 table: 0x0401 sat before 0x0402's row, 0x0404/0x0405 after 0x0403's.
+static size_t v6_pos_for_v7(size_t i)
+{
+    int r402 = index_for_id(0x0402), r403 = index_for_id(0x0403);
+    return i + ((int)i >= r402 ? 1u : 0u) + ((int)i > r403 ? 2u : 0u);
+}
+
+static void test_v6_blob_migrates_by_id_and_drops_removed_ids(void)
+{
+    TEST_SECTION("nvs_load_store -- a v6 blob migrates by param id, removed ids dropped");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    safety_cfg_store_blob_v6_t v6;
+    memset(&v6, 0, sizeof(v6));
+    v6.version = 6u;
+    v6.config_crc = 0x1234;
+    for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V6; j++) {
+        v6.entries[j].set = 1;
+        v6.entries[j].value.u16_val = (uint16_t)(1000u + j);
+    }
+    stage_raw_blob(&v6, sizeof(v6));
+
+    nvs_load_store();
+
+    TEST_CHECK(s_store.version == SAFETY_CFG_STORE_VERSION, "migrated store is stamped current");
+    TEST_CHECK(s_store.config_crc == 0x1234, "config_crc carried over as stored");
+    TEST_CHECK(s_has_data, "migrated cache counts as data");
+    size_t bad = 0;
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
+        safety_cfg_param_t p;
+        TEST_CHECK(safety_cfg_store_get_by_index(i, &p), "row readable");
+        size_t j = v6_pos_for_v7(i);
+        if (!p.set || s_store.entries[i].value.u16_val != (uint16_t)(1000u + j)) {
+            bad++;
+        }
+    }
+    TEST_CHECK(bad == 0, "every surviving row holds its own v6 value, mapped by id");
+    TEST_CHECK(index_for_id(0x0401) < 0 &&
+                   index_for_id(0x0404) < 0 &&
+                   index_for_id(0x0405) < 0,
+               "removed ids are gone from the table");
+    fake_kv_reset_all();
+}
+
+static void test_v6_blob_wrong_size_is_unreadable(void)
+{
+    TEST_SECTION("nvs_load_store -- a wrong-size v6 blob is unreadable");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    safety_cfg_store_blob_v6_t v6;
+    memset(&v6, 0, sizeof(v6));
+    v6.version = 6u;
+    v6.config_crc = 0x1234;
+    v6.entries[0].set = 1;
+    stage_raw_blob(&v6, sizeof(v6) - sizeof(v6.entries[0]));
+    nvs_load_store();
+    TEST_CHECK(s_store.config_crc == 0 && !s_has_data, "short v6 blob leaves the empty default");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set, "nothing leaked in");
+    fake_kv_reset_all();
+}
+
+static void test_v5_blob_still_resets(void)
+{
+    TEST_SECTION("nvs_load_store -- a v5 blob still has no migration");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    safety_cfg_store_blob_v6_t v5;
+    memset(&v5, 0, sizeof(v5));
+    v5.version = 5u;
+    v5.config_crc = 0x1234;
+    v5.entries[0].set = 1;
+    stage_raw_blob(&v5, sizeof(v5) - 3u * sizeof(v5.entries[0]));
+    nvs_load_store();
+    TEST_CHECK(s_store.config_crc == 0 && !s_has_data, "v5 blob resets to the empty cache");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set, "nothing leaked in");
+    fake_kv_reset_all();
+}
+
+// ---------------------------------------------------------------------------
 // RELAY_LIFE_BUDGET.md -- the safety relay (K4) type.
 // ---------------------------------------------------------------------------
 
@@ -1571,6 +1665,9 @@ void run_test_safety_cfg_store(void)
     test_lookup_by_id();
     test_version_refuse_newer_than_firmware();
     test_version_refuse_older_layout_without_a_migration();
+    test_v6_blob_migrates_by_id_and_drops_removed_ids();
+    test_v6_blob_wrong_size_is_unreadable();
+    test_v5_blob_still_resets();
     test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache();
     test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles();
     test_safety_relay_type_set_persists_and_roundtrips_after_reload();

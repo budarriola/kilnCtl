@@ -525,6 +525,49 @@ static void reset_to_defaults(void)
  * written, so there is no migration chain yet (mirrors kiln_cfg_store.c's own
  * "only version 1 exists today" state); a future bump needs one here, same as
  * those two files. */
+/* v6 -> v7 migration (SR-31). v6 carried 71 rows: the v7 table plus context_max_age_s
+ * (0x0401, between 0x031E and 0x0402), mainfault_debounce_ms (0x0404) and
+ * telemetry_period_ms (0x0405) (both between 0x0403 and 0x0501). Values are mapped by
+ * param id, so a v6 cache keeps every surviving entry and config_crc as stored. */
+#define SAFETY_CFG_PARAM_COUNT_V6 (SAFETY_CFG_PARAM_COUNT + 3u)
+
+typedef struct {
+    uint8_t version;
+    uint16_t config_crc;
+    safety_cfg_entry_t entries[SAFETY_CFG_PARAM_COUNT_V6];
+} safety_cfg_store_blob_v6_t;
+
+typedef union {
+    safety_cfg_store_blob_t cur;
+    safety_cfg_store_blob_v6_t v6;
+} safety_cfg_load_scratch_t;
+
+static int index_for_id(uint16_t id);
+
+/* The v6 table's id order, rebuilt from the v7 table plus the three removed ids. */
+static bool build_v6_id_order(uint16_t out[SAFETY_CFG_PARAM_COUNT_V6])
+{
+    size_t k = 0;
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
+        uint16_t id = SAFETY_CFG_PARAM_TABLE[i].id;
+        if (id == 0x0402 && k < SAFETY_CFG_PARAM_COUNT_V6) {
+            out[k++] = 0x0401;
+        }
+        if (k >= SAFETY_CFG_PARAM_COUNT_V6) {
+            return false;
+        }
+        out[k++] = id;
+        if (id == 0x0403) {
+            if (k + 2 > SAFETY_CFG_PARAM_COUNT_V6) {
+                return false;
+            }
+            out[k++] = 0x0404;
+            out[k++] = 0x0405;
+        }
+    }
+    return k == SAFETY_CFG_PARAM_COUNT_V6;
+}
+
 static void nvs_load_store(void)
 {
     reset_to_defaults();
@@ -535,48 +578,69 @@ static void nvs_load_store(void)
         return; /* HAL_NOT_FOUND (never saved) or partition trouble -- defaults stand */
     }
 
-    safety_cfg_store_blob_t loaded;
-    size_t len = sizeof(loaded);
-    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CFG, &loaded, &len);
+    /* Scratch holds the larger of the current and v6 layouts (PSRAM-first, not internal). */
+    safety_cfg_load_scratch_t *scr = persist_scratch_alloc(sizeof(*scr));
+    if (!scr) {
+        hal_kv_close(&h);
+        ESP_LOGW(TAG, "safety_cfg_store load scratch alloc failed -- empty cache");
+        return;
+    }
+    size_t len = sizeof(*scr);
+    err = hal_kv_get_blob(&h, NVS_KEY_SAFETY_CFG, scr, &len);
     hal_kv_close(&h);
     if (err != HAL_OK) {
+        free(scr);
         return; /* nothing stored, or unreadable -- defaults stand */
     }
-    if (len < sizeof(loaded.version)) {
+    if (len < sizeof(scr->cur.version)) {
         ESP_LOGW(TAG, "safety_cfg_store blob is too short to contain a version -- treating as unreadable");
+        free(scr);
         return;
     }
-    if (loaded.version == SAFETY_CFG_STORE_VERSION) {
-        if (len != sizeof(loaded)) {
+    uint8_t ver = scr->cur.version;
+    if (ver == SAFETY_CFG_STORE_VERSION) {
+        if (len != sizeof(scr->cur)) {
             ESP_LOGW(TAG, "safety_cfg_store blob claims current version but is the wrong size -- "
                           "treating as unreadable");
+            free(scr);
             return;
         }
-        s_store = loaded;
-        s_has_data = (loaded.config_crc != 0);
+        s_store = scr->cur;
+        s_has_data = (scr->cur.config_crc != 0);
+        free(scr);
         return;
     }
-    if (loaded.version < SAFETY_CFG_STORE_VERSION) {
-        /* No migration chain exists yet -- unreachable until a future bump
-         * adds one (see this function's header comment). Fail safe rather
-         * than guess at a layout this build has never written: reset stands,
-         * same choice kiln_cfg_store.c's nvs_load_store() makes for "wrong
-         * size or an unknown version". */
+    if (ver == 6u) {
+        uint16_t ids[SAFETY_CFG_PARAM_COUNT_V6];
+        if (len != sizeof(scr->v6) || !build_v6_id_order(ids)) {
+            ESP_LOGW(TAG, "safety_cfg_store v6 blob is the wrong size -- treating as unreadable");
+            free(scr);
+            return;
+        }
+        for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V6; j++) {
+            int idx = index_for_id(ids[j]);
+            if (idx >= 0) {
+                s_store.entries[idx] = scr->v6.entries[j];
+            } /* else: a removed SR-31 id, dropped */
+        }
+        s_store.config_crc = scr->v6.config_crc;
+        s_has_data = (s_store.config_crc != 0);
+        ESP_LOGI(TAG, "safety_cfg_store migrated v6 -> v%u", (unsigned)SAFETY_CFG_STORE_VERSION);
+        free(scr);
+        return;
+    }
+    free(scr);
+    if (ver < SAFETY_CFG_STORE_VERSION) {
+        /* v5 and older: no migration -- fail safe, empty cache, refilled by the next refetch. */
         ESP_LOGW(TAG, "safety_cfg_store blob is version %u with no migration path to %u -- "
                       "resetting to an empty cache",
-                 (unsigned)loaded.version, (unsigned)SAFETY_CFG_STORE_VERSION);
+                 (unsigned)ver, (unsigned)SAFETY_CFG_STORE_VERSION);
         return;
     }
-    /* loaded.version > SAFETY_CFG_STORE_VERSION: firmware-rollback case, same
-     * as zones_http.c/kiln_cfg_store.c -- refuse to load, flash left
-     * untouched, this boot runs with an empty cache. Every param reads
-     * set=false until the next successful refetch, which is a strictly safer
-     * failure than reinterpreting a newer layout's byte offsets as this
-     * version's fields (COMMISSIONING.md sec 1's identical reasoning for the
-     * Pico's own config_store). */
+    /* ver > SAFETY_CFG_STORE_VERSION: firmware-rollback case -- refuse to load, flash untouched. */
     ESP_LOGW(TAG, "safety_cfg_store blob is version %u, newer than this firmware's %u -- "
                   "refusing to load, flash data left untouched",
-             (unsigned)loaded.version, (unsigned)SAFETY_CFG_STORE_VERSION);
+             (unsigned)ver, (unsigned)SAFETY_CFG_STORE_VERSION);
 }
 
 /* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
