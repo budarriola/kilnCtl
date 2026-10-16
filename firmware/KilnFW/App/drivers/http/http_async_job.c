@@ -7,8 +7,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "freertos/task.h"
-#include "freertos/idf_additions.h"
-#include "esp_heap_caps.h"
 
 #include "safety_cfg_writer_guard.h"
 #include "dram_watch.h"
@@ -85,7 +83,7 @@ static void http_async_job_task(void *arg)
     // before the guard release -- no separate write here (see run_job()'s
     // comment). A FreeRTOS task function must still not simply return
     // (CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y panics on that).
-    vTaskDeleteWithCaps(NULL); /* stack was allocated by ...WithCaps(MALLOC_CAP_SPIRAM) */
+    vTaskDelete(NULL);
 }
 
 http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const char *task_name,
@@ -115,20 +113,18 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
     s_run_ctx.ctx = ctx;
     s_run_ctx.async_req = async_req;
 
-    // PSRAM stack (KNOWN_ISSUES RAM-02, 2026-10-16): the 10 KB stack no longer
-    // needs a contiguous internal block. Safe because XIP_FROM_PSRAM defines
-    // SPI_FLASH_CACHE_NO_DISABLE (NVS/flash writes keep the cache on) and no
-    // job reaches an mmap-class call (esp_ota_*, esp_image_*, esp_partition_mmap,
-    // esp_core_dump_*): crash_report_clear hops to bx_flash_worker. Keep it so.
     // Runs at httpd_worker's own priority (tskIDLE_PRIORITY+5,
     // HTTPD_DEFAULT_CONFIG()) -- it is doing httpd_worker's own deferred
     // work, so nothing lower-priority should preempt it (2026-09-25
     // fix-then-push review; was tskIDLE_PRIORITY+1).
+    // STACK MUST STAY INTERNAL (2026-10-16 bench bug): jobs write NVS/cfg files
+    // (backup_import creating a kiln_configs entry), and every NVS writer guards on
+    // hal_kv_write_safe_here() (stack not in PSRAM) and REFUSES from a PSRAM stack
+    // ("could not be saved to flash"). tools/check_psram_task_stacks.ps1 pins this.
     dram_watch_log_task(task_name ? task_name : "http_async_job", "before-create");
     if (dram_watch_task_after(task_name ? task_name : "http_async_job",
-                              xTaskCreateWithCaps(http_async_job_task, task_name, stack_bytes, &s_run_ctx,
-                                                  tskIDLE_PRIORITY + 5, &s_task_handle,
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) != pdPASS) {
+                              xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx,
+                                          tskIDLE_PRIORITY + 5, &s_task_handle)) != pdPASS) {
         ESP_LOGE(TAG, "%s: failed to create the job task", task_name ? task_name : "?");
         // A4 review follow-up C (2026-09-28): httpd_req_async_handler_begin()
         // already succeeded above, so req's body (if any) has never been

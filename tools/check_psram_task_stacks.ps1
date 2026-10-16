@@ -67,6 +67,20 @@ foreach ($e in $tasks) {
         elseif ($c.Args -match 'MALLOC_CAP_INTERNAL') { $bad += "$($e[0]): $($e[1]) $($c.Fn) call requests MALLOC_CAP_INTERNAL" }
     }
 }
+# Tasks that reach guarded NVS/cfg writes (hal_kv_write_safe_here() refuses from a PSRAM stack) and so
+# must keep an INTERNAL stack: plain xTaskCreate*, never WithCaps.
+$mustBeInternal = @(
+    ,@('firmware/KilnFW/App/drivers/http/http_async_job.c', 'http_async_job_task')
+)
+foreach ($e in $mustBeInternal) {
+    $path = Join-Path $root $e[0]
+    $calls = Get-CreateCalls (Strip-C ([IO.File]::ReadAllText($path))) |
+        Where-Object { $_.Args -match ('(?<![A-Za-z0-9_])' + [regex]::Escape($e[1]) + '(?![A-Za-z0-9_])') }
+    if (-not $calls) { $bad += "$($e[0]): no xTaskCreate* call for $($e[1]) found"; continue }
+    foreach ($c in $calls) {
+        if ($c.Fn -match 'WithCaps$' -or $c.Args -match 'MALLOC_CAP_SPIRAM') { $bad += "$($e[0]): $($e[1]) must keep an internal stack (writes NVS; guards refuse a PSRAM stack) but uses $($c.Fn)" }
+    }
+}
 $uart = [IO.File]::ReadAllText((Join-Path $root 'firmware/hwAbstraction/esp/uart/hal_uart_esp.c'))
 $uart = [regex]::Replace($uart, '(?s)/\*.*?\*/|//[^\r\n]*', '')
 if ($uart -notmatch 'vTaskDeleteWithCaps\s*\(' -or $uart -match '\bvTaskDelete\s*\(') { $bad += 'hal_uart_esp.c: WithCaps task must be deleted with vTaskDeleteWithCaps' }

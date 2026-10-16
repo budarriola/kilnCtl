@@ -26,6 +26,7 @@ $allow = [ordered]@{
 'drivers/control/zones_current_sweep_task.c' = @(1, 'task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/backup_import.c' = @(2, 'import job ctx and pass-1 scratch; job task writes NVS; transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md)')
 'drivers/http/diagnostics_http.c' = @(1, 'coredump read buffer (flash read path); transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md); plus cfgfs file body buffer (explicit MALLOC_CAP_INTERNAL, flash read)')
+'drivers/http/http_async_job.c' = @(1, 'async job task writes NVS/flash; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/ota_http_esp.c' = @(1, 'OTA task writes flash; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/ota_http_pico.c' = @(1, 'OTA task; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/ota_http_recovery.c' = @(2, 'recovery OTA/apply tasks write flash; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
