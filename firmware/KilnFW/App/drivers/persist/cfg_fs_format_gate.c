@@ -300,3 +300,49 @@ bool cfg_fs_confirm_uri_force_healthy(const char *uri)
     }
     return false;
 }
+
+bool cfg_fs_uri_query_token(const char *uri, const char *key, char *out, size_t cap)
+{
+    if (out && cap > 0) {
+        out[0] = '\0';
+    }
+    if (uri == NULL || key == NULL || out == NULL || cap < 2u) {
+        return false;
+    }
+    const char *q = strchr(uri, '?');
+    if (q == NULL) {
+        return false;
+    }
+    const size_t key_len = strlen(key);
+    const char *p = q + 1;
+    while (*p != '\0' && *p != '#') {
+        const char *end = p;
+        while (*end != '\0' && *end != '&' && *end != '#') {
+            end++;
+        }
+        const char *eq = memchr(p, '=', (size_t)(end - p));
+        size_t name_len = eq ? (size_t)(eq - p) : (size_t)(end - p);
+        if (name_len == key_len && memcmp(p, key, key_len) == 0) {
+            if (eq == NULL) {
+                return false;
+            }
+            size_t vlen = (size_t)(end - (eq + 1));
+            if (vlen == 0 || vlen >= cap) {
+                return false;
+            }
+            for (size_t i = 0; i < vlen; i++) {
+                char c = eq[1 + i];
+                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+                          c == '_' || c == '-';
+                if (!ok) {
+                    return false;
+                }
+            }
+            memcpy(out, eq + 1, vlen);
+            out[vlen] = '\0';
+            return true;
+        }
+        p = (*end == '&') ? end + 1 : end;
+    }
+    return false;
+}

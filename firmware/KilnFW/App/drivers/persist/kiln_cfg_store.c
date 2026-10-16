@@ -33,6 +33,7 @@
                                 * validity check, section 5.2 rule 5. */
 
 #include "kiln_cfg_store_internal.h"
+#include "cfg_fs.h" /* cfg_fs_read(), cfg_fs_is_available() */
 #include "persist_scratch.h"
 #include "kiln_cfg_store_cfg_fs.h"
 #include "kiln_package.h" /* kiln_package_capture_pico_half()/_compute_hash() -- explicit even
@@ -600,6 +601,64 @@ static uint32_t kiln_cfg_rev_load(void)
     return err == HAL_OK ? rev : 0;
 }
 
+/* persmed MED-C: the cfg file is the only store written now, so a file left by an OLDER layout (v1/v2 here; every
+ * future bump adds its frozen type) must be migrated like the NVS blob always was -- not treated as rejected,
+ * which would lock the store at the first version bump. Reads the file again (the resolve layer only reports
+ * OLDER), converts it into s_store through the same chain nvs_load_store() uses, and rewrites it in the current
+ * layout (file rev unchanged until that write bumps it). Returns false when the bytes are not a known older
+ * layout; the caller then preserves them as .bad and quarantines. */
+static bool migrate_older_cfg_file(uint32_t *out_rev)
+{
+    size_t cap = 4 + sizeof(kiln_cfg_store_blob_t);
+    if (4 + sizeof(kiln_cfg_store_blob_v1_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v1_t);
+    }
+    if (4 + sizeof(kiln_cfg_store_blob_v2_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v2_t);
+    }
+    uint8_t *raw = persist_scratch_alloc(cap);
+    if (!raw) {
+        return false;
+    }
+    size_t len = 0;
+    if (cfg_fs_read(KILN_CFG_STORE_FILE_PATH, raw, cap, &len) != ESP_OK || len < 5) {
+        free(raw);
+        return false;
+    }
+    uint32_t rev = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8) | ((uint32_t)raw[2] << 16) | ((uint32_t)raw[3] << 24);
+    const uint8_t *blob = raw + 4;
+    size_t blen = len - 4;
+    bool ok = false;
+    if (blen == sizeof(kiln_cfg_store_blob_v1_t) && blob[0] == 1) {
+        kiln_cfg_store_blob_v1_t *v1 = persist_scratch_alloc(sizeof(*v1));
+        kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
+        if (v1 && v2) {
+            memcpy(v1, blob, sizeof(*v1));
+            migrate_store_v1_to_v2(v1, v2);
+            migrate_store_v2_to_v3(v2, &s_store);
+            ok = true;
+        }
+        free(v1);
+        free(v2);
+    } else if (blen == sizeof(kiln_cfg_store_blob_v2_t) && blob[0] == 2) {
+        kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
+        if (v2) {
+            memcpy(v2, blob, sizeof(*v2));
+            migrate_store_v2_to_v3(v2, &s_store);
+            ok = true;
+        }
+        free(v2);
+    }
+    if (!ok) {
+        (void)kiln_cfg_store_cfg_fs_preserve_bad(raw, len);
+    }
+    free(raw);
+    if (ok) {
+        *out_rev = rev;
+    }
+    return ok;
+}
+
 /* Wraps nvs_load_store() with the `cfg` LittleFS read-through/dual-write
  * policy (docs/FILESYSTEM_USER_DATA.md section 5, "kiln config slots"
  * item) -- exactly the shape zones_config_store.c's nvs_load() wraps
@@ -633,6 +692,21 @@ static void nvs_load_store_with_cfg_fs(void)
     kiln_cfg_file_state_t fstate = KILN_CFG_FILE_ABSENT;
     bool trustworthy = kiln_cfg_store_cfg_fs_resolve_ex(&s_store, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                         &used_file, &fstate);
+    if (fstate == KILN_CFG_FILE_OLDER) {
+        uint32_t file_rev = 0;
+        free(resolved);
+        if (migrate_older_cfg_file(&file_rev)) {
+            s_kiln_cfg_rev = file_rev;
+            hal_status_t save_err = nvs_save_store(); /* current layout on disk so the next boot takes the fast path */
+            ESP_LOGI(TAG, "kiln_cfg_store migrated the older cfg file (rev %lu) to v%u%s", (unsigned long)file_rev,
+                     (unsigned)KILN_CFG_STORE_VERSION, save_err == HAL_OK ? "" : " (rewrite failed; will retry)");
+            return;
+        }
+        reset_to_defaults();
+        set_quarantine("kiln config file is an older layout this firmware cannot migrate -- copy kept as .bad");
+        s_kiln_cfg_rev = nvs_rev;
+        return;
+    }
     if (fstate == KILN_CFG_FILE_UNKNOWN || fstate == KILN_CFG_FILE_NEWER || fstate == KILN_CFG_FILE_REJECTED) {
         /* persfx4 MED-3: the cfg file is the store that is written now, and it exists but could not be used
          * (unreadable / newer than this firmware / corrupt). Quarantine (mutators refused, nothing written) and
@@ -1852,6 +1926,39 @@ bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, siz
         return set_reason(reason_out, reason_cap,
                            "refusing: calling task's stack is in external RAM (PSRAM) and the legacy NVS "
                            "blob erase would abort the board -- retry from an internal-stack task");
+    }
+    /* persmed MED-B: keep what is being discarded. The cfg file (any state, including a NEWER one the resolve
+     * layer deliberately left unpreserved) goes to kiln_configs.json.bad; the quarantining legacy NVS blob, when
+     * there is one, goes to kiln_configs.nvs.bad. If a copy that should exist cannot be made, nothing is
+     * discarded. */
+    if (!kiln_cfg_store_cfg_fs_preserve_existing_file()) {
+        return set_reason(reason_out, reason_cap,
+                           "refusing: the unreadable kiln config file could not be copied to .bad first -- "
+                           "nothing was discarded");
+    }
+    if (cfg_fs_is_available()) {
+        hal_kv_handle_t rh;
+        if (hal_kv_open(&rh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            size_t nlen = 0;
+            if (hal_kv_get_blob(&rh, NVS_KEY_STORE, NULL, &nlen) == HAL_OK && nlen > 0 && nlen <= 65536) {
+                uint8_t *nb = persist_scratch_alloc(nlen);
+                bool kept = false;
+                if (nb) {
+                    size_t got = nlen;
+                    if (hal_kv_get_blob(&rh, NVS_KEY_STORE, nb, &got) == HAL_OK && got == nlen) {
+                        kept = kiln_cfg_store_cfg_fs_get_write_fn()(KILN_CFG_STORE_NVS_BAD_PATH, nb, nlen) == ESP_OK;
+                    }
+                    free(nb);
+                }
+                if (!kept) {
+                    hal_kv_close(&rh);
+                    return set_reason(reason_out, reason_cap,
+                                       "refusing: the legacy NVS kiln config blob could not be copied to .bad "
+                                       "first -- nothing was discarded");
+                }
+            }
+            hal_kv_close(&rh);
+        }
     }
     ESP_LOGW(TAG, "kiln_cfg_store: operator confirmed discard of quarantined store (%s) -- starting a "
                   "fresh, empty store",

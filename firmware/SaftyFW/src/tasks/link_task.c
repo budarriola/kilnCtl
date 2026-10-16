@@ -2056,7 +2056,10 @@ static void link_task_config_check_poll(TickType_t now)
     s_last_poll = now;
 
     config_store_record_t snap;
-    if (!config_store_get_full_record(&snap) || snap.config_check_period_s == 0u) {
+    // A7: the period comes from the persisted copy, not the live RAM record under test.
+    uint32_t period_s = 0u;
+    if (!config_store_get_full_record(&snap) || !config_store_get_persisted_check_period_s(&period_s) ||
+        period_s == 0u) {
         // Not loaded yet, no stable snapshot this poll, or the check is
         // disabled -- keep the accumulator at rest rather than let it carry
         // stale progress into a later period that might be reconfigured.
@@ -2065,7 +2068,7 @@ static void link_task_config_check_poll(TickType_t now)
     }
 
     s_config_check_elapsed_s++;
-    if (s_config_check_elapsed_s < config_check_period_effective_s(snap.config_check_period_s)) {
+    if (s_config_check_elapsed_s < config_check_period_effective_s(period_s)) {
         return;
     }
     s_config_check_elapsed_s = 0u;

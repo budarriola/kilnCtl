@@ -6457,6 +6457,13 @@ static void test_update_settings_http_post(void)
     TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "a trailing %00 is refused");
     TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "%00 requests change nothing");
 
+    // Restore fence (backup-import LOW-3): refused 409 while a restore/config change is in flight.
+    backup_import_config_change_set(true);
+    wp9_http_post("repo=fenced%2Frepo");
+    backup_import_config_change_set(false);
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "a POST during a restore is refused, setting unchanged");
+    TEST_CHECK(strncmp(s_post_last_status, "409", 3) == 0, "a POST during a restore gets 409");
+
     // Missing field / empty / oversized body: plain 400 via httpd_resp_send_err.
     wp9_http_post("other=1");
     TEST_CHECK(s_send_last_err_code == 400, "a missing repo field gets 400");

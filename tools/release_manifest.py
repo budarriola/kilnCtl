@@ -64,6 +64,7 @@ def check_tag(tag):
 
 def parse_define_int(text, name):
     """Value of `#define NAME <int>` (tolerating casts/parens), or None."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")  # core.autocrlf checkouts: `$` does not match before \r
     m = re.search(r"^[ \t]*#[ \t]*define[ \t]+" + re.escape(name) +
                   r"[ \t]+\(*(?:\(\w+\))?[ \t]*(0[xX][0-9A-Fa-f]+|\d+)[uUlL]*\)*[ \t]*(?:/[/*].*)?$",
                   text, re.MULTILINE)

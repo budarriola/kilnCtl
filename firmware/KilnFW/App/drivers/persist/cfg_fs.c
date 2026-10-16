@@ -502,6 +502,18 @@ void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int coun
 }
 #endif
 
+/* Cold, non-inlined so the log call's varargs frame is not folded into cfg_fs_read()'s own frame (stack-budget:
+ * cfg_fs_read sits on the httpd and bx_worker deepest paths). */
+#if defined(_MSC_VER)
+#define CFG_FS_NOINLINE __declspec(noinline)
+#else
+#define CFG_FS_NOINLINE __attribute__((noinline))
+#endif
+static CFG_FS_NOINLINE void cfg_fs_log_fopen_unknown(const char *rel_path, int e)
+{
+    ESP_LOGW("cfg_fs", "fopen('%s') failed: errno %d -- file state unknown", rel_path, e);
+}
+
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len)
 {
     if (!rel_path || !buf || cap == 0) {
@@ -522,7 +534,15 @@ esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_l
     }
     FILE *f = fopen(path, "rb");
     if (!f) {
-        return ESP_ERR_NOT_FOUND;
+        /* persmed MED-A: only a genuinely missing file is NOT_FOUND ("never saved"). Any other fopen failure
+         * (EIO, EACCES, ENOMEM, a directory at the path, ...) means the file may exist: ESP_FAIL, so callers
+         * treat its state as unknown and never as absent. */
+        int e = errno;
+        if (e == ENOENT || e == ENOTDIR) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        cfg_fs_log_fopen_unknown(rel_path, e);
+        return ESP_FAIL;
     }
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);

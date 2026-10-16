@@ -1546,6 +1546,13 @@ uint8_t config_store_get_tc_type(void);
 // CONFIG_STORE_DEFAULT_TC_TYPE if called before config_store_boot_load().
 uint8_t config_store_get_persisted_tc_type(void);
 
+// The config_check_period_s that is PERSISTED ON FLASH (A7). The S16 RAM-integrity
+// check must not take its own period from the live RAM record it is checking: a
+// corrupted live 0 would disable it, a corrupted large value would defer it.
+// Same single-writer contract as config_store_get_persisted_tc_type(). Returns
+// false (and leaves *out untouched) before config_store_boot_load().
+bool config_store_get_persisted_check_period_s(uint32_t *out);
+
 // The cached tc_offset_c -- a calibration correction to be ADDED to the
 // safety board's own MAX31856 hot-junction reading (thermo_task.c is the one
 // caller, applied to reading.tc_temperature_c before anything else -- fault

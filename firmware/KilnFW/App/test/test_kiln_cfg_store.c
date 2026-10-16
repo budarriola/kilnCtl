@@ -1920,6 +1920,97 @@ static void test_med3_unusable_file_quarantines_never_absent(void)
     (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
 }
 
+// persmed MED-C: a cfg file written by an OLDER layout (v1/v2) is migrated, never rejected -- otherwise the next
+// version bump would lock the store. MED-B: quarantine_clear keeps a .bad copy of what it discards.
+static void persmed_write_old_file(int ver)
+{
+    size_t blob_sz = (ver == 1) ? sizeof(kiln_cfg_store_blob_v1_t) : sizeof(kiln_cfg_store_blob_v2_t);
+    uint8_t *f = (uint8_t *)calloc(1, 4 + blob_sz);
+    TEST_CHECK(f != NULL, "alloc old-layout file");
+    f[0] = 9; /* rev 9 */
+    if (ver == 1) {
+        kiln_cfg_store_blob_v1_t *b = (kiln_cfg_store_blob_v1_t *)(f + 4);
+        b->version = 1;
+        b->active_id = 5;
+        b->next_id = 6;
+        b->entries[0].in_use = 1;
+        b->entries[0].id = 5;
+        strcpy(b->entries[0].name, "oldv1");
+    } else {
+        kiln_cfg_store_blob_v2_t *b = (kiln_cfg_store_blob_v2_t *)(f + 4);
+        b->version = 2;
+        b->active_id = 5;
+        b->next_id = 6;
+        b->entries[0].in_use = 1;
+        b->entries[0].id = 5;
+        strcpy(b->entries[0].name, "oldv2");
+    }
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, f, 4 + blob_sz) == ESP_OK, "setup: older-layout file");
+    free(f);
+}
+
+static void test_persmed_older_file_migrates_and_clear_keeps_copy(void)
+{
+    for (int ver = 1; ver <= 2; ver++) {
+        TEST_SECTION(ver == 1 ? "persmed MED-C: a v1-layout cfg file migrates (not rejected)"
+                              : "persmed MED-C: a v2-layout cfg file migrates (not rejected)");
+        reset_state_cfg_fs();
+        TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+        persmed_write_old_file(ver);
+        memset(&s_store, 0, sizeof(s_store));
+        nvs_load_store_with_cfg_fs();
+        char nm[KILN_CFG_NAME_MAX_LEN + 1];
+        TEST_CHECK(!kiln_cfg_store_is_quarantined(NULL, 0), "MED-C: not quarantined");
+        TEST_CHECK(kiln_cfg_store_get_active_id() == 5, "MED-C: active id survived the migration");
+        TEST_CHECK(kiln_cfg_store_get_name(5, nm, sizeof(nm)) && strncmp(nm, "oldv", 4) == 0,
+                   "MED-C: entry survived the migration");
+        kiln_cfg_store_blob_t raw;
+        uint32_t rev = 0;
+        bool valid = false;
+        kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &valid);
+        TEST_CHECK(valid && raw.version == KILN_CFG_STORE_VERSION && rev == 10,
+                   "MED-C: the file was rewritten in the current layout at rev+1");
+        char reason[96];
+        int32_t id = -1;
+        TEST_CHECK(kiln_cfg_store_save_current("after", -1, &id, reason, sizeof(reason)),
+                   "MED-C: saves work after the migration");
+    }
+
+    TEST_SECTION("persmed MED-B: quarantine_clear keeps .bad copies of the file and the NVS blob");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    char reason[96];
+    int32_t id = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("keepme", -1, &id, reason, sizeof(reason)), "setup: a store");
+    kcfg_stage_legacy_nvs(&s_store, 7);
+    memset(s_med3_file, 0x77, sizeof(s_med3_file));
+    s_med3_file[0] = 3;
+    s_med3_file[1] = s_med3_file[2] = s_med3_file[3] = 0;
+    memcpy(s_med3_file + 4, &s_store, sizeof(kiln_cfg_store_blob_t));
+    ((kiln_cfg_store_blob_t *)(s_med3_file + 4))->version = (uint8_t)(KILN_CFG_STORE_VERSION + 1);
+    const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, s_med3_file, full) == ESP_OK, "setup: NEWER file");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+    (void)cfg_fs_delete(KILN_CFG_STORE_NVS_BAD_PATH);
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(kiln_cfg_store_is_quarantined(NULL, 0), "quarantined on a NEWER file");
+    size_t got = 0;
+    static uint8_t back[sizeof(s_med3_file)];
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", back, sizeof(back), &got) == ESP_ERR_NOT_FOUND,
+               "precondition: a NEWER file has no .bad copy yet");
+    char op[192];
+    TEST_CHECK(kiln_cfg_store_quarantine_clear(true, op, sizeof(op)), "operator confirms the discard");
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", back, sizeof(back), &got) == ESP_OK && got == full &&
+                   memcmp(back, s_med3_file, full) == 0,
+               "MED-B: the discarded cfg file is kept byte-for-byte as .bad");
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_NVS_BAD_PATH, back, sizeof(back), &got) == ESP_OK &&
+                   got == sizeof(kiln_cfg_store_blob_t),
+               "MED-B: the discarded legacy NVS blob is kept as .nvs.bad");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+    (void)cfg_fs_delete(KILN_CFG_STORE_NVS_BAD_PATH);
+}
+
 // 4. Saves and deletes each advance the shared whole-document rev, in the
 //    file only.
 static void test_cfg_fs_dual_write_keeps_file_and_nvs_in_sync(void)
@@ -4350,6 +4441,7 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_stale_delete_not_resurrected();
     test_cfg_fs_interrupted_write_leaves_old_or_new();
     test_med3_unusable_file_quarantines_never_absent();
+    test_persmed_older_file_migrates_and_clear_keeps_copy();
 
     test_export_import_new_slot_round_trip();
     test_export_package_json_never_contains_or_disturbs_credential();

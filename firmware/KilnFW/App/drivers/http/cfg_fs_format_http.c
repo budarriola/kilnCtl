@@ -9,6 +9,7 @@
 #include "cfg_fs.h" /* cfg_fs_skipped_for_recovery() -- recovery-mode refusal below */
 #include "cfg_fs_format_gate.h" /* cfg_fs_confirm_decide() */
 #include "cfg_fs_mount.h"
+#include "pref_cfg_fs.h" /* pref_cfg_fs_discard_rejected() */
 #include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
                         * carry under OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29 */
 #include "ota_http_internal.h" /* ota_http_get_client_ip() declaration -- logging only */
@@ -112,6 +113,42 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* persmed MED-D: POST /api/cfgfs/discard_rejected?store=<cfg path> deletes ONE rejected (rev-unknown) pref file,
+ * the only way besides a full format to lift its save refusal. Refuses (409) a path that is not currently
+ * rejected, so a healthy file is never deleted here; the .bad copy made at load is kept. */
+static esp_err_t discard_rejected_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    ota_http_get_client_ip(req, ip, sizeof(ip));
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_CFGFS_FORMAT, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
+    }
+    char store[48];
+    if (!cfg_fs_uri_query_token(req->uri, "store", store, sizeof(store))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or invalid store=<cfg file name>");
+        return ESP_OK;
+    }
+    esp_err_t err = pref_cfg_fs_discard_rejected(store);
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused: that file is not currently rejected by this boot (or cfg is not mounted)");
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not delete the rejected file");
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "cfg_fs discard_rejected from %s: removed '%s' (its .bad copy is kept)", ip, store);
+    httpd_resp_sendstr(req, "ok -- rejected file removed; saves to it work again");
+    return ESP_OK;
+}
+
 esp_err_t cfg_fs_format_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -136,6 +173,16 @@ esp_err_t cfg_fs_format_http_start(void)
     err = kiln_http_register(server, &confirm_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/cfgfs/format_confirm) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    static const httpd_uri_t discard_uri = {
+        .uri = "/api/cfgfs/discard_rejected", .method = HTTP_POST, .handler = discard_rejected_post_handler,
+    };
+    err = kiln_http_register(server, &discard_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/cfgfs/discard_rejected) failed: %s",
                  esp_err_to_name(err));
         return err;
     }

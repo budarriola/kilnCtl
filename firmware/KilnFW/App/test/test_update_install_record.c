@@ -5,6 +5,7 @@
 #include "test_common.h"
 
 #include "../drivers/update/update_install_record.h"
+#include "ota_image_crc.h"
 
 typedef struct {
     int events[16];
@@ -401,6 +402,51 @@ static int g_erase_calls;
 static int g_erase_rc;
 static int stale_erase(void) { g_erase_calls++; return g_erase_rc; }
 
+static void refresh_crc(uint8_t b[UPD_INST_RES_SIZE])
+{
+    uint32_t c = ota_image_crc32(b, UPD_INST_RES_SIZE - 4);
+    for (int i = 0; i < 4; i++) {
+        b[UPD_INST_RES_SIZE - 4 + i] = (uint8_t)(c >> (8 * i));
+    }
+}
+
+/* MED-3: result record v1/v2. */
+static void test_res_versions(void)
+{
+    update_install_res_t s, d;
+    uint8_t b[UPD_INST_RES_SIZE];
+    memset(&s, 0, sizeof(s));
+    s.code = UPD_INST_RES_FAIL;
+    s.reason = UPD_INST_REASON_SHA_MISMATCH;
+    strcpy(s.semver, "1.2.3");
+    TEST_CHECK(update_install_res_encode(&s, b) == UPD_INST_RES_SIZE && b[4] == UPD_INST_RES_VERSION_1,
+               "RES VERSION: ordinary reason stays v1 (older images still read it)");
+    TEST_CHECK(update_install_res_decode(b, sizeof(b), &d) && d.reason == UPD_INST_REASON_SHA_MISMATCH,
+               "RES VERSION: v1 decodes");
+    s.reason = UPD_INST_REASON_ROLLED_BACK;
+    TEST_CHECK(update_install_res_encode(&s, b) == UPD_INST_RES_SIZE && b[4] == UPD_INST_RES_VERSION_2,
+               "RES VERSION: rolled_back is written as v2");
+    TEST_CHECK(update_install_res_decode(b, sizeof(b), &d) && d.reason == UPD_INST_REASON_ROLLED_BACK &&
+                   strcmp(update_install_reason_name(d.reason), "rolled_back") == 0,
+               "RES VERSION: v2 decodes");
+    b[4] = UPD_INST_RES_VERSION_1; /* forged v1 carrying a v2 reason, CRC recomputed */
+    refresh_crc(b);
+    TEST_CHECK(!update_install_res_decode(b, sizeof(b), &d), "RES VERSION: v1 with a v2 reason refused");
+    b[4] = 3;
+    refresh_crc(b);
+    TEST_CHECK(!update_install_res_decode(b, sizeof(b), &d), "RES VERSION: unknown version refused");
+    /* MED-3 rewrite */
+    memset(&s, 0, sizeof(s));
+    s.code = UPD_INST_RES_OK;
+    strcpy(s.semver, "2.0.0");
+    TEST_CHECK(!update_install_res_apply_rollback(&s, false) && s.code == UPD_INST_RES_OK,
+               "ROLLBACK: app not rolled back leaves OK alone");
+    TEST_CHECK(update_install_res_apply_rollback(&s, true) && s.code == UPD_INST_RES_FAIL &&
+                   s.reason == UPD_INST_REASON_ROLLED_BACK,
+               "ROLLBACK: OK on a rolled-back app becomes FAIL/rolled_back");
+    TEST_CHECK(!update_install_res_apply_rollback(&s, true), "ROLLBACK: a FAIL record is not rewritten");
+}
+
 /* recfx leftover: the LCD warning line (40 columns) holds "INSTALL FAILED: " plus the reason. */
 static void test_reason_lcd_fits(void)
 {
@@ -688,6 +734,7 @@ void run_test_update_install_record(void)
     test_pre_boot();
     test_drop_stale();
     test_reason_lcd_fits();
+    test_res_versions();
     test_refusal_clear_failure();
     test_result_identity();
     test_prepare();

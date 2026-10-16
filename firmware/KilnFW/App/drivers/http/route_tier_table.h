@@ -365,6 +365,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/ota/pico/rollback", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/factory_reset", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/cfgfs/format_confirm", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs/discard_rejected", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/sw_reset", HTTP_POST, ROUTE_TIER_ADMIN),
     /* GITHUB_RELEASE_UPDATE_PLAN.md WP4: the update stage. The status read is
      * ADMIN too -- it names the staged build's version, commit and hash. */

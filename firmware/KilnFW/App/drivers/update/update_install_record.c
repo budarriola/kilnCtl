@@ -74,7 +74,7 @@ size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_
     }
     memset(out, 0, UPD_INST_RES_SIZE);
     put_u32(out, RES_MAGIC);
-    out[4] = (uint8_t)REC_VERSION;
+    out[4] = (uint8_t)(r->reason >= UPD_INST_REASON_ROLLED_BACK ? UPD_INST_RES_VERSION_2 : UPD_INST_RES_VERSION_1);
     out[5] = r->code;
     out[6] = r->reason;
     out[7] = (uint8_t)((r->detail & UPD_INST_DETAIL_CODE_MASK) | (r->app_modified ? UPD_INST_DETAIL_MODIFIED_BIT : 0u));
@@ -89,7 +89,7 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
     if (!buf || !out || len != UPD_INST_RES_SIZE) {
         return false;
     }
-    if (get_u32(buf) != RES_MAGIC || buf[4] != REC_VERSION) {
+    if (get_u32(buf) != RES_MAGIC || (buf[4] != UPD_INST_RES_VERSION_1 && buf[4] != UPD_INST_RES_VERSION_2)) {
         return false;
     }
     if (get_u32(buf + UPD_INST_RES_SIZE - 4) != ota_image_crc32(buf, UPD_INST_RES_SIZE - 4)) {
@@ -106,7 +106,20 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
     if (r.code > UPD_INST_RES_FAIL || r.reason >= UPD_INST_REASON_COUNT || !semver_terminated(r.semver)) {
         return false;
     }
+    if (buf[4] == UPD_INST_RES_VERSION_1 && r.reason >= UPD_INST_REASON_ROLLED_BACK) {
+        return false; // a v1 writer cannot have produced a v2 reason
+    }
     *out = r;
+    return true;
+}
+
+bool update_install_res_apply_rollback(update_install_res_t *res, bool app_rolled_back)
+{
+    if (!res || !app_rolled_back || res->code != UPD_INST_RES_OK) {
+        return false;
+    }
+    res->code = UPD_INST_RES_FAIL;
+    res->reason = UPD_INST_REASON_ROLLED_BACK;
     return true;
 }
 
@@ -125,7 +138,7 @@ const char *update_install_reason_name(uint8_t reason)
     static const char *const names[UPD_INST_REASON_COUNT] = {
         "none",         "record_bad",   "clear_failed",    "stage_not_ready",   "size_mismatch",
         "sha_mismatch", "apply_failed", "nvs_unavailable", "result_write_failed",
-        "attempts_exceeded", "counter_failed", "outcome_unknown_do_not_power_cycle",
+        "attempts_exceeded", "counter_failed", "outcome_unknown_do_not_power_cycle", "rolled_back",
     };
     return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
 }
