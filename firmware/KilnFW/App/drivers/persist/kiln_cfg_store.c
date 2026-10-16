@@ -33,6 +33,7 @@
                                 * validity check, section 5.2 rule 5. */
 
 #include "kiln_cfg_store_internal.h"
+#include "cfg_fs.h" /* cfg_fs_read(), cfg_fs_is_available() */
 #include "persist_scratch.h"
 #include "kiln_cfg_store_cfg_fs.h"
 #include "kiln_package.h" /* kiln_package_capture_pico_half()/_compute_hash() -- explicit even
@@ -629,8 +630,8 @@ static bool migrate_older_cfg_file(uint32_t *out_rev)
     size_t blen = len - 4;
     bool ok = false;
     if (blen == sizeof(kiln_cfg_store_blob_v1_t) && blob[0] == 1) {
-        kiln_cfg_store_blob_v1_t *v1 = malloc(sizeof(*v1));
-        kiln_cfg_store_blob_v2_t *v2 = malloc(sizeof(*v2));
+        kiln_cfg_store_blob_v1_t *v1 = persist_scratch_alloc(sizeof(*v1));
+        kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
         if (v1 && v2) {
             memcpy(v1, blob, sizeof(*v1));
             migrate_store_v1_to_v2(v1, v2);
@@ -640,7 +641,7 @@ static bool migrate_older_cfg_file(uint32_t *out_rev)
         free(v1);
         free(v2);
     } else if (blen == sizeof(kiln_cfg_store_blob_v2_t) && blob[0] == 2) {
-        kiln_cfg_store_blob_v2_t *v2 = malloc(sizeof(*v2));
+        kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
         if (v2) {
             memcpy(v2, blob, sizeof(*v2));
             migrate_store_v2_to_v3(v2, &s_store);
