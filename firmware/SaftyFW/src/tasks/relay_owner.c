@@ -262,7 +262,8 @@ bool relay_owner_command_trip(safety_trip_t reason)
     }
 
     relay_owner_cmd_t cmd = { .type = RELAY_OWNER_CMD_TRIP, .reason = reason };
-    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+    // PO-02: TRIP goes to the FRONT so queued ENERGIZE commands behind it see TRIPPED and are refused.
+    return xQueueSendToFront(s_cmd_queue, &cmd, 0) == pdTRUE;
 }
 
 bool relay_owner_clear_trip(void)

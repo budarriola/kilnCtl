@@ -34,6 +34,7 @@
 #define UNDERCURRENT_TIME_S_DEFAULT   30.0f   /* S15 */
 #define RATE_WINDOW_S_DEFAULT         60.0f   /* S8 -- SAFETY_MODEL.md section 4 */
 
+#define S1_TCRANGE_NEAR_CEILING_MARGIN_C 100.0f /* SR-33: last good reading this close to abs_max */
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
 
 /* S8. Consecutive WINDOW EVALUATIONS (each rate_window_s long, not ticks)
@@ -751,7 +752,10 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
              * energize/ARM path has no way to observe this field at all. */
         }
         float soft = effective_f(cfg->link_timeout_s, LINK_TIMEOUT_S_DEFAULT);
-        if (state->s6b_link_down_elapsed_s >= soft && in->any_current_present) {
+        /* SR-30: on a CT-less board any_current_present is forced false, so use the K4 software
+         * mirror (relay energized) as the heat evidence. This only adds trips. */
+        bool heat_evidence = in->any_current_present || (in->current_sensing_disabled && !in->relay_deenergized);
+        if (state->s6b_link_down_elapsed_s >= soft && heat_evidence) {
             if (!in->reboot_grace_active) {
                 trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_timeout_s %.1fs) with current present",
                      (double)state->s6b_link_down_elapsed_s, (double)soft);
@@ -793,6 +797,24 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             state->s5_bad_streak++;
         }
         state->s5_bad_elapsed_s += in->dt_s;
+
+        /* SR-33: TCRANGE right after a good reading within S1_TCRANGE_NEAR_CEILING_MARGIN_C of
+         * abs_max_temp_c means the converter ran out of range going UP; treat it as S1 (same streak)
+         * instead of waiting blind_grace_s. The SPI/OPEN/OVUV paths are unchanged. */
+        if (cfg->abs_max_temp_c > 0.0f && !in->spi_failed && state->s1_last_valid_known &&
+            (in->fault_bits & SAFETY_THERMO_FAULT_TCRANGE) != 0u &&
+            state->s1_last_valid_c >= cfg->abs_max_temp_c - S1_TCRANGE_NEAR_CEILING_MARGIN_C) {
+            if (state->s1_tcrange_near_ceiling_streak < UINT8_MAX) {
+                state->s1_tcrange_near_ceiling_streak++;
+            }
+            if (state->s1_tcrange_near_ceiling_streak >= S1_OVER_CEILING_STREAK_TO_TRIP) {
+                trip(state, SAFETY_TRIP_OVERTEMP, "TCRANGE after %.1fC (ceiling %.1fC): converter range exceeded near the ceiling",
+                     (double)state->s1_last_valid_c, (double)cfg->abs_max_temp_c);
+                return true;
+            }
+        } else {
+            state->s1_tcrange_near_ceiling_streak = 0;
+        }
 
         uint16_t count_th = effective_u16(cfg->bad_read_count_threshold, BAD_READ_COUNT_DEFAULT);
         float time_th = effective_f(cfg->bad_read_time_s, BAD_READ_TIME_S_DEFAULT);
@@ -864,6 +886,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         goto context_guards;
     }
 
+    state->s1_last_valid_c = in->tc_c;
+    state->s1_last_valid_known = true;
+    state->s1_tcrange_near_ceiling_streak = 0;
     state->s5_bad_streak = 0;
     state->s5_bad_elapsed_s = 0.0f;
     state->s5_warn = false;
@@ -1259,7 +1284,7 @@ context_guards:
                 } else {
                     uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
                     float threshold_a = expected_sum_a * (float)pct / 100.0f;
-                    if (in->amps[ch] > threshold_a) {
+                    if (in->amps[ch] > threshold_a || in->clipped[ch]) {
                         state->s14_over_elapsed_s[ch] += in->dt_s;
                         float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
                         state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
@@ -1313,7 +1338,7 @@ context_guards:
                 }
                 uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
                 float threshold_a = cfg->i_normal_a[ch] * (float)pct / 100.0f;
-                if (in->amps[ch] > threshold_a) {
+                if (in->amps[ch] > threshold_a || in->clipped[ch]) {
                     state->s14_over_elapsed_s[ch] += in->dt_s;
                     float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
                     state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
@@ -1368,7 +1393,7 @@ context_guards:
             } else {
                 uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
                 float threshold_a = expected_sum_a * (float)pct / 100.0f;
-                if (in->amps[CT_SUMMED_CHANNEL] > threshold_a) {
+                if (in->amps[CT_SUMMED_CHANNEL] > threshold_a || in->clipped[CT_SUMMED_CHANNEL]) {
                     state->s14_over_elapsed_s[CT_SUMMED_CHANNEL] += in->dt_s;
                     float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
                     state->s14_warn[CT_SUMMED_CHANNEL] =

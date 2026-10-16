@@ -1292,6 +1292,7 @@ static safety_guard_input_t safety_core_build_input(void)
     // meaningful to index relay_now_mask with.
     float amps_for_ct[3] = { 0.0f, 0.0f, 0.0f };
     bool  amps_valid_for_ct[3] = { false, false, false };
+    bool  clipped_for_ct[3] = { false, false, false };
     bool  relay_commanded_now_for_ct[3] = { false, false, false };
     if (current_fresh && !cts_disabled) {
         for (unsigned ch = 0; ch < 3; ch++) {
@@ -1329,6 +1330,7 @@ static safety_guard_input_t safety_core_build_input(void)
             }
             amps_for_ct[ch] = current.amps[ch];
             amps_valid_for_ct[ch] = true;
+            clipped_for_ct[ch] = current.clipped[ch];
         }
     }
     if (context_valid && (cfg_rec.fields_set & CONFIG_STORE_SET_CT_CHANNEL_MAP) != 0u) {
@@ -1449,6 +1451,7 @@ static safety_guard_input_t safety_core_build_input(void)
         // what these come from and why current_fresh/context_valid gate them.
         .amps = { amps_for_ct[0], amps_for_ct[1], amps_for_ct[2] },
         .amps_valid = { amps_valid_for_ct[0], amps_valid_for_ct[1], amps_valid_for_ct[2] },
+        .clipped = { clipped_for_ct[0], clipped_for_ct[1], clipped_for_ct[2] },
         .relay_commanded_now_for_ct = { relay_commanded_now_for_ct[0], relay_commanded_now_for_ct[1],
                                          relay_commanded_now_for_ct[2] },
         .relay_commanded_now_for_zone = { relay_commanded_now_for_zone[0], relay_commanded_now_for_zone[1],

@@ -366,6 +366,15 @@ static void test_apply_context_session_announce_order(void)
                "no announce known, context B");
     TEST_CHECK(pa.version == 0u, "no announce this boot: version forgotten");
 
+    /* PL-01: a lower ANNOUNCE under the same boot_id never lowers the version; a new boot_id replaces it. */
+    pa = mk_peer(true, 0x44u, 18u);
+    link_peer_announce_record(&pa, 0x44u, 16u);
+    TEST_CHECK(pa.version == 18u && pa.boot_id == 0x44u, "PL-01 same boot_id: lower version ignored");
+    link_peer_announce_record(&pa, 0x44u, 19u);
+    TEST_CHECK(pa.version == 19u, "PL-01 same boot_id: higher version raises");
+    link_peer_announce_record(&pa, 0x55u, 16u);
+    TEST_CHECK(pa.version == 16u && pa.boot_id == 0x55u, "PL-01 new boot_id: version replaced even if lower");
+
     link_peer_announce_record(&pa, 0x33u, 16u);
     link_peer_announce_clear(&pa);
     TEST_CHECK(!pa.known && pa.version == 0u && pa.boot_id == 0u, "clear forgets the announce");

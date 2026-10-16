@@ -2059,7 +2059,7 @@ static void test_config_params_set_range_validation(void)
         // shares one value across every field in the table, except the
         // ct_cal gains, whose sanity band tops out at
         // CONFIG_PARAMS_CT_CAL_GAIN_MAX (kilnlink audit 2026-10-09 L2).
-        v.f32_val = (f32_ids[i] >= 0x0310u && f32_ids[i] <= 0x0312u) ? 1.0f : 20.0f;
+        v.f32_val = (f32_ids[i] >= 0x0310u && f32_ids[i] <= 0x0312u) ? 1.0f : (f32_ids[i] == 0x030Eu ? 230.0f : 20.0f); // mains_voltage_v has a [50,500] V window (SR-05)
         TEST_CHECK(config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
                    "an ordinary finite value is still accepted for this F32 field");
     }
@@ -3467,6 +3467,50 @@ static void test_a5_threshold_upper_bounds(void)
     TEST_CHECK(config_params_validate_ranges(&d, &field, &rule, &reason), "stored records are not invalidated");
 }
 
+// KNOWN_ISSUES SR-04/05/06: physical-range bounds on guard-feeding SET_PARAMs.
+static void test_sr04_05_06_physical_ranges(void)
+{
+    TEST_SECTION("SR-04/05/06 -- physical-range SET_PARAM bounds (inclusive edges accepted, beyond refused)");
+    static const struct { uint16_t id; uint8_t type; double ok_lo, ok_hi, bad; const char *name; } k[] = {
+        { 0x031Du, KILNLINK_PARAM_TYPE_U16, 100, 300, 65535, "overcurrent_pct" },
+        { 0x0106u, KILNLINK_PARAM_TYPE_U8, 0, 2, 200, "ct_channel_map[0]" },
+        { 0x0108u, KILNLINK_PARAM_TYPE_U8, 0, 2, 3, "ct_channel_map[2]" },
+        { 0x0302u, KILNLINK_PARAM_TYPE_U16, 0, 4095, 4096, "zero_counts[0]" },
+        { 0x0305u, KILNLINK_PARAM_TYPE_U16, 0, 3600, 3601, "correlation_window_s" },
+        { 0x030Fu, KILNLINK_PARAM_TYPE_U16, 0, 3600, 65535, "power_window_s" },
+        { 0x030Eu, KILNLINK_PARAM_TYPE_F32, 90, 264, 1.0e9, "mains_voltage_v" },
+        { 0x0301u, KILNLINK_PARAM_TYPE_F32, 0, 1000, 1.0e6, "i_present_a" },
+        { 0x031Au, KILNLINK_PARAM_TYPE_F32, 0, 1000, 1.0e6, "i_normal_a[0]" },
+        { 0x0319u, KILNLINK_PARAM_TYPE_F32, 0, 1.0e6, 1.0e9, "max_expected_power_w" },
+        { 0x020Bu, KILNLINK_PARAM_TYPE_F32, 60, 150, 1.0e6, "cj_warn_c" },
+        { 0x020Au, KILNLINK_PARAM_TYPE_F32, -500, 500, 1.0e6, "tc_expected_offset_c" },
+    };
+    for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
+        config_store_record_t rec;
+        kilnlink_param_value_t v;
+        double vals[3] = { k[i].ok_lo, k[i].ok_hi, k[i].bad };
+        for (int j = 0; j < 3; j++) {
+            config_store_default(&rec);
+            memset(&v, 0, sizeof v);
+            if (k[i].type == KILNLINK_PARAM_TYPE_U8) { v.u8_val = (uint8_t)vals[j]; }
+            else if (k[i].type == KILNLINK_PARAM_TYPE_U16) { v.u16_val = (uint16_t)vals[j]; }
+            else { v.f32_val = (float)vals[j]; }
+            bool ok = config_params_set(&rec, k[i].id, k[i].type, v);
+            TEST_CHECK(ok == (j < 2), k[i].name);
+        }
+    }
+    {
+        config_store_record_t rec; kilnlink_param_value_t v;
+        config_store_default(&rec); memset(&v, 0, sizeof v);
+        v.u16_val = 99u;
+        TEST_CHECK(!config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 99 refused");
+        v.u16_val = 0u;
+        TEST_CHECK(config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 0 (default sentinel) accepted");
+        memset(&v, 0, sizeof v); v.f32_val = 0.0f;
+        TEST_CHECK(config_params_set(&rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v), "mains_voltage_v 0 (unset) accepted");
+    }
+}
+
 // 2026-10-09 guard-fixes review LOW-1: a stored record whose tc_offset_c is
 // beyond the +/-50 C write bound must load (clamped), not fall back to
 // defaults and lose abs_max_temp_c. NaN is still refused.
@@ -3545,6 +3589,7 @@ void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
     test_a5_threshold_upper_bounds();
+    test_sr04_05_06_physical_ranges();
     test_pack_unpack_roundtrip();
     test_unpack_hostile();
     test_default();

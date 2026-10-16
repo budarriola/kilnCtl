@@ -2570,6 +2570,93 @@ static void test_s16(void)
     }
 }
 
+static void test_s6b_ctless_relay_evidence(void)
+{
+    TEST_SECTION("SR-30 -- S6b soft tier on a CT-less board uses the K4 mirror as heat evidence");
+    for (int energized = 0; energized < 2; energized++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.current_sensing_disabled = true;
+        in.relay_deenergized = (energized == 0);
+        in.dt_s = 2.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) { /* 12 s > link_timeout_s 10 s, < 120 s hard backstop */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        if (energized) {
+            TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LINK_DEAD, "CT-less + K4 energized: S6b soft tier trips at link_timeout_s");
+        } else {
+            TEST_CHECK(!tripped, "CT-less + K4 de-energized: no S6b soft trip");
+        }
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.current_sensing_disabled = false;
+        in.relay_deenergized = false;
+        in.dt_s = 2.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) { tripped = safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(!tripped, "CTs fitted, no current: relay mirror alone is not heat evidence (unchanged)");
+    }
+}
+
+static void test_sr33_tcrange_near_ceiling(void)
+{
+    TEST_SECTION("SR-33 -- TCRANGE right after a reading near abs_max trips as S1, not after blind_grace_s");
+    for (int near = 0; near < 2; near++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 1300.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 0.1f;
+        in.tc_valid = true;
+        in.tc_c = near ? 1250.0f : 900.0f;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "good reading does not trip");
+        in.tc_valid = false;
+        in.tc_c = NAN;
+        in.fault_bits = SAFETY_THERMO_FAULT_TCRANGE;
+        int ticks = 0;
+        for (; ticks < 5 && !tripped; ticks++) { tripped = safety_guards_tick(&s, &cfg, &in); }
+        if (near) {
+            TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP && ticks == 3, "near ceiling: TCRANGE trips OVERTEMP in 3 reads");
+        } else {
+            TEST_CHECK(!tripped, "far from ceiling: TCRANGE stays on the S5 grace path");
+        }
+    }
+}
+
+static void test_pn05_clipped_channel_overcurrent(void)
+{
+    TEST_SECTION("PN-05 -- a clipped fitted CT channel counts as over the S14 threshold");
+    for (int clipped = 0; clipped < 2; clipped++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f; /* threshold 15 A */
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 12.0f; /* the clip value reads BELOW the threshold */
+        in.clipped[0] = (clipped != 0);
+        in.relay_commanded_now_for_ct[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s14_warn[0] == (clipped != 0), clipped ? "clipped channel warns S14 despite low amps" : "unclipped 12 A stays quiet");
+    }
+}
+
 static void test_s6b_reboot_grace(void)
 {
     TEST_SECTION("S6b -- ANNOUNCE_REBOOT grace window suppression");
@@ -4498,6 +4585,7 @@ static void test_ct_disabled_guards(void)
          * be forced together upstream. */
         in.any_current_present = false;
         in.current_sensing_disabled = true;
+        in.relay_deenergized = true; /* SR-30: with the relay still energized the soft tier now fires */
         bool tripped = false;
         for (int i = 0; i < 500 && !tripped; i++) { /* 50 s: past soft, short of hard */
             tripped = safety_guards_tick(&soft, &lcfg, &in);
@@ -5437,6 +5525,9 @@ void run_test_safety_guards(void)
     test_s6();
     test_s16();
     test_s6b_reboot_grace();
+    test_s6b_ctless_relay_evidence();
+    test_pn05_clipped_channel_overcurrent();
+    test_sr33_tcrange_near_ceiling();
     test_s9();
     test_s10();
     test_s13();

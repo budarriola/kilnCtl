@@ -171,6 +171,19 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 /* abs_max_temp_c ceiling: must stay >= the ESP's ZONE_MAX_TEMP_C_MAX (2500 C,
    zones_config_accessors.h) so the Pico ceiling is never tighter than a zone max (owner rule);
    tightening both to the TC range is KNOWN_ISSUES SR-12. Rejects 1e30 / inf. */
+/* SR-04/05/06 (KNOWN_ISSUES): physical-range bounds on guard-feeding values. */
+#define CONFIG_PARAMS_OVERCURRENT_PCT_MIN 100u       /* 0 = use the compiled default */
+#define CONFIG_PARAMS_OVERCURRENT_PCT_MAX 300u
+#define CONFIG_PARAMS_MAINS_VOLTAGE_MIN_V 50.0f      /* 0 = unset */
+#define CONFIG_PARAMS_MAINS_VOLTAGE_MAX_V 500.0f
+#define CONFIG_PARAMS_CURRENT_A_MAX 1000.0f          /* i_present_a, i_normal_a[] */
+#define CONFIG_PARAMS_MAX_POWER_W_MAX 1.0e6f         /* max_expected_power_w */
+#define CONFIG_PARAMS_CJ_WARN_ABS_MAX_C 150.0f       /* |cj_warn_c| */
+#define CONFIG_PARAMS_TC_EXPECTED_OFFSET_ABS_MAX_C 500.0f
+#define CONFIG_PARAMS_CT_CHANNEL_MAP_MAX 2u          /* relay/zone id 0..2 */
+#define CONFIG_PARAMS_ZERO_COUNTS_MAX 4095u          /* 12-bit ADC */
+#define CONFIG_PARAMS_CORRELATION_WINDOW_MAX_S 3600u /* default 150 */
+#define CONFIG_PARAMS_POWER_WINDOW_MAX_S 3600u       /* default 120 */
 #define CONFIG_PARAMS_ABS_MAX_TEMP_MAX_C 2500.0f
 #define CONFIG_PARAMS_CJ_MAX_MAX_C 125.0f           /* MAX31856 limit; default 85 */
 #define CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C 300.0f /* default 75 */
