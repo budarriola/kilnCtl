@@ -483,6 +483,7 @@ void json_escape(const char *src, char *out, size_t out_cap)
 // backend), then profiles_live_http.c which #includes live_profile.h only
 // (declarations) and needs live_profile.c's real bodies linked in.
 #include "../drivers/persist/live_profile.c"
+#include "stubs/flash_hop_host_stub.h"
 #include "../drivers/http/profiles_live_http.c"
 
 #undef asm
@@ -504,6 +505,7 @@ static httpd_req_t make_req(const char *body)
 
 static void reset_fakes(void)
 {
+    flash_hop_stub_reset();
     memset(&g_fake_live_status, 0, sizeof(g_fake_live_status));
     memset(&g_fake_profiles_state, 0, sizeof(g_fake_profiles_state));
     memset(g_fake_slots, 0, sizeof(g_fake_slots));
@@ -874,12 +876,14 @@ static void test_decide_clear_failure_after_save_is_reported(void)
     TEST_SECTION("decide save_as -- a failing clear after the save is a 500, not silent success");
     reset_fakes();
     fork_for_tests(0);
-    fake_kv_set_write_safe_here(false); /* live_profile_clear() refuses on a non-write-safe caller */
+    fake_kv_set_write_safe_here(false);
+    g_flash_hop_stub_fail = true; /* the flash_hop worker is unavailable: live_profile_clear() refuses */
     char err[96] = {0};
     uint8_t id = 0;
     profiles_live_decide_result_t r =
         profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "ClrFail", false, &id, err, sizeof(err));
     fake_kv_set_write_safe_here(true);
+    g_flash_hop_stub_fail = false;
     TEST_CHECK(r == LIVE_DECIDE_SERVER_ERROR, "SERVER_ERROR, not OK");
     TEST_CHECK(strstr(err, "clearing the working copy failed") != NULL, "err says the clear failed");
 
@@ -887,9 +891,11 @@ static void test_decide_clear_failure_after_save_is_reported(void)
     reset_fakes();
     fork_for_tests(0);
     fake_kv_set_write_safe_here(false);
+    g_flash_hop_stub_fail = true;
     httpd_req_t req = make_req("action=save_as&name=ClrFail2");
     (void)api_profile_live_decide_post_handler(&req);
     fake_kv_set_write_safe_here(true);
+    g_flash_hop_stub_fail = false;
     TEST_CHECK(strstr(s_resp_status, "500") != NULL, "500 Internal Server Error");
     TEST_CHECK(strstr(s_resp_body, "\"saved\":true") != NULL, "500 body carries saved:true");
     TEST_CHECK(strstr(s_resp_body, "\"id\":") != NULL, "500 body carries the slot id");
@@ -1115,7 +1121,8 @@ static void test_decide_discard_clear_failure_500(void)
     TEST_SECTION("discard -- live_profile_clear failure is a 500, record stays pending");
     reset_fakes();
     fork_for_tests(0);
-    fake_kv_set_write_safe_here(false); /* live_profile_clear() refuses on a non-write-safe caller */
+    fake_kv_set_write_safe_here(false);
+    g_flash_hop_stub_fail = true; /* the flash_hop worker is unavailable: live_profile_clear() refuses */
     char err[96];
     TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) ==
                    LIVE_DECIDE_SERVER_ERROR,
@@ -1125,6 +1132,7 @@ static void test_decide_discard_clear_failure_500(void)
     httpd_req_t req = make_req("action=discard");
     esp_err_t e = api_profile_live_decide_post_handler(&req);
     fake_kv_set_write_safe_here(true);
+    g_flash_hop_stub_fail = false;
     TEST_CHECK(e == ESP_OK, "handler returns ESP_OK");
     TEST_CHECK(strcmp(s_resp_status, "500 Internal Server Error") == 0, "HTTP 500, not a false ok:true");
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "body does not claim success");

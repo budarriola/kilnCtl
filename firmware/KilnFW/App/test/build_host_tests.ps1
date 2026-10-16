@@ -1189,6 +1189,7 @@ try {
     New-Item -ItemType Directory -Force -Path $plhObjDir | Out-Null
     $cmdPlh = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$plhObjDir\\`" /Fe:`"$exePlh`" `"$(Join-Path $testDir 'test_profiles_live_http.c')`" " +
+            $hopStubFull +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
