@@ -1066,7 +1066,10 @@ CEILING_BYTES = {
     # (set_reason()/latch_boot_fault()) and returns before any state-
     # mutating step if the allocation fails, so a failed allocation can
     # never leave a partial swap.
-    "kiln_cfg_swap": 5520,
+    # 2026-10-16 psramhop: save_pending hops via flash_hop_run (the walk counts the
+    # inline path: save_pending + save_pending_job frames), 5520 -> 5568 B measured.
+    # The real save runs on bx_flash_worker, not this stack; 2324 B honest free of 8192 B.
+    "kiln_cfg_swap": 5568,
     "autotune_engine": 2944,
     # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
     # regression tripwire -- NOT a measured worst case. The task's deep path
