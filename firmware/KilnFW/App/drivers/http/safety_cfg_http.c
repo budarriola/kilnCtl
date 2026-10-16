@@ -1,3 +1,4 @@
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "safety_cfg_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
@@ -1577,7 +1578,7 @@ static void ct_auto_zero_job(httpd_req_t *async_req, void *arg)
     // local, so there is no frame cost to "declaring a second one" any more.
     bool profile_running_or_paused_after;
     {
-        profile_exec_status_t *pstat2 = heap_caps_malloc(sizeof(*pstat2), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        profile_exec_status_t *pstat2 = persist_scratch_alloc(sizeof(*pstat2));
         if (!pstat2) {
             httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return;
@@ -1777,7 +1778,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
      * (docs/audits/unreviewed_changes_review_2026-09-08.md finding D3). */
     bool link_up, trip_latched, k4_closed;
     {
-        safety_link_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        safety_link_status_t *st = persist_scratch_alloc(sizeof(*st));
         if (!st) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_OK;
@@ -1794,7 +1795,7 @@ static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
     uint32_t off_ms = have_io ? kiln_io_relays_off_ms(s_hw_io) : UINT32_MAX;
     bool profile_running_or_paused;
     {
-        profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        profile_exec_status_t *pstat = persist_scratch_alloc(sizeof(*pstat));
         if (!pstat) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_OK;

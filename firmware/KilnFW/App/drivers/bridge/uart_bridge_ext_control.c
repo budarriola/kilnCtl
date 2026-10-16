@@ -4,6 +4,7 @@
 // infrastructure (flash-safe executor, little-endian/reply helpers) this
 // file uses via uart_bridge_ext_* names. MOVE-ONLY: no logic, ordering, or
 // visibility change beyond the widening rename the split required.
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "uart_bridge.h"
 #include "uart_bridge_ext_internal.h"
@@ -386,7 +387,7 @@ static size_t profiles_build_exec_status(uint8_t *out)
      * was added to avoid, just for a caller that (unlike that one) needs
      * every field, not only state+id. Heap it instead, same pattern as
      * safety_cfg_http.c's profile_exec_status_t reads. */
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (!st) {
         return 0; /* out of memory -- caller sees an empty reply, same as a malformed frame */
     }

@@ -957,7 +957,7 @@ TASKS = [
              "CONFIG_KILNCTL_UART_OWNER_STACK_SIZE")),
     dict(name="uart_proto_rx", root="uart_protocol_rx_task",
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
-             r'uart_protocol_init\(&ctx->uart_proto,.*?UART_PROTOCOL_STACK_SIZE',
+             r'uart_protocol_init\(ctx->uart_proto,.*?UART_PROTOCOL_STACK_SIZE',
              "CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE")),
     dict(name="kiln_cfg_swap", root="swap_worker_task",
          # Added 2026-09-22 after a REAL hardware stack overflow

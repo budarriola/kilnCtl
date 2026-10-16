@@ -794,3 +794,38 @@ class InstallStartTests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyPrecheckTests(_Base):
+    def _stage(self, **kw):
+        d = {"ok": True, "phase": "idle", "busy": False, "staged": True, "state": "verified", "semver": "1.0.1",
+             "sha256": STAGED_SHA}
+        d.update(kw)
+        return d
+
+    def _run(self, stage, confirm, post_exc=None):
+        e404 = uhc.UpdateHttpError("nf", 404, "nf")
+        with mock.patch.object(uhc, "get_install_status", side_effect=e404),              mock.patch.object(uhc, "get_stage_status", side_effect=lambda h, timeout=8.0: stage),              mock.patch.object(uhc, "start_install", side_effect=post_exc) as post:
+            return msu.update_install_staged(confirm=confirm, wait_s=20), post
+
+    def test_verified_stage_unconfirmed_posts_nothing(self):
+        out, post = self._run(self._stage(), False)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        post.assert_not_called()
+
+    def test_verified_stage_confirmed_posts(self):
+        out, post = self._run(self._stage(), True, post_exc=uhc.UpdateHttpError("x", 409, "busy"))
+        post.assert_called_once()
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_unverified_or_busy_stage_refused(self):
+        for st in (self._stage(state="writing"), self._stage(staged=False), self._stage(busy=True)):
+            out, post = self._run(st, True)
+            self.assertTrue(out.startswith("REFUSED"), out)
+            post.assert_not_called()
+
+    def test_stage_read_failure_errors(self):
+        e404 = uhc.UpdateHttpError("nf", 404, "nf")
+        with mock.patch.object(uhc, "get_install_status", side_effect=e404),              mock.patch.object(uhc, "get_stage_status", side_effect=uhc.UpdateHttpError("down")),              mock.patch.object(uhc, "start_install") as post:
+            self.assertTrue(msu.update_install_staged(confirm=True).startswith("error"))
+            post.assert_not_called()

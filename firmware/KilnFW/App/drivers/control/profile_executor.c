@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "profile_executor.h"
 #include "profile_executor_internal.h"
 
@@ -93,7 +94,7 @@ const char *PE_TAG = "profile_executor";
  *            range; HISTORY_TEMP_INVALID encodes NaN
  *   duty     whole percent, u8; 255 encodes "no value"
  * The graph this feeds is a multi-hour trend, not a scope trace. */
-s_exec_state_t s_exec;
+EXT_RAM_BSS_ATTR s_exec_state_t s_exec;
 
 /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_internal.h's
  * big table comment for the full rule list and rationale; this is just the

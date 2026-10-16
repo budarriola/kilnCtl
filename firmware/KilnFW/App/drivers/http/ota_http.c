@@ -1,3 +1,4 @@
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "ota_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "ota_http_internal.h"
@@ -424,7 +425,7 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
      * bytes -- same reasoning and pattern as safety_cfg_http.c's reads.
      * Freed right after the switch below; nothing past this point needs
      * more than the enum it already copied out. */
-    profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *pstat = persist_scratch_alloc(sizeof(*pstat));
     if (!pstat) {
         if (reason_out && reason_cap > 0) {
             snprintf(reason_out, reason_cap, "out of memory checking profile state");

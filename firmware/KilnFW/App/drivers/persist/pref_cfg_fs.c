@@ -1,4 +1,5 @@
 // See pref_cfg_fs.h for the full design/rationale.
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "pref_cfg_fs.h"
 
 #include <stdio.h>
@@ -351,7 +352,7 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
  * is covered by one rule. */
 #define PREF_UNKNOWN_MAX 32
 #define PREF_UNKNOWN_PATH_MAX 64
-static char s_unknown_paths[PREF_UNKNOWN_MAX][PREF_UNKNOWN_PATH_MAX];
+static EXT_RAM_BSS_ATTR char s_unknown_paths[PREF_UNKNOWN_MAX][PREF_UNKNOWN_PATH_MAX];
 static portMUX_TYPE s_unknown_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void unknown_set(const char *rel_path, bool unknown)

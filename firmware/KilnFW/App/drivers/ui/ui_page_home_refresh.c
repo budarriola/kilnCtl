@@ -6,6 +6,7 @@
  * ui_page_home.c's own header comment for the full "why" history behind
  * each section below. See ui_page_home_internal.h for the shared
  * statics/prototypes this file reaches across the split. */
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "ui_page_home_internal.h"
 
 #include <stdlib.h>
@@ -134,7 +135,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * comment above and check_all_task_stack_budgets.py) -- heap-allocate
      * rather than add a 1512-byte profile_exec_status_t stack local here,
      * same pattern as safety_cfg_http.c/dashboard_exec_http.c. */
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (!st) {
         return; /* out of memory -- skip this tick's repaint, next 1 Hz tick tries again */
     }
