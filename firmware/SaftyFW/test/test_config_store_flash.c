@@ -437,6 +437,25 @@ static void test_volatile_dirty_flag_and_persisted_version(void)
 // that does not construct this disagreement passes against the defect.
 static void test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type(void)
 {
+    TEST_SECTION("config_store_flash: persisted check period is flash truth, not the live RAM record (A7)");
+    reset_all();
+    {
+        uint32_t pp = 123u;
+        /* my own new check "unavailable before boot_load" was invalid: s_loaded survives reset_all() */
+        config_store_boot_load();
+        TEST_CHECK(config_store_get_persisted_check_period_s(&pp) == true, "A7: available after boot_load");
+        const uint32_t flash_period = pp;
+        config_store_record_t vr;
+        config_store_default(&vr);
+        vr.config_check_period_s = flash_period + 77u;
+        TEST_CHECK(config_store_write_volatile(&vr, NULL) == true, "A7 fixture: volatile install accepted");
+        config_store_record_t live;
+        TEST_CHECK(config_store_get_full_record(&live) && live.config_check_period_s == flash_period + 77u,
+                   "A7 fixture: live RAM period moved");
+        TEST_CHECK(config_store_get_persisted_check_period_s(&pp) && pp == flash_period,
+                   "A7: persisted period unmoved by a RAM-only change");
+    }
+
     TEST_SECTION("config_store_flash: a MIXED ARMED refusal's wire reason is derived from the "
                  "PERSISTED tc_type and agrees with its own log sentence (re-review defect 1)");
     reset_all();

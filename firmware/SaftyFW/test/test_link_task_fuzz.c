@@ -117,6 +117,7 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
     memset(out, 0, sizeof(config_store_ct_channel_cal_t) * CONFIG_STORE_CT_CAL_NUM_CHANNELS);
 }
 bool config_store_get_full_record(config_store_record_t *out) { config_store_default(out); return true; }
+bool config_store_get_persisted_check_period_s(uint32_t *out) { *out = 10u; return true; }
 static uint8_t g_pers_tc, g_cur_tc;
 uint8_t config_store_get_persisted_tc_type(void) { return g_pers_tc; }
 uint32_t config_store_get_ram_integrity_fail_count(void) { return 0; }

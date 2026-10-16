@@ -907,6 +907,15 @@ uint8_t config_store_get_tc_type(void)
     return snap.tc_type;
 }
 
+bool config_store_get_persisted_check_period_s(uint32_t *out)
+{
+    if (!s_loaded || out == NULL) {
+        return false;
+    }
+    *out = s_persisted_record.config_check_period_s;
+    return true;
+}
+
 uint8_t config_store_get_persisted_tc_type(void)
 {
     if (!s_loaded) {
