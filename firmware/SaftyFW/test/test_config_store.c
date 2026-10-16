@@ -3423,7 +3423,6 @@ static void test_a5_threshold_upper_bounds(void)
         { 0x020Fu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S, "borrowed_stale_trip_s" },
         { 0x0306u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_STUCK_ON_TIME_MAX_S, "stuck_on_time_s" },
         { 0x031Eu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_OVERCURRENT_TIME_MAX_S, "overcurrent_time_s" },
-        { 0x0401u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S, "context_max_age_s" },
         { 0x0402u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_LINK_TIMEOUT_MAX_S, "link_timeout_s" },
     };
     for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
@@ -3460,6 +3459,21 @@ static void test_a5_threshold_upper_bounds(void)
         TEST_CHECK(!config_params_set(&r, 0x0104u, KILNLINK_PARAM_TYPE_F32, pv), "SR-03 abs_max_temp_c = inf refused");
         pv.f32_val = 1300.0f;
         TEST_CHECK(config_params_set(&r, 0x0104u, KILNLINK_PARAM_TYPE_F32, pv), "SR-03 abs_max_temp_c = 1300 (a real ceiling) still accepted");
+    }
+    /* SR-31: reserved ids are refused at SET_PARAM, absent from the enumeration, still readable. */
+    {
+        static const uint16_t rsv[] = { 0x0401u, 0x0404u, 0x0405u };
+        for (unsigned i = 0; i < 3; i++) {
+            config_store_record_t r; kilnlink_param_value_t pv; uint8_t ty = 0, t2;
+            config_store_default(&r); memset(&pv, 0, sizeof pv); pv.u16_val = 7u;
+            TEST_CHECK(!config_params_set(&r, rsv[i], KILNLINK_PARAM_TYPE_U16, pv), "SR-31 reserved id refused");
+            TEST_CHECK(config_params_get(&r, rsv[i], &ty, &pv), "SR-31 reserved id still readable");
+            for (size_t j = 0; j < config_params_count(); j++) {
+                uint16_t id = 0;
+                TEST_CHECK(config_params_id_at(j, &id, &t2), "SR-31 id_at");
+                TEST_CHECK(id != rsv[i], "SR-31 reserved id not enumerated");
+            }
+        }
     }
     /* Load time is deliberately unbounded (owner decision pending): a stored big value still validates. */
     d.link_dead_hard_s = 5000u;

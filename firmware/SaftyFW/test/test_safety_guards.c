@@ -3852,7 +3852,8 @@ static void test_try_clear(void)
         safety_guards_reset(&s);
         bad.cj_invalid = true;
         bad.cj_c = (float)NAN;
-        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "T4: bad TC read with an invalid cold junction does not run S12 (no new trip)");
+        bad.dt_s = 1.0f;
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "T4: bad TC read with a briefly invalid cold junction does not trip S12");
     }
 
     /* 2026-08-23 hardware finding: S5 (and S12/S13/S6b below) are the four
@@ -4785,6 +4786,49 @@ static void test_guard_review_2026_10_09(void)
         TEST_CHECK(s.is_tripped, "still latched");
         safety_guard_input_t cool = base_input();
         TEST_CHECK(safety_guards_try_clear(&s, &cfg, &cool), "S12 clear succeeds once cj is known and cool");
+    }
+
+    TEST_SECTION("PN-04 -- sustained unknown cold junction trips S12");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        unk.dt_s = 30.0f;
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &unk), "PN-04: 30 s unknown CJ only warns");
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &unk) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP,
+                   "PN-04: 60 s unknown CJ trips S12");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        unk.dt_s = 30.0f;
+        safety_guard_input_t ok = base_input();
+        ok.dt_s = 1.0f;
+        bool tr = false;
+        for (int i = 0; i < 6; i++) {
+            tr |= safety_guards_tick(&s, &cfg, &unk);
+            tr |= safety_guards_tick(&s, &cfg, &ok);
+        }
+        TEST_CHECK(!tr, "PN-04: a known CJ between unknown spells resets the accumulator");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.cj_invalid = true;
+        bad.cj_c = (float)NAN;
+        bad.dt_s = 61.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &bad) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP,
+                   "PN-04: sustained unknown CJ trips S12 on the bad-TC-read path too");
     }
 
     TEST_SECTION("guard review F6 -- S5 bad read does not suspend TC-independent guards");

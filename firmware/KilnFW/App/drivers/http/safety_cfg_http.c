@@ -1973,11 +1973,8 @@ static const struct {
     { 0x030C, KILNLINK_PARAM_TYPE_F32, { .f32_val = 0.715f } },  /* gain[1] */
     { 0x030D, KILNLINK_PARAM_TYPE_F32, { .f32_val = 0.715f } },  /* gain[2] */
     { 0x030F, KILNLINK_PARAM_TYPE_U16, { .u16_val = 120 } },     /* power_window_s */
-    { 0x0401, KILNLINK_PARAM_TYPE_U16, { .u16_val = 5 } },       /* context_max_age_s */
     { 0x0402, KILNLINK_PARAM_TYPE_U16, { .u16_val = 10 } },      /* link_timeout_s */
     { 0x0403, KILNLINK_PARAM_TYPE_U16, { .u16_val = 120 } },     /* link_dead_hard_s */
-    { 0x0404, KILNLINK_PARAM_TYPE_U16, { .u16_val = 200 } },     /* mainfault_debounce_ms */
-    { 0x0405, KILNLINK_PARAM_TYPE_U16, { .u16_val = 500 } },     /* telemetry_period_ms */
     { 0x0501, KILNLINK_PARAM_TYPE_U16, { .u16_val = 60 } },      /* startup_grace_s */
     { 0x0502, KILNLINK_PARAM_TYPE_U16, { .u16_val = 50 } },      /* estop_debounce_ms */
     { 0x0503, KILNLINK_PARAM_TYPE_U16, { .u16_val = 1000 } },    /* watchdog_timeout_ms */

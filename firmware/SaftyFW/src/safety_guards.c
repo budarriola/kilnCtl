@@ -511,7 +511,18 @@ static bool s12_evaluate(safety_guard_state_t *state, const safety_guard_cfg_t *
              * guard_condition_still_immediate() refuses to clear an S12
              * trip while cj is unknown. */
             state->s12_warn = true;
+            /* PN-04 (owner 2026-10-16): an unknown CJ that persists longer than
+             * cj_time_s is a repeated sensor fault, not a warning forever: the TC
+             * value's cold-junction compensation is invalid too, so escalate to an
+             * S12 trip. The accumulator for the over-max case is still held. */
+            state->s12_cj_unknown_elapsed_s += in->dt_s;
+            if (state->s12_cj_unknown_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
+                trip(state, SAFETY_TRIP_ENCLOSURE_TEMP, "cold junction unknown for %.0fs >= cj_time_s",
+                     (double)state->s12_cj_unknown_elapsed_s);
+                return true;
+            }
         } else if (in->cj_c > cj_max) {
+            state->s12_cj_unknown_elapsed_s = 0.0f;
             state->s12_warn = true;
             state->s12_over_max_elapsed_s += in->dt_s;
             if (state->s12_over_max_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
@@ -520,9 +531,11 @@ static bool s12_evaluate(safety_guard_state_t *state, const safety_guard_cfg_t *
                 return true;
             }
         } else if (in->cj_c > cj_warn) {
+            state->s12_cj_unknown_elapsed_s = 0.0f;
             state->s12_warn = true;
             state->s12_over_max_elapsed_s = 0.0f;
         } else {
+            state->s12_cj_unknown_elapsed_s = 0.0f;
             state->s12_warn = false;
             state->s12_over_max_elapsed_s = 0.0f;
         }
@@ -872,7 +885,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* T4: the cold junction is a separate MAX31856 register, usually still
          * valid on the commonest fault (open TC). Run S12 on a valid CJ so the
          * enclosure guard is not blind; S5 is untouched. */
-        if (!in->cj_invalid && !isnan(in->cj_c) && s12_evaluate(state, cfg, in)) {
+        if (s12_evaluate(state, cfg, in)) { /* PN-04: also runs on an unknown CJ */
             return true;
         }
         /* A11 (guard audit 2026-10-14): keep the S8 window's wall-clock honest across

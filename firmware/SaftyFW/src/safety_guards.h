@@ -676,6 +676,7 @@ typedef struct {
      * non-timed) cj_warn_c crossing. */
     bool  s12_warn;
     float s12_over_max_elapsed_s;
+    float s12_cj_unknown_elapsed_s; /* PN-04: sustained unknown CJ (CJRANGE / stale) -> S12 trip */
 
     /* S8: baseline-sample-and-hold rate-of-rise window. s8_window_start_c is
      * the reading at the start of the current rate_window_s window;

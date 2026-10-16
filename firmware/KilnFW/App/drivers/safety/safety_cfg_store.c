@@ -286,11 +286,11 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
     { 0x031D, KILNLINK_PARAM_TYPE_U16, "overcurrent_pct" },
     { 0x031E, KILNLINK_PARAM_TYPE_U16, "overcurrent_time_s" },
     /* sec 4 -- link and liveness */
-    { 0x0401, KILNLINK_PARAM_TYPE_U16, "context_max_age_s" },
+    { 0x0401, KILNLINK_PARAM_TYPE_U16, "context_max_age_s" }, /* SR-31 reserved: Pico refuses SET, no guard reads it; id burned */
     { 0x0402, KILNLINK_PARAM_TYPE_U16, "link_timeout_s" },
     { 0x0403, KILNLINK_PARAM_TYPE_U16, "link_dead_hard_s" },
-    { 0x0404, KILNLINK_PARAM_TYPE_U16, "mainfault_debounce_ms" },
-    { 0x0405, KILNLINK_PARAM_TYPE_U16, "telemetry_period_ms" },
+    { 0x0404, KILNLINK_PARAM_TYPE_U16, "mainfault_debounce_ms" }, /* SR-31 reserved: Pico refuses SET, no guard reads it; id burned */
+    { 0x0405, KILNLINK_PARAM_TYPE_U16, "telemetry_period_ms" }, /* SR-31 reserved: Pico refuses SET, no guard reads it; id burned */
     /* sec 5 -- timing and system */
     { 0x0501, KILNLINK_PARAM_TYPE_U16, "startup_grace_s" },
     { 0x0502, KILNLINK_PARAM_TYPE_U16, "estop_debounce_ms" },

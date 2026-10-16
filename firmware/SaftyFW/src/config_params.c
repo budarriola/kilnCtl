@@ -141,11 +141,8 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x0320u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[0]
     { 0x0321u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[1]
     { 0x0322u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[2]
-    { 0x0401u, KILNLINK_PARAM_TYPE_U16 }, // context_max_age_s
     { 0x0402u, KILNLINK_PARAM_TYPE_U16 }, // link_timeout_s
     { 0x0403u, KILNLINK_PARAM_TYPE_U16 }, // link_dead_hard_s
-    { 0x0404u, KILNLINK_PARAM_TYPE_U16 }, // mainfault_debounce_ms
-    { 0x0405u, KILNLINK_PARAM_TYPE_U16 }, // telemetry_period_ms
     { 0x0501u, KILNLINK_PARAM_TYPE_U16 }, // startup_grace_s
     { 0x0502u, KILNLINK_PARAM_TYPE_U16 }, // estop_debounce_ms
     { 0x0503u, KILNLINK_PARAM_TYPE_U16 }, // watchdog_timeout_ms
@@ -596,11 +593,16 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0321u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[1] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_1; return true;
     case 0x0322u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[2] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_2; return true;
 
-    case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S); rec->context_max_age_s = value.u16_val; return true;
+    // SR-31 (owner 2026-10-16): 0x0401/0x0404/0x0405 are RESERVED, not applicable. No guard
+    // reads them (context age is the fixed CONTEXT_MAX_AGE_MS), so a SET_PARAM would be
+    // accepted, persisted and silently ignored. Ids stay burned, record layout unchanged;
+    // they are refused here and absent from CONFIG_PARAM_TABLE. GET_PARAM still reads them.
+    case 0x0401u:
+    case 0x0404u:
+    case 0x0405u:
+        return false;
     case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_LINK_TIMEOUT_MAX_S); rec->link_timeout_s = value.u16_val; return true;
     case 0x0403u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S); rec->link_dead_hard_s = value.u16_val; return true;
-    case 0x0404u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->mainfault_debounce_ms = value.u16_val; return true;
-    case 0x0405u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->telemetry_period_ms = value.u16_val; return true;
 
     case 0x0501u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->startup_grace_s = value.u16_val; return true;
     case 0x0502u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->estop_debounce_ms = value.u16_val; return true;

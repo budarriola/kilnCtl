@@ -774,17 +774,10 @@ var GROUPS = [
     ] },
 
   { title: '4. Link and liveness', fields: [
-      { id: 1025, name: 'context_max_age_s', type: 'u16', risk: 'nuisance', unit: 's', def: 5,
-        guards: ['S2', 'S3', 'S4'], note: 'Stale context makes those guards go inactive, never ' +
-          'pessimistic.' },
       { id: 1026, name: 'link_timeout_s', type: 'u16', risk: 'nuisance', unit: 's', def: 10,
         guards: ['S6b'], note: 'Trips only if current is also flowing.' },
       { id: 1027, name: 'link_dead_hard_s', type: 'u16', risk: 'dangerous', unit: 's', def: 120,
         guards: ['S6b'], note: 'Unconditional backstop.' },
-      { id: 1028, name: 'mainfault_debounce_ms', type: 'u16', risk: 'nuisance', unit: 'ms', def: 200, guards: ['S6a'] },
-      { id: 1029, name: 'telemetry_period_ms', type: 'u16', risk: 'dangerous', unit: 'ms', def: 500,
-        guards: ['ESP liveness detector'], note: 'The ESP\'s liveness detector keys on this. ' +
-          'Changing it means changing the main board\'s 1.5s window too.' },
     ] },
 
   { title: '5. Timing and system', fields: [
