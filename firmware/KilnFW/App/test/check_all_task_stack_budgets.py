@@ -1298,7 +1298,12 @@ CEILING_BYTES = {
     # walk's own measured total, not headroom-padded: 1184 B of the declared
     # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
     # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
-    "wifi_prov_owner": 3056,  # 2026-10-15 re-measured
+    # 2026-10-16: 3056 -> 3104 B (+48 B), measured on dev a3d5965b5. No large local
+    # grew: the extra depth is the owner_task -> do_rescan_tick -> ap_teardown_should_defer
+    # -> http_auth_any_ap_session_active -> resolve_timeout_s -> web_auth_store_load_policy
+    # chain (read-only AP session query, c27c415a1; web auth store lock, 4dabdd28b), all
+    # 32-64 B frames. Declared stack is 4096 B in PSRAM (0 B DRAM): 692 B honest free.
+    "wifi_prov_owner": 3104,
     # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
     # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
     # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.
