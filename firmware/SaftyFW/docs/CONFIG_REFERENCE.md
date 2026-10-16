@@ -157,11 +157,11 @@ one-way door for that record.
 
 | Field | Default | Unit | Guard | Risk | Notes |
 |---|---|---|---|---|---|
-| `context_max_age_s` | 5 | s | S2, S3, S4 | 🟠 | Stale context ⇒ those guards go **inactive**, never pessimistic |
+| `context_max_age_s` | 5 | s | S2, S3, S4 | 🟠 | Stale context ⇒ those guards go **inactive**, never pessimistic  **Reserved (SR-31, owner 2026-10-16): no guard reads it; SET_PARAM refuses it, GET_PARAM still reads it, not on the commissioning page.** |
 | `link_timeout_s` | 10 | s | S6b | 🟠 | Trips only **if current is also flowing** |
 | `link_dead_hard_s` | 120 | s | S6b | 🔴🟠 | Unconditional backstop |
-| `mainfault_debounce_ms` | 200 | ms | S6a | 🟠 | |
-| `telemetry_period_ms` | 500 | ms | — | 🔴 | The ESP's liveness detector keys on this. Changing it means changing the ESP's 1.5 s window too (`LINK_PROTOCOL.md` §8) |
+| `mainfault_debounce_ms` | 200 | ms | S6a | 🟠 |  **Reserved (SR-31, owner 2026-10-16): no guard reads it; SET_PARAM refuses it, GET_PARAM still reads it, not on the commissioning page.** |
+| `telemetry_period_ms` | 500 | ms | — | 🔴 | The ESP's liveness detector keys on this. Changing it means changing the ESP's 1.5 s window too (`LINK_PROTOCOL.md` §8)  **Reserved (SR-31, owner 2026-10-16): no guard reads it; SET_PARAM refuses it, GET_PARAM still reads it, not on the commissioning page.** |
 
 ## 5. Timing and system
 
