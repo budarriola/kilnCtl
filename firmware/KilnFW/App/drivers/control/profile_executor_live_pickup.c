@@ -57,3 +57,8 @@ float profile_live_pickup_rederive_remaining_s(uint32_t old_dwell_min, float old
     }
     return new_remaining_s;
 }
+
+bool profile_live_pickup_dwell_target_changed(bool dwelling, float old_target_c, float new_target_c)
+{
+    return dwelling && (old_target_c != new_target_c);
+}

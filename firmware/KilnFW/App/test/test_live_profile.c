@@ -1034,6 +1034,14 @@ static void test_io_seg_rederive_remaining_s_carries_elapsed_time(void)
                "an unchanged dwell_min is a no-op");
 }
 
+static void test_dwell_target_changed_clears_dwell(void)
+{
+    TEST_SECTION("profile_live_pickup_dwell_target_changed -- CL-01: only a dwelling segment with a changed target");
+    TEST_CHECK(profile_live_pickup_dwell_target_changed(true, 600.0f, 1000.0f), "dwelling + new target -> clear dwell");
+    TEST_CHECK(!profile_live_pickup_dwell_target_changed(true, 600.0f, 600.0f), "dwelling + same target -> keep dwell");
+    TEST_CHECK(!profile_live_pickup_dwell_target_changed(false, 600.0f, 1000.0f), "ramping + new target -> nothing to clear");
+}
+
 int main(void)
 {
     // fake_kv.c (the host hal_kv backend) requires every partition to be
@@ -1071,6 +1079,7 @@ int main(void)
     test_window_refuses_running_segment_deletion();
     test_window_refuses_zone_mask_change();
     test_pickup_ok_when_window_and_validate_both_pass();
+    test_dwell_target_changed_clears_dwell();
     test_pickup_refuses_on_window_violation_before_validating();
     test_pickup_refuses_on_hard_validate_failure();
     lpt_mount_fresh_cfg();

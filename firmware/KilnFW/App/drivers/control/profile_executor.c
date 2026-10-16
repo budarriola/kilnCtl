@@ -602,7 +602,24 @@ static void reload_live_profile_if_changed(void)
          * concurrent segment advance: both the window check just above and
          * this swap run under the SAME lock acquisition, against the SAME
          * s_exec.segment_index read, so nothing can move between the two. */
+        /* CL-01: a changed target_c on the dwelling segment must ramp, not
+         * step. Compare OLD content (still in s_exec.profile) to the new. */
+        bool clear_dwell = false;
+        if (s_exec.segment_index < s_exec.profile.segment_count && s_exec.segment_index < candidate->segment_count) {
+            clear_dwell = profile_live_pickup_dwell_target_changed(
+                s_exec.dwelling, s_exec.profile.segments[s_exec.segment_index].target_c,
+                candidate->segments[s_exec.segment_index].target_c);
+        }
         s_exec.profile = *candidate;
+        if (clear_dwell) {
+            s_exec.dwelling = false;
+            s_exec.segment_elapsed_s = 0;
+            s_exec.segment_elapsed_rem_ms = 0;
+            s_exec.dwell_credit_applied_s = 0.0f;
+            s_exec.dwell_credit_cap_s = 0.0f;
+            ESP_LOGW(PE_TAG, "live edit changed dwelling segment %u target: dwell cleared, ramping to new target",
+                     s_exec.segment_index);
+        }
     }
 
     /* HIGH-1: only a CHECKED outcome (OK or a REFUSED_*) may consume this

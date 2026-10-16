@@ -81,6 +81,21 @@ static void *kiln_cfg_store_test_malloc(size_t n)
     }
     return malloc(n);
 }
+// PS-01 seam: fail the Nth persist_scratch_alloc() of an exact size (the real
+// allocator otherwise). Included first so the #define below only redirects calls
+// made from kiln_cfg_store.c.
+#include "../drivers/persist/persist_scratch.h"
+static size_t s_ps_fail_size = 0;
+static int s_ps_fail_nth = 0;
+static int s_ps_seen = 0;
+static void *kcs_test_scratch_alloc(size_t n)
+{
+    if (s_ps_fail_nth > 0 && n == s_ps_fail_size && ++s_ps_seen == s_ps_fail_nth) {
+        return NULL;
+    }
+    return persist_scratch_alloc(n);
+}
+#define persist_scratch_alloc kcs_test_scratch_alloc
 #define malloc kiln_cfg_store_test_malloc
 
 #include "../drivers/persist/kiln_cfg_store.c"
@@ -1947,6 +1962,54 @@ static void persmed_write_old_file(int ver)
     }
     TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, f, 4 + blob_sz) == ESP_OK, "setup: older-layout file");
     free(f);
+}
+
+// PS-01: a transient failure while migrating a GOOD older file must not quarantine it as unmigratable or keep a
+// .bad copy; the file stays byte-identical so the next boot migrates it.
+static void test_ps01_transient_migration_failure_keeps_file(void)
+{
+    TEST_SECTION("PS-01: scratch alloc failure during migration -> file kept, no .bad, retry-next-boot reason");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    persmed_write_old_file(2);
+    uint8_t before[4 + sizeof(kiln_cfg_store_blob_v2_t)];
+    size_t blen = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH, before, sizeof(before), &blen) == ESP_OK, "read back setup file");
+    size_t cap = 4 + sizeof(kiln_cfg_store_blob_t);
+    if (4 + sizeof(kiln_cfg_store_blob_v1_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v1_t);
+    }
+    if (4 + sizeof(kiln_cfg_store_blob_v2_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v2_t);
+    }
+    s_ps_fail_size = cap;
+    s_ps_fail_nth = 1;
+    s_ps_seen = 0;
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    s_ps_fail_nth = 0;
+    TEST_CHECK(s_ps_seen == 1, "the migration raw-buffer allocation was reached");
+    char why[128];
+    TEST_CHECK(kiln_cfg_store_is_quarantined(why, sizeof(why)), "transient failure still refuses writes this boot");
+    TEST_CHECK(strstr(why, "transient") != NULL && strstr(why, "cannot migrate") == NULL,
+               "reason says transient/retry, not 'cannot migrate'");
+    uint8_t after[4 + sizeof(kiln_cfg_store_blob_v2_t)];
+    size_t alen = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH, after, sizeof(after), &alen) == ESP_OK && alen == blen &&
+                   memcmp(before, after, blen) == 0,
+               "the good file is left byte-identical");
+    size_t badlen = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", after, sizeof(after), &badlen) == ESP_ERR_NOT_FOUND,
+               "no .bad copy is written for a transient failure");
+
+    /* next boot (no failure) migrates the same file */
+    memset(&s_store, 0, sizeof(s_store));
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(!kiln_cfg_store_is_quarantined(NULL, 0) && kiln_cfg_store_get_active_id() == 5,
+               "the retry boot migrates the same file");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
 }
 
 static void test_persmed_older_file_migrates_and_clear_keeps_copy(void)
@@ -4441,6 +4504,7 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_stale_delete_not_resurrected();
     test_cfg_fs_interrupted_write_leaves_old_or_new();
     test_med3_unusable_file_quarantines_never_absent();
+    test_ps01_transient_migration_failure_keeps_file();
     test_persmed_older_file_migrates_and_clear_keeps_copy();
 
     test_export_import_new_slot_round_trip();

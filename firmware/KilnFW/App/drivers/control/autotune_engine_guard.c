@@ -100,6 +100,21 @@ bool autotune_reject_if_blocked_during_measure(void)
     return true;
 }
 
+/* CL-02: a refused gain calculation (kp=ki=kd=0) must never end DONE.
+ * Must be called with s_at.lock held. */
+bool autotune_reject_if_gains_refused(void)
+{
+    if (s_at.proposed_gains.refusal == AUTOTUNE_REFUSAL_OK) {
+        return false;
+    }
+    force_relays_off();
+    s_at.state = AUTOTUNE_ENGINE_ABORTED;
+    snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "gain calculation refused: %s",
+             s_at.proposed_gains.refusal_reason);
+    ESP_LOGW(AT_TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+    return true;
+}
+
 /* Must be called with s_at.lock held. */
 void autotune_apply_relay(bool want_on)
 {
@@ -367,6 +382,13 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     bool have_result = (s_at.method == AUTOTUNE_METHOD_RELAY) ? s_at.relay.valid : s_at.model.valid;
     if (s_at.state != AUTOTUNE_ENGINE_DONE || !have_result) {
         xSemaphoreGive(s_at.lock);
+        return false;
+    }
+    /* CL-02: never write the 0/0/0 gains of a refused calculation. */
+    if (s_at.proposed_gains.refusal != AUTOTUNE_REFUSAL_OK) {
+        xSemaphoreGive(s_at.lock);
+        ESP_LOGW(AT_TAG, "autotune_engine_accept() refused -- gain calculation was refused (%d)",
+                 (int)s_at.proposed_gains.refusal);
         return false;
     }
     /* 2026-09-01 review fix, extended 2026-09-02 (round-3 follow-up): the
