@@ -1,5 +1,38 @@
 # Known issues
 
+The single list of open problems (bugs and accepted trade-offs, not planned features). One line per item; the source doc holds the detail. Remove an entry when it is fixed.
+
+## KilnFW
+- Autotune thermal-guard zero-duty feed | severity: safety review pending | autotune feeds zero duty to the thermal guard window | [REVIEW_FIXERS](audits/REVIEW_FIXERS_2026-10-15.md), [AUDIT_CONTROL_EXECUTOR](audits/AUDIT_CONTROL_EXECUTOR.md) | open, see "Safety review 2026-10-16" below
+- Aux manual fence | severity: unknown | aux manual output fence not yet settled | [SPARE_RELAY_ONOFF_PLAN](SPARE_RELAY_ONOFF_PLAN.md) | open, safety review pending
+- Wi-Fi TX buffer RAM cut | MED | `ESP_WIFI_STATIC_TX_BUFFER_NUM` 16 -> 8 to free internal RAM; web/TLS TX throughput risk, bench soak needed | [AUDIT_INTERNAL_RAM_XIP](audits/AUDIT_INTERNAL_RAM_XIP.md) | open
+- Stack budget unmeasured (TRIPWP3 INFO-4) | INFO | needs a target ELF measurement on the bench-flashed build | [REVIEW_TRIPWP3](audits/REVIEW_TRIPWP3_2026-10-11.md) | open
+- Test-trip `trip_is_test` stays true after clear (TRIPFX5 LOW-1/LOW-2/INFO-2) | LOW | stale cached DIAG/TRIP_EVENT after clear; redundant term untested; stale docstring | [REVIEW_TRIPFX5](audits/REVIEW_TRIPFX5_2026-10-12.md) | open
+- Test-trip readback ignores `diag_boot_id` (TRIPFX4 INFO-3) | INFO | covered in practice by `diag_since_reboot` | [REVIEW_TRIPFX4](audits/REVIEW_TRIPFX4_2026-10-12.md) | open
+
+## SaftyFW
+- A5 SET_PARAM bounds | owner 2026-10-16: reject out-of-range values | SET_PARAM accepts out-of-range values | [KILNLINK_ROBUSTNESS_AUDIT](audits/KILNLINK_ROBUSTNESS_AUDIT_2026-10-09.md) | fix pending, see SR-01..SR-07 below
+- ctfx LOW-4: uncalibrated CT presence fallback is sensitive | LOW | deliberate (S3/S9 false negatives are the dangerous direction); mitigated by readiness naming the channel | [REVIEW_FIXERS](audits/REVIEW_FIXERS_2026-10-15.md) | accepted, will not fix
+
+## Recovery / OTA / update
+- Bench pre.3 cannot self-update from GitHub | HIGH (bench) | fetch refuses with `low_heap`, largest internal block 10752 B, steady state across reset | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
+- pre.3 has no `/api/update/status`, so `update_install_start` fails (404) after a PC-side stage | MED (bench) | install of staged pre.4 not completed | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
+- `flash_firmware` otadata gap | MED | JTAG flash does not touch `otadata`; a board pointing at factory/recovery boots recovery, verify fails loud | [CLAUDE.md](../CLAUDE.md) flash section, [MCP_SERVERS](MCP_SERVERS.md) | known, deliberate
+
+## Web / auth
+- Web page ignores `saved:true` on a failed live-profile decide (PROFILESFX3 INFO-2) | INFO | [REVIEW_PROFILESFX3](audits/REVIEW_PROFILESFX3_2026-10-12.md) | open
+
+## PcTools / MCP tooling
+- No MCP wrapper for `POST /api/cfgfs/discard_rejected` | LOW | route exists (ADMIN, mode-gated), no tool | [REVIEW_PERSFX](audits/REVIEW_PERSFX_2026-10-10.md) | open
+- `.cmd`/`.bat` git shim resolution not addressed (TOOLFX12 INFO-5) | INFO | [REVIEW_TOOLFX12](audits/REVIEW_TOOLFX12_2026-10-12.md) | open
+- `check_lcd_admin_gates` R12 false-fail (LCDFX9 LOW-2/LOW-3) and gate semantics resting on host tests (LCDFX7 INFO-3) | LOW | [REVIEW_LCDFX9](audits/REVIEW_LCDFX9_2026-10-12.md), [REVIEW_LCDFX7](audits/REVIEW_LCDFX7_2026-10-11.md) | open
+
+## Hardware
+- None recorded here yet; hardware-gated items live in [ROADMAP](../ROADMAP.md) and `firmware/*/TODO.md`.
+
+## Docs
+- This list is seeded from the 2026-10 REVIEW_* finding tables and the named items above; the per-area `TODO.md` files and ROADMAP bug rows have not been swept in full. Add entries as found.
+
 ## Safety review 2026-10-16
 
 Review only, base origin/dev. Rule applied for SET_PARAM (owner A5, 2026-10-15): the Pico must reject, not clamp, any out-of-range value and report the refusal. Bounded fields in `config_params_set()` do reject (`return false`, no clamp); the fields below have no reject bound beyond type (and finiteness for f32).
