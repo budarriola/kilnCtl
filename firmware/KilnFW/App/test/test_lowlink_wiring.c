@@ -46,7 +46,7 @@ static void check_up01(void)
     char *fn = body_of("net/pico_auto_update_boot.c", "attempt_update_acquire(");
     TEST_CHECK(fn != NULL, "could not locate attempt_update_acquire body");
     if (!fn) return;
-    const char *claim = strstr(fn, "ota_http_update_begin");
+    const char *claim = strstr(fn, "ota_http_update_try_begin");
     const char *recheck = claim ? strstr(claim, "relay_authority_heat_run_active") : NULL;
     TEST_CHECK(claim != NULL && recheck != NULL, "heat-run recheck must follow the claim");
     TEST_CHECK(recheck != NULL && strstr(recheck, "ota_http_check_interlocks") != NULL &&
@@ -77,7 +77,7 @@ static void check_bw02(void)
     if (!t) return;
     int n = 0;
     const char *p = t;
-    while ((p = strstr(p, "esp_wifi_set_mode(WIFI_MODE_STA)")) != NULL) {
+    while ((p = strstr(p, "esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);")) != NULL) {
         const char *clr = strstr(p, "ap_fallback_active = false");
         const char *ret = strstr(p, "will retry");
         TEST_CHECK(clr != NULL && ret != NULL && ret < clr,
