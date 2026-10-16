@@ -1,3 +1,4 @@
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "ui_page_profile_detail.h"
 
@@ -301,7 +302,7 @@ static void refresh_plan_chart(const profile_t *prof)
      * 1512-byte profile_exec_status_t stack local on that task (see
      * ui_page_home_refresh.c's own comment on its measured stack ceiling
      * for why this task in particular is treated as tight, not generous). */
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (!st) {
         return; /* out of memory -- skip this repaint */
     }

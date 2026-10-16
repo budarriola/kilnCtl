@@ -23,6 +23,7 @@
 // This file must not gain any HTTP, httpd_req_t or form-parsing dependency.
 // Body parsing stays in http/safety_cfg_http.c; it hands the pairs here.
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "safety_cfg_write.h"
 
 #include <math.h>
@@ -768,7 +769,7 @@ bool safety_cfg_write_apply_package_and_confirm(SafetyLinkClass *link, const kil
      * (kiln_cfg_swap.c serializes swaps through kiln_cfg_store_lock()'s
      * generation check), so a single process-wide scratch buffer is safe --
      * it is never touched by two callers at once. */
-    static safety_cfg_post_pair_t s_bulk_pairs[SAFETY_CFG_POST_MAX_PAIRS];
+    static EXT_RAM_BSS_ATTR safety_cfg_post_pair_t s_bulk_pairs[SAFETY_CFG_POST_MAX_PAIRS];
     int n = 0;
     for (uint16_t i = 0; i < pkg->count; i++) {
         const kiln_pkg_pico_param_t *e = &pkg->entries[i];

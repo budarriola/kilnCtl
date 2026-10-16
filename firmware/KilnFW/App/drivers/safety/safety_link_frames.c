@@ -24,6 +24,7 @@
 // version_once, safety_context_update_relay_recent, safety_count_cmd_byte's
 // sibling s_boot_clean statics, safety_link_mark_boot_clean's own file-local
 // state) stays exactly as private as it always was.
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "safety_link.h"
 #include "safety_link_frame.h"
 #include "safety_link_internal.h"
@@ -542,7 +543,7 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * stack, same pattern as safety_cfg_http.c/dashboard_exec_http.c. Every
      * field below is read, not just the active-firing bool, so the narrow
      * profile_executor_get_active_id() accessor does not fit here. */
-    profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *pstat = persist_scratch_alloc(sizeof(*pstat));
     if (!pstat) {
         ESP_LOGE(TAG, "safety_build_and_send_context: out of memory, skipping this PUSH_CONTEXT broadcast");
         return;

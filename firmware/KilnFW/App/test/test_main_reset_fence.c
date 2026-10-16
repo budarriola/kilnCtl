@@ -19,7 +19,7 @@ int g_test_count = 0;
 #define MAIN_INTERNAL_H
 #include <stdbool.h>
 #include <stdint.h>
-typedef struct { int unused; } main_boot_ctx_t;
+typedef struct { void *safety; void *uart_proto; } main_boot_ctx_t; // pointer members: main.c points them at its PSRAM statics (RAM-03)
 // Likewise kiln_io.h / safety_link.h / profile_executor.h drag in uart_protocol.h; main.c only passes these types
 // through main_kiln_enter_safe_state(), which this test never calls.
 #define KILN_IO_H

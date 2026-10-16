@@ -35,10 +35,10 @@
 void main_bridges_bringup(main_boot_ctx_t *ctx)
 {
     // Everything below through the control/profiles/autotune/wifi/gpio_probe
-    // block takes &ctx->uart_proto and is only valid to call once
+    // block takes ctx->uart_proto and is only valid to call once
     // ctx->pc_link_ready is true (see the PC link block's own NOTE in
     // main_network_http.c). lvgl_port_start() is the one exception in this
-    // stretch -- it takes &ctx->display, not &ctx->uart_proto -- so it stays
+    // stretch -- it takes &ctx->display, not ctx->uart_proto -- so it stays
     // outside this gate, exactly as unaffected by a dead PC link as
     // Wi-Fi/mDNS/I2C bring-up already were in main_boot_early.c.
     if (ctx->pc_link_ready) {
@@ -47,15 +47,15 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         // purely so buffered boot-time log lines -- e.g. an SX1509 or panel
         // failure -- reach the PC as early as possible; registration order
         // otherwise doesn't matter between these tasks.
-        if (uart_log_bridge_start(&ctx->uart_proto) != ESP_OK) {
+        if (uart_log_bridge_start(ctx->uart_proto) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start log uart bridge task");
         }
 
-        if (uart_bridge_start_info_task(&ctx->uart_proto) != ESP_OK) {
+        if (uart_bridge_start_info_task(ctx->uart_proto) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start info uart bridge task");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
-        if (uart_bridge_start_system_task(&ctx->uart_proto, &ctx->uart_owner) != ESP_OK) {
+        if (uart_bridge_start_system_task(ctx->uart_proto, &ctx->uart_owner) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start system uart bridge task");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
@@ -66,7 +66,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
              * task-registration refusal (ESP_ERR_INVALID_STATE / task id
              * already taken) from ESP_ERR_NO_MEM, which is the difference
              * between a logic bug and a memory-pressure problem. */
-            esp_err_t thermo_task_err = uart_bridge_start_thermo_task(&ctx->uart_proto, &ctx->thermo_bus);
+            esp_err_t thermo_task_err = uart_bridge_start_thermo_task(ctx->uart_proto, &ctx->thermo_bus);
             if (thermo_task_err != ESP_OK) {
                 ESP_LOGE(MAIN_TAG, "Failed to start thermo uart bridge task: %s (free heap %lu B, largest block %u B)",
                          esp_err_to_name(thermo_task_err), (unsigned long)esp_get_free_heap_size(),
@@ -74,7 +74,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                 startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
             }
         }
-        if (ctx->io_ready && uart_bridge_start_io_task(&ctx->uart_proto, &ctx->kio) != ESP_OK) {
+        if (ctx->io_ready && uart_bridge_start_io_task(ctx->uart_proto, &ctx->kio) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start io uart bridge task");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
@@ -117,18 +117,18 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         startup_fault_note(STARTUP_FAULT_LCD_UI);
     }
     if (ctx->pc_link_ready) {
-        if (ctx->screen_idle_ready && uart_bridge_start_touch_task(&ctx->uart_proto, &ctx->screen_idle) != ESP_OK) {
+        if (ctx->screen_idle_ready && uart_bridge_start_touch_task(ctx->uart_proto, &ctx->screen_idle) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start touch uart bridge task");
         }
         /* Gated the same way lvgl_port_start() above is (display_ready,
          * !recovery_mode): every kiln_ui_* call this task makes walks the
          * live LVGL widget tree, which only exists once that call has
          * actually succeeded. */
-        if (!ctx->recovery_mode && ctx->display_ready && uart_bridge_start_ui_test_task(&ctx->uart_proto) != ESP_OK) {
+        if (!ctx->recovery_mode && ctx->display_ready && uart_bridge_start_ui_test_task(ctx->uart_proto) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start UI test uart bridge task");
         }
         if (ctx->safety_err == ESP_OK &&
-            uart_bridge_start_safety_task(&ctx->uart_proto, &ctx->safety) != ESP_OK) {
+            uart_bridge_start_safety_task(ctx->uart_proto, ctx->safety) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start safety uart bridge task");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
@@ -153,7 +153,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         // dead bridge here is silent from the board's point of view -- it
         // only shows up on the PC as "destination task not registered on the
         // peer".
-        esp_err_t control_task_err = uart_bridge_start_control_task(&ctx->uart_proto);
+        esp_err_t control_task_err = uart_bridge_start_control_task(ctx->uart_proto);
         if (control_task_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start control uart bridge task: %s%s", esp_err_to_name(control_task_err),
                      control_task_err == ESP_ERR_NO_MEM
@@ -161,7 +161,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                          : "");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
-        esp_err_t profiles_task_err = uart_bridge_start_profiles_task(&ctx->uart_proto);
+        esp_err_t profiles_task_err = uart_bridge_start_profiles_task(ctx->uart_proto);
         if (profiles_task_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start profiles uart bridge task: %s%s", esp_err_to_name(profiles_task_err),
                      profiles_task_err == ESP_ERR_NO_MEM
@@ -169,7 +169,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                          : "");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
-        esp_err_t autotune_task_err = uart_bridge_start_autotune_task(&ctx->uart_proto);
+        esp_err_t autotune_task_err = uart_bridge_start_autotune_task(ctx->uart_proto);
         if (autotune_task_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start autotune uart bridge task: %s%s", esp_err_to_name(autotune_task_err),
                      autotune_task_err == ESP_ERR_NO_MEM
@@ -177,7 +177,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                          : "");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
-        if (uart_bridge_start_wifi_task(&ctx->uart_proto) != ESP_OK) {
+        if (uart_bridge_start_wifi_task(ctx->uart_proto) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start wifi uart bridge task");
             startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
@@ -212,7 +212,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         // ESP_ERR_NOT_SUPPORTED here just means CONFIG_KILNCTL_ENABLE_GPIO_PROBE
         // is off (the default) -- not a failure worth an ESP_LOGE. See
         // gpio_probe.h.
-        esp_err_t gpio_probe_err = uart_bridge_start_gpio_probe_task(&ctx->uart_proto);
+        esp_err_t gpio_probe_err = uart_bridge_start_gpio_probe_task(ctx->uart_proto);
         if (gpio_probe_err != ESP_OK && gpio_probe_err != ESP_ERR_NOT_SUPPORTED) {
             ESP_LOGE(MAIN_TAG, "Failed to start gpio_probe uart bridge task: %s",
                      esp_err_to_name(gpio_probe_err));
@@ -229,7 +229,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
     // nobody is currently controlling. See uart_bridge.h for the timing and
     // exactly what "the link went away" means here.
     esp_err_t wd_err = uart_bridge_start_link_watchdog(ctx->io_ready ? &ctx->kio : NULL,
-                                                       ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+                                                       ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     if (wd_err != ESP_OK) {
         // Nothing left that drops the relays on link loss. That is the one
         // failure in this file worth shouting about: a kiln whose controller
@@ -237,7 +237,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         ESP_LOGE(MAIN_TAG, "PC link watchdog did not start (%s) -- RELAYS WILL NOT DROP ON LINK LOSS",
                  esp_err_to_name(wd_err));
         startup_fault_note(STARTUP_FAULT_PC_LINK_WATCHDOG);
-        main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, &ctx->safety, ctx->safety_err == ESP_OK,
+        main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, ctx->safety, ctx->safety_err == ESP_OK,
                               SAFETY_FAULT_SRC_APP,
                               "no link watchdog, so relays cannot be guaranteed to drop");
     }

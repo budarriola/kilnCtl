@@ -34,6 +34,7 @@
  * field on the main_boot_ctx_t passed to it).
  */
 
+#include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -245,6 +246,11 @@ void app_main(void)
     hal_kv_set_write_refuse_hook(kiln_nvs_reset_refuses_write);
 
     static main_boot_ctx_t ctx;
+    /* RAM-03: task-only, no DMA/ISR access; kept out of internal .bss (~5.7 KB) */
+    static EXT_RAM_BSS_ATTR SafetyLinkClass s_boot_safety;
+    static EXT_RAM_BSS_ATTR uart_protocol_t s_boot_uart_proto;
+    ctx.safety = &s_boot_safety;
+    ctx.uart_proto = &s_boot_uart_proto;
 
     /* Flash-facts read does an mmap (cache freeze) -- do it here on the internal
      * app_main stack before any PSRAM-stack task can call dashboard_get_status(). */

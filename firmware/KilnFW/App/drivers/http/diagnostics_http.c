@@ -1899,16 +1899,10 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, "cfg filesystem not mounted");
         return ESP_OK;
     }
-    /* INTERNAL DRAM, deliberately NOT PSRAM (unlike the GET handler's read
-     * buffer above): this buffer is the write SOURCE for cfg_fs_write_atomic()
-     * dispatched onto the flash worker below, and a flash operation disables
-     * the cache, making PSRAM unreachable for the duration -- see
-     * flash_worker.h's own HAZARD comment and relay_cycles_reset()'s
-     * reset_persist_job_arg_t snapshot (a stack-local struct, never PSRAM)
-     * for the precedent this follows. Freed well before the response is
-     * sent, so this is a transient 8KB internal allocation, not a standing
-     * one. */
-    uint8_t *body = heap_caps_malloc(CFGFS_FILE_BODY_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* PSRAM-first (internal fallback), RAM-02 2026-10-16: the flash write copies a PSRAM
+     * source through a bounce buffer under XIP (persist_scratch.h), so the old "cache disabled
+     * makes PSRAM unreachable" reason is stale. Transient, freed before the response. */
+    uint8_t *body = persist_scratch_alloc(CFGFS_FILE_BODY_MAX);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;

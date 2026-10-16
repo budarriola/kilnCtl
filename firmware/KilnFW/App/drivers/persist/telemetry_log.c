@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "telemetry_log.h"
 
 #include <stdint.h>
@@ -141,7 +142,7 @@ static void telemetry_log_task(void *arg)
      * life and never released, own it as a static instead -- .dram0.bss
      * +1512 B, but the OOM-and-vanish failure mode is gone entirely rather
      * than just retried. */
-    static profile_exec_status_t fst_storage;
+    static EXT_RAM_BSS_ATTR profile_exec_status_t fst_storage;
     profile_exec_status_t *fst = &fst_storage;
     autotune_engine_status_t ast;
     char line[TELEMETRY_LOG_LINE_BUF];

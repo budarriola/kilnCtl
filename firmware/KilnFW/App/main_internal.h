@@ -92,7 +92,7 @@ typedef struct {
     backlight_pwm_t backlight;
 
     /* --- safety+IO / control subsystems (main_control_bringup.c) -------- */
-    SafetyLinkClass safety;
+    SafetyLinkClass *safety;      /* PSRAM static in main.c (RAM-03) */
     esp_err_t        safety_err;
 
     bool recovery_mode;
@@ -104,7 +104,7 @@ typedef struct {
     esp_err_t dash_err;
 
     uart_owner_t    uart_owner;
-    uart_protocol_t uart_proto;
+    uart_protocol_t *uart_proto;  /* PSRAM static in main.c (RAM-03) */
     bool            pc_link_ready;
 } main_boot_ctx_t;
 

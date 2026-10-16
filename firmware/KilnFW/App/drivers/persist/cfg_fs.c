@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "cfg_fs.h"
 #include "persist_scratch.h"
 
@@ -291,7 +292,7 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists)
 
 #define CFG_FS_DEGRADED_MAX 40
 #define CFG_FS_DEGRADED_NAME_MAX 48
-static char s_degraded[CFG_FS_DEGRADED_MAX][CFG_FS_DEGRADED_NAME_MAX];
+static EXT_RAM_BSS_ATTR char s_degraded[CFG_FS_DEGRADED_MAX][CFG_FS_DEGRADED_NAME_MAX];
 static portMUX_TYPE s_degraded_mux = portMUX_INITIALIZER_UNLOCKED;
 
 void cfg_fs_degraded_set(const char *name, bool degraded)

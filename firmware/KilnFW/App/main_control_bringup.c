@@ -92,7 +92,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // --- Safety processor link (isolated UART1 + the opto-isolated fault line) ------
     // Comes up whether or not an RP2040 is answering; a silent far side is
     // link_up = 0, not a startup failure.
-    esp_err_t safety_err = safety_link_start(&ctx->safety);
+    esp_err_t safety_err = safety_link_start(ctx->safety);
     ctx->safety_err = safety_err;
     if (safety_err != ESP_OK) {
         /* Not a silent degradation: this is the board's last line of defence
@@ -106,7 +106,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
         /* First moment the accumulated bring-up failures can actually reach
          * the safety processor. */
         if ((ctx->boot_fault_sources & SAFETY_FAULT_SRC_APP) != 0u) profile_executor_note_external_app_hold();
-        esp_err_t err = safety_link_set_fault_source(&ctx->safety, ctx->boot_fault_sources, true);
+        esp_err_t err = safety_link_set_fault_source(ctx->safety, ctx->boot_fault_sources, true);
         if (err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "could not assert boot fault sources 0x%02X: %s",
                      (unsigned)ctx->boot_fault_sources, esp_err_to_name(err));
@@ -166,7 +166,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // accurate-log alternative (ESP_LOGE once on a NULL hook, per defect 2's
     // other option) was rejected: it would still let a real divergence
     // enforcement no-op during bring-up, merely honestly.
-    danger_mode_init(&ctx->safety);
+    danger_mode_init(ctx->safety);
 
     // heat_enable (heat_enable.h): the shared, refcounted holder of the
     // SAFETY_CMD_REQUEST_ENABLE request that profile_executor.c and
@@ -176,7 +176,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // reasoning as danger_mode_init() immediately above, and for the same
     // reason it must run before anything that can start a firing or an
     // autotune (profile_executor_start()/autotune_engine_start(), below).
-    heat_enable_init(&ctx->safety);
+    heat_enable_init(ctx->safety);
 
     safety_ceiling_sync_set_disable_heat_hooks(main_control_bringup_all_relays_off_void,
                                                 profile_executor_divergence_fault_halt);
@@ -203,7 +203,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
      * kiln_cfg_swap_apply()/_boot_recover() both document refusing with a
      * reason rather than dereferencing it, and a board with no safety
      * processor must never be able to swap a kiln package at all. */
-    kiln_cfg_swap_set_link(safety_err == ESP_OK ? &ctx->safety : NULL);
+    kiln_cfg_swap_set_link(safety_err == ESP_OK ? ctx->safety : NULL);
 
     // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
     // relay/expander state from here on -- must start before anything that
@@ -225,7 +225,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // (post_and_wait() checks for a NULL queue) if this didn't succeed --
     // nothing downstream needs a second guard.
     if (ctx->io_ready) {
-        esp_err_t owner_err = kiln_io_owner_start(&ctx->kio, safety_err == ESP_OK ? &ctx->safety : NULL);
+        esp_err_t owner_err = kiln_io_owner_start(&ctx->kio, safety_err == ESP_OK ? ctx->safety : NULL);
         if (owner_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "kiln_io_owner_start failed: %s -- no relay/IO commands routed through "
                           "kiln_io_owner will be reachable this boot (direct fail-safe paths are "
@@ -259,7 +259,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // Pico's identity over, so there is nothing to decide -- skipped, not
     // escalated (the missing link is already reported, loudly, above).
     if (!ctx->recovery_mode && safety_err == ESP_OK) {
-        esp_err_t pau_err = pico_auto_update_boot_start(&ctx->safety);
+        esp_err_t pau_err = pico_auto_update_boot_start(ctx->safety);
         if (pau_err != ESP_OK) {
             /* Not fatal and not a block: no verdict is published, so the
              * readiness gate stays open. The only thing lost is this boot's
@@ -282,7 +282,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
      * Everything else about the link (reporting, status, the fault line
      * itself) is untouched. */
     if (safety_err == ESP_OK) {
-        esp_err_t policy_err = safety_link_fault_on_link_loss(&ctx->safety, false);
+        esp_err_t policy_err = safety_link_fault_on_link_loss(ctx->safety, false);
         ESP_LOGW(MAIN_TAG, "SIM BUILD: safety-link loss demoted to non-fault (%s) -- "
                       "a missing RP2040 must not block a simulated firing",
                  esp_err_to_name(policy_err));
@@ -362,7 +362,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     if (!ctx->recovery_mode) {
         ctx->exec_err = profile_executor_start(ctx->io_ready ? &ctx->kio : NULL,
                                                 ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
-                                                safety_err == ESP_OK ? &ctx->safety : NULL);
+                                                safety_err == ESP_OK ? ctx->safety : NULL);
         if (ctx->exec_err != ESP_OK) {
             ESP_LOGW(MAIN_TAG, "profile_executor_start failed: %s -- no profile execution this boot",
                      esp_err_to_name(ctx->exec_err));
@@ -387,7 +387,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // wiring convention as everything else here; a board with no io/thermo_bus
     // this boot still gets the frame, just with zone_count=0/relay_now_mask=0.
     if (safety_err == ESP_OK) {
-        safety_link_set_context_sources(&ctx->safety, ctx->io_ready ? &ctx->kio : NULL,
+        safety_link_set_context_sources(ctx->safety, ctx->io_ready ? &ctx->kio : NULL,
                                         ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL);
     }
 
@@ -399,7 +399,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     if (!ctx->recovery_mode) {
         ctx->autotune_err = autotune_engine_start(ctx->io_ready ? &ctx->kio : NULL,
                                                    ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
-                                                   safety_err == ESP_OK ? &ctx->safety : NULL);
+                                                   safety_err == ESP_OK ? ctx->safety : NULL);
         if (ctx->autotune_err != ESP_OK) {
             ESP_LOGW(MAIN_TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(ctx->autotune_err));
             startup_fault_note(STARTUP_FAULT_AUTOTUNE_ENGINE);

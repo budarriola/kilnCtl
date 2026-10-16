@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "pico_image_source.h"
 
 #include <stdarg.h>
@@ -27,7 +28,7 @@ typedef char pico_image_source_align_check
 /* Carry region first, then the freshly-read chunk: the scan window is the
  * tail of the previous chunk followed by this one, so a record straddling a
  * chunk boundary is still seen whole exactly once. */
-static uint8_t s_scan_buf[SCAN_CARRY + SCAN_CHUNK];
+static EXT_RAM_BSS_ATTR uint8_t s_scan_buf[SCAN_CARRY + SCAN_CHUNK];
 
 static void set_reason(pico_image_source_info_t *out, const char *fmt, ...)
 {

@@ -164,7 +164,7 @@ void dashboard_plan_exec_fields(const profile_exec_status_t *st, int64_t *out_to
 
 esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
 {
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (st == NULL) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
@@ -348,7 +348,7 @@ esp_err_t profile_plan_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (st == NULL) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
@@ -427,7 +427,7 @@ esp_err_t profile_plan_get_handler(httpd_req_t *req)
  * (there's one ramp per run, TODO.md 6A.5(d)), the rest is per zone. */
 esp_err_t control_status_get_handler(httpd_req_t *req)
 {
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (st == NULL) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
