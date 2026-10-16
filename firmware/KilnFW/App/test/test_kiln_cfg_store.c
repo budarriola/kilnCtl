@@ -2002,6 +2002,21 @@ static void test_ps01_transient_migration_failure_keeps_file(void)
     TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", after, sizeof(after), &badlen) == ESP_ERR_NOT_FOUND,
                "no .bad copy is written for a transient failure");
 
+    /* second transient shape: raw read fine, the v2 conversion buffer allocation fails */
+    memset(&s_store, 0, sizeof(s_store));
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
+    s_ps_fail_size = sizeof(kiln_cfg_store_blob_v2_t);
+    s_ps_fail_nth = 1;
+    s_ps_seen = 0;
+    nvs_load_store_with_cfg_fs();
+    s_ps_fail_nth = 0;
+    TEST_CHECK(s_ps_seen == 1, "the v2 conversion buffer allocation was reached");
+    TEST_CHECK(kiln_cfg_store_is_quarantined(why, sizeof(why)) && strstr(why, "transient") != NULL,
+               "conversion-buffer failure is also transient");
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", after, sizeof(after), &badlen) == ESP_ERR_NOT_FOUND,
+               "no .bad copy for a conversion-buffer failure either");
+
     /* next boot (no failure) migrates the same file */
     memset(&s_store, 0, sizeof(s_store));
     s_quarantined = false;
