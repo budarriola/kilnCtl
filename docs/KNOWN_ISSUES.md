@@ -269,3 +269,20 @@ Checked and found clean:
 - Flash sources and destinations in PSRAM: `pico_image_source.c` `s_scan_buf` (esp_partition_read), the dashboard_exec body, the kiln_cfg_store `s_store` and the migration scratch. esp_flash bounce-buffers these, and flash encryption is off.
 - The mmap-class calls (esp_ota_*, esp_image_verify, esp_core_dump_*, esp_partition_mmap) all run on httpd, the main or boot task, or bx_flash_worker. None runs on a PSRAM-stack task (system_uart_bridge only erases the coredump). The reboot tasks call only esp_restart, and no shutdown handlers are registered.
 - Cache-off windows. No ISR registered with ESP_INTR_FLAG_IRAM touches PSRAM data, and the UART ISR is no longer IRAM (XIP replaced it).
+## Review 2026-10-16: setup wizard (docs/audits/REVIEW_WIZARD.md)
+- **WZ-01** MED, `setup_wizard_page.html:1389`. Step 9 read-back uses absolute tolerances (1e-6 Kp/Kd, 1e-9 Ki) against float32 `%.9g`; Ki=0.3 or Kp=100.3 shows a false "different gains" warning and the step is not marked done. Fix: compare to `Math.fround(sent)` or a relative tolerance. Status open.
+- **WZ-02** MED, `setup_wizard_page.html:1640,1643`. Step 7 checks tc_offset_c only for finite and abs_max only > 0; Pico A5 refuses |offset| > 50 and abs_max > 2500, and per SR-32 the other pairs still commit. Fix: mirror Pico bounds client side; fix `safety_commissioning_page.html:521` "No fixed cap" text. Status open.
+- **WZ-03** LOW, step numbers in messages use the 0-based id while headings show id+1 (`:500,507,925,1653,2179`). Status open.
+- **WZ-04** LOW, step 9 status line reads step 10's detail (`:1360`). Status open.
+- **WZ-05** LOW, step 9 marks done after one zone with kp>0 (`:1393`). Status open.
+- **WZ-06** LOW, step 6 refuses zone max above Pico abs_max (`:921`) while `POST /api/zones` auto-raises the Pico ceiling. Status open.
+- **WZ-07** LOW, per-zone CT map hint says required (`:2904`) but a blank map commits (`:3002,3044`). Status open.
+- **WZ-08** LOW, CT cal Apply success re-renders step 7 and drops unsaved edits (`:2772`). Status open.
+- **WZ-09** LOW, CT cal 400s are text/plain; page shows "bad response" instead of the range reason (`:2766`). Status open.
+- **WZ-10** LOW, step 3 verify polls immediately, a pre-change reading counts as verified (`:2220`). Status open.
+- **WZ-11** LOW, step 3 Save has no lockSave; double click shows a false "Nothing was saved" (`:2191`). Status open.
+- **WZ-12** LOW, `zoneToPostParams` `|| 0` would turn a missing GET field into an explicit value (xzone 0 disables guard 8) (`:705-747`). Status open (latent).
+- **WZ-13** LOW, step 11 password saved but policy refused reports a plain "Save refused" (`:1514-1545`). Status open.
+- **WZ-14** INFO, wizard does not offer the safety relay type or e-stop verification; several readiness items map to no step. Status open.
+- **WZ-15** INFO, `docs/SETUP_WIZARD.md` says 13 steps and stale step numbers. Status open.
+- **WZ-16** INFO, live CDP rows cover only W49/W50; no automated coverage of steps 2-11 saves. Status open.
