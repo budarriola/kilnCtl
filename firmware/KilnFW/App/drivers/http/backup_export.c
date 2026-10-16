@@ -448,6 +448,8 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_ct_mask(zi, &ct_mask);
             float cal_offset_c = 0.0f;
             zones_config_get_cal_offset(zi, &cal_offset_c);
+            float tc_sheath_tau_s = 0.0f;
+            zones_config_get_tc_sheath_tau(zi, &tc_sheath_tau_s);
             float max_ramp_c_per_hr = 0.0f;
             zones_config_get_max_ramp(zi, &max_ramp_c_per_hr);
             float sanity_rate_c_per_min = 0.0f;
@@ -524,6 +526,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * of one that could quietly drop the tail of a zone's entry. */
             backup_stream_printf(&s, "\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"ct_mask\":%u,",
                                 name_escaped, relay_mask, thermo_mask, ct_mask);
+            backup_stream_printf(&s, "\"tc_sheath_tau_s\":%.9g,", (double)tc_sheath_tau_s);
             backup_stream_printf(&s, "\"cal_offset_c\":%.9g,\"max_ramp_c_per_hr\":%.9g,"
                                 "\"sanity_rate_c_per_min\":%.9g,\"control_mode\":%u,",
                                 (double)cal_offset_c, (double)max_ramp_c_per_hr, (double)sanity_rate_c_per_min,

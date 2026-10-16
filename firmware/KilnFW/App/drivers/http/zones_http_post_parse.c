@@ -418,6 +418,22 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         *err_reason = "zone cal_offset_c missing or out of range";
         return false;
     }
+    /* ZONES_CFG_VERSION 26->27: protection-tube tau, next to the offset it
+     * pairs with. OPTIONAL, omit-PRESERVES (same convention as
+     * z%u_fuzzy_strength): a client that predates this field must not reset
+     * a fitted tube's tau to 0. Present but out of range is refused. */
+    snprintf(key, sizeof(key), "z%u_sheath_tau", i);
+    if (zones_config_json_field_present(body, key)) {
+        float tau_s = 0.0f;
+        if (!zones_config_json_parse_float_field(body, key, ZONE_TC_SHEATH_TAU_MIN_S, ZONE_TC_SHEATH_TAU_MAX_S,
+                                                 &tau_s)) {
+            *err_reason = "zone tc_sheath_tau_s out of range (0-600 s)";
+            return false;
+        }
+        z->tc_sheath_tau_s = (uint16_t)lrintf(tau_s); /* stored in whole seconds */
+    } else {
+        z->tc_sheath_tau_s = current_z->tc_sheath_tau_s;
+    }
     snprintf(key, sizeof(key), "z%u_kp", i);
     if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_PID_GAIN_MAX, &z->pid_kp)) {
         *err_reason = "zone pid_kp missing or out of range";

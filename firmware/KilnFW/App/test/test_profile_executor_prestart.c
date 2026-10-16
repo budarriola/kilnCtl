@@ -793,6 +793,17 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c)
     return raw_c;
 }
 
+/* Sheath tau 0 (no protection tube): tc_lag_comp is an exact passthrough,
+ * so this executable's expectations are unchanged by the lag compensation. */
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s)
+{
+    (void)zone_index;
+    if (out_tau_s) {
+        *out_tau_s = 0.0f;
+    }
+    return true;
+}
+
 uint32_t zones_config_generation(void)
 {
     return 0;

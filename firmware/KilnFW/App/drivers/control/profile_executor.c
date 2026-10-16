@@ -43,6 +43,7 @@ extern bool profiles_validate_candidate(const profile_t *candidate, int mode, ch
 #include "pid.h"
 #include "pid_fuzzy.h"
 #include "ramp_assist_cfg.h"
+#include "tc_lag_comp.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
@@ -95,6 +96,10 @@ const char *PE_TAG = "profile_executor";
  *   duty     whole percent, u8; 255 encodes "no value"
  * The graph this feeds is a multi-hour trend, not a scope trace. */
 EXT_RAM_BSS_ATTR s_exec_state_t s_exec;
+
+_Static_assert(TC_LAG_COMP_TAU_MAX_S == (unsigned)ZONE_TC_SHEATH_TAU_MAX_S &&
+                   TC_LAG_COMP_TAU_MIN_S == (unsigned)ZONE_TC_SHEATH_TAU_MIN_S,
+               "zone tc_sheath_tau_s bounds must match tc_lag_comp.h");
 
 /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_internal.h's
  * big table comment for the full rule list and rationale; this is just the
@@ -935,7 +940,23 @@ void executor_task_entry(void *arg)
             raw_c[zi] = combined;
             sensor_ok[zi] = valid;
             s_exec.zones[zi].actual_valid = valid;
-            s_exec.zones[zi].actual_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
+            {
+                /* Offset first, then sheath-lag compensation (tc_lag_comp.c).
+                 * tau 0 is an exact passthrough: actual_c == actual_cal_c and
+                 * the guard lead is 0, i.e. identical to before this field. */
+                zone_runtime_t *zr = &s_exec.zones[zi];
+                float cal_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
+                float tau_s = 0.0f;
+                zones_config_get_tc_sheath_tau(zi, &tau_s);
+                bool lag_reset = false;
+                float est_c = tc_lag_comp_step(&zr->tc_lag, tau_s, cal_c, valid, dt_s, &lag_reset);
+                if (lag_reset) {
+                    zr->pid_sensor_outage = true; /* re-base the PID derivative with the filter */
+                }
+                zr->actual_cal_c = cal_c;
+                zr->actual_c = valid ? est_c : NAN;
+                zr->tc_lag_corr_c = valid ? zr->tc_lag.corr_c : 0.0f;
+            }
 
             /* Cross-zone coupling filter (PID_EXPANSION_PLAN.md 2c/Phase 3b,
              * BLOCKING review finding 3): updated exactly once per control
@@ -1779,6 +1800,7 @@ void executor_task_entry(void *arg)
             thermal_guard_input_t gin = {
                 .sensor_ok = sensor_ok[zi],
                 .measurement_c = raw_c[zi], /* RAW -- a calibration offset must not hide an out-of-range sensor */
+                .lead_c = z->tc_lag_corr_c, /* sheath lead; 0 without a tube -- see thermal_guard_input_t */
                 /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_
                  * STUDY.md section 2.4: this zone's OWN commanded setpoint
                  * (rate-limited toward the shared s_exec.target_c by this

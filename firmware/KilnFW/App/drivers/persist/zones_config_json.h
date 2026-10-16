@@ -60,7 +60,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 26
+#define ZONES_CFG_VERSION 27
 
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
@@ -863,6 +863,22 @@ typedef struct {
      * exclusions only), but the field's storage and default are pinned now
      * so no later pass has to touch the schema again for it. */
     uint8_t failsafe_state;
+    /* ZONES_CFG_VERSION 26->27 (2026-10-16): thermocouple protection-tube
+     * (mullite sheath) time constant, whole seconds, 0..600. 0 = no tube
+     * fitted, compensation off and the control path byte-identical to v26.
+     * Per sensor like cal_offset_c, never mirrored (SRC_GROUP_TC mirrors
+     * tc_type only). Applied after cal_offset_c by profile_executor.c
+     * through tc_lag_comp.c; bounds ZONE_TC_SHEATH_TAU_MIN_S/MAX_S.
+     *
+     * LAYOUT: this uint16_t sits in the 2 bytes of alignment padding v23
+     * left between failsafe_state and hyst_c, so sizeof(zone_cfg_t) and
+     * every other field's offset are unchanged from v26 (asserted below).
+     * That keeps the zones blob at ZONES_CONFIG_BLOB_MAX_SIZE (896) and the
+     * kiln_cfg_store slot layout untouched. Because those bytes were
+     * padding on a v26 board (contents not guaranteed zero), the 26->27
+     * migration zeroes this field explicitly rather than trusting the
+     * memcpy. See docs/TC_SHEATH_LAG_SIM.md. */
+    uint16_t tc_sheath_tau_s;
     /* hyst_c: temperature hysteresis for a future trigger evaluator (plan
      * sec 3), 0 -> 2.0f default at read, same "0 is always a safe, must-
      * substitute" convention as progress_band_c just above. Unused by any
@@ -957,6 +973,92 @@ typedef struct {
      * vice versa -- see project_reset_one_side_bug_class. */
     float autotune_baseline_k_dc;
 } zone_cfg_t;
+
+/* v27 placed tc_sheath_tau_s in v26's padding: nothing else may move. */
+_Static_assert(sizeof(zone_cfg_t) == 248, "zone_cfg_t size must stay 248 bytes (tc_sheath_tau_s uses padding)");
+_Static_assert(offsetof(zone_cfg_t, tc_sheath_tau_s) == 222, "tc_sheath_tau_s must occupy v26's padding at 222");
+_Static_assert(offsetof(zone_cfg_t, hyst_c) == 224, "hyst_c must stay at byte offset 224");
+_Static_assert(offsetof(zone_cfg_t, autotune_baseline_k_dc) == 244,
+               "autotune_baseline_k_dc must stay at byte offset 244");
+
+/* Frozen v26 zone layout -- what zone_cfg_t looked like immediately before
+ * THIS pass (ZONES_CFG_VERSION 26->27): predates tc_sheath_tau_s, which
+ * v27 put in the padding after failsafe_state. Field-for-field IDENTICAL to
+ * zone_cfg_v25_t below plus autotune_baseline_k_dc appended at the true
+ * tail (the field v25->26 added). Same size as v27. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source[SRC_GROUP_COUNT];
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    uint8_t  adaptive_tune_enabled;
+    float coupling_diag_k_dc;
+    float ease_off_window_mult;
+    float approach_rate_cap_c_per_hr;
+    float error_band_c;
+    float rate_band_c_per_s;
+    uint8_t relay_type;
+    float progress_band_c;
+    uint8_t zone_type;
+    uint8_t failsafe_state;
+    float hyst_c;
+    uint16_t min_on_s;
+    uint16_t min_off_s;
+    float model_fit_temp_c;
+    float model_fit_ambient_c;
+    float coil_power_w;
+    float autotune_baseline_k_dc;
+} zone_cfg_v26_t;
+
+/* 248 = 244 (zone_cfg_v25_t) + 4 (autotune_baseline_k_dc). */
+_Static_assert(sizeof(zone_cfg_v26_t) == 248,
+               "zone_cfg_v26_t must match the on-flash v26 layout byte-for-byte (248 bytes)"); /* v26 -- predates tc_sheath_tau_s */
+_Static_assert(offsetof(zone_cfg_v26_t, name) == 0,
+               "zone_cfg_v26_t::name must stay at byte offset 0");
+_Static_assert(offsetof(zone_cfg_v26_t, autotune_baseline_k_dc) == 244,
+               "zone_cfg_v26_t::autotune_baseline_k_dc must stay at byte offset 244");
 
 /* Frozen v25 zone layout -- what zone_cfg_t looked like immediately before
  * THIS pass (ZONES_CFG_VERSION 25->26): predates autotune_baseline_k_dc.
@@ -3263,6 +3365,23 @@ typedef struct {
     uint32_t crc32;
 } zones_cfg_v24_t; /* v24 -- what zones_cfg_t looked like immediately before v24->25;
                      * predates coil_power_w. */
+
+/* Frozen v26 layout -- what zones_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 26->27): zones[] is zone_cfg_v26_t (predates
+ * tc_sheath_tau_s). Same wrapper shape as v25's. */
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v26_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v26_t; /* v26 -- predates tc_sheath_tau_s. */
 
 /* Frozen v25 layout -- what zones_cfg_t looked like immediately before THIS
  * pass (ZONES_CFG_VERSION 25->26): zones[] is the per-zone shape that

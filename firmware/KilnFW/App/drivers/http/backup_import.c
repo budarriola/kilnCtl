@@ -203,6 +203,8 @@ typedef struct {
     uint8_t ct_mask;
     bool has_cal;
     float cal_offset_c;
+    bool has_sheath_tau;
+    float tc_sheath_tau_s;
     bool has_ramp;
     float max_ramp_c_per_hr;
     bool has_sanity;
@@ -1619,6 +1621,18 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             zc->cal_offset_c = (float)dcal;
         }
 
+        /* ZONES_CFG_VERSION 26->27: protection-tube tau, optional (a backup
+         * from older firmware has none and leaves the live value alone). */
+        double dsheath;
+        if (backup_json_field_opt_num(ze, "tc_sheath_tau_s", (double)ZONE_TC_SHEATH_TAU_MIN_S,
+                               (double)ZONE_TC_SHEATH_TAU_MAX_S, &dsheath, &zc->has_sheath_tau, "tc_sheath_tau_s",
+                               err_msg, err_cap, (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_sheath_tau) {
+            zc->tc_sheath_tau_s = (float)dsheath;
+        }
+
         double dramp;
         if (backup_json_field_opt_num(ze, "max_ramp_c_per_hr", 0, (double)ZONE_MAX_RAMP_C_PER_HR_MAX, &dramp,
                                &zc->has_ramp, "max_ramp_c_per_hr", err_msg, err_cap,
@@ -2632,6 +2646,13 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
         }
         if (zc->has_cal && !zones_config_set_cal_offset_no_save(zc->index, zc->cal_offset_c)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting cal_offset_c",
+                    (unsigned)i, zc->index);
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
+            return false;
+        }
+        if (zc->has_sheath_tau && !zones_config_set_tc_sheath_tau_no_save(zc->index, zc->tc_sheath_tau_s)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting tc_sheath_tau_s",
                     (unsigned)i, zc->index);
             zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;

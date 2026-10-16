@@ -366,6 +366,11 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone cal_offset_c out of range";
             return false;
         }
+        /* ZONES_CFG_VERSION 26->27: protection-tube tau, 0 = off. */
+        if ((float)z->tc_sheath_tau_s > ZONE_TC_SHEATH_TAU_MAX_S) {
+            *err_reason = "zone tc_sheath_tau_s out of range";
+            return false;
+        }
         if (!isfinite(z->pid_kp) || z->pid_kp < 0.0f || z->pid_kp > 1000.0f) {
             *err_reason = "zone pid_kp out of range";
             return false;

@@ -135,7 +135,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
             double pre_clamp_total = (double)z->pid_p + (double)z->pid_i + (double)z->pid_d + (double)z->pid_ff;
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"control_mode\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,"
-                        "\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
+                        "\"tc_lag_corr_c\":%.2f,\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
                         "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u,"
                         "\"heat_blocked\":%s,\"heat_blocked_sources\":%lu,"
                         "\"relay_starved_s\":%.1f,\"relay_denied_reason\":%u,\"ff_hold_used_matrix\":%s,"
@@ -146,7 +146,9 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         "\"bd_pre_clamp_total\":%.4f,\"bd_post_clamp_total\":%.4f,"
                         "\"bd_load_cap_boost\":%.4f,\"bd_final_commanded\":%.4f}",
                         first ? "" : ",", zi, z->control_mode, (double)(z->actual_valid ? z->actual_c : 0.0f),
-                        z->actual_valid ? "true" : "false", (double)z->duty,
+                        z->actual_valid ? "true" : "false",
+                        (double)(z->actual_valid && isfinite(z->tc_lag_corr_c) ? z->tc_lag_corr_c : 0.0f),
+                        (double)z->duty,
                         z->relay_commanded_on ? "true" : "false", (double)z->pid_p, (double)z->pid_i,
                         (double)z->pid_d, (double)z->pid_ff, z->cooling_limited ? "true" : "false",
                         z->faulted ? "true" : "false", z->fault_guard,

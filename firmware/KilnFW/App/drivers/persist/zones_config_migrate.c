@@ -906,6 +906,31 @@ static bool convert_versioned_blob_to_current_impl(uint8_t version, const void *
          * struct. */
         return true;
     }
+    case 26: {
+        /* v26 -> v27 (2026-10-16): tc_sheath_tau_s is new and occupies the
+         * two padding bytes v26 had between failsafe_state and hyst_c, so
+         * zone_cfg_v26_t and zone_cfg_t have the same size and every other
+         * offset. Plain memcpy, then the new field is zeroed EXPLICITLY:
+         * those bytes were padding on v26, not guaranteed zero, and a stray
+         * value there must never turn into a lead term. 0 is the "no
+         * protection tube" default: compensation off, control identical to
+         * v26. */
+        zones_cfg_v26_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms;
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            out->zones[i].tc_sheath_tau_s = 0;
+        }
+        return true;
+    }
     default:
         /* No known historical (or current) layout for this version --
          * zones_cfg_expected_len_for_version() already returned 0 for it and
@@ -1098,16 +1123,16 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
          * for the same reasons given there (v24 is covered separately,
          * below, added in the 2026-09-16 release-hardening pass). */
         if (version == ZONES_CFG_VERSION - 1) {
-            _Static_assert(offsetof(zones_cfg_v25_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v25_t),
-                           "zones_cfg_v25_t's CRC check below assumes crc32 is its last field");
+            _Static_assert(offsetof(zones_cfg_v26_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v26_t),
+                           "zones_cfg_v26_t's CRC check below assumes crc32 is its last field");
             uint32_t stored_crc = 0;
-            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v25_t, crc32), sizeof(stored_crc));
+            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v26_t, crc32), sizeof(stored_crc));
             static const uint8_t zero4[sizeof(uint32_t)] = {0};
             uint32_t computed_crc =
-                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v25_t, crc32));
+                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v26_t, crc32));
             computed_crc = esp_crc32_le(computed_crc, zero4, sizeof(zero4));
             if (computed_crc != stored_crc) {
-                *reason = "CRC mismatch on the stored v25 blob -- treating as corrupt rather than migrating it";
+                *reason = "CRC mismatch on the stored v26 blob -- treating as corrupt rather than migrating it";
                 return ZONES_DECODE_CORRUPT;
             }
         }
@@ -1131,7 +1156,24 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
          * checked at all. zones_cfg_v24_t has the identical "crc32 is the
          * last field" shape as v25 (frozen struct comment, zones_config_
          * json.h), so this mirrors the v25 branch exactly. */
-        if (version == ZONES_CFG_VERSION - 2) {
+        /* ZONES_CFG_VERSION 26->27 (sheath tau): the N-2 gate moves to v25;
+         * v24 keeps its own gate by literal version so this bump does not
+         * silently drop it back onto the uncovered list. */
+        if (version == ZONES_CFG_VERSION - 2 /* v25 */) {
+            _Static_assert(offsetof(zones_cfg_v25_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v25_t),
+                           "zones_cfg_v25_t's CRC check below assumes crc32 is its last field");
+            uint32_t stored_crc = 0;
+            memcpy(&stored_crc, (const uint8_t *)blob + offsetof(zones_cfg_v25_t, crc32), sizeof(stored_crc));
+            static const uint8_t zero4[sizeof(uint32_t)] = {0};
+            uint32_t computed_crc =
+                esp_crc32_le(0, (const uint8_t *)blob, offsetof(zones_cfg_v25_t, crc32));
+            computed_crc = esp_crc32_le(computed_crc, zero4, sizeof(zero4));
+            if (computed_crc != stored_crc) {
+                *reason = "CRC mismatch on the stored v25 blob -- treating as corrupt rather than migrating it";
+                return ZONES_DECODE_CORRUPT;
+            }
+        }
+        if (version == 24) {
             _Static_assert(offsetof(zones_cfg_v24_t, crc32) + sizeof(uint32_t) == sizeof(zones_cfg_v24_t),
                            "zones_cfg_v24_t's CRC check below assumes crc32 is its last field");
             uint32_t stored_crc = 0;

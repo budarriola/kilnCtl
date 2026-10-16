@@ -1728,6 +1728,59 @@ static void test_fuzz_zones_post_toplevel_hostile(void)
     }
 }
 
+/* ZONES_CFG v27 sheath tau on the whole-page POST: z%u_sheath_tau is
+ * optional (absent preserves the stored value, so an older page or a
+ * wizard step that does not know the field cannot reset it), parsed in
+ * seconds 0..600 and refused out of range. The same bounds are mirrored by
+ * the web pages (zones_page.html, setup_wizard_page.html) and checked
+ * against this parser by tools/PcTools/tests/test_sheath_tau_client_bounds.py. */
+static void test_parse_zone_fields_sheath_tau(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_sheath_tau optional (omit preserves), 0..600 s, refused outside");
+    zone_cfg_t current = make_stored_zone();
+    current.tc_sheath_tau_s = 90;
+    static const char base[] = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+                               "z0_cal=1.5&z0_kp=2.0&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                               "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+    struct { const char *extra; bool ok; uint16_t want; const char *msg; } cases[] = {
+        {"", true, 90, "absent z0_sheath_tau preserves the stored tau"},
+        {"&z0_sheath_tau=0", true, 0, "0 turns compensation off"},
+        {"&z0_sheath_tau=180", true, 180, "180 s stored"},
+        {"&z0_sheath_tau=600", true, 600, "600 s upper bound accepted"},
+        {"&z0_sheath_tau=59.6", true, 60, "fractional seconds round to the nearest whole second"},
+        {"&z0_sheath_tau=601", false, 0, "601 s refused"},
+        {"&z0_sheath_tau=-1", false, 0, "negative refused"},
+        {"&z0_sheath_tau=abc", false, 0, "non-numeric refused"},
+        {"&z0_sheath_tau=nan", false, 0, "NaN refused"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char body[640];
+        snprintf(body, sizeof(body), "%s%s", base, cases[i].extra);
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok == cases[i].ok, cases[i].msg);
+        if (ok && cases[i].ok) {
+            TEST_CHECK(out.tc_sheath_tau_s == cases[i].want, cases[i].msg);
+        }
+    }
+}
+
+/* Mode gate: a sheath tau change rides the same POST /api/zones and is
+ * refused 409 while a firing or autotune runs, like every other zone field. */
+static void test_zones_post_sheath_tau_refused_while_running(void)
+{
+    TEST_SECTION("zones_post_handler -- a z0_sheath_tau change is refused by the mode gate while RUNNING");
+    s_test_profile_status.state = PROFILE_EXEC_RUNNING;
+    s_test_ok_called = false;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2&z0_sheath_tau=120");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    TEST_CHECK(!s_test_ok_called, "no success for a sheath tau change while running");
+    TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
+               "refused with the mode-gate 409 body");
+}
+
 // Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
 // spec): zones_post_handler() used to call system_mode_gate_check() AFTER
 // ota_http_check_interlocks() -- which already refuses (409 "a profile is
@@ -6239,6 +6292,53 @@ static void corpus_migrate_case_v25(void)
     }
 }
 
+static void corpus_migrate_case_v26(void)
+{
+    zones_cfg_v26_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 26;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    /* v26 offset 222 is struct padding: firmware that wrote it never
+     * initialized it, so the migration must zero tc_sheath_tau_s rather
+     * than adopt whatever bytes were there. */
+    memset((uint8_t *)&src.zones[0] + 222, 0xA5, 2);
+    memset((uint8_t *)&src.zones[1] + 222, 0x5A, 2);
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v26_t, crc32));
+        src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v26 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v26 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v26 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v26 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v26 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v26 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v26 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v26 zones[0].max_temp_c survives migration");
+        TEST_CHECK(out.zones[0].tc_sheath_tau_s == 0 && out.zones[1].tc_sheath_tau_s == 0,
+                   "v26 -> v27: padding garbage at the new tc_sheath_tau_s offset is zeroed (tau off)");
+    }
+}
+
 static void test_zones_config_migration_corpus_every_historical_version_forward(void)
 {
     TEST_SECTION("zones_config_json_decode_blob -- release-hardening corpus: every historical "
@@ -6270,12 +6370,13 @@ static void test_zones_config_migration_corpus_every_historical_version_forward(
     corpus_migrate_case_v23();
     corpus_migrate_case_v24();
     corpus_migrate_case_v25();
+    corpus_migrate_case_v26();
 
     /* This corpus must actually track ZONES_CFG_VERSION rather than silently
      * going stale the next time it bumps: fail loudly, at test-run time, the
      * day a v26 (or later) historical layout exists and this file has not
      * been extended to cover it. */
-    _Static_assert(ZONES_CFG_VERSION == 26,
+    _Static_assert(ZONES_CFG_VERSION == 27,
                    "a new zones_cfg version was added -- extend this corpus with a new "
                    "corpus_migrate_case_vN() for the version that just became historical, then "
                    "update this assert to the new ZONES_CFG_VERSION");
@@ -10591,7 +10692,7 @@ static void test_decode_zones_blob_accepts_a_v25_blob_with_a_correct_crc(void)
     const char *reason = "unset";
     zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
     TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v25 blob migrates cleanly");
-    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v26) version");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
     TEST_CHECK(out.thermo_count == 2, "sibling field survives the hop unchanged");
     TEST_CHECK(out.zones[0].autotune_baseline_k_dc == 0.0f,
                "a migrated zone's new autotune_baseline_k_dc reads the 'not recorded yet' sentinel, "
@@ -10688,7 +10789,7 @@ static void test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc(void)
     const char *reason = "unset";
     zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
     TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v24 blob migrates cleanly");
-    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v26) version");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
     TEST_CHECK(out.thermo_count == 2, "sibling field survives the two-version hop unchanged");
     TEST_CHECK(out.zones[0].coil_power_w == 0.0f,
                "a migrated zone's v25-added coil_power_w reads its 'equal share' sentinel, "
@@ -16716,6 +16817,7 @@ static void make_fully_populated_cfg_poisoned(zones_cfg_t *cfg, uint8_t poison)
         zc->progress_band_c = 3.5f + (float)z;
         zc->zone_type = 0;
         zc->failsafe_state = 0;
+        zc->tc_sheath_tau_s = (uint16_t)(60u + z);
         zc->hyst_c = 2.0f + (float)z;
         zc->min_on_s = (uint16_t)(30 + z);
         zc->min_off_s = (uint16_t)(30 + z);
@@ -17165,6 +17267,8 @@ void run_test_zones_http(void)
     test_zones_fix_review9_atomic_pair_and_claim_gated_writers();
     test_zones_pid_post_accepts_while_idle();
     test_zones_post_refused_by_mode_gate_before_interlock();
+    test_parse_zone_fields_sheath_tau();
+    test_zones_post_sheath_tau_refused_while_running();
     test_zones_pid_post_refuses_embedded_nul();
     test_zones_pid_post_bumps_generation();
     test_zones_pid_post_rejects_kp_over_bound();

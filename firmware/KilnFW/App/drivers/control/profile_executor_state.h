@@ -183,6 +183,8 @@ typedef struct {
     bool     actual_valid;
     bool     relay_commanded_on;
     float    duty;
+    float    tc_lag_corr_c;   /* sheath-lag correction inside actual_c (0 with no tube):
+                               * the uncompensated calibrated reading is actual_c - this */
     uint8_t  control_mode;    /* zone_control_mode_t */
     bool     faulted;         /* this zone's own per-zone guard tripped (guards 1/2/4/7) --
                                * the run continues for other active zones unless every

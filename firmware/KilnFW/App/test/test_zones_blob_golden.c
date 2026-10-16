@@ -62,10 +62,11 @@
 #define ZBG_REGEN_ENV "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS"
 
 /* Padding bytes natural C alignment puts in zones_cfg_t today: 2 after the
- * 6-byte header, 11 per zone_cfg_t (3+3+3+2), 3 after timing_profile_count.
+ * 6-byte header, 9 per zone_cfg_t (3+3+3; the old 2-byte hole before
+ * hyst_c became tc_sheath_tau_s in v27), 3 after timing_profile_count.
  * A field added to the struct but not to the fill below would show up as
  * extra "padding" here, so this is also the "every field was set" check. */
-#define ZBG_EXPECTED_PAD_BYTES (2u + 11u * MAX31856_CHANNEL_COUNT + 3u)
+#define ZBG_EXPECTED_PAD_BYTES (2u + 9u * MAX31856_CHANNEL_COUNT + 3u)
 
 static char s_text[64 * 1024];
 static size_t s_text_len;
@@ -224,6 +225,7 @@ static void zbg_fill_zone(zones_cfg_t *c, int zi)
     ZF(progress_band_c);
     ZB(zone_type);
     ZB(failsafe_state);
+    ZH(tc_sheath_tau_s);
     ZF(hyst_c);
     ZH(min_on_s);
     ZH(min_off_s);
