@@ -104,7 +104,7 @@
  * 90+32+33+31+31 = 370B. 381+370 = 751B measured worst case. HP-02
  * (2026-09-27) added relay_starved_s/relay_denied_reason here too, the same
  * 53B computed for the profile_exec shape above: 751+53 = 804B. The
- * 2026-10-16 sheath-lag key "tc_lag_corr_c":-1234.56, adds 25B: 829B;
+ * 2026-10-16 sheath-lag key "tc_lag_corr_c":-327.68, adds 24B: 828B;
  * 900/zone leaves ~71B headroom. See test_dashboard_json.c's fill_worst_case_zone()
  * for the exact widths this measures against -- it fills every new
  * duty_breakdown field at the same -1234.xxxx worst-case magnitude used for

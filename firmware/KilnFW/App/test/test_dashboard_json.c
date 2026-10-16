@@ -46,7 +46,7 @@ static void fill_worst_case_zone(profile_exec_zone_status_t *z, uint8_t zi)
 {
     z->active = true;
     z->actual_c = -1234.56f;         /* "%.2f" worst case this test exercises */
-    z->tc_lag_corr_c = -1234.56f;    /* "%.2f" sheath-lag correction, same worst case */
+    z->tc_lag_corr_cc = INT16_MIN;   /* "%.2f" of -327.68: widest the int16 centi-degC field prints */
     z->actual_valid = true;
     z->relay_commanded_on = false;
     z->duty = -1.234f;               /* "%.3f" */
@@ -211,7 +211,7 @@ static void test_control_status_json_is_complete_and_well_formed_at_3_zones(void
     TEST_CHECK(strstr(json, "\"bd_final_commanded\"") != NULL, "must contain bd_final_commanded");
     TEST_CHECK(strstr(json, "\"relay_starved_s\":-1234567.0") != NULL,
               "must contain relay_starved_s at its worst-case width (HP-02 starvation reporting)");
-    TEST_CHECK(strstr(json, "\"tc_lag_corr_c\":-1234.56,") != NULL,
+    TEST_CHECK(strstr(json, "\"tc_lag_corr_c\":-327.68,") != NULL,
               "control JSON carries the sheath-lag correction (raw = actual_c - tc_lag_corr_c)");
     TEST_CHECK(strstr(json, "\"relay_denied_reason\":255") != NULL, "must contain relay_denied_reason");
     /* All 3 zones must actually be present, not just zone 0 before a bail. */

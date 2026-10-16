@@ -557,7 +557,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
             if (!z->active) continue;
             zo->actual_c = z->actual_c;
             zo->actual_valid = z->actual_valid;
-            zo->tc_lag_corr_c = z->tc_lag_corr_c;
+            zo->tc_lag_corr_cc = (int16_t)lrintf(isfinite(z->tc_lag_corr_c) ? z->tc_lag_corr_c * 100.0f : 0.0f);
             zo->relay_commanded_on = z->relay_commanded_on;
             zo->duty = z->duty;
             zo->control_mode = (uint8_t)z->control_mode;

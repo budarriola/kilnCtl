@@ -147,7 +147,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         "\"bd_load_cap_boost\":%.4f,\"bd_final_commanded\":%.4f}",
                         first ? "" : ",", zi, z->control_mode, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false",
-                        (double)(z->actual_valid && isfinite(z->tc_lag_corr_c) ? z->tc_lag_corr_c : 0.0f),
+                        z->actual_valid ? (double)z->tc_lag_corr_cc / 100.0 : 0.0,
                         (double)z->duty,
                         z->relay_commanded_on ? "true" : "false", (double)z->pid_p, (double)z->pid_i,
                         (double)z->pid_d, (double)z->pid_ff, z->cooling_limited ? "true" : "false",

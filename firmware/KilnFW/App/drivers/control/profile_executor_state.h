@@ -182,9 +182,11 @@ typedef struct {
     float    actual_c;        /* calibration-corrected; meaningless if !actual_valid */
     bool     actual_valid;
     bool     relay_commanded_on;
+    int16_t  tc_lag_corr_cc;  /* sheath-lag correction inside actual_c, centi-degC (0 with
+                               * no tube; |corr| <= 60 C fits). The uncompensated calibrated
+                               * reading is actual_c - this/100. Sits in the padding hole
+                               * before duty, so sizeof(profile_exec_status_t) is unchanged. */
     float    duty;
-    float    tc_lag_corr_c;   /* sheath-lag correction inside actual_c (0 with no tube):
-                               * the uncompensated calibrated reading is actual_c - this */
     uint8_t  control_mode;    /* zone_control_mode_t */
     bool     faulted;         /* this zone's own per-zone guard tripped (guards 1/2/4/7) --
                                * the run continues for other active zones unless every
