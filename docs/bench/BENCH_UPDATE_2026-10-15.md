@@ -19,6 +19,16 @@ Result: the update could not start. Both attempts failed on the board with error
 
 Heap at the time: internal free 30007-30111 B, largest free block 10752 B, min free 13779 B. The board's own fetch admission refuses at this level, so pre.3 cannot reach GitHub or stage pre.4 on this unit while in this heap state. No stage was created, no install was started, and nothing on the board changed. The install, post-install checks and the zones comparison were not run.
 
+## Retry after reset, and PC-side stage
+
+The board was reset with sw_reset_esp (uptime 15 s afterwards, link up, no safety trip latched, so no clear was needed). Heap right after the reset: internal free 29871 B, largest free block 10752 B, min free 13643 B. This is the same largest block as before the reset, so a reboot does not help. update_check and update_stage_release (unforced) again failed with error=low_heap.
+
+Device finding: a pre.3 unit cannot self-update from GitHub. Fetch admission refuses because the largest internal block is about 10.7 KB, and that is the steady state, not a transient.
+
+Fallback: update_stage_upload of KilnCtrl-v1.0.0-pre.4.bin (2975824 B) with version 1.0.0-pre.4. The stage read back as verified, header ok, semver 1.0.0-pre.4, source upload, sha256 3b36b1f0...a17beec, identical to SHA256SUMS. So a PC-side stage works on pre.3.
+
+update_install_start then failed after 1 s: the tool reads GET /api/update/status first, and pre.3 answers HTTP 404 "no such endpoint". No install was performed; the board still runs pre.3 with pre.4 staged and verified. I did not POST /api/update/install by hand because that would bypass the tool. The earlier forced pre.3 install was reported UNKNOWN for the same missing endpoint. Post-install checks were not run.
+
 ## Open item
 
-The unforced pre.3 to pre.4 path is blocked by fetch heap admission on pre.3. A possible workaround not tried here is a reboot to get a fresher heap (not tried: it would not change the 10752 B largest block much), or staging via update_stage_upload from the PC. Both need a decision from the coordinator.
+To finish the test, someone must either let update_install_staged proceed when /api/update/status is 404 (a PC-side tooling change) or authorize a direct POST /api/update/install. The stage is in place and can be installed without re-uploading.
