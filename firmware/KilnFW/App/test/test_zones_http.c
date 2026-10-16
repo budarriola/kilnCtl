@@ -2388,6 +2388,16 @@ static void test_zones_cfg_lock_covers_commit_and_setters(void)
     TEST_CHECK(!zones_config_set_max_ramp_no_save(0, -1.0f), "rejected setter");
     TEST_CHECK(s_config_generation == g && s_zones_cfg_lock_acquires == a0 + 1,
                "a rejected setter neither locks nor bumps");
+
+    /* Sheath tau setter: same 0..600 s bound as the POST parser and validate. */
+    float tau_out = -1.0f;
+    TEST_CHECK(zones_config_set_tc_sheath_tau_no_save(0, 600.0f), "sheath tau setter takes 600 s");
+    TEST_CHECK(zones_config_get_tc_sheath_tau(0, &tau_out) && tau_out == 600.0f, "sheath tau 600 s reads back");
+    TEST_CHECK(!zones_config_set_tc_sheath_tau_no_save(0, 601.0f), "sheath tau setter refuses 601 s");
+    TEST_CHECK(!zones_config_set_tc_sheath_tau_no_save(0, -1.0f), "sheath tau setter refuses -1 s");
+    TEST_CHECK(!zones_config_set_tc_sheath_tau_no_save(0, NAN), "sheath tau setter refuses NaN");
+    TEST_CHECK(zones_config_get_tc_sheath_tau(0, &tau_out) && tau_out == 600.0f, "refused sheath tau leaves 600 s");
+    TEST_CHECK(zones_config_set_tc_sheath_tau_no_save(0, 0.0f), "sheath tau setter takes 0 (off)");
 }
 
 static void test_zones_post_refuses_relay_claimed_by_aux(void)

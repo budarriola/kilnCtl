@@ -265,4 +265,38 @@ void run_test_tc_lag_comp(void)
         int t4 = ticks_to_trip(0.5f, 20.0f, 0.0f, 200.0f, 0.0f, 0.0f, 200, &r0);
         TEST_CHECK(r1 == THERMAL_GUARD_TRIP_RUNAWAY && t3 < t4, "guard 3: lead alone reveals a hidden rise");
     }
+
+    /* Guard 3, each check on its own: raw flat, only the lead rises. With the
+     * rate check disabled (huge rate) the margin check alone must still see
+     * the compensated rise, and with the margin disabled the rate check must. */
+    {
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        for (int which = 0; which < 2; which++) {
+            cfg.runaway_rate_c_per_min = which == 0 ? 1e6f : 0.0f;
+            cfg.runaway_margin_c = which == 0 ? 0.0f : 1e6f;
+            thermal_guard_state_t s;
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = guard_in();
+            in.setpoint_c = 20.0f;
+            in.commanded_duty = 0.0f;
+            in.measurement_c = 200.0f;
+            bool tripped = false;
+            for (int i = 0; i < 400 && !tripped; i++) {
+                in.lead_c = 0.5f * (float)i; /* 30 C/min compensated rise, raw flat */
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_RUNAWAY,
+                       which == 0 ? "guard 3 margin check uses the compensated rise"
+                                  : "guard 3 rate check uses the compensated rise");
+            thermal_guard_reset(&s);
+            in.measurement_c = 200.0f;
+            tripped = false;
+            for (int i = 0; i < 400 && !tripped; i++) {
+                in.lead_c = 0.0f;
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            TEST_CHECK(!(tripped && s.reason == THERMAL_GUARD_TRIP_RUNAWAY), which == 0 ? "guard 3 margin: flat raw, no lead, no trip"
+                                            : "guard 3 rate: flat raw, no lead, no trip");
+        }
+    }
 }
