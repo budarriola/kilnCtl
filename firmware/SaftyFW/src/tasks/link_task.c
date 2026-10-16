@@ -2333,6 +2333,16 @@ static void link_task_handle_ct_auto_zero_begin(const kilnlink_frame_t *frame)
     if (dstatus != KILNLINK_CT_AUTO_ZERO_BEGIN_OK) {
         return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
     }
+    // PN-03: the accumulator averages whatever counts_avg it sees, so a run
+    // while heat is possible (relay energized, enable pending, heat requested,
+    // stale/no context, or current flowing) would bake load current into
+    // zero_counts and blind S3/S4/S8. Refuse, drop any stale result so the
+    // ESP's GET_CT_AUTO_ZERO poll reads IDLE, and log; no new wire value.
+    if (link_task_heat_possible_probe()) {
+        current_task_ct_auto_zero_cancel();
+        log_task_log(LOG_LEVEL_WARN, "ct_auto_zero", "refused, heat possible or current flowing");
+        return;
+    }
     if (!current_task_ct_auto_zero_begin(msg.channel)) {
         log_task_log(LOG_LEVEL_WARN, "ct_auto_zero", "refused, channel out of range or already in progress");
     } else {

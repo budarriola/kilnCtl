@@ -155,6 +155,23 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 #define CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S 600u     /* default 120 */
 #define CONFIG_PARAMS_BLIND_GRACE_MAX_S 300u        /* default 60 */
 #define CONFIG_PARAMS_TRIP_VERIFY_MAX_S 60u         /* default 10 */
+/* SET_PARAM upper bounds, owner decision A5 (2026-10-16): out-of-range is REFUSED, never clamped.
+   KNOWN_ISSUES SR-01/02/03. Roughly 5x the compiled default; stored records are not invalidated. */
+#define CONFIG_PARAMS_OVERSHOOT_TIME_MAX_S 600u        /* default 120 */
+#define CONFIG_PARAMS_RATE_WINDOW_MAX_S 300u           /* default 60 */
+#define CONFIG_PARAMS_FROZEN_WINDOW_MAX_S 3600u        /* default 600 */
+#define CONFIG_PARAMS_TC_DISAGREEMENT_TIME_MAX_S 1800u /* default 300 */
+#define CONFIG_PARAMS_CJ_TIME_MAX_S 600u               /* default 60 */
+#define CONFIG_PARAMS_BORROWED_STALE_MAX_S 120u        /* default 10 */
+#define CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S 600u   /* default 60 */
+#define CONFIG_PARAMS_STUCK_ON_TIME_MAX_S 120u         /* default 20 */
+#define CONFIG_PARAMS_OVERCURRENT_TIME_MAX_S 300u      /* default 30 */
+#define CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S 60u        /* default 5 */
+#define CONFIG_PARAMS_LINK_TIMEOUT_MAX_S 60u           /* default 10 */
+/* abs_max_temp_c ceiling: must stay >= the ESP's ZONE_MAX_TEMP_C_MAX (2500 C,
+   zones_config_accessors.h) so the Pico ceiling is never tighter than a zone max (owner rule);
+   tightening both to the TC range is KNOWN_ISSUES SR-12. Rejects 1e30 / inf. */
+#define CONFIG_PARAMS_ABS_MAX_TEMP_MAX_C 2500.0f
 #define CONFIG_PARAMS_CJ_MAX_MAX_C 125.0f           /* MAX31856 limit; default 85 */
 #define CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C 300.0f /* default 75 */
 #define CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C 500.0f  /* default 200 */

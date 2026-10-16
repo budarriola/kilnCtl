@@ -3413,6 +3413,18 @@ static void test_a5_threshold_upper_bounds(void)
         { 0x020Cu, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_CJ_MAX_MAX_C, "cj_max_c" },
         { 0x0202u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C, "overshoot_margin_c" },
         { 0x0208u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C, "tc_disagreement_c" },
+        { 0x0104u, KILNLINK_PARAM_TYPE_F32, CONFIG_PARAMS_ABS_MAX_TEMP_MAX_C, "abs_max_temp_c" },
+        { 0x0203u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_OVERSHOOT_TIME_MAX_S, "overshoot_time_s" },
+        { 0x0205u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_RATE_WINDOW_MAX_S, "rate_window_s" },
+        { 0x0207u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_FROZEN_WINDOW_MAX_S, "frozen_window_s" },
+        { 0x0209u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_TC_DISAGREEMENT_TIME_MAX_S, "tc_disagreement_time_s" },
+        { 0x020Du, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_CJ_TIME_MAX_S, "cj_time_s" },
+        { 0x020Eu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_BORROWED_STALE_MAX_S, "borrowed_stale_s" },
+        { 0x020Fu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S, "borrowed_stale_trip_s" },
+        { 0x0306u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_STUCK_ON_TIME_MAX_S, "stuck_on_time_s" },
+        { 0x031Eu, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_OVERCURRENT_TIME_MAX_S, "overcurrent_time_s" },
+        { 0x0401u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S, "context_max_age_s" },
+        { 0x0402u, KILNLINK_PARAM_TYPE_U16, CONFIG_PARAMS_LINK_TIMEOUT_MAX_S, "link_timeout_s" },
     };
     for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
         config_store_record_t rec;
@@ -3436,6 +3448,19 @@ static void test_a5_threshold_upper_bounds(void)
                d.trip_verify_s <= CONFIG_PARAMS_TRIP_VERIFY_MAX_S && d.cj_max_c <= CONFIG_PARAMS_CJ_MAX_MAX_C &&
                d.overshoot_margin_c <= CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C &&
                d.tc_disagreement_c <= CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C, "defaults are within the bounds");
+    TEST_CHECK(d.overshoot_time_s <= CONFIG_PARAMS_OVERSHOOT_TIME_MAX_S && d.rate_window_s <= CONFIG_PARAMS_RATE_WINDOW_MAX_S &&
+               d.frozen_window_s <= CONFIG_PARAMS_FROZEN_WINDOW_MAX_S && d.tc_disagreement_time_s <= CONFIG_PARAMS_TC_DISAGREEMENT_TIME_MAX_S &&
+               d.cj_time_s <= CONFIG_PARAMS_CJ_TIME_MAX_S && d.borrowed_stale_s <= CONFIG_PARAMS_BORROWED_STALE_MAX_S &&
+               d.borrowed_stale_trip_s <= CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S && d.stuck_on_time_s <= CONFIG_PARAMS_STUCK_ON_TIME_MAX_S &&
+               d.context_max_age_s <= CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S && d.link_timeout_s <= CONFIG_PARAMS_LINK_TIMEOUT_MAX_S,
+               "SR-01/02 defaults are within the new bounds");
+    {
+        config_store_record_t r; kilnlink_param_value_t pv; config_store_default(&r); memset(&pv, 0, sizeof pv);
+        pv.f32_val = INFINITY;
+        TEST_CHECK(!config_params_set(&r, 0x0104u, KILNLINK_PARAM_TYPE_F32, pv), "SR-03 abs_max_temp_c = inf refused");
+        pv.f32_val = 1300.0f;
+        TEST_CHECK(config_params_set(&r, 0x0104u, KILNLINK_PARAM_TYPE_F32, pv), "SR-03 abs_max_temp_c = 1300 (a real ceiling) still accepted");
+    }
     /* Load time is deliberately unbounded (owner decision pending): a stored big value still validates. */
     d.link_dead_hard_s = 5000u;
     const char *field = NULL, *rule = NULL; config_params_reject_reason_t reason;

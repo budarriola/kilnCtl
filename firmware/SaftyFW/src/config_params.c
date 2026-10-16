@@ -464,7 +464,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0101u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_TC_SOURCE_BOTH); rec->tc_source = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_SOURCE; return true;
     case 0x0102u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); /* CONFIG_REFERENCE.md sec1: "0-2" */ rec->borrowed_zone_index = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_BORROWED_ZONE_INDEX; return true;
     case 0x0103u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT); rec->tc_placement_mode = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_PLACEMENT_MODE; return true;
-    case 0x0104u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_POS(); rec->abs_max_temp_c = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; return true;
+    case 0x0104u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_POS(); CHECK_F32_MAX(CONFIG_PARAMS_ABS_MAX_TEMP_MAX_C); rec->abs_max_temp_c = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; return true;
     case 0x0105u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(7u); /* MAX31856_TC_TYPE_T (max31856.h); this file stays dependency-free of that header, same reason config_store.h gives -- see this file's own header comment on that isolation */ rec->tc_type = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_TYPE; return true; // 2026-08-24: NOW fields_set-gated too -- tc_type still keeps its own compiled default (config_store.h), the bit exists so a real commissioning write can be told apart from that default (see CONFIG_STORE_SET_TC_TYPE's comment)
     // Per-channel bookkeeping only -- the group bit (CONFIG_STORE_SET_
     // CT_CHANNEL_MAP) is NOT set here. See config_store.h's header comment
@@ -493,19 +493,19 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
     case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C); rec->overshoot_margin_c = value.f32_val; return true;
-    case 0x0203u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overshoot_time_s = value.u16_val; return true;
+    case 0x0203u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_OVERSHOOT_TIME_MAX_S); rec->overshoot_time_s = value.u16_val; return true;
     case 0x0204u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING); rec->max_rate_c_per_min = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; return true;
-    case 0x0205u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->rate_window_s = value.u16_val; return true;
+    case 0x0205u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_RATE_WINDOW_MAX_S); rec->rate_window_s = value.u16_val; return true;
     case 0x0206u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_BLIND_GRACE_MAX_S); rec->blind_grace_s = value.u16_val; return true;
-    case 0x0207u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->frozen_window_s = value.u16_val; return true;
+    case 0x0207u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_FROZEN_WINDOW_MAX_S); rec->frozen_window_s = value.u16_val; return true;
     case 0x0208u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_TC_DISAGREEMENT_MAX_C); rec->tc_disagreement_c = value.f32_val; return true;
-    case 0x0209u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->tc_disagreement_time_s = value.u16_val; return true;
+    case 0x0209u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_TC_DISAGREEMENT_TIME_MAX_S); rec->tc_disagreement_time_s = value.u16_val; return true;
     case 0x020Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->tc_expected_offset_c = value.f32_val; return true;
     case 0x020Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->cj_warn_c = value.f32_val; return true;
     case 0x020Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_CJ_MAX_MAX_C); rec->cj_max_c = value.f32_val; return true;
-    case 0x020Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->cj_time_s = value.u16_val; return true;
-    case 0x020Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->borrowed_stale_s = value.u16_val; return true;
-    case 0x020Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->borrowed_stale_trip_s = value.u16_val; return true;
+    case 0x020Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_CJ_TIME_MAX_S); rec->cj_time_s = value.u16_val; return true;
+    case 0x020Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_BORROWED_STALE_MAX_S); rec->borrowed_stale_s = value.u16_val; return true;
+    case 0x020Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_BORROWED_STALE_TRIP_MAX_S); rec->borrowed_stale_trip_s = value.u16_val; return true;
     case 0x0210u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(7u); /* MAX31856_TC_TYPE_T -- see 0x0105 above */ rec->borrowed_type_expected = value.u8_val; return true;
     // safety_tc_installed: 0/1 only (CHECK_U8_MAX(1u)) -- a boolean-shaped
     // field carried as u8 for wire-type consistency with every other
@@ -542,7 +542,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0303u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[1] = value.u16_val; return true;
     case 0x0304u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[2] = value.u16_val; return true;
     case 0x0305u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->correlation_window_s = value.u16_val; return true;
-    case 0x0306u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->stuck_on_time_s = value.u16_val; return true;
+    case 0x0306u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_STUCK_ON_TIME_MAX_S); rec->stuck_on_time_s = value.u16_val; return true;
     case 0x0307u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_TRIP_VERIFY_MAX_S); rec->trip_verify_s = value.u16_val; return true;
     case 0x0308u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[0] = value.f32_val; return true;
     case 0x0309u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_RANGE_OR_ZERO(CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX); rec->k_ct_v_per_a[1] = value.f32_val; return true;
@@ -580,7 +580,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x031Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_normal_a[1] = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_I_NORMAL_A_1; return true;
     case 0x031Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_normal_a[2] = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_I_NORMAL_A_2; return true;
     case 0x031Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overcurrent_pct = value.u16_val; return true;
-    case 0x031Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overcurrent_time_s = value.u16_val; return true;
+    case 0x031Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_OVERCURRENT_TIME_MAX_S); rec->overcurrent_time_s = value.u16_val; return true;
     // ct_topology: 0 (per_zone) or 1 (summed) only -- CONFIG_STORE_CT_
     // TOPOLOGY_PER_ZONE/_SUMMED. Not fields_set-gated: per_zone (0) is
     // already the safe default for a never-answered record, the same
@@ -596,8 +596,8 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0321u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[1] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_1; return true;
     case 0x0322u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); rec->zone_ct_channel[2] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL_2; return true;
 
-    case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->context_max_age_s = value.u16_val; return true;
-    case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_timeout_s = value.u16_val; return true;
+    case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_CONTEXT_MAX_AGE_MAX_S); rec->context_max_age_s = value.u16_val; return true;
+    case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_LINK_TIMEOUT_MAX_S); rec->link_timeout_s = value.u16_val; return true;
     case 0x0403u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_LINK_DEAD_HARD_MAX_S); rec->link_dead_hard_s = value.u16_val; return true;
     case 0x0404u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->mainfault_debounce_ms = value.u16_val; return true;
     case 0x0405u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->telemetry_period_ms = value.u16_val; return true;
