@@ -704,6 +704,11 @@ static bool s_loaded = false;
 // diagnostics" case 2, distinct from an ordinary never-committed board (case
 // 1, this stays false). See config_store_is_config_rejected()'s own comment.
 static bool s_load_rejected = false;
+// PS2-03: a record with a seq above the loaded one was refused at boot (too-new
+// format after a rollback, or a range rule). s_refused_seq_floor is the highest
+// refused seq; the next write seq is placed above it.
+static bool s_newer_refused = false;
+static uint32_t s_refused_seq_floor = 0u;
 static bool s_load_tc_offset_clamped = false; // review LOW-A: winning record's tc_offset_c was clamped at load
 
 // Module-scope, not a local: SAFTYFW_CONFIG_STORE_FLASH_SIZE is 4096 bytes
@@ -782,6 +787,10 @@ void config_store_boot_load(void)
 
     s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
+    s_refused_seq_floor = reject_info.refused_any ? reject_info.max_refused_seq : 0u;
+    s_newer_refused = reject_info.refused_any &&
+                      (s_cached_slot == CONFIG_STORE_NO_SLOT ||
+                       reject_info.max_refused_seq > s_cached_record.seq);
     s_load_tc_offset_clamped = (s_cached_slot != CONFIG_STORE_NO_SLOT) && reject_info.tc_offset_clamped;
     s_persisted_record = s_cached_record; // opus review item 4: seed flash-truth from what boot found
     // Seed the periodic RAM-integrity check's tracked CRC from the same
@@ -863,6 +872,18 @@ void config_store_boot_load(void)
                           "(UNCOMMISSIONED).\r\n");
     }
 
+    if (s_newer_refused && !s_load_rejected) {
+        // PS2-03: loud, not silent. The loaded record is older than one this
+        // build refused (rollback, or a range rule); abs_max/limits may differ.
+        // Reachable via config_store_newer_record_refused().
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "SaftyFW: WARN config_store loaded seq=%lu but REFUSED a newer record "
+                 "(seq=%lu); recommission/verify limits\r\n",
+                 (unsigned long)s_cached_record.seq, (unsigned long)s_refused_seq_floor);
+        console_uart_puts(line);
+    }
+
     if (s_load_tc_offset_clamped) {
         // Review LOW-A: loud, not silent. A stored offset beyond the write
         // bound was clamped; the Pico thermocouple may read cooler than the
@@ -886,6 +907,16 @@ bool config_store_tc_offset_was_clamped(void)
 bool config_store_is_config_rejected(void)
 {
     return s_loaded && s_load_rejected;
+}
+
+bool config_store_newer_record_refused(void)
+{
+    return s_loaded && s_newer_refused;
+}
+
+uint32_t config_store_refused_seq_floor(void)
+{
+    return s_loaded ? s_refused_seq_floor : 0u;
 }
 
 uint8_t config_store_get_tc_type(void)
@@ -1490,7 +1521,11 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
 
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
-    to_write.seq = s_cached_record.seq + 1u;
+    // PS2-03: above both the live seq and any refused record seq, so a write
+    // made under a rolled-back image can never lose to the newer image
+    // refused record after a roll-forward.
+    to_write.seq = ((s_cached_record.seq > s_refused_seq_floor) ? s_cached_record.seq
+                                                                 : s_refused_seq_floor) + 1u;
     // CT_CHANNEL_MASK.md step 3: keep the legacy ct_topology byte in
     // sync with zone_ct_channel on every write, so a board downgraded to
     // firmware that cannot see zone_ct_channel still reads a meaningful
@@ -1573,6 +1608,23 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
         plan.needs_erase = true;
     }
 
+    // PS2-04: an erase (log wrap, or the torn-slot fallback just above)
+    // runs under hal_flash_safe_execute(), which locks core 1 out for the
+    // whole sector erase (~45 ms typical, ~400 ms worst case), stopping the
+    // guards and the relay owner while the relay may be energized. The
+    // narrow tc_type / ct_cal writes are allowed while ARMED only when they
+    // are a single page program; one that needs an erase waits for disarm.
+    if (armed && plan.needs_erase) {
+        if (out_reason != NULL) {
+            *out_reason =
+                config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE);
+        }
+        if (out_decision != NULL) {
+            *out_decision = CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE;
+        }
+        return false;
+    }
+
     config_store_write_args_t args;
     args.region = s_regions[plan.sector_index];
     args.next_write_slot = plan.slot_index;
@@ -1619,6 +1671,7 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     config_store_seqlock_write(&to_write);
     s_cached_slot = plan.slot_index;
     s_cached_sector = plan.sector_index;
+    s_newer_refused = false; // PS2-03: this record now supersedes the refused one
     s_persisted_record = to_write; // opus review item 4: this landed in flash -- update flash-truth
     s_persisted_record_crc = config_store_record_crc(&s_persisted_record);
     if (out_reason != NULL) {

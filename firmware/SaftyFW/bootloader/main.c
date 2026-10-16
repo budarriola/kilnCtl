@@ -281,7 +281,15 @@ int main(void)
 
     // Step 6.
     if (decision.needs_metadata_update) {
-        bootloader_persist_metadata(&decision.updated_meta, latest_slot);
+        // PS2-01: a failed write for a PENDING_VERIFY slot means its attempt
+        // count was not recorded. Booting it anyway would let a crash-looping
+        // image run forever without being rolled back: treat the attempt as
+        // used up and go to recovery.
+        if (!bootloader_persist_metadata(&decision.updated_meta, latest_slot) &&
+            bootloader_metadata_persist_failure_blocks_boot(&decision.updated_meta,
+                                                            (uint8_t)decision.chosen_slot)) {
+            enter_recovery();
+        }
     }
 
     // Step 7 -- never returns.

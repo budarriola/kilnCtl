@@ -838,6 +838,8 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
                 out_reject->field = field;
                 out_reject->rule = rule;
                 out_reject->seq = scratch.seq;
+                out_reject->refused_any = true;
+                out_reject->max_refused_seq = scratch.seq;
             }
             return false;
         }
@@ -905,6 +907,8 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
                 out_reject->field = field;
                 out_reject->rule = rule;
                 out_reject->seq = scratch.seq;
+                out_reject->refused_any = true;
+                out_reject->max_refused_seq = scratch.seq;
             }
             return false;
         }
@@ -976,6 +980,8 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
                 out_reject->field = field;
                 out_reject->rule = rule;
                 out_reject->seq = scratch.seq;
+                out_reject->refused_any = true;
+                out_reject->max_refused_seq = scratch.seq;
             }
             return false;
         }
@@ -990,6 +996,17 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
     // the caller (config_store_find_latest() / config_store_flash.c's
     // read_latest_or_default()) falls back to config_store_default() with
     // calibration_missing set, exactly as it does for a CRC failure.
+    //
+    // PS2-03: but remember that it existed. The header (magic, version, seq)
+    // is the part a future format keeps; an erased/torn-looking version
+    // (>= 0x100) or an all-ones seq is not trusted.
+    if (out_reject != NULL && version != 0u && version < 0x100u) {
+        uint32_t seq = get_u32_le(&in[REC_OFF_SEQ]);
+        if (seq != 0xFFFFFFFFu) {
+            out_reject->refused_any = true;
+            out_reject->max_refused_seq = seq;
+        }
+    }
     return false;
 }
 
@@ -1174,6 +1191,8 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
     config_store_reject_info_t best_reject;
     memset(&best_reject, 0, sizeof(best_reject));
     bool have_rejected = false;
+    bool any_refused = false;
+    uint32_t max_refused = 0u;
 
     // Known limitation: v1 firmware wrote 256 B records (16 slots), but this
     // scan uses the current 512 B stride, so odd v1 slots are never seen when
@@ -1186,6 +1205,10 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
         config_store_record_t candidate;
         config_store_reject_info_t reject_info;
         if (!config_store_unpack_ex(rec_bytes, &candidate, &reject_info)) {
+            if (reject_info.refused_any && (!any_refused || reject_info.max_refused_seq > max_refused)) {
+                any_refused = true;
+                max_refused = reject_info.max_refused_seq;
+            }
             if (reject_info.rejected && (!have_rejected || reject_info.seq > best_reject.seq)) {
                 best_reject = reject_info;
                 have_rejected = true;
@@ -1208,6 +1231,10 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
         if (out_reject != NULL && have_rejected) {
             *out_reject = best_reject;
         }
+        if (out_reject != NULL) {
+            out_reject->refused_any = any_refused;
+            out_reject->max_refused_seq = max_refused;
+        }
         return CONFIG_STORE_NO_SLOT;
     }
 
@@ -1215,6 +1242,10 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
     if (out_reject != NULL && best_clamped) {
         out_reject->tc_offset_clamped = true; // rejected stays false: the record loaded
         out_reject->tc_offset_stored_c = best_clamped_stored_c;
+    }
+    if (out_reject != NULL) {
+        out_reject->refused_any = any_refused;
+        out_reject->max_refused_seq = max_refused;
     }
     return best_slot;
 }
@@ -1247,6 +1278,8 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
     config_store_reject_info_t best_reject;
     memset(&best_reject, 0, sizeof(best_reject));
     bool have_rejected = false;
+    bool any_refused = false;
+    uint32_t max_refused = 0u;
 
     for (size_t s = 0; s < SAFTYFW_CONFIG_STORE_NUM_SECTORS; s++) {
         if (sectors[s] == NULL) {
@@ -1255,6 +1288,10 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
         config_store_record_t sector_rec;
         config_store_reject_info_t sector_reject;
         size_t sector_slot = config_store_find_latest_ex(sectors[s], &sector_rec, &sector_reject);
+        if (sector_reject.refused_any && (!any_refused || sector_reject.max_refused_seq > max_refused)) {
+            any_refused = true;
+            max_refused = sector_reject.max_refused_seq;
+        }
         if (sector_slot == CONFIG_STORE_NO_SLOT) {
             if (sector_reject.rejected && (!have_rejected || sector_reject.seq > best_reject.seq)) {
                 best_reject = sector_reject;
@@ -1276,6 +1313,10 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
         if (out_reject != NULL && have_rejected) {
             *out_reject = best_reject;
         }
+        if (out_reject != NULL) {
+            out_reject->refused_any = any_refused;
+            out_reject->max_refused_seq = max_refused;
+        }
         return CONFIG_STORE_NO_SLOT;
     }
 
@@ -1284,6 +1325,10 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
     if (out_reject != NULL && best_clamped) {
         out_reject->tc_offset_clamped = true;
         out_reject->tc_offset_stored_c = best_clamped_stored_c;
+    }
+    if (out_reject != NULL) {
+        out_reject->refused_any = any_refused;
+        out_reject->max_refused_seq = max_refused;
     }
     return best_slot;
 }
@@ -1684,6 +1729,9 @@ const char *config_store_write_decision_reason(config_store_write_decision_t dec
         case CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN:
             return "refused: relay is ARMED and this write path did not determine heat state -- "
                    "tc_type may only be changed while ARMED via a caller that confirms heat is off";
+        case CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE:
+            return "refused: relay is ARMED and this write needs a flash sector erase, which would "
+                   "stall the safety core -- retry when disarmed";
         default:
             return "unknown";
     }
