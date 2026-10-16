@@ -115,8 +115,7 @@ foreach ($rel in ($psramFiles | Select-Object -Unique)) {
     $path = Join-Path $root $rel
     if (-not (Test-Path $path)) { $bad += "$rel missing"; continue }
     $code = Strip-C ([IO.File]::ReadAllText($path))
-    $code = [regex]::Replace($code, '(?s)void\s+ui_page_diagnostics_prime_ota_state\s*\(void\)\s*\{.*??
-\}', '') # sanctioned one-shot read, off the LVGL task
+    $code = [regex]::Replace($code, '(?s)void\s+ui_page_diagnostics_prime_ota_state\s*\(void\)\s*\{.*?\r?\n\}', '') # sanctioned one-shot read, off the LVGL task
     foreach ($m in [regex]::Matches($code, $directBan)) {
         $bad += "${rel}: PSRAM-stack code calls guarded writer $($m.Groups[1].Value)( directly; hop it through flash_hop_run (bx_flash_worker)"
     }
