@@ -723,6 +723,24 @@ def _staged_id(host: str) -> str:
     return ""
 
 
+def _legacy_install_status(host: str) -> Optional[dict]:
+    """Precheck fallback for firmware that predates GET /api/update/status (404).
+
+    Reads GET /api/update/stage instead and reports staged=True only when the board says
+    the stage is not busy and its header state is exactly 'verified'. Any read failure or
+    other state returns None (caller refuses). running_version is unknown on such a board.
+    """
+    try:
+        sg = uhc.get_stage_status(host)
+    except uhc.UpdateHttpError:
+        return None
+    ok = (sg.get("staged") is True and not sg.get("busy")
+          and str(sg.get("state", "")).lower() == "verified")
+    return {"running_version": "unknown", "stage_busy": bool(sg.get("busy")), "staged": ok,
+            "staged_version": sg.get("semver") or None,
+            "last_install": {"state": "none", "code": "none", "reason": "none"}, "legacy_precheck": True}
+
+
 def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: float) -> str:
     t0 = time.monotonic()
     # Whole call (initial GET, POST, settle sleep and polling) stays under the
@@ -732,7 +750,11 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
     try:
         before = uhc.get_install_status(resolved)
     except uhc.UpdateHttpError as exc:
-        return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
+        before = None
+        if exc.status == 404:
+            before = _legacy_install_status(resolved)
+        if before is None:
+            return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
     if confirm is not True:
         pend = _PENDING_INSTALL.get(resolved)
         if pend is not None and time.monotonic() - pend["t_pre"] > _PENDING_TTL_S:
