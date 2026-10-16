@@ -51,6 +51,7 @@ static const char *s_pending_reason = "";
 static esp_err_t s_format_result = ESP_OK;
 static int s_format_calls = 0;
 bool cfg_fs_mount_format_confirmation_pending(void) { return s_pending; }
+esp_err_t pref_cfg_fs_discard_rejected(const char *rel_path) { (void)rel_path; return ESP_ERR_INVALID_STATE; } /* persmed MED-D: real logic is tested in test_persist_campaign10 */
 const char *cfg_fs_mount_format_pending_reason(void) { return s_pending_reason; }
 esp_err_t cfg_fs_confirm_format_device(void)
 {
@@ -245,11 +246,13 @@ static void test_start(void)
     TEST_SECTION("cfg_fs_format_http_start -- registers GET pending and POST confirm; propagates failure");
     s_reg_calls = 0;
     s_reg_fail_at = 0;
-    TEST_CHECK(cfg_fs_format_http_start() == ESP_OK && s_reg_calls == 2, "two routes registered");
+    TEST_CHECK(cfg_fs_format_http_start() == ESP_OK && s_reg_calls == 3, "three routes registered");
     TEST_CHECK(strcmp(s_reg_uris[0]->uri, "/api/cfgfs/format_pending") == 0 && s_reg_uris[0]->method == HTTP_GET,
                "route 1 is GET pending");
     TEST_CHECK(strcmp(s_reg_uris[1]->uri, "/api/cfgfs/format_confirm") == 0 && s_reg_uris[1]->method == HTTP_POST,
                "route 2 is POST confirm (never GET)");
+    TEST_CHECK(strcmp(s_reg_uris[2]->uri, "/api/cfgfs/discard_rejected") == 0 && s_reg_uris[2]->method == HTTP_POST,
+               "persmed MED-D: route 3 is POST discard_rejected");
     s_reg_calls = 0;
     s_reg_fail_at = 2;
     TEST_CHECK(cfg_fs_format_http_start() == ESP_FAIL, "second registration failure propagates");

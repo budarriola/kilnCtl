@@ -519,8 +519,32 @@ static void test_write_atomic_refused_by_reset_fence(void)
     TCF_RMDIR("cfg_fs_test_fence");
 }
 
+static void test_read_distinguishes_absent_from_unopenable(void)
+{
+    TEST_SECTION("cfg_fs: read() answers NOT_FOUND only for a missing file; any other open failure is ESP_FAIL (persmed MED-A)");
+    const char *base = "cfg_fs_test_read_err";
+    reset_scratch(base, NULL);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "init succeeds");
+    char buf[16];
+    size_t n = 0;
+    TEST_CHECK(cfg_fs_read("missing.json", buf, sizeof(buf), &n) == ESP_ERR_NOT_FOUND, "a missing file is NOT_FOUND");
+#ifdef _WIN32
+    /* A directory sitting at the file path makes fopen(path, "rb") fail with EACCES on Windows: the path is
+     * occupied, so it is NOT absent. */
+    char dp[600];
+    snprintf(dp, sizeof(dp), "%s/occupied.json", base);
+    TEST_CHECK(TCF_MKDIR(dp) == 0, "test setup: a directory occupies the file path");
+    esp_err_t rc = cfg_fs_read("occupied.json", buf, sizeof(buf), &n);
+    TEST_CHECK(rc != ESP_ERR_NOT_FOUND && rc != ESP_OK, "an unopenable existing path is an error, never NOT_FOUND");
+    TCF_RMDIR(dp);
+#endif
+    cfg_fs_deinit();
+    TCF_RMDIR(base);
+}
+
 void run_test_cfg_fs(void)
 {
+    test_read_distinguishes_absent_from_unopenable();
     test_write_atomic_refused_by_reset_fence();
     test_mount_and_round_trip();
     test_overwrite_replaces_old_content();

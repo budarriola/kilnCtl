@@ -701,6 +701,17 @@ static void test_med1_rejected_file_never_overwritten(void)
     TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "MED-1: path marked rev-unknown");
     TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_ERR_INVALID_STATE,
                "MED-1: saves refused while the rejected file stands");
+    TEST_CHECK(pref_cfg_fs_discard_rejected("other.bin") == ESP_ERR_INVALID_STATE,
+               "persmed MED-D: discard refuses a path that is not rejected");
+    TEST_CHECK(pref_cfg_fs_discard_rejected("small.bin") == ESP_OK && !pref_cfg_fs_rev_unknown("small.bin") &&
+                   read_raw_file("small.bin", got, sizeof(got)) == (size_t)-1,
+               "persmed MED-D: discard removes the rejected file and clears the refusal");
+    TEST_CHECK(read_raw_file("small.bin.bad", got, sizeof(got)) == sizeof(file),
+               "persmed MED-D: the .bad copy survives the discard");
+    TEST_CHECK(pref_cfg_fs_discard_rejected("small.bin") == ESP_ERR_INVALID_STATE,
+               "persmed MED-D: a second discard (no longer rejected) is refused");
+    write_raw_file("small.bin", file, sizeof(file));
+    (void)pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
     TEST_CHECK(pref_cfg_fs_remove("small.bin") == ESP_OK && !pref_cfg_fs_rev_unknown("small.bin"),
                "MED-1: a deliberate remove clears the refusal");
     TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_OK, "MED-1: save works after remove");

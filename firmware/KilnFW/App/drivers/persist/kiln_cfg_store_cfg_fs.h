@@ -76,6 +76,7 @@ extern "C" {
 #endif
 
 #define KILN_CFG_STORE_FILE_PATH "kiln_configs.json"
+#define KILN_CFG_STORE_NVS_BAD_PATH "kiln_configs.nvs.bad" /* persmed MED-B: copy of a discarded legacy NVS blob */
 
 /* Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
  * cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- same seam
@@ -103,13 +104,21 @@ typedef enum {
     KILN_CFG_FILE_VALID,
     KILN_CFG_FILE_UNKNOWN,  /* read error or scratch OOM: the file was not examined */
     KILN_CFG_FILE_NEWER,    /* version above this build's, or larger than any store it writes */
-    KILN_CFG_FILE_REJECTED, /* wrong size or older version without a migration chain (corrupt) */
+    KILN_CFG_FILE_REJECTED, /* wrong size or version 0 (corrupt) */
+    KILN_CFG_FILE_OLDER,    /* persmed MED-C: written by an older layout; kiln_cfg_store.c migrates it */
 } kiln_cfg_file_state_t;
 
 /* load_raw plus the file state; `preserve` copies a REJECTED file to "kiln_configs.json.bad" (resolve passes
  * true, read-only callers false). */
 void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid,
                                        kiln_cfg_file_state_t *out_state, bool preserve);
+
+/* Copies `raw` to "kiln_configs.json.bad" unless an identical copy exists; true when a copy of these bytes exists. */
+bool kiln_cfg_store_cfg_fs_preserve_bad(const void *raw, size_t len);
+
+/* persmed MED-B: before a deliberate discard, keep whatever the kiln_configs file holds as ".bad". True when the
+ * file is absent / cfg unmounted (nothing to lose) or a copy was made; false when it exists but cannot be kept. */
+bool kiln_cfg_store_cfg_fs_preserve_existing_file(void);
 
 /* Writes `blob` (must already be a valid, current-version struct -- this
  * function does not validate it) to the file at `rev`. No-op returning

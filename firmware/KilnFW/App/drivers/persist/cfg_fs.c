@@ -522,7 +522,15 @@ esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_l
     }
     FILE *f = fopen(path, "rb");
     if (!f) {
-        return ESP_ERR_NOT_FOUND;
+        /* persmed MED-A: only a genuinely missing file is NOT_FOUND ("never saved"). Any other fopen failure
+         * (EIO, EACCES, ENOMEM, a directory at the path, ...) means the file may exist: ESP_FAIL, so callers
+         * treat its state as unknown and never as absent. */
+        int e = errno;
+        if (e == ENOENT || e == ENOTDIR) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        ESP_LOGW("cfg_fs", "fopen('%s') failed: errno %d -- file state unknown", rel_path, e);
+        return ESP_FAIL;
     }
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);

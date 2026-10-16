@@ -517,6 +517,17 @@ esp_err_t pref_cfg_fs_remove(const char *rel_path)
     return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
 }
 
+esp_err_t pref_cfg_fs_discard_rejected(const char *rel_path)
+{
+    if (!rel_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!pref_cfg_fs_rev_unknown(rel_path)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return pref_cfg_fs_remove(rel_path);
+}
+
 static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
                               uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes,
                               uint32_t *out_rev, bool *out_used_file, uint8_t *file_bytes, bool adopt_nvs_if_unreadable)

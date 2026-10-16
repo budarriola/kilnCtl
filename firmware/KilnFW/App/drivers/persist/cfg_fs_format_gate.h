@@ -143,6 +143,11 @@ cfg_fs_confirm_decision_t cfg_fs_confirm_decide(bool mounted, bool skipped_for_r
  * the httpd handler needs no stack copy of the query string. */
 bool cfg_fs_confirm_uri_force_healthy(const char *uri);
 
+/* persmed MED-D: copies the (undecoded) value of query key `key` into out (NUL-terminated). True only when the
+ * key is present with a non-empty value that fits cap and contains only [A-Za-z0-9._-]; anything else
+ * (NULL, absent, empty, too long, percent-encoded or other characters) is false and out is left empty. */
+bool cfg_fs_uri_query_token(const char *uri, const char *key, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

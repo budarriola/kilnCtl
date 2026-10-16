@@ -123,11 +123,20 @@ void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t
         return;
     }
     if (len != KCFG_FILE_BUF_MAX) {
-        /* Unlike zones_config_cfg_fs.c/profiles_cfg_fs.c, this store has no
-         * versioned file layout of its own to migrate from a shorter/older
-         * shape (see this module's header comment) -- ANY size other than
-         * exactly "rev + one current kiln_cfg_store_blob_t" is invalid,
-         * full stop. It is also NOT absent: it is preserved, never replaced. */
+        /* A size other than "rev + one current blob" is never valid as-is. persmed MED-C: if the version byte
+         * says it was written by an OLDER layout, it is migratable (kiln_cfg_store.c owns the frozen v1/v2
+         * layouts and converts it), not corrupt -- the next version bump must not lock the store. Anything
+         * else is REJECTED: preserved, never replaced. */
+        if (len >= 5 && raw[4] >= 1 && raw[4] < KILN_CFG_STORE_VERSION) {
+            ESP_LOGW(KCFG_FS_TAG, "kiln config store file is %u bytes with version byte %u (older layout) -- "
+                                  "migratable",
+                     (unsigned)len, (unsigned)raw[4]);
+            free(raw);
+            if (out_state) {
+                *out_state = KILN_CFG_FILE_OLDER;
+            }
+            return;
+        }
         ESP_LOGE(KCFG_FS_TAG, "kiln config store file is %u bytes, expected %u -- rejected (kept untouched)",
                  (unsigned)len, (unsigned)KCFG_FILE_BUF_MAX);
         if (preserve) {
@@ -151,17 +160,20 @@ void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t
 
     if (out_blob->version != KILN_CFG_STORE_VERSION) {
         bool newer = out_blob->version > KILN_CFG_STORE_VERSION;
+        /* persmed MED-C: an exact-size file at a version BELOW this build's is an older layout to migrate, not a
+         * rejected file. Version 0 (never a real layout) stays corrupt. */
+        bool older = !newer && out_blob->version >= 1;
         ESP_LOGE(KCFG_FS_TAG,
-                 "kiln config store file (rev %lu) claims version %u, this firmware wants %u -- %s, kept untouched",
+                 "kiln config store file (rev %lu) claims version %u, this firmware wants %u -- %s%s",
                  (unsigned long)rev, (unsigned)out_blob->version, (unsigned)KILN_CFG_STORE_VERSION,
-                 newer ? "NEWER" : "rejected");
-        if (preserve && !newer) {
+                 newer ? "NEWER" : older ? "OLDER (migratable)" : "rejected", older ? "" : ", kept untouched");
+        if (preserve && !newer && !older) {
             (void)kcfg_preserve_rejected(raw, len);
         }
         free(raw);
         memset(out_blob, 0, sizeof(*out_blob));
         if (out_state) {
-            *out_state = newer ? KILN_CFG_FILE_NEWER : KILN_CFG_FILE_REJECTED;
+            *out_state = newer ? KILN_CFG_FILE_NEWER : older ? KILN_CFG_FILE_OLDER : KILN_CFG_FILE_REJECTED;
         }
         return;
     }
@@ -172,6 +184,35 @@ void kiln_cfg_store_cfg_fs_load_raw_ex(kiln_cfg_store_blob_t *out_blob, uint32_t
     if (out_state) {
         *out_state = KILN_CFG_FILE_VALID;
     }
+}
+
+bool kiln_cfg_store_cfg_fs_preserve_bad(const void *raw, size_t len)
+{
+    return kcfg_preserve_rejected((const uint8_t *)raw, len);
+}
+
+bool kiln_cfg_store_cfg_fs_preserve_existing_file(void)
+{
+    if (!cfg_fs_is_available()) {
+        return true; /* nothing on disk to lose */
+    }
+    size_t cap = KCFG_FILE_BUF_MAX * 2; /* also covers an oversized (newer) file up to twice this build's size */
+    uint8_t *raw = persist_scratch_alloc(cap);
+    if (!raw) {
+        return false;
+    }
+    size_t len = 0;
+    esp_err_t err = cfg_fs_read(KILN_CFG_STORE_FILE_PATH, raw, cap, &len);
+    bool ok;
+    if (err == ESP_ERR_NOT_FOUND) {
+        ok = true; /* no file, nothing to keep */
+    } else if (err == ESP_OK && len > 0) {
+        ok = kcfg_preserve_rejected(raw, len);
+    } else {
+        ok = false; /* unreadable or oversized beyond the cap: cannot make a copy */
+    }
+    free(raw);
+    return ok;
 }
 
 void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *out_rev, bool *out_valid)
@@ -251,7 +292,9 @@ bool kiln_cfg_store_cfg_fs_resolve_ex(const kiln_cfg_store_blob_t *nvs_blob, boo
     if (out_state) {
         *out_state = fstate;
     }
-    if (fstate == KILN_CFG_FILE_UNKNOWN || fstate == KILN_CFG_FILE_NEWER || fstate == KILN_CFG_FILE_REJECTED) {
+    if (fstate == KILN_CFG_FILE_UNKNOWN || fstate == KILN_CFG_FILE_NEWER || fstate == KILN_CFG_FILE_REJECTED ||
+        fstate == KILN_CFG_FILE_OLDER) {
+        /* persmed MED-C: OLDER is reported, never decided here -- kiln_cfg_store.c migrates it. */
         /* persfx4 MED-3: a file that exists but cannot be used is never "absent". The frozen NVS blob does NOT
          * replace it and nothing is written: out_blob stays zeroed, trustworthy=false, and the caller quarantines. */
         free(file_blob);
