@@ -385,3 +385,5 @@ Their outputs reach persistence only through the validating setters.
 - LOW-2 fixed in the autotune engine: a blocked heat write while STEPPING/RELAY_* latches `blocked_during_measure`, and finalize then ABORTS ("heat was blocked during the measurement") instead of DONE. The thermal-guard zero-duty feed part of the finding is skipped (separate guard path, no safe host test).
 - LOW-3 fixed: `pid_reseed_derivative` on the first valid sample after a sensor outage, so there is no derivative kick.
 - INFO-1 (aux NaN temperature term): not done, optional.
+
+- **LOW-2 zero-duty guard feed** (lowfin, 2026-10-15): left open deliberately. A blocked autotune measurement already ABORTS, and changing what `thermal_guard_tick()` is fed from autotune is a safety-guard input change with no safe host test; needs a deliberate review, not a LOW sweep.

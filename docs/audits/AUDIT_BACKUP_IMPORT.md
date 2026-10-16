@@ -195,3 +195,5 @@ Verified sound, no finding:
 - LOW-1 fixed: the version gate compares the double and requires an integer (no `(int)` truncation of 7.9 or 1e300).
 - LOW-2 fixed: `KILN_CFG_PLAN_MAX_LINES` 32 -> 64; lines past the cap are counted and the rendered plan ends "... N more lines not shown".
 - LOW-3 partly fixed: `backup_import_restore_in_flight()` now answers 409 on profile save, profile delete, profile import, live-profile decide and the aux settings POST. Not fenced: the aux manual handler (runtime output, not a stored config) and the update-settings POST (OTA/update area owned by other work); left open.
+
+- **LOW-3 restore fence** (lowfin, 2026-10-15): `POST /api/update/settings` now answers 409 during a restore (`update_settings_http.c`; test in `test_backup_import.c`, negtest `fence_off` CAUGHT). The aux manual POST stays unfenced on purpose: it drives a runtime output, and refusing an output-off command during a restore would be the wrong direction.
