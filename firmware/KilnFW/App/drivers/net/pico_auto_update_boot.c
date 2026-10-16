@@ -14,6 +14,7 @@
 #include "ota_http.h" /* ota_http_update_try_begin() -- the single cross-processor update mutex.
                        * ota_state.h beside it declares only the _end() half. */
 #include "ota_interlock.h"
+#include "relay_authority.h" /* UP-01: relay_authority_heat_run_active() */
 #include "ota_pico_relay.h"
 #include "ota_state.h"
 #include "pico_auto_update.h"
@@ -124,6 +125,24 @@ static bool attempt_update_acquire(void)
     if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
         ESP_LOGW(TAG, "update attempt stood down: an update is already in progress");
         return false;
+    }
+
+    /* UP-01: the interlock read above ran BEFORE the claim, so a firing started in that window passed the profile
+     * start's own update-claim check (no claim yet) and this task's interlock read (run not committed yet). Now
+     * that the claim blocks every heat path, re-read authoritatively, same as ota_recovery_boot_run: a Pico
+     * reboot mid-firing must never come from this task. */
+    {
+        bool profile_running = false;
+        bool autotune_running = false;
+        relay_authority_heat_run_active(&profile_running, &autotune_running);
+        char reason2[OTA_INTERLOCK_REASON_MAX];
+        ota_interlock_result_t gate2 = ota_http_check_interlocks(false, reason2, sizeof(reason2));
+        if (profile_running || autotune_running || gate2 != OTA_INTERLOCK_OK) {
+            ESP_LOGW(TAG, "update attempt stood down after the claim: %s",
+                     gate2 != OTA_INTERLOCK_OK ? reason2 : "a firing or autotune started");
+            ota_http_update_end();
+            return false;
+        }
     }
     return true;
 }

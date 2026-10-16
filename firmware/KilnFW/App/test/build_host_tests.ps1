@@ -197,6 +197,7 @@ try {
         (Join-Path $testDir "test_cone_table.c"),
         (Join-Path $testDir "test_ramp_lock_onesided.c"),
         (Join-Path $testDir "test_zone_sweep_relay_off_wiring.c"),
+        (Join-Path $testDir "test_lowlink_wiring.c"),
         (Join-Path $testDir "test_approach_rate_cap.c"),
         (Join-Path $testDir "test_safety_ceiling_policy.c"),
         # docs/WEB_AUTH_PLAN.md section 5 -- the fail-closed enforcement

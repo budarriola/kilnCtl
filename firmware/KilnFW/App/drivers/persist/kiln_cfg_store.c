@@ -723,7 +723,9 @@ static void nvs_load_store_with_cfg_fs(void)
             /* PS-01: file untouched, no .bad; the quarantine is RAM-only so a reboot retries the migration. */
             set_quarantine("kiln config file could not be read for migration (transient) -- file kept, reboot to retry");
         } else {
-            set_quarantine("kiln config file is an older layout this firmware cannot migrate -- copy kept as .bad");
+            set_quarantine(kiln_cfg_store_cfg_fs_last_preserve_failed()
+                               ? "kiln config file is an older layout this firmware cannot migrate -- copy could NOT be kept as .bad"
+                               : "kiln config file is an older layout this firmware cannot migrate -- copy kept as .bad");
         }
         s_kiln_cfg_rev = nvs_rev;
         return;
@@ -737,7 +739,9 @@ static void nvs_load_store_with_cfg_fs(void)
         snprintf(qmsg, sizeof(qmsg), "kiln config file is %s -- file left untouched",
                  fstate == KILN_CFG_FILE_NEWER     ? "newer than this firmware"
                  : fstate == KILN_CFG_FILE_UNKNOWN ? "unreadable at boot"
-                                                   : "corrupt or the wrong size (copy kept as .bad)");
+                           : kiln_cfg_store_cfg_fs_last_preserve_failed()
+                               ? "corrupt or the wrong size (copy could NOT be kept as .bad)"
+                               : "corrupt or the wrong size (copy kept as .bad)");
         reset_to_defaults();
         set_quarantine(qmsg);
         s_kiln_cfg_rev = nvs_rev;

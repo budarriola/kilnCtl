@@ -3401,6 +3401,45 @@ static void tt_set_reply(uint8_t outcome, uint8_t trip_seq)
     s_stub_request_id_delta = 0u;
 }
 
+static void el01_apply_fresh_status(SafetyLinkClass *link)
+{
+    uart_proto_message_t status;
+    memset(&status, 0, sizeof(status));
+    status.rx_ms = (uint32_t)s_fake_tick_count;
+    set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
+    status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    safety_apply_status(link, &status);
+}
+
+static void test_el01_local_freshness_uses_diag_age_not_status_age(void)
+{
+    TEST_SECTION("EL-01 -- clear_trip/test_trip judge the DIAG frame's own age (4500 ms), not the STATUS tick");
+    safety_link_test_trip_outcome_t oc;
+    uint8_t seq;
+    SafetyLinkClass link = boot_clear_test_setup();
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_fake_tick_count = 0;
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 1u, 0x5Au);
+    /* STATUS keeps arriving, DIAG stops: 3000 ms old is still fresh (<= 4500), STATUS age is irrelevant. */
+    s_fake_tick_count = 3000;
+    el01_apply_fresh_status(&link);
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "EL-01: DIAG 3000 ms old (STATUS fresh) still clears");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u, "EL-01: that clear was sent");
+    /* DIAG now 6000 ms old with a fresh STATUS: refused, nothing sent. */
+    s_fake_tick_count = 6000;
+    el01_apply_fresh_status(&link);
+    base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_ERR_INVALID_STATE,
+               "EL-01: clear refused when the DIAG is older than 4500 ms though STATUS is fresh");
+    TEST_CHECK(s_stub_broadcast_count == base, "EL-01: stale-DIAG clear sends nothing");
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_INVALID_STATE &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_STALE,
+               "EL-01: test trip refused LOCAL_STALE on an old DIAG with fresh STATUS");
+    TEST_CHECK(s_stub_broadcast_count == base, "EL-01: stale-DIAG test trip sends nothing");
+}
+
 static void test_send_test_trip(void)
 {
     TEST_SECTION("safety_link_send_test_trip -- local refusals send nothing; happy path maps "
@@ -4099,6 +4138,7 @@ int main(void)
     test_tripfx4_low2_diag_age_through_get_status_and_reboot_clear();
     test_wp3_info5_test_trip_result_counted_in_stats();
     test_send_test_trip();
+    test_el01_local_freshness_uses_diag_age_not_status_age();
     test_low4_link_down_invalidates_uptime_baseline();
     test_reboot_counted_once_diag_before_fw_version();
     test_reboot_counted_once_per_diag_all_signals();

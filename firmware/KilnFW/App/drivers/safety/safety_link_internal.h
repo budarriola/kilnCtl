@@ -59,6 +59,7 @@ static inline void safety_unlock(SafetyLinkClass *link)
 
 uint32_t safety_elapsed_ms(TickType_t since);
 uint16_t safety_age_ms_locked(const SafetyLinkClass *link);
+uint32_t safety_diag_age_ms_locked(SafetyLinkClass *link); /* EL-01: age of the DIAG frame itself, latched stale */
 bool     safety_link_up_locked(const SafetyLinkClass *link);
 void     safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link);
 

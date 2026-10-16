@@ -1903,6 +1903,33 @@ static void med3_run_case(const char *label, size_t len, uint8_t version_or_0, b
     (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
 }
 
+static esp_err_t ps02_failing_write(const char *path, const void *data, size_t len)
+{
+    (void)path; (void)data; (void)len;
+    return ESP_FAIL;
+}
+
+static void test_ps02_failed_bad_copy_is_not_claimed(void)
+{
+    TEST_SECTION("PS-02: a failed .bad preserve says the copy could NOT be kept");
+    const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    memset(s_med3_file, 0x5A, sizeof(s_med3_file));
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, s_med3_file, full - 3) == ESP_OK, "setup: bad file");
+    kiln_cfg_store_cfg_fs_set_write_fn(ps02_failing_write);
+    nvs_load_store_with_cfg_fs();
+    kiln_cfg_store_cfg_fs_set_write_fn(NULL);
+    char reason[192];
+    reason[0] = 0;
+    TEST_CHECK(kiln_cfg_store_is_quarantined(reason, sizeof(reason)), "quarantined");
+    TEST_CHECK(strstr(reason, "could NOT be kept") != NULL, "PS-02: reason says no .bad copy exists");
+    TEST_CHECK(strstr(reason, "copy kept as .bad") == NULL, "PS-02: reason does not claim a copy was kept");
+    size_t bgot = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", s_med3_file, sizeof(s_med3_file), &bgot) == ESP_ERR_NOT_FOUND,
+               "PS-02: no .bad file really exists");
+}
+
 static void test_med3_unusable_file_quarantines_never_absent(void)
 {
     const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
@@ -4520,6 +4547,7 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_interrupted_write_leaves_old_or_new();
     test_med3_unusable_file_quarantines_never_absent();
     test_ps01_transient_migration_failure_keeps_file();
+    test_ps02_failed_bad_copy_is_not_claimed();
     test_persmed_older_file_migrates_and_clear_keeps_copy();
 
     test_export_import_new_slot_round_trip();
