@@ -4,11 +4,13 @@ The single list of open problems (bugs and accepted trade-offs, not planned feat
 
 ## KilnFW
 - Autotune thermal-guard zero-duty feed | severity: safety review pending | autotune feeds zero duty to the thermal guard window | [REVIEW_FIXERS](audits/REVIEW_FIXERS_2026-10-15.md), [AUDIT_CONTROL_EXECUTOR](audits/AUDIT_CONTROL_EXECUTOR.md) | open, see "Safety review 2026-10-16" below
-- Aux manual fence | severity: unknown | aux manual output fence not yet settled | [SPARE_RELAY_ONOFF_PLAN](SPARE_RELAY_ONOFF_PLAN.md) | open, safety review pending
+- Aux manual POST not fenced against a backup restore in flight | LOW | deliberate so far: it drives a runtime output and refusing an output-off during a restore is the wrong direction; the other restore writers answer 409 | [AUDIT_BACKUP_IMPORT](audits/AUDIT_BACKUP_IMPORT.md) LOW-3 | open, safety review pending
 - Wi-Fi TX buffer RAM cut | MED | `ESP_WIFI_STATIC_TX_BUFFER_NUM` 16 -> 8 to free internal RAM; web/TLS TX throughput risk, bench soak needed | [AUDIT_INTERNAL_RAM_XIP](audits/AUDIT_INTERNAL_RAM_XIP.md) | open
 - Stack budget unmeasured (TRIPWP3 INFO-4) | INFO | needs a target ELF measurement on the bench-flashed build | [REVIEW_TRIPWP3](audits/REVIEW_TRIPWP3_2026-10-11.md) | open
 - Test-trip `trip_is_test` stays true after clear (TRIPFX5 LOW-1/LOW-2/INFO-2) | LOW | stale cached DIAG/TRIP_EVENT after clear; redundant term untested; stale docstring | [REVIEW_TRIPFX5](audits/REVIEW_TRIPFX5_2026-10-12.md) | open
 - Test-trip readback ignores `diag_boot_id` (TRIPFX4 INFO-3) | INFO | covered in practice by `diag_since_reboot` | [REVIEW_TRIPFX4](audits/REVIEW_TRIPFX4_2026-10-12.md) | open
+- One global bridge stall in a 25-minute soak (2026-08-20) | unknown | every bridge surface failed "ACKed but no reply within 3.0s" in one tick, then recovered; cause not found, never reproduced (`latency_soak` tool exists to catch it) | [KilnFW TODO](../firmware/KilnFW/TODO.md) | open
+- Cross-zone plausibility guard (guard 8) threshold defaults to 0, i.e. disabled | LOW | logic built and host-tested; threshold needs a measured coupling matrix or an operator-entered number | [KilnFW TODO](../firmware/KilnFW/TODO.md) | open, needs hardware data
 
 ## SaftyFW
 - A5 SET_PARAM bounds | owner 2026-10-16: reject out-of-range values | SET_PARAM accepts out-of-range values | [KILNLINK_ROBUSTNESS_AUDIT](audits/KILNLINK_ROBUSTNESS_AUDIT_2026-10-09.md) | fix pending, see SR-01..SR-07 below
@@ -18,6 +20,8 @@ The single list of open problems (bugs and accepted trade-offs, not planned feat
 - Bench pre.3 cannot self-update from GitHub | HIGH (bench) | fetch refuses with `low_heap`, largest internal block 10752 B, steady state across reset | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
 - pre.3 has no `/api/update/status`, so `update_install_start` fails (404) after a PC-side stage | MED (bench) | install of staged pre.4 not completed | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
 - `flash_firmware` otadata gap | MED | JTAG flash does not touch `otadata`; a board pointing at factory/recovery boots recovery, verify fails loud | [CLAUDE.md](../CLAUDE.md) flash section, [MCP_SERVERS](MCP_SERVERS.md) | known, deliberate
+- Recovery HTTP starts before `recovery_install_boot()` (REVIEW_AUTOFX LOW-4) | LOW | a client joining in the first milliseconds can hit the mutating routes before the apply claim; unreachable in practice, fix is a recovery boot-order change | [REVIEW_AUTOFX](audits/REVIEW_AUTOFX.md), [AUDIT_RECOVERY_IMAGE](audits/AUDIT_RECOVERY_IMAGE.md) | open (`recovery_main.c` still calls `recovery_http_start` before `recovery_install_boot`)
+- Broader flash-mmap vs writer serialization (XIP cache disabled window) | MED | only the mark-valid readback was bounded; other mmap readers vs flash writers are not serialized | [AUDIT_XIP_CACHE_DISABLED](audits/AUDIT_XIP_CACHE_DISABLED.md) | open
 
 ## Web / auth
 - Web page ignores `saved:true` on a failed live-profile decide (PROFILESFX3 INFO-2) | INFO | [REVIEW_PROFILESFX3](audits/REVIEW_PROFILESFX3_2026-10-12.md) | open
@@ -26,12 +30,14 @@ The single list of open problems (bugs and accepted trade-offs, not planned feat
 - No MCP wrapper for `POST /api/cfgfs/discard_rejected` | LOW | route exists (ADMIN, mode-gated), no tool | [REVIEW_PERSFX](audits/REVIEW_PERSFX_2026-10-10.md) | open
 - `.cmd`/`.bat` git shim resolution not addressed (TOOLFX12 INFO-5) | INFO | [REVIEW_TOOLFX12](audits/REVIEW_TOOLFX12_2026-10-12.md) | open
 - `check_lcd_admin_gates` R12 false-fail (LCDFX9 LOW-2/LOW-3) and gate semantics resting on host tests (LCDFX7 INFO-3) | LOW | [REVIEW_LCDFX9](audits/REVIEW_LCDFX9_2026-10-12.md), [REVIEW_LCDFX7](audits/REVIEW_LCDFX7_2026-10-11.md) | open
+- Allocation-count gate cannot see a same-file malloc swap (IRAMGATE LOW-2) | LOW | one malloc replaced by another in the same file keeps the count equal; accepted as a cheap-gate design choice | [REVIEW_IRAMGATE](audits/REVIEW_IRAMGATE.md) | accepted, will not fix
+- `log_store` has no host tests for a truncated/empty manifest or a torn final record then append (LOGSTORE_TIME LOW-4/LOW-5); web-auth LRU compare is raw, not wrap-safe (LOW-2); `ota_auth.c` keeps the signed `locked_until_ms` test | LOW | [AUDIT_LOGSTORE_TIME](audits/AUDIT_LOGSTORE_TIME.md) | open
 
 ## Hardware
 - None recorded here yet; hardware-gated items live in [ROADMAP](../ROADMAP.md) and `firmware/*/TODO.md`.
 
 ## Docs
-- This list is seeded from the 2026-10 REVIEW_* finding tables and the named items above; the per-area `TODO.md` files and ROADMAP bug rows have not been swept in full. Add entries as found.
+- This list is seeded from the 2026-10 REVIEW_* finding tables and the pre-2026-10 AUDIT_*/REVIEW_* docs, ROADMAP and the three `TODO.md` files were swept 2026-10-15 (bugs only; the remaining TODO boxes are hardware verification, not bugs, and live in ROADMAP). PROJECT_STATUS.md has no open known-issue section. Add entries as found.
 
 ## Safety review 2026-10-16
 
