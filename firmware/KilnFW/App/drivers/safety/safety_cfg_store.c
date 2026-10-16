@@ -193,8 +193,13 @@ static safety_rate_guard_meta_blob_t s_rate_guard_meta;
  *
  * 5 -> 6 (2026-09-18, docs/CT_CHANNEL_MASK.md step 2): zone_ct_channel
  * [0..2] (0x0320-0x0322) appended at the END of the table, same tail-append
- * discipline as every bump above. */
-#define SAFETY_CFG_STORE_VERSION 6u
+ * discipline as every bump above.
+ *
+ * 6 -> 7 (2026-10-16, SR-31): context_max_age_s (0x0401), mainfault_debounce_ms
+ * (0x0404) and telemetry_period_ms (0x0405) REMOVED from the middle of the table
+ * (the Pico no longer carries them; ids stay burned). Rows after them moved down,
+ * so a v6 blob would remap -- the version bump (and the smaller size) refuses it. */
+#define SAFETY_CFG_STORE_VERSION 7u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -287,11 +292,8 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
     { 0x031D, KILNLINK_PARAM_TYPE_U16, "overcurrent_pct" },
     { 0x031E, KILNLINK_PARAM_TYPE_U16, "overcurrent_time_s" },
     /* sec 4 -- link and liveness */
-    { 0x0401, KILNLINK_PARAM_TYPE_U16, "context_max_age_s" }, /* SR-31 reserved: Pico refuses SET, no guard reads it; id burned */
     { 0x0402, KILNLINK_PARAM_TYPE_U16, "link_timeout_s" },
     { 0x0403, KILNLINK_PARAM_TYPE_U16, "link_dead_hard_s" },
-    { 0x0404, KILNLINK_PARAM_TYPE_U16, "mainfault_debounce_ms" }, /* SR-31 reserved: Pico refuses SET, no guard reads it; id burned */
-    { 0x0405, KILNLINK_PARAM_TYPE_U16, "telemetry_period_ms" }, /* SR-31 reserved: Pico refuses SET, no guard reads it; id burned */
     /* sec 5 -- timing and system */
     { 0x0501, KILNLINK_PARAM_TYPE_U16, "startup_grace_s" },
     { 0x0502, KILNLINK_PARAM_TYPE_U16, "estop_debounce_ms" },
