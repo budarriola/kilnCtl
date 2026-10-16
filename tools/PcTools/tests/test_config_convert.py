@@ -853,6 +853,7 @@ def _make_zone(**overrides):
     zone["progress_band_c"] = 3.3
     zone["zone_type"] = 1
     zone["failsafe_state"] = 0
+    zone["tc_sheath_tau_s"] = 0
     zone["hyst_c"] = 1.1
     zone["min_on_s"] = 5
     zone["min_off_s"] = 6

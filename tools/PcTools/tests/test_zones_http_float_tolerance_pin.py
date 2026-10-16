@@ -28,7 +28,8 @@ class FloatToleranceTest(unittest.TestCase):
 
     def test_every_preset_float_field_is_mapped_or_nonfloat(self):
         nonfloat = {"relay_mask", "thermo_mask", "ct_mask", "control_mode", "zone_type", "failsafe_state",
-                    "min_on_s", "min_off_s", "name", "tc_type", "timing_profile", "relay_type"}
+                    "min_on_s", "min_off_s", "name", "tc_type", "timing_profile", "relay_type",
+                    "tc_sheath_tau_s"}
         for f in zh._PRESET_ZONE_OVERRIDE_FIELDS - nonfloat:
             self.assertIn(f, zh._FLOAT_FIELD_PRINT_FORMAT, f)
 

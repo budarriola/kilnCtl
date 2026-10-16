@@ -62,6 +62,13 @@ extern "C" {
  * blob needs migrating against it. */
 #define ZONES_CFG_VERSION 27
 
+/* Oldest zones_cfg version this firmware still migrates (docs/CONFIG_MIGRATION_
+ * CHAIN.md sec 4.2, D2). LOWERING IT IS FREE; RAISING IT (or bumping
+ * ZONES_CFG_VERSION, which raises it) IS A DATA-LOSS DECISION: a board whose
+ * stored config is older than this is refused as too old to consume and its
+ * values must be re-entered by hand. */
+#define ZONES_CFG_MIGRATION_EXPIRY_FLOOR (ZONES_CFG_VERSION - 8)
+
 /* Bounds for zones_cfg_t::ease_off_window_mult (ZONES_CFG_VERSION 15->16,
  * 2026-09-03): the terminal ease-off's window, as a multiple of a zone's own
  * identified dead time -- see profile_executor_feedforward.c's
