@@ -3504,6 +3504,10 @@ static void test_sr04_05_06_physical_ranges(void)
         config_store_default(&rec); memset(&v, 0, sizeof v);
         v.u16_val = 99u;
         TEST_CHECK(!config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 99 refused");
+        v.u16_val = 301u;
+        TEST_CHECK(!config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 301 refused");
+        v.u16_val = 300u;
+        TEST_CHECK(config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 300 accepted");
         v.u16_val = 0u;
         TEST_CHECK(config_params_set(&rec, 0x031Du, KILNLINK_PARAM_TYPE_U16, v), "overcurrent_pct 0 (default sentinel) accepted");
         memset(&v, 0, sizeof v); v.f32_val = 0.0f;

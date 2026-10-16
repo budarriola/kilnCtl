@@ -2657,6 +2657,28 @@ static void test_pn05_clipped_channel_overcurrent(void)
     }
 }
 
+static void test_pn05_clipped_summed_channel(void)
+{
+    TEST_SECTION("PN-05 -- a clipped summed-topology CT channel counts as over the S14 threshold");
+    for (int clipped = 0; clipped < 2; clipped++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.ct_topology_summed = true;
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 12.0f;
+        in.clipped[2] = (clipped != 0);
+        in.relay_commanded_now_for_zone[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s14_warn[2] == (clipped != 0), clipped ? "summed: clipped warns S14 despite low amps" : "summed: unclipped 12 A stays quiet");
+    }
+}
+
 static void test_s6b_reboot_grace(void)
 {
     TEST_SECTION("S6b -- ANNOUNCE_REBOOT grace window suppression");
@@ -5527,6 +5549,7 @@ void run_test_safety_guards(void)
     test_s6b_reboot_grace();
     test_s6b_ctless_relay_evidence();
     test_pn05_clipped_channel_overcurrent();
+    test_pn05_clipped_summed_channel();
     test_sr33_tcrange_near_ceiling();
     test_s9();
     test_s10();
