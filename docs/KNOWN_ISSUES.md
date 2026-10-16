@@ -108,7 +108,7 @@ fetch all refuse during a firing/autotune.
   read (run not committed yet), then claims and pushes a SaftyFW image; the Pico reboots mid-firing
   (fails safe: heat cut, run aborts). Fix: after the claim succeeds, re-run
   `ota_http_check_interlocks()` and `relay_authority_heat_run_active()`; on refusal call
-  `ota_http_update_end()` and stand down. Status: open.
+  `ota_http_update_end()` and stand down. Status fixed lowlink (d40d2c214).
 - **UP-02** LOW, `firmware/KilnFW/App/drivers/update/update_install_http.c` (request write in
   `install_prepare`) and `ota_http_recovery.c` `ota_recovery_boot_run` step 5. Problem: the one-shot install
   request is removed only by `undo()` on an in-handler failure; the application never drops a lingering
