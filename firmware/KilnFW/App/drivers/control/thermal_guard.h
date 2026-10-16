@@ -213,6 +213,12 @@ typedef struct {
                            * safety-refusal -- guards reason about what was
                            * actually commanded, not what control wanted */
     float dt_s;
+    /* SR-10: true when commanded_duty is positive but heater_output rendered
+     * the relay OFF for the whole current window (on-time under the minimum
+     * on-time floor, on_ms_this_window == 0). The relay is physically commanded
+     * off, so guard 3 (runaway / welded relay) arms exactly as at duty 0.
+     * Default false = unchanged behaviour for every producer that omits it. */
+    bool relay_held_off;
 
     /* Guard 8's view of the other zones this tick, from the SAME snapshot
      * (profile_executor.c reads every channel once per tick precisely so

@@ -1123,6 +1123,25 @@ static void test_k4_timer_and_episode_restart(void)
     TEST_CHECK(!heat_enable_grant_unconfirmed(), "leaving ARMED clears the unconfirmed latch (LOW-1)");
 }
 
+static void test_pico_repeated_benign_reboot_holds(void)
+{
+    TEST_SECTION("heat_enable -- SR-11: a second benign (power-on/brownout) Pico reboot within 15 min holds");
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    TEST_CHECK(!heat_enable_reboot_hold(), "SR-11: the first POWERON reboot stays benign (owner rule)");
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 60000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "SR-11: a second POWERON reboot within the window holds");
+
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u + 16u * 60u * 1000u);
+    TEST_CHECK(!heat_enable_reboot_hold(), "SR-11: a second reboot outside the window is benign again");
+}
+
 static void test_pico_reboot_after_tripped_holds(void)
 {
     TEST_SECTION("heat_enable -- T3: a reboot that followed a TRIPPED DIAG is fatal even if benign-looking");
@@ -1487,6 +1506,7 @@ void run_test_heat_enable(void)
     test_executor_autotune_and_stale_diag_wiring();
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
+    test_pico_repeated_benign_reboot_holds();
     test_pico_reboot_after_tripped_holds();
     test_reboot_fatal_latch_survives_newer_seq();
     test_enable_in_flight_under_classify_pending_queues_release();

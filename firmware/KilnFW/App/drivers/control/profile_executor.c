@@ -1778,6 +1778,11 @@ void executor_task_entry(void *arg)
                 .setpoint_c = zone_commanded_setpoint_c(z, zi),
                 .commanded_duty = commanded_duty_for_guards,
                 .dt_s = dt_s,
+                /* SR-10: positive duty rendered as relay OFF for the whole
+                 * window (below the minimum on-time) still arms guard 3. */
+                .relay_held_off = heater_zone_applies_relay && !heat_blocked_for_guards && z->duty > 0.0f &&
+                                  z->heater_state.window_started && z->heater_state.on_ms_this_window == 0 &&
+                                  !z->heater_state.relay_on,
                 /* Guard 8 (TODO.md 6A.3/6A.5): this tick's whole-bus snapshot,
                  * raw and un-averaged, so a zone can be compared against its
                  * neighbours in the same chamber. Costs nothing extra -- the

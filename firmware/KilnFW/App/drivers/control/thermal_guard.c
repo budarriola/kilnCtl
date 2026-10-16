@@ -445,7 +445,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     if (in->on_off_zone) {
         state->off_window_active = false;
         state->runaway_rate_baseline_valid = false;
-    } else if (in->commanded_duty <= 0.0f) {
+    } else if (in->commanded_duty <= 0.0f || in->relay_held_off) {
         /* Computed once per tick so the settle threshold and the "sample too
          * short to rate" cutoff below always agree on the same window,
          * whatever this zone's override is -- the false positive this guard

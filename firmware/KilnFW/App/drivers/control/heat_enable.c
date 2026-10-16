@@ -72,6 +72,9 @@ static const char *TAG = "heat_enable";
  * frame of the NEW boot. Until one arrives the cause is undecided and heat is
  * withheld (no timeout fallback: a late fatal DIAG must still hold). */
 
+/* SR-11: a second benign Pico reboot inside this window is held as fatal. */
+#define HE_BENIGN_REBOOT_WINDOW_MS (15u * 60u * 1000u)
+
 typedef struct {
     SemaphoreHandle_t lock;
     SafetyLinkClass  *safety;
@@ -103,6 +106,12 @@ typedef struct {
      * reboot_hold. Cleared only when an acquire consumes it, or by init (never by a newer reboot). */
     bool              reboot_verdict_pending;
     bool              reboot_fatal_latched;
+    /* SR-11: the RP2040 cannot tell a brownout from a clean power-on (both set
+     * CHIP_RESET HAD_POR), so a brownout reports as POWERON and would classify
+     * benign. Bound it: a benign reboot within HE_BENIGN_REBOOT_WINDOW_MS of the
+     * previous benign one is treated as fatal. Deliberately survives release/pause
+     * (a pause/resume must not wash the history); cleared only by init. 0 = none. */
+    uint32_t          last_benign_reboot_ms;
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -212,6 +221,7 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.reboot_was_tripped = false;
     s_he.reboot_verdict_pending = false;
     s_he.reboot_fatal_latched = false;
+    s_he.last_benign_reboot_ms = 0u;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -748,6 +758,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
     bool log_benign = false;
     bool log_lost_trip = false;
     bool log_claimless_lost_trip = false;
+    bool repeated_benign = false;
     if (!s_he.reboot_seq_known) {
         s_he.reboot_seq_known = true;
         s_he.seen_reboot_seq = reboot_seq;
@@ -799,7 +810,16 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
              * latched trip was lost, not cleared by an operator. Withholds heat only. */
             bool lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal) == 0u;
             s_he.reboot_was_tripped = false;
-            if ((boot_reason & fatal) != 0u || lost_trip) {
+            /* SR-11: repeated "benign" reboots are a sagging rail, not luck. */
+            uint32_t this_ms = s_he.reboot_classify_since_ms;
+            if ((boot_reason & fatal) == 0u && !lost_trip) {
+                if (s_he.last_benign_reboot_ms != 0u &&
+                    (uint32_t)(this_ms - s_he.last_benign_reboot_ms) < HE_BENIGN_REBOOT_WINDOW_MS) {
+                    repeated_benign = true;
+                }
+                s_he.last_benign_reboot_ms = this_ms;
+            }
+            if ((boot_reason & fatal) != 0u || lost_trip || repeated_benign) {
                 s_he.reboot_hold = true;
                 log_lost_trip = lost_trip;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
@@ -831,6 +851,10 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x) during a "
                       "heat claim -- NOT re-requesting heat; K4 stays open until an operator resumes",
                  (unsigned)boot_reason);
+    } else if (log_hold && repeated_benign) {
+        ESP_LOGE(TAG, "Pico rebooted again within %u s of the previous benign reboot (possible brownout, "
+                      "which reports as power-on) during a heat claim -- NOT re-requesting heat; K4 stays open "
+                      "until an operator resumes", (unsigned)(HE_BENIGN_REBOOT_WINDOW_MS / 1000u));
     } else if (log_hold) {
         ESP_LOGE(TAG, "Pico rebooted with a fatal cause (boot_reason 0x%02x) during a heat claim -- "
                       "NOT re-requesting heat; K4 stays open until an operator resumes",
