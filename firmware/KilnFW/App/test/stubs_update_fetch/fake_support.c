@@ -833,6 +833,8 @@ void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t n)
     (void)req;
     snprintf(out, n, "127.0.0.1");
 }
+bool backup_import_restore_in_flight(void) { return false; }
+
 void relay_authority_heat_run_active(bool *profile, bool *autotune)
 {
     *profile = g_fr_heat_profile;
