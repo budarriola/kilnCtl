@@ -76,7 +76,7 @@ state to readiness.
 Fix: allow it and say that the Pico ceiling will be raised to match. Or document why the wizard stays stricter.
 
 **LOW-5: the per-zone CT map is described as "Required" but can be committed blank.**
-At `:2860` the hint says required. `:3002`/`:3044` commit ct_installed=1 with per-zone topology and no map when all
+At `:2904` the hint says required. `:3002`/`:3044` commit ct_installed=1 with per-zone topology and no map when all
 three selects are blank. Readiness `safety_commissioned` should catch this, but the screen contradicts itself.
 Fix: refuse a blank map when ct_installed=1 and the topology is per-zone, or reword the hint.
 
