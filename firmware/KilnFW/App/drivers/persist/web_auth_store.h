@@ -278,6 +278,17 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out);
 // it is given.
 hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
 
+// AU-02: persistent "auth was ever enabled" marker (key auth_ever, outside the
+// policy record). Set (read-back verified) by set_policy whenever either
+// interface is enabled. load_policy reports UNREADABLE (fail closed) when the
+// policy record is absent but this marker is set. Recovery is unchanged: an
+// administrator logs in and re-saves the policy.
+bool web_auth_store_ever_enabled(void);
+
+// Erases the policy record AND the marker (read-back verified): the only way
+// back to the fresh-board open state. For a deliberate factory reset of auth.
+bool web_auth_store_clear_policy_and_marker(void);
+
 // --- Auth-off / first-boot / field-upgrade collapse (plan item 11) ---------
 
 // Turns a load status + a possibly-stale stored flag into the one answer

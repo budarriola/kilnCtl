@@ -29,6 +29,15 @@ NVS_KEY_LEN_CHECK(WEB_AUTH_NAMESPACE);
 NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_WEB);
 NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_LCD);
 NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_POLICY);
+// AU-02: separate "auth was ever enabled" marker, outside the policy key, so a
+// path that drops only auth_policy cannot silently open every admin route.
+#define WEB_AUTH_KEY_EVER "auth_ever"
+NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_EVER);
+#define WEB_AUTH_EVER_MAGIC 0x41555448u
+typedef struct {
+    uint32_t magic;
+    uint32_t magic_inv;
+} web_auth_ever_blob_t;
 
 // --- On-disk blob layouts ----------------------------------------------------
 // Each blob is version-tagged and CRC32'd, same convention as
@@ -732,12 +741,48 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
 
 // --- Policy -------------------------------------------------------------------
 
+bool web_auth_store_ever_enabled(void)
+{
+    web_auth_ever_blob_t m;
+    hal_status_t err = load_blob(WEB_AUTH_KEY_EVER, &m, sizeof(m));
+    if (err == HAL_OK) {
+        return true; // present, whatever the contents: fail closed
+    }
+    return err == HAL_INVALID_SIZE; // wrong-size record exists: still a marker
+}
+
+static hal_status_t set_ever_enabled_marker(void)
+{
+    web_auth_ever_blob_t m = {WEB_AUTH_EVER_MAGIC, ~WEB_AUTH_EVER_MAGIC};
+    return set_blob_verified(WEB_AUTH_KEY_EVER, &m, sizeof(m)); // read-back verified
+}
+
+bool web_auth_store_clear_policy_and_marker(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_WRITE, NULL) != HAL_OK) {
+        return false;
+    }
+    hal_status_t a = hal_kv_erase_key(&h, WEB_AUTH_KEY_POLICY);
+    hal_status_t b = hal_kv_erase_key(&h, WEB_AUTH_KEY_EVER);
+    hal_status_t c = hal_kv_commit(&h);
+    bool gone = hal_kv_key_exists(&h, WEB_AUTH_KEY_POLICY) == HAL_NOT_FOUND &&
+                hal_kv_key_exists(&h, WEB_AUTH_KEY_EVER) == HAL_NOT_FOUND;
+    hal_kv_close(&h);
+    return (a == HAL_OK || a == HAL_NOT_FOUND) && (b == HAL_OK || b == HAL_NOT_FOUND) && c == HAL_OK && gone;
+}
+
 web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
 {
     memset(out, 0, sizeof(*out));
     web_auth_policy_blob_t blob;
     hal_status_t err = load_blob(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
     if (err != HAL_OK) {
+        // AU-02: ABSENT plus the ever-enabled marker means the record was lost
+        // on a commissioned board: fail closed (UNREADABLE), never open.
+        if (web_auth_store_ever_enabled()) {
+            return WEB_AUTH_LOAD_UNREADABLE;
+        }
         return WEB_AUTH_LOAD_ABSENT; // item 11: absent record reads as both-off
     }
     if (blob.version != WEB_AUTH_STORE_VERSION) {
@@ -767,6 +812,14 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
     blob.lcd_timeout_s = policy->lcd_timeout_s;
     blob.crc32 = policy_blob_crc(&blob);
 
+    // AU-02: marker first, so a crash between the writes leaves marker-only
+    // (fails closed), never an enabled policy without its marker.
+    if (policy->web_enabled || policy->lcd_enabled) {
+        hal_status_t mst = set_ever_enabled_marker();
+        if (mst != HAL_OK) {
+            return mst;
+        }
+    }
     return set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
 }
 
