@@ -109,7 +109,7 @@ bool autotune_reject_if_gains_refused(void)
     }
     force_relays_off();
     s_at.state = AUTOTUNE_ENGINE_ABORTED;
-    snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "gain calculation refused: %s",
+    snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "gain calculation refused: %.60s",
              s_at.proposed_gains.refusal_reason);
     ESP_LOGW(AT_TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
     return true;
