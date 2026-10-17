@@ -1527,18 +1527,18 @@ def flash_firmware(
     erase_note_entries: "list[dict]" = []
     tcl_parts = [
         f"adapter serial {MAIN_BOARD_JTAG_SERIAL}",
-        "program_esp build/bootloader/bootloader.bin 0x0 verify",
+        "program_esp build/bootloader/bootloader.bin 0x0 verify no_clock_boost",
         # Resolved from <kiln_fw_root>/sdkconfig's CONFIG_PARTITION_TABLE_OFFSET
         # (falling back to IDF's default, 0x8000, only when that key is absent)
         # -- see _resolve_partition_table_offset(). Previously hardcoded to
         # 0x8000 regardless of sdkconfig, unlike app_target.offset above (which
         # IS read from partitions.csv); this closes that gap the same way.
-        f"program_esp build/partition_table/partition-table.bin 0x{partition_table_offset:x} verify",
-        f"program_esp build/KilnCtrl.bin 0x{app_target.offset:x} verify",
+        f"program_esp build/partition_table/partition-table.bin 0x{partition_table_offset:x} verify no_clock_boost",
+        f"program_esp build/KilnCtrl.bin 0x{app_target.offset:x} verify no_clock_boost",
     ]
     for entry in erase_targets:
         blank_path = _write_blank_partition_file(entry, erase_tmp_dir)
-        tcl_parts.append(f'program_esp "{blank_path.replace(chr(92), "/")}" 0x{entry.offset:x} verify')
+        tcl_parts.append(f'program_esp "{blank_path.replace(chr(92), "/")}" 0x{entry.offset:x} verify no_clock_boost')
         erase_note_entries.append({"name": entry.name, "offset": entry.offset, "size": entry.size})
     otadata_tmp_dir = None
     if otadata_entry is not None:
@@ -1546,7 +1546,7 @@ def flash_firmware(
         otadata_path = os.path.join(otadata_tmp_dir, "otadata_app.bin")
         with open(otadata_path, "wb") as f:
             f.write(otadata_blob.build_otadata_image(otadata_entry.size, 1))
-        tcl_parts.append(f'program_esp "{otadata_path.replace(chr(92), "/")}" 0x{otadata_entry.offset:x} verify')
+        tcl_parts.append(f'program_esp "{otadata_path.replace(chr(92), "/")}" 0x{otadata_entry.offset:x} verify no_clock_boost')
     tcl_parts[-1] += " reset exit"
     tcl = "; ".join(tcl_parts)
 
@@ -2088,7 +2088,7 @@ def fixture_flash(
     # Tcl's backslash escaping of a bare Windows path.
     parts = [f"adapter serial {FIXTURE_JTAG_SERIAL}"]
     for path, offset in images:
-        parts.append(f'program_esp "{path.replace(chr(92), "/")}" {offset} verify')
+        parts.append(f'program_esp "{path.replace(chr(92), "/")}" {offset} verify no_clock_boost')
     parts[-1] += " reset exit"
     tcl = "; ".join(parts)
 
