@@ -44,6 +44,10 @@ extern "C" {
 // for why (the reset-one-side-of-a-pair shape CLAUDE.md warns about).
 web_auth_table_t *http_session_table(void);
 
+// AZ-03: ask httpd to destroy every session. Safe from any task; the table
+// itself is only touched by the next http_session_table() call (httpd side).
+void http_session_destroy_all_request_post(void);
+
 // Plain SHA-256 of a bearer token, exactly the hash http_auth_session_resolve()
 // uses to look a token up. Section 6's login handler MUST hash the token it
 // mints with THIS function before calling web_auth_table_create_session(),

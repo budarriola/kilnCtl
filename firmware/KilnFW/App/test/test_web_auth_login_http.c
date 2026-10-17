@@ -450,7 +450,7 @@ static void test_lockout_table_is_bounded(void)
 // eviction cleared a locked slot -- vacuous against exactly this bug. ***
 static void test_lockout_eviction_never_evicts_a_locked_slot(void)
 {
-    TEST_SECTION("login lockout table -- eviction must skip currently-locked slots (Finding 2)");
+    TEST_SECTION("login lockout table -- full table of locks evicts only the oldest (AZ-04)");
     reset_all();
     set_admin_credential("admin", "correct-horse-battery-staple");
 
@@ -472,38 +472,29 @@ static void test_lockout_eviction_never_evicts_a_locked_slot(void)
     }
     TEST_CHECK(locked_count == LOGIN_LOCKOUT_MAX_IPS, "test setup: every slot is now locked");
 
-    // A brand-new, never-seen-before source IP arrives once the table is
-    // saturated with locked attackers. It must be refused outright (429),
-    // NOT granted a slot by evicting one of the locked attackers -- that
-    // eviction is exactly the bypass Finding 2 found.
+    // AZ-04 (owner-directed, supersedes the 2026-09-17 accepted tradeoff): a
+    // brand-new source IP arriving at a fully locked table must NOT be refused
+    // for everyone. It evicts the OLDEST entry; the other lockouts stay intact.
     strncpy(s_stub_client_ip, "10.2.9.99", sizeof(s_stub_client_ip) - 1);
     s_last_status_line = 0;
     esp_err_t err = do_login("admin", "correct-horse-battery-staple");
-    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK when refusing a saturated-table login");
-    TEST_CHECK(s_last_status_line == 429,
-               "a brand-new IP is refused once the table is saturated with locked IPs, "
-               "rather than being handed a slot evicted from a locked attacker");
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK for a new IP on a saturated table");
+    TEST_CHECK(s_last_status_line != 429,
+               "AZ-04: a brand-new IP is not refused (429) just because the table is full of locks");
 
-    // Every one of the originally-locked IPs must still be locked -- none
-    // was evicted to make room for the new arrival.
     unsigned still_locked = 0;
+    bool new_ip_got_a_slot = false;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
             still_locked++;
         }
-    }
-    TEST_CHECK(still_locked == LOGIN_LOCKOUT_MAX_IPS,
-               "eviction never cleared a locked slot to make room for the new IP -- "
-               "the pre-fix bug would have shown fewer than LOGIN_LOCKOUT_MAX_IPS here");
-
-    // The new IP must never have been granted a slot at all.
-    bool new_ip_got_a_slot = false;
-    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         if (s_login_lockouts[i].in_use && strcmp(s_login_lockouts[i].ip, "10.2.9.99") == 0) {
             new_ip_got_a_slot = true;
         }
     }
-    TEST_CHECK(!new_ip_got_a_slot, "the refused new IP was never given a table slot");
+    TEST_CHECK(new_ip_got_a_slot, "AZ-04: the new IP was given a slot (oldest entry evicted)");
+    TEST_CHECK(still_locked == LOGIN_LOCKOUT_MAX_IPS - 1,
+               "AZ-04: exactly one lockout was evicted; every other per-address lockout is intact");
 }
 
 // A slot that is free (never used) or in_use but NOT currently locked must
@@ -902,37 +893,6 @@ static void test_scope_subnet_math_with_non_24_mask(void)
     TEST_CHECK(s_last_status_line == 429,
                "10.20.30.16 falls outside the /28 boundary and classifies REMOTE, sharing the "
                "already-locked remote slot");
-}
-
-// Review fix (2026-09-21, finding 1): the table-saturation (slot == NULL)
-// 429 path used to send Retry-After: 1, leaking "this is saturation, not a
-// real lock" to the caller -- a real lock reports 5/10/30/60/300 depending
-// on ladder step. Fixed: the saturation path now reports the ladder's own
-// last (worst-case) step, 300s, so both causes of a 429 are indistinguishable
-// from the response alone.
-static void test_saturation_retry_after_matches_ladder_not_one_second(void)
-{
-    TEST_SECTION("login lockout table -- saturated-table Retry-After matches the ladder, "
-                 "not a distinct '1' (Finding 1)");
-    reset_all();
-    set_admin_credential("admin", "correct-horse-battery-staple");
-
-    char ip[46];
-    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        snprintf(ip, sizeof(ip), "10.3.0.%u", i + 1);
-        strncpy(s_stub_client_ip, ip, sizeof(s_stub_client_ip) - 1);
-        for (int j = 0; j < 3; j++) {
-            do_login("admin", "wrong-password");
-        }
-    }
-    strncpy(s_stub_client_ip, "10.3.9.99", sizeof(s_stub_client_ip) - 1);
-    s_last_status_line = 0;
-    s_last_retry_after[0] = '\0';
-    do_login("admin", "correct-horse-battery-staple");
-    TEST_CHECK(s_last_status_line == 429, "test setup: saturation refuses with 429");
-    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1] / 1000u,
-               "the saturation path reports the ladder's last (worst-case) step, "
-               "never a distinct value that would leak table-saturation vs. a real lock");
 }
 
 // Review fix (2026-09-21, finding 3): an UNKNOWN-scope client (address that
@@ -1371,7 +1331,6 @@ void run_test_web_auth_login_http(void)
     test_local_success_does_not_reset_remote_counter();
     test_scope_subnet_math_with_non_24_mask();
     test_ip_scope_classify_mapped_ipv6_forms();
-    test_saturation_retry_after_matches_ladder_not_one_second();
     test_unknown_scope_shares_the_remote_slot();
     test_refused_login_makes_no_extra_sta_ip_netmask_calls();
     test_mapped_ipv6_dotted_quad_tail_classifies_local();

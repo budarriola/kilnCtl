@@ -31,10 +31,33 @@
 static EXT_RAM_BSS_ATTR web_auth_table_t s_web_auth_table;
 static bool s_web_auth_table_init_done = false;
 
+// AZ-03: the table has no lock and is owned by httpd. Other tasks (the LVGL
+// four-corner reset gesture) must not mutate it; they post a destroy-all
+// request that httpd applies here, before its next table access.
+static volatile uint32_t s_destroy_all_posted_gen;
+static uint32_t s_destroy_all_applied_gen;
+
+void http_session_destroy_all_request_post(void) {
+#if defined(__GNUC__)
+    (void)__atomic_add_fetch(&s_destroy_all_posted_gen, 1u, __ATOMIC_SEQ_CST);
+#else
+    s_destroy_all_posted_gen++; /* host (MSVC) tests are single-threaded */
+#endif
+}
+
 web_auth_table_t *http_session_table(void) {
     if (!s_web_auth_table_init_done) {
         web_auth_table_init(&s_web_auth_table);
         s_web_auth_table_init_done = true;
+    }
+#if defined(__GNUC__)
+    uint32_t posted = __atomic_load_n(&s_destroy_all_posted_gen, __ATOMIC_SEQ_CST);
+#else
+    uint32_t posted = s_destroy_all_posted_gen;
+#endif
+    if (posted != s_destroy_all_applied_gen) {
+        s_destroy_all_applied_gen = posted;
+        web_auth_table_destroy_all(&s_web_auth_table);
     }
     return &s_web_auth_table;
 }

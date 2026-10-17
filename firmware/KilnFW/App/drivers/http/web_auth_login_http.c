@@ -200,6 +200,8 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
     int free_idx = -1;
     int lru_idx = -1;
     uint32_t lru_age = 0;
+    int oldest_idx = -1; // AZ-04: oldest slot of any lock state, last-resort victim
+    uint32_t oldest_age = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         login_lockout_slot_t *s = &s_login_lockouts[i];
         login_backoff_cycle_reset_if_due(&s->backoff, now);
@@ -210,6 +212,10 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
+        if (s->in_use && (oldest_idx < 0 || (uint32_t)(now - s->last_activity_ms) > oldest_age)) {
+            oldest_age = (uint32_t)(now - s->last_activity_ms);
+            oldest_idx = (int)i;
+        }
         if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
             (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
             /* largest unsigned elapsed wins: wrap-safe LRU */
@@ -218,6 +224,13 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         }
     }
     int idx = (free_idx >= 0) ? free_idx : lru_idx;
+    if (idx < 0) {
+        // AZ-04: every slot is in use and locked. Evict the oldest entry
+        // rather than refusing every new local login (a LAN host holding 16
+        // addresses must not lock the owner out). The other 15 per-address
+        // lockouts stay intact.
+        idx = oldest_idx;
+    }
     if (idx < 0) {
         // Every slot is in_use and currently locked -- see this function's
         // header comment. Deliberately not falling back to "evict the

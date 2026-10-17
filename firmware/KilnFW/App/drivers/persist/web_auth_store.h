@@ -232,6 +232,8 @@ bool web_auth_store_verify_password(web_auth_role_t role, const char *password);
 // Used by item 11's "enabling auth is refused unless a credential exists"
 // gate and by nothing else -- it is not itself an auth check.
 bool web_auth_store_password_configured(web_auth_role_t role);
+// AZ-01: bootstrap predicate input; true for UNREADABLE (fail closed).
+bool web_auth_store_admin_configured_or_unreadable(void);
 
 // Sets role's password. Caller supplies `salt` (WEB_AUTH_SALT_LEN
 // caller-generated random bytes -- see this header's randomness note) and

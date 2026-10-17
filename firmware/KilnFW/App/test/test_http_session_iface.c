@@ -572,6 +572,24 @@ static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
 
 // AUDIT_LOGSTORE_TIME LOW-1: an expired session left allocated would read valid again
 // once the uint32 ms tick wraps (2^32 ms = 49.7 days after its last use).
+// AZ-03: the LVGL-side reset gesture posts a request; httpd applies it on its
+// next table access instead of another task mutating the unlocked table.
+static void test_destroy_all_request_applied_by_httpd(void)
+{
+    TEST_SECTION("AZ-03 destroy-all request is deferred to the httpd-side table access");
+    reset_all();
+    set_policy_timeout(600);
+    make_session("tok-az03", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    TEST_CHECK(http_auth_session_status("tok-az03", "10.0.0.5", &role, NULL, NULL), "session live before");
+    http_session_destroy_all_request_post();
+    TEST_CHECK(!http_auth_session_status("tok-az03", "10.0.0.5", &role, NULL, NULL),
+               "session gone after the request is applied");
+    make_session("tok-az03b", WEB_AUTH_SESSION_ROLE_USER, 0);
+    TEST_CHECK(http_auth_session_status("tok-az03b", "10.0.0.5", &role, NULL, NULL),
+               "request applies once; a later session survives");
+}
+
 static void test_expired_session_does_not_revive_after_tick_wrap(void)
 {
     TEST_SECTION("expired session is freed and stays dead across the 2^32 ms tick wrap");
@@ -616,6 +634,7 @@ static void test_session_expired_after_idle_longer_than_tick_wrap(void)
 
 void run_test_http_session_iface(void) {
     test_session_expired_after_idle_longer_than_tick_wrap();
+    test_destroy_all_request_applied_by_httpd();
     test_expired_session_does_not_revive_after_tick_wrap();
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();

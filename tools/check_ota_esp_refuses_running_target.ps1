@@ -42,6 +42,18 @@ $ufn = [regex]::Match($util, "bool\s+ota_http_esp_target_usable\s*\([^)]*\)\s*\{
 if (-not $ufn.Success) { $fail += "ota_http_util.c: ota_http_esp_target_usable() not found" }
 elseif ($ufn.Groups['b'].Value -notmatch "return\s+target\s*!=\s*NULL\s*&&\s*target\s*!=\s*running\s*;") { $fail += "ota_http_util.c: ota_http_esp_target_usable() must return 'target != NULL && target != running;'" }
 
+# RO-02 (accepted): the rollback must keep marking the running image INVALID via the IDF call, and that call
+# must stay inside the flash_xip reader bracket (it reads otadata through the flash mmap and never returns).
+$rb = [regex]::Match($esp, "static\s+void\s+ota_rollback_reboot_task\s*\(.*?
+\}", "Singleline")
+if (-not $rb.Success) { $fail += "ota_http_esp.c: ota_rollback_reboot_task() not found" }
+else {
+    $rbv = $rb.Value
+    $en = $rbv.IndexOf("flash_xip_reader_enter()"); $mk = $rbv.IndexOf("esp_ota_mark_app_invalid_rollback_and_reboot(")
+    if ($mk -lt 0) { $fail += "ota_http_esp.c: ota_rollback_reboot_task() no longer calls esp_ota_mark_app_invalid_rollback_and_reboot (the rejected image must be marked INVALID)" }
+    elseif ($en -lt 0 -or $en -gt $mk) { $fail += "ota_http_esp.c: esp_ota_mark_app_invalid_rollback_and_reboot must be called inside the flash_xip reader bracket" }
+}
+
 $specs = @(
     @{ File = "ota_http_esp.c";  Src = $esp;  Kind = "esp";  Do = "ota_esp_do_transfer";  Ret = "return !ok;";           Args = "s_ota_esp_chunk,\s*sizeof\(s_ota_esp_chunk\)" },
     @{ File = "ota_http_pico.c"; Src = $pico; Kind = "pico"; Do = "ota_pico_do_stage";    Ret = "return !started_relay;"; Args = "chunk,\s*chunk_cap" }
