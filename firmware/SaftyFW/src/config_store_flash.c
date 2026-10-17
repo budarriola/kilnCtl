@@ -962,6 +962,18 @@ uint8_t config_store_get_persisted_tc_type(void)
     return s_persisted_record.tc_type;
 }
 
+uint16_t config_store_get_tc_sheath_tau_s(void)
+{
+    if (!s_loaded) {
+        return 0u; // safe default: no compensation until proven otherwise
+    }
+    config_store_record_t snap;
+    if (!config_store_seqlock_read(&snap)) {
+        return 0u;
+    }
+    return snap.tc_sheath_tau_s;
+}
+
 float config_store_get_tc_offset_c(void)
 {
     if (!s_loaded) {

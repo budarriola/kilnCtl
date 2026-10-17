@@ -377,7 +377,7 @@ CEILING_BYTES = {
     # runs only in the boot/load path, never in the safety_core task); the
     # growth most likely came from the earlier F1-F7 batch d53125fe, which
     # changed safety_core/safety_guards without re-pinning.
-    "safety_core": 2240,    # 2026-10-16 PN-04: measured 2216 -> 2240 B (S12 unknown-CJ trip call); before: 2026-10-10 TEST_TRIP WP2: measured 2208 -> 2216 B (test_trip queue take)
+    "safety_core": 2248,    # 2026-10-16 tc sheath lag: measured 2240 -> 2248 B (guard_hot_c in S1/S2); before: 2026-10-16 PN-04: measured 2216 -> 2240 B (S12 unknown-CJ trip call); before: 2026-10-10 TEST_TRIP WP2: measured 2208 -> 2216 B (test_trip queue take)
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,
     # forced_reconfigure) around the reconfig-retry gate, moving the measured
@@ -392,7 +392,7 @@ CEILING_BYTES = {
     # max31856_verify_live_config()/max31856_live_check_note_result() call
     # depth, moving the measured total 1224 -> 1232 B. Re-pinned to the new
     # measured value, same convention.
-    "thermo_task": 1232,
+    "thermo_task": 1264,    # 2026-10-16 tc sheath lag: measured 1232 -> 1264 B (tc_lag_comp_step from thermo_task_lag_step)
     # 2026-09-18, the mid-erase watchdog reset fix
     # (docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md):
     # update_task_erase_slot() went from an inline offset/remaining walk over

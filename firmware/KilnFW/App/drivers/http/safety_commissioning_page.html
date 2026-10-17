@@ -518,9 +518,16 @@ var GROUPS = [
           'below, which only ever compare against a zone reading and never change what the ' +
           'safety processor believes its own sensor says. 0 means no correction. A wrong value ' +
           'here silently shifts every reading the independent over-temperature protection relies ' +
-          'on. No fixed cap beyond a finite number -- the safety processor rejects NaN/Infinity; ' +
-          'an unusually large correction is your own responsibility to cross-check, the same as ' +
+          'on. The safety processor refuses NaN/Infinity and any |offset| above 50 C; ' +
+          'a smaller but wrong correction is your own responsibility to cross-check, the same as ' +
           'this page\'s sibling tc_expected_offset_c field.' },
+      { id: 267, name: 'tc_sheath_tau_s', type: 'u16', risk: 'dangerous', unit: 's', def: 0, min: 0, max: 600,
+        guards: ['S1', 'S2'],
+        note: '0x010B. Time constant of the safety thermocouple\'s protection tube. 0 = bare TC ' +
+          '(no compensation). Tubed TC: about 60 s is a typical starting value. The safety ' +
+          'processor estimates the hotter true temperature from the reading\'s rise rate and ' +
+          'S1/S2 trip on the higher of the raw and estimated values, so a larger value can only ' +
+          'trip earlier. 0..600 s; the safety processor refuses anything outside that range.' },
       { id: 265, name: 'ct_installed', type: 'enum', risk: 'dangerous', noDefault: true,
         guards: ['S3', 'S4', 'S9', 'S14'],
         enumOpts: [ [1, 'Yes -- current transformers are fitted'],

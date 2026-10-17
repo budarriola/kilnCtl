@@ -1434,6 +1434,10 @@ function zoneBlock(z, i, relayCount, thermoCount) {
        (saveAll()'s own comment: "tc_type yes, cal offset no"), so it sits
        outside every frame and stays visible whatever the selects say. */
     '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal"' + kgRawAttrs(z.cal_offset_c) + ' value="' + kgR6(z.cal_offset_c) + '">' +
+    /* Protection-tube lag tau: per SENSOR like the offset (applied after it,
+       ESP control reading only), never mirrored. 0 = bare TC, off. min/max
+       must match ZONE_TC_SHEATH_TAU_MIN_S/MAX_S (test_sheath_tau_client_bounds.py). */
+    '<label>Protection tube lag tau (s, 0 = no tube)</label><input type="number" step="1" min="0" max="600" class="sheathtau" value="' + ((typeof z.tc_sheath_tau_s === 'number') ? z.tc_sheath_tau_s : '') + '">' +
     /* coupling_diag_k_dc: the coupling identification's own diagonal cell --
        a MEASURED quantity (see zone_cfg_t::coupling_diag_k_dc's own doc
        comment), always emitted by GET and read-back-and-reposted by POST
@@ -2862,6 +2866,10 @@ document.getElementById('saveBtn').addEventListener('click', function () {
        docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs
        ("tc_type yes, cal offset no"). */
     params.push('z' + i + '_cal=' + kgPost(ownStack.querySelector('.cal')));
+    /* Sheath tau: omit-preserves on the board, so an empty field (GET had no
+       value) is left out rather than posted as 0. */
+    var sheathEl = ownStack.querySelector('.sheathtau');
+    if (sheathEl && String(sheathEl.value).trim() !== '') params.push('z' + i + '_sheath_tau=' + encodeURIComponent(sheathEl.value));
     /* coupling_diag_k_dc and the five controller-bands/shaping fields: same
        "no inheritance group, always this zone's own" treatment as cal offset
        just above -- read off ownStack, matching zones_http_post_parse.c's

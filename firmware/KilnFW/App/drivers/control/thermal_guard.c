@@ -111,14 +111,17 @@ void thermal_guard_restart_windows(thermal_guard_state_t *state)
 {
     state->progress_window_active = false;
     state->progress_window_start_c = 0.0f;
+    state->progress_window_start_lead_c = 0.0f;
     state->progress_window_elapsed_s = 0.0f;
     state->progress_window_min_c = 0.0f;
     state->progress_window_max_c = 0.0f;
     state->off_window_active = false;
     state->off_window_elapsed_s = 0.0f;
     state->runaway_baseline_c = 0.0f;
+    state->runaway_baseline_lead_c = 0.0f;
     state->runaway_rate_baseline_valid = false;
     state->runaway_rate_baseline_c = 0.0f;
+    state->runaway_rate_baseline_lead_c = 0.0f;
     state->runaway_rate_elapsed_s = 0.0f;
     state->at_setpoint_elapsed_s = 0.0f;
     state->frozen_window_active = false;
@@ -159,6 +162,10 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     if (state->is_tripped) {
         return false; /* already latched -- caller should have stopped driving anyway */
     }
+    /* TC sheath lead (zone tc_sheath_tau_s > 0): compensated minus raw
+     * reading. Non-finite reads as 0 so a bad estimate can never mask a raw
+     * trip. 0 (every zone without a tube) leaves every guard byte-identical. */
+    const float lead_c = isfinite(in->lead_c) ? in->lead_c : 0.0f;
 
     /* Guard 4's arming backstop -- see thermal_guard_state_t.idle_elapsed_s's
      * doc comment. Accumulated ahead of every other guard (including the
@@ -191,8 +198,12 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     state->sensor_fault_streak = 0;
 
     /* --- Guard 5: absolute limits, immediate, no debounce ------------------ */
-    if (cfg->max_temp_c > 0.0f && in->measurement_c >= cfg->max_temp_c) {
-        trip(state, THERMAL_GUARD_TRIP_MAX_TEMP, "%.1fC >= max_temp_c %.1fC", (double)in->measurement_c,
+    /* TC sheath lead (lead_c, see thermal_guard_input_t): the higher of the
+     * raw reading and raw + lead. A negative lead (cooling) never lowers the
+     * value checked, so this can only trip earlier than raw alone. */
+    float max_check_c = in->measurement_c + (lead_c > 0.0f ? lead_c : 0.0f);
+    if (cfg->max_temp_c > 0.0f && max_check_c >= cfg->max_temp_c) {
+        trip(state, THERMAL_GUARD_TRIP_MAX_TEMP, "%.1fC >= max_temp_c %.1fC", (double)max_check_c,
              (double)cfg->max_temp_c);
         return true;
     }
@@ -250,6 +261,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         if (!state->progress_window_active) {
             state->progress_window_active = true;
             state->progress_window_start_c = in->measurement_c;
+            state->progress_window_start_lead_c = lead_c;
             state->progress_window_elapsed_s = 0.0f;
             state->progress_window_min_c = in->measurement_c;
             state->progress_window_max_c = in->measurement_c;
@@ -303,6 +315,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                         return true;
                     }
                     state->progress_window_start_c = in->measurement_c;
+                    state->progress_window_start_lead_c = lead_c;
                     state->progress_window_elapsed_s = 0.0f;
                     state->progress_window_min_c = in->measurement_c;
                     state->progress_window_max_c = in->measurement_c;
@@ -385,6 +398,14 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                 }
                 if (state->progress_window_elapsed_s >= window_s) {
                     float delta = in->measurement_c - state->progress_window_start_c;
+                    /* Sheath lead: the same window seen on the compensated
+                     * reading. Guards 1 and 2 both trip on too little rise,
+                     * so take the smaller of the two deltas -- never later
+                     * than raw alone. lead_c == 0 leaves delta unchanged. */
+                    float delta_comp = delta + (lead_c - state->progress_window_start_lead_c);
+                    if (delta_comp < delta) {
+                        delta = delta_comp;
+                    }
                     float elapsed_min = state->progress_window_elapsed_s / 60.0f;
                     if (climbing) {
                         /* Guard 1: heating, below setpoint, must be rising --
@@ -427,6 +448,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                      * for guard 2) -- slide to a fresh window rather than
                      * growing forever. */
                     state->progress_window_start_c = in->measurement_c;
+                    state->progress_window_start_lead_c = lead_c;
                     state->progress_window_elapsed_s = 0.0f;
                 }
             }
@@ -455,6 +477,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
             state->off_window_active = true;
             state->off_window_elapsed_s = 0.0f;
             state->runaway_baseline_c = in->measurement_c;
+            state->runaway_baseline_lead_c = lead_c;
         } else {
             state->off_window_elapsed_s += in->dt_s;
             if (state->off_window_elapsed_s >= off_settle_s) {
@@ -476,6 +499,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                 if (!state->runaway_rate_baseline_valid) {
                     state->runaway_rate_baseline_valid = true;
                     state->runaway_rate_baseline_c = in->measurement_c;
+                    state->runaway_rate_baseline_lead_c = lead_c;
                     state->runaway_rate_elapsed_s = 0.0f;
                 } else {
                     state->runaway_rate_elapsed_s += in->dt_s;
@@ -485,6 +509,17 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                  * statement, independent of when the rate window started. */
                 float delta = in->measurement_c - state->runaway_baseline_c;
                 float rate_delta = in->measurement_c - state->runaway_rate_baseline_c;
+                /* Sheath lead: guard 3 trips on too MUCH rise, so take the
+                 * larger of raw and compensated rise for both checks --
+                 * never later than raw alone; lead_c == 0 changes nothing. */
+                float delta_comp = delta + (lead_c - state->runaway_baseline_lead_c);
+                float rate_delta_comp = rate_delta + (lead_c - state->runaway_rate_baseline_lead_c);
+                if (delta_comp > delta) {
+                    delta = delta_comp;
+                }
+                if (rate_delta_comp > rate_delta) {
+                    rate_delta = rate_delta_comp;
+                }
                 float elapsed_min = state->runaway_rate_elapsed_s / 60.0f;
                 /* Below ~a third of the settle window the sample is too short
                  * to divide by; the margin check still applies meanwhile. */

@@ -643,6 +643,8 @@ typedef struct {
     uint8_t ct_mask;
     bool set_cal_called;
     float cal_offset_c;
+    bool set_sheath_called;
+    float tc_sheath_tau_s;
     bool set_ramp_called;
     float max_ramp_c_per_hr;
     bool set_sanity_called;
@@ -1677,6 +1679,20 @@ bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_cal_called = true;
     s_writes[zone_index].cal_offset_c = cal_offset_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s)
+{
+    if (!out_tau_s || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_tau_s = s_writes[zone_index].tc_sheath_tau_s;
+    return true;
+}
+bool zones_config_set_tc_sheath_tau_no_save(uint8_t zone_index, float tau_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_sheath_called = true;
+    s_writes[zone_index].tc_sheath_tau_s = tau_s;
     g_total_write_calls++;
     return true;
 }
@@ -3063,6 +3079,43 @@ static void test_overlong_zone_name_rejected(void)
 // build: a v2 body that never had the sentinel (what this build now
 // exports), and a v2 body that DOES still carry it (what firmware already
 // live on the bench exported before this fix, and may still be handed to
+
+/* ZONES_CFG v27: tc_sheath_tau_s is optional on import (older backups have
+ * none and leave the live value alone), committed when present, and refused
+ * out of range (0..600 s) before anything is written. */
+static void test_sheath_tau_optional_and_bounded(void)
+{
+    TEST_SECTION("backup_import_apply -- tc_sheath_tau_s optional, committed, 0..600 s");
+    static const char fmt[] =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1.5,\"pid_ki\":0.2,\"pid_kd\":0.05,"
+        "\"name\":\"Top\",\"relay_mask\":1,\"thermo_mask\":1,"
+        "\"cal_offset_c\":0,%s\"max_ramp_c_per_hr\":100,\"sanity_rate_c_per_min\":0,\"control_mode\":0,"
+        "\"max_temp_c\":1300,\"min_temp_c\":-20,\"heater_window_ms\":1000,"
+        "\"heater_min_on_ms\":0,\"heater_min_off_ms\":0,"
+        "\"guard_wrong_dir_window_s\":0,\"guard_wrong_dir_rate_c_per_min\":0,\"guard_off_settle_s\":0,"
+        "\"guard_runaway_rate_c_per_min\":0,\"guard_runaway_margin_c\":0,\"guard_drift_period_s\":0,"
+        "\"guard_sensor_fault_debounce_ticks\":0,\"guard_frozen_window_s\":0,"
+        "\"cross_zone_max_delta_c\":0}]}";
+    const char *cases[] = {"", "\"tc_sheath_tau_s\":240,", "\"tc_sheath_tau_s\":601,",
+                           "\"tc_sheath_tau_s\":-1,", "\"tc_sheath_tau_s\":600,"};
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_stub_state();
+        char body[1400];
+        snprintf(body, sizeof(body), fmt, cases[i]);
+        char err[160] = "";
+        bool ok = test_backup_import_apply(body, err, sizeof(err));
+        if (i == 0) {
+            TEST_CHECK(ok && !s_writes[0].set_sheath_called, "absent tc_sheath_tau_s imports and leaves it alone");
+        } else if (i == 1 || i == 4) {
+            TEST_CHECK(ok && s_writes[0].set_sheath_called, "in-range tc_sheath_tau_s is committed");
+            TEST_CHECK_NEAR(s_writes[0].tc_sheath_tau_s, i == 1 ? 240.0 : 600.0, 1e-6, "committed value exact");
+        } else {
+            TEST_CHECK(!ok && g_total_write_calls == 0, "out-of-range tc_sheath_tau_s refused with nothing written");
+        }
+    }
+}
+
 // this build as a restore file).
 static void test_v2_body_without_sentinel_imports(void)
 {
@@ -4313,6 +4366,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(zones_config_set_thermo_mask(1, 0x02), "seed zone 1 thermo_mask");
     TEST_CHECK(zones_config_set_ct_mask(1, 0x02), "seed zone 1 ct_mask");
     TEST_CHECK(zones_config_set_cal_offset(1, 0.75f), "seed zone 1 cal_offset_c");
+    s_writes[1].tc_sheath_tau_s = 120.0f; /* get_tc_sheath_tau reads this stub field */
     test_stub_zones_set_max_ramp(1, true, 150.0f); /* export's get_max_ramp is this hook, not the setter below */
     TEST_CHECK(zones_config_set_sanity_rate(1, 2.5f), "seed zone 1 sanity_rate_c_per_min");
     TEST_CHECK(zones_config_set_control_mode(1, 3), "seed zone 1 control_mode (PID_FUZZY)");
@@ -4352,6 +4406,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(strstr(s_export_body, "\"relay_mask\":2,\"thermo_mask\":2,\"ct_mask\":2") != NULL,
               "zone 1's masks are emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"cal_offset_c\":0.75,") != NULL, "zone 1's cal_offset_c is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"tc_sheath_tau_s\":120,") != NULL, "zone 1's tc_sheath_tau_s is emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"max_ramp_c_per_hr\":150,") != NULL,
               "zone 1's max_ramp_c_per_hr is emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"sanity_rate_c_per_min\":2.5,") != NULL,
@@ -4761,6 +4816,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     zones_config_set_thermo_mask(1, 0x02);
     zones_config_set_ct_mask(1, 0x02);
     zones_config_set_cal_offset(1, 0.75f);
+    s_writes[1].tc_sheath_tau_s = 180.0f; /* protection tube, ZONES_CFG v27 */
     test_stub_zones_set_max_ramp(1, true, 150.0f);
     zones_config_set_sanity_rate(1, 2.5f);
     zones_config_set_control_mode(1, 3);
@@ -4806,6 +4862,8 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK(s_writes[1].relay_mask == 0x02 && s_writes[1].thermo_mask == 0x02 && s_writes[1].ct_mask == 0x02,
               "masks round-trip");
     TEST_CHECK_NEAR(s_writes[1].cal_offset_c, 0.75, 1e-6, "cal_offset_c round-trips");
+    TEST_CHECK(s_writes[1].set_sheath_called, "tc_sheath_tau_s is committed on import");
+    TEST_CHECK_NEAR(s_writes[1].tc_sheath_tau_s, 180.0, 1e-6, "tc_sheath_tau_s round-trips");
     TEST_CHECK_NEAR(s_writes[1].sanity_rate_c_per_min, 2.5, 1e-6, "sanity_rate_c_per_min round-trips");
     TEST_CHECK(s_writes[1].control_mode == 3, "control_mode round-trips");
     TEST_CHECK_NEAR(s_writes[1].max_temp_c, 1250.0, 1e-6, "max_temp_c round-trips");
@@ -7681,6 +7739,7 @@ void run_test_backup_import(void)
     test_out_of_range_model_rejected();
     test_overlong_zone_name_rejected();
     test_v2_body_without_sentinel_imports();
+    test_sheath_tau_optional_and_bounded();
     test_v2_body_with_stale_sentinel_still_imports();
     test_overlong_profile_name_rejected();
     test_profile_name_at_limit_accepted();

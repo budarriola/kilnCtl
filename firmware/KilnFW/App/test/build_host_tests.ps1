@@ -58,6 +58,8 @@ try {
         (Join-Path $testDir "test_main.c"),
         (Join-Path $testDir "test_pid.c"),
         (Join-Path $testDir "test_thermal_guard.c"),
+        (Join-Path $testDir "test_tc_lag_comp.c"),
+        (Join-Path $testDir "test_tc_lag_sim.c"),
         (Join-Path $testDir "test_on_off_trigger_decide.c"),
         (Join-Path $testDir "test_heater_output.c"),
         (Join-Path $testDir "test_closed_loop.c"),
@@ -240,6 +242,7 @@ try {
         (Join-Path $driversDir "control/pid.c"),
         (Join-Path $driversDir "control/cone_table.c"),
         (Join-Path $driversDir "control/thermal_guard.c"),
+        (Join-Path $driversDir "control/tc_lag_comp.c"),
         (Join-Path $driversDir "control/on_off_trigger_decide.c"),
         (Join-Path $driversDir "control/heater_output.c"),
         (Join-Path $driversDir "control/pid_autotune.c"),
@@ -896,7 +899,7 @@ try {
     $cmd4 = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$peObjDir\\`" /Fe:`"$exe4`" " +
             "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
-            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/thermal_guard.c')`" " +
+            "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/tc_lag_comp.c')`" " +
             "`"$(Join-Path $driversDir 'control/heater_output.c')`" `"$(Join-Path $driversDir 'control/thermo_combine.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
@@ -1009,7 +1012,7 @@ try {
     $cmd5 = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$aeObjDir\\`" /Fe:`"$exe5`" " +
             "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
-            "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
+            "`"$(Join-Path $driversDir 'control/thermal_guard.c')`" `"$(Join-Path $driversDir 'control/tc_lag_comp.c')`" `"$(Join-Path $driversDir 'control/heater_output.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +

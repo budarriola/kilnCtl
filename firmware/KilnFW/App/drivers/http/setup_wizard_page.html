@@ -367,6 +367,9 @@ var WIZARD_STEPS = [
   { id: 11, title: 'Authentication (optional)', readinessKeys: [], safety: false },
 ];
 
+// WZ-03: headings show id+1, so every user-visible step number goes through this.
+function stepLabel(id) { return id + 1; }
+
 function defaultProgress() {
   // Documented shape of GET /api/setup/progress per SETUP_WIZARD.md
   // section 5 item 2 ("thin blob: {version, per-step {state, ts, note}}"),
@@ -497,14 +500,14 @@ function computeCompleteness(mergedSteps, readiness) {
   });
   mergedSteps.forEach(function (s) {
     if (s.safety && s.state === 'skipped') {
-      reasons.push({ text: 'Step ' + s.id + ' (' + s.title + ') is safety-relevant and was skipped.', fix_url: null, step_id: s.id });
+      reasons.push({ text: 'Step ' + stepLabel(s.id) + ' (' + s.title + ') is safety-relevant and was skipped.', fix_url: null, step_id: s.id });
     }
     // §2c continued: a step whose readiness data could not be resolved at
     // all is exactly as "not confirmed" as the top-level empty-list case
     // above, even when other steps' items came back fine (a partially
     // truncated checklist, not a fully failed fetch).
     if (s.state === 'unknown') {
-      reasons.push({ text: 'Step ' + s.id + ' (' + s.title + ') readiness could not be read -- state unknown.', fix_url: null, step_id: s.id });
+      reasons.push({ text: 'Step ' + stepLabel(s.id) + ' (' + s.title + ') readiness could not be read -- state unknown.', fix_url: null, step_id: s.id });
     }
   });
   return { complete: reasons.length === 0, reasons: reasons };
@@ -643,8 +646,16 @@ function validateStep2(thermoCount, zones) {
   return { valid: errors.length === 0, errors: errors };
 }
 
-// Step 3 (thermocouple types + calibration offsets) commit-time validator.
-// `zones` is an array of { tc_type, cal_offset_c } for indices [0, thermoCount).
+// TC protection-tube (sheath) lag tau, seconds. Must match the firmware
+// parser (zones_http_post_parse.c z%u_sheath_tau, ZONE_TC_SHEATH_TAU_MIN_S/
+// MAX_S); tools/PcTools/tests/test_sheath_tau_client_bounds.py pins that.
+var SHEATH_TAU_MIN_S = 0;
+var SHEATH_TAU_MAX_S = 600;
+var SHEATH_TAU_TUBED_DEFAULT_S = 60; // owner 2026-10-16: tubed default, editable
+
+// Step 3 (thermocouple types + calibration offsets + sheath tau) commit-time validator.
+// `zones` is an array of { tc_type, cal_offset_c, tc_sheath_tau_s } for indices
+// [0, thermoCount). tc_sheath_tau_s absent = not edited here (preserved).
 function validateStep3(thermoCount, zones, calMinC, calMaxC) {
   var errors = [];
   for (var i = 0; i < thermoCount; i++) {
@@ -657,6 +668,12 @@ function validateStep3(thermoCount, zones, calMinC, calMaxC) {
         z.cal_offset_c < calMinC || z.cal_offset_c > calMaxC) {
       errors.push('Zone ' + (i + 1) + ' calibration offset must be a number between ' +
         calMinC + ' and ' + calMaxC + ' °C.');
+    }
+    if ('tc_sheath_tau_s' in z && (typeof z.tc_sheath_tau_s !== 'number' ||
+        !isFinite(z.tc_sheath_tau_s) || Math.round(z.tc_sheath_tau_s) !== z.tc_sheath_tau_s ||
+        z.tc_sheath_tau_s < SHEATH_TAU_MIN_S || z.tc_sheath_tau_s > SHEATH_TAU_MAX_S)) {
+      errors.push('Zone ' + (i + 1) + ' protection tube lag must be a whole number of seconds between ' +
+        SHEATH_TAU_MIN_S + ' and ' + SHEATH_TAU_MAX_S + '.');
     }
   }
   return { valid: errors.length === 0, errors: errors };
@@ -710,6 +727,9 @@ function zoneToPostParams(z, i) {
   add('ct_mask', z.ct_mask || 0);
   add('tctype', (z.tc_type != null) ? z.tc_type : 3);
   add('cal', z.cal_offset_c || 0);
+  // Omit preserves (parser): only echo a tau GET actually reported or this
+  // step set. Never default a missing value to 0 -- that would clear it.
+  if (typeof z.tc_sheath_tau_s === 'number') add('sheath_tau', z.tc_sheath_tau_s);
   add('kp', z.pid_kp || 0);
   add('ki', z.pid_ki || 0);
   add('kd', z.pid_kd || 0);
@@ -729,7 +749,8 @@ function zoneToPostParams(z, i) {
   add('driftperiod', z.guard_drift_period_s || 0);
   add('debounce', z.guard_sensor_fault_debounce_ticks || 0);
   add('frozenwindow', z.guard_frozen_window_s || 0);
-  add('xzone', z.cross_zone_max_delta_c || 0);
+  // WZ-12: omit preserves (parser); an explicit 0 would disable guard 8.
+  if (typeof z.cross_zone_max_delta_c === 'number') add('xzone', z.cross_zone_max_delta_c);
   add('k', z.model_k_dc || 0);
   add('tau', z.model_tau_s || 0);
   add('deadtime', z.model_dead_time_s || 0);
@@ -905,6 +926,10 @@ function getAbsMaxTempC(commissioning) {
 // Compared at kgR6 (6 significant digits, the Pico GET print precision): zone
 // max is the raw %.9g value, the Pico ceiling prints %.6g. Firmware compares
 // exactly and reconcile raises the Pico ceiling to heal sub-print gaps.
+// WZ-06 (skipped, deliberate): POST /api/zones would raise the Pico ceiling for the
+// operator, but this is the commissioning path where abs_max_temp_c is meant to be
+// chosen on purpose in step 8 as the independent second ceiling, so the wizard stays
+// stricter than /settings/zones and refuses instead.
 function validateStep6(zones, absMaxTempC) {
   var errors = [];
   zones.forEach(function (z, i) {
@@ -922,7 +947,7 @@ function validateStep6(zones, absMaxTempC) {
       errors.push('Zone ' + (i + 1) + ' max temp (' + kgR6(z.max_temp_c) + ' °C) exceeds the safety ' +
         'processor\'s abs_max_temp_c ceiling (' + absMaxTempC + ' °C). The Pico\'s ceiling is a ' +
         'second set of eyes and must never be tighter than the ESP\'s -- lower this zone\'s max temp, or ' +
-        'raise abs_max_temp_c in step 7 first. Refused, not clamped.');
+        'raise abs_max_temp_c in step 8 first. Refused, not clamped.');
     }
   });
   return { valid: errors.length === 0, errors: errors };
@@ -1004,7 +1029,7 @@ function validateStep8(ctInstalled, ctTopology, mapMask, zoneForCh, committedMas
   if (ctInstalled !== 1) return { valid: true, errors: [] };
   var errors = [];
   if (ctTopology !== 0 && ctTopology !== 1) {
-    errors.push('CT topology (per-zone or summed) must be set once a CT is installed (step 7\'s ' +
+    errors.push('CT topology (per-zone or summed) must be set once a CT is installed (step 8\'s ' +
       'safety commissioning screen).');
     return { valid: false, errors: errors };
   }
@@ -1145,7 +1170,7 @@ function renderStep8() {
       // Posting 'done' instead makes the two screens agree, and matches the
       // one-word fix the review recommended over making `safety` a
       // predicate over live ct_installed.
-      el.innerHTML = '<p class="hint">No CT installed (step 7) -- there is nothing to verify. This is a ' +
+      el.innerHTML = '<p class="hint">No CT installed (step 8) -- there is nothing to verify. This is a ' +
         'legitimate finish, not a deferral.</p><div class="gnav"><button type="button" id="step8Skip">No CT ' +
         'installed &amp; mark done</button></div>';
       document.getElementById('step8Skip').addEventListener('click', function () {
@@ -1323,7 +1348,7 @@ function renderStep9() {
     var zones = data.zones || [];
     if (thermoCount === 0) {
       el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
-        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+        '<a href="#step=2" onclick="gGoto(2)">step 3</a> first.</p>';
       return;
     }
     var html = '<p class="hint"><b>Hand-entered gains complete this step just as fully as autotune does</b> ' +
@@ -1357,7 +1382,7 @@ function renderStep9() {
     }
     html += couplingSummaryHtml(matrix, zones);
     html += '<p class="hint">Status: ' + window.kcEscapeHtml(
-      (latestMerged.filter(function (m) { return m.id === 10; })[0] || {}).detail || '') + '</p>';
+      (latestMerged.filter(function (m) { return m.id === 9; })[0] || {}).detail || '') + '</p>';
     el.innerHTML = html;
 
     el.querySelectorAll('.s10save').forEach(function (btn) {
@@ -1386,11 +1411,12 @@ function renderStep9() {
           // discipline main_page.html's PID popup already uses.
           return fetchJsonOr('/api/zones', null).then(function (cfg2) {
             var stored = cfg2 && cfg2.zones ? cfg2.zones[zi] : null;
-            var matched = stored && Math.abs(stored.pid_kp - kp) < 1e-6 && Math.abs(stored.pid_ki - ki) < 1e-9 &&
-              Math.abs(stored.pid_kd - kd) < 1e-6;
+            var matched = !!stored && pidReadbackMatches(kp, stored.pid_kp) &&
+              pidReadbackMatches(ki, stored.pid_ki) && pidReadbackMatches(kd, stored.pid_kd);
             resultEl.textContent = matched ? 'Stored.' : 'WARNING: board reports different gains than sent.';
             resultEl.className = matched ? 's10result wok' : 's10result werr';
-            if (matched && kp > 0) {
+            var allKp = matched && cfg2.zones.slice(0, thermoCount).every(function (zz) { return zz && zz.pid_kp > 0; });
+            if (allKp) {
               postStepState(9, 'done').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
             }
           });
@@ -1510,6 +1536,7 @@ function renderStep11() {
       var unlock11 = lockSave('step11Save');
       if (!unlock11) return;
       var chain = Promise.resolve();
+      var pwSaved = false;
       if (username && password) {
         chain = chain.then(function () {
           return fetch('/api/auth/security', {
@@ -1525,7 +1552,7 @@ function renderStep11() {
             // surfaces it and cmd=set_policy is never sent.
             // The board answers 200 {"ok":false,"error":...} on refusal (security_http.c).
             return res.json().catch(function () { return {}; }).then(function (body) {
-              if (res.ok && body && body.ok === true) return null;
+              if (res.ok && body && body.ok === true) { pwSaved = true; return null; }
               throw new Error((body && body.error) ||
                 'The board refused the administrator login details -- login was NOT turned on.');
             });
@@ -1555,7 +1582,7 @@ function renderStep11() {
         });
       }).then(function (r) {
         if (!r.ok) {
-          renderErrList(errEl, [(r.body && r.body.error) || 'Save refused -- see status above and try again.']);
+          renderErrList(errEl, [step11FailureText(pwSaved, (r.body && r.body.error) || 'Save refused -- see status above and try again.')]);
           return;
         }
         // Re-read the policy: the text below reports what the board says, not what was sent.
@@ -1566,14 +1593,14 @@ function renderStep11() {
         }).then(function (cfg) {
           msgEl.textContent = wizardLoginReadBackText(wantEnable, cfg);
           if (!cfg || typeof cfg.web_enabled === 'undefined' || !!cfg.web_enabled !== !!wantEnable) {
-            renderErrList(errEl, ['The board does not report the requested login setting. Step 11 is NOT marked done -- check and save again.']);
+            renderErrList(errEl, ['The board does not report the requested login setting. Step 12 is NOT marked done -- check and save again.']);
             return null;
           }
           return postStepState(11, 'done');
         }, function (rbErr) {
           if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(rbErr)) throw rbErr;
           msgEl.textContent = wizardLoginReadBackText(wantEnable, null);
-          renderErrList(errEl, ['Could not read the setting back to confirm it. Step 11 is NOT marked done -- try again.']);
+          renderErrList(errEl, ['Could not read the setting back to confirm it. Step 12 is NOT marked done -- try again.']);
           return null;
         }).then(function (r) { if (r && !stepSaveFailed(r)) loadAll(); });
       }).catch(function (err) {
@@ -1581,8 +1608,8 @@ function renderStep11() {
           renderErrList(errEl, ['Sign-in cancelled.']);
           return;
         }
-        renderErrList(errEl, [(err && err.message) ||
-          'Could not reach the board to save this -- try again once it answers.']);
+        renderErrList(errEl, [step11FailureText(pwSaved, (err && err.message) ||
+          'Could not reach the board to save this -- try again once it answers.')]);
       }).then(unlock11);
     });
     document.getElementById('step11Skip').addEventListener('click', function () {
@@ -1625,6 +1652,18 @@ function step7EnumLabelFor(id, rawValue) {
   return hit ? hit[1] : null;
 }
 
+// WZ-01: the board stores float32 and prints %.9g, so compare to the float32 image of what was
+// sent with a relative tolerance (never an absolute 1e-6 / 1e-9 against a decimal like 0.3).
+function pidReadbackMatches(sent, stored) {
+  if (typeof stored !== 'number' || !isFinite(stored) || !isFinite(sent)) return false;
+  var want = Math.fround(sent);
+  return Math.abs(stored - want) <= 1e-6 * Math.max(1, Math.abs(want));
+}
+
+// WZ-02: Pico A5 bounds (CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, CONFIG_PARAMS_ABS_MAX_TEMP_MAX_C).
+var STEP7_TC_OFFSET_MAX_C = 50;
+var STEP7_ABS_MAX_TEMP_MAX_C = 2500;
+
 // Requirement 2 (abs-max relationship): fields.absMaxTempC must never be
 // BELOW any zone's own max_temp_c -- refused, not clamped, mirroring step 6's
 // own check in the other direction (zone max_temp_c above the Pico ceiling).
@@ -1637,12 +1676,23 @@ function validateStep7(fields, zoneMaxTemps) {
     errors.push('Choose the safety processor\'s own thermocouple type (tc_type) -- it must match the ' +
       'sensor physically fitted to J7 on the safety board.');
   }
-  if (fields.tcOffsetC !== '' && !isFinite(fields.tcOffsetC)) {
-    errors.push('Calibration offset (tc_offset_c) must be a finite number.');
+  if (fields.tcOffsetC !== '' && (!isFinite(fields.tcOffsetC) ||
+      Math.abs(Number(fields.tcOffsetC)) > STEP7_TC_OFFSET_MAX_C)) {
+    errors.push('Calibration offset (tc_offset_c) must be a finite number within +/-' +
+      STEP7_TC_OFFSET_MAX_C + ' °C (the safety processor refuses more).');
   }
-  if (!(fields.absMaxTempC > 0)) {
+  // tc_sheath_tau_s (id 267, 0x010B): bare = 0, tubed = a whole number of seconds 1..600.
+  if (fields.tcSheath !== 'bare' && fields.tcSheath !== 'tubed') {
+    errors.push('Answer whether the safety processor\'s thermocouple is bare or in a protection tube ' +
+      '(tc_sheath_tau_s).');
+  } else if (fields.tcSheath === 'tubed' &&
+             !(Number.isInteger(fields.tcSheathTauS) && fields.tcSheathTauS >= 1 && fields.tcSheathTauS <= 600)) {
+    errors.push('Tube time constant (tc_sheath_tau_s) must be a whole number of seconds from 1 to 600 ' +
+      '(choose "bare" for 0).');
+  }
+  if (!(fields.absMaxTempC > 0) || fields.absMaxTempC > STEP7_ABS_MAX_TEMP_MAX_C) {
     errors.push('Enter the safety processor\'s absolute-maximum ceiling (abs_max_temp_c) -- a real ' +
-      'positive number, no "unlimited" value.');
+      'positive number up to ' + STEP7_ABS_MAX_TEMP_MAX_C + ' °C, no "unlimited" value.');
   } else {
     var maxZone = (zoneMaxTemps || []).filter(function (v) { return v > 0; })
       .reduce(function (a, b) { return Math.max(a, b); }, 0);
@@ -1650,7 +1700,7 @@ function validateStep7(fields, zoneMaxTemps) {
       errors.push('abs_max_temp_c (' + fields.absMaxTempC + ' °C) is BELOW the highest configured ' +
         'zone max_temp_c (' + maxZone + ' °C). The Pico\'s ceiling is a second set of eyes and must ' +
         'never be tighter than the ESP\'s -- refused, not clamped. Raise abs_max_temp_c or lower that ' +
-        'zone\'s max temp in step 6 first.');
+        'zone\'s max temp in step 7 first.');
     }
   }
   if (fields.ctInstalled !== 0 && fields.ctInstalled !== 1) {
@@ -1839,6 +1889,28 @@ function stepRefusalText(r) {
 
 /* Double-submit guard (dev web review LOW-3): disables the Save button and returns the
  * release function, or null when a save is already in flight (the caller must then return). */
+// WZ-09: ct_cal 400s are text/plain (httpd_resp_send_err), not JSON; surface the reason text.
+function ctCalResponseBody(r) {
+  return r.text().then(function (t) {
+    try { return JSON.parse(t); } catch (e) { /* fall through */ }
+    return { ok: false, reason: (t && String(t).trim()) || 'bad response' };
+  });
+}
+
+// WZ-10: let the old reading age out (conversion + thermo task period) before verifying.
+var STEP3_VERIFY_SETTLE_MS = 2000;
+function step3SettleThenVerify(thermoCount) {
+  return new Promise(function (resolve) { setTimeout(resolve, STEP3_VERIFY_SETTLE_MS); }).then(function () {
+    return pollVerifyAfterWrite(thermoCount, 5, 800);
+  });
+}
+
+// WZ-13: if the password write succeeded but the policy write did not, say so.
+function step11FailureText(passwordSaved, msg) {
+  if (!passwordSaved) return msg;
+  return 'The administrator login details WERE saved, but the login setting change was not applied: ' + msg;
+}
+
 function lockSave(id) {
   var b = document.getElementById(id);
   if (!b || b.disabled) return null;
@@ -2000,7 +2072,7 @@ function step2ZoneRowHtml(i, z) {
   }
   var commissioned = isZoneCommissioned(z);
   var badge = commissioned ? '<span class="badge badge-ok">limits set</span>' :
-    '<span class="badge badge-warn">limits NOT SET (step 6)</span>';
+    '<span class="badge badge-warn">limits NOT SET (step 7)</span>';
   return '<div class="zonecard" data-zone="' + i + '">' +
     '<h4>Zone ' + (i + 1) + badge + '</h4>' +
     '<div class="wfield"><label>Name</label><input type="text" class="s2name" data-zone="' + i +
@@ -2010,7 +2082,7 @@ function step2ZoneRowHtml(i, z) {
     'wiggle the probe now and confirm the right number moves, before saving.</p>' +
     '<p class="hint">Commissioning limits (max temp ' + formatZoneLimitC(z.max_temp_c) + ', max ramp ' +
     formatZoneLimitC(z.max_ramp_c_per_hr) + (z.max_ramp_c_per_hr === 0 ? '' : '/hr') +
-    ') are set in step 6, not here.</p></div>';
+    ') are set in step 7, not here.</p></div>';
 }
 
 function step2ReadCurrentZones(thermoCount, existingZones) {
@@ -2147,7 +2219,26 @@ function step3ZoneRowHtml(i, z) {
     tcTypeOptionsHtml(z.tc_type) + '</select></div>' +
     '<div class="wfield"><label>Calibration offset (&deg;C)</label>' +
     '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '"' + kgRawAttrs(z.cal_offset_c) + ' value="' + kgR6(z.cal_offset_c) + '"></div>' +
+    step3SheathHtml(i, z) +
     '<p class="hint">Verify: <span class="s3verify" data-zone="' + i + '">not yet checked</span></p></div>';
+}
+
+// Sheath lag: "protection tube fitted?" (no = 0) plus tau when yes. Applied
+// after the calibration offset, to the ESP control reading only; the Pico
+// reading and its tc_offset_c are separate (step 7).
+function step3SheathHtml(i, z) {
+  var tau = (typeof z.tc_sheath_tau_s === 'number') ? z.tc_sheath_tau_s : 0;
+  var tubed = tau > 0;
+  return '<div class="wfield"><label>Protection tube fitted over this thermocouple?</label>' +
+    '<select class="s3tube" data-zone="' + i + '"><option value="0"' + (tubed ? '' : ' selected') +
+    '>No (bare thermocouple)</option><option value="1"' + (tubed ? ' selected' : '') + '>Yes</option></select></div>' +
+    '<div class="wfield"><label>Tube lag tau (s, ' + SHEATH_TAU_MIN_S + '-' + SHEATH_TAU_MAX_S + ')</label>' +
+    '<input type="number" step="1" min="' + SHEATH_TAU_MIN_S + '" max="' + SHEATH_TAU_MAX_S + '" class="s3tau" data-zone="' + i +
+    '" value="' + (tubed ? tau : SHEATH_TAU_TUBED_DEFAULT_S) + '"></div>' +
+    '<p class="hint">Used only when a tube is fitted. Thin tubes are tens of seconds, thick mullite up to a few ' +
+    'minutes; ' + SHEATH_TAU_TUBED_DEFAULT_S + ' s is a reasonable start. To measure: step the kiln (or move the ' +
+    'tubed probe into a hot hold) and time how long the reading takes to cover 63% of the change. ' +
+    'The verify below does not check this value.</p>';
 }
 
 function step3ReadCurrentZones(thermoCount, existingZones) {
@@ -2156,10 +2247,16 @@ function step3ReadCurrentZones(thermoCount, existingZones) {
     var card = document.querySelector('#stepBody3 .zonecard[data-zone="' + i + '"]');
     var prev = existingZones[i] || {};
     if (!card) { zones.push(prev); continue; }
-    zones.push({
+    var row = {
       tc_type: parseInt(card.querySelector('.s3type').value, 10),
       cal_offset_c: parseFloat(kgPost(card.querySelector('.s3cal'))),
-    });
+    };
+    var tube = card.querySelector('.s3tube');
+    var tauEl = card.querySelector('.s3tau');
+    // No tube control on the card: tau not edited here, leave it absent
+    // so zoneToPostParams() omits it and the board preserves it.
+    if (tube && tauEl) row.tc_sheath_tau_s = (tube.value === '1') ? Number(tauEl.value) : 0;
+    zones.push(row);
   }
   return zones;
 }
@@ -2177,7 +2274,7 @@ function renderStep3() {
     var zones = data.zones || [];
     if (thermoCount === 0) {
       el.innerHTML = '<p class="hint">No thermocouple channels assigned yet -- finish ' +
-        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+        '<a href="#step=2" onclick="gGoto(2)">step 3</a> first.</p>';
       return;
     }
     var html = '';
@@ -2197,6 +2294,8 @@ function renderStep3() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
+      var unlock3 = lockSave('step3Save');
+      if (!unlock3) return;
       // Whole-page submit, same reasoning as step 2's commit handler above:
       // this step only edits tc_type/cal_offset_c, so every other required/
       // omit-deletes field (relay_mask, kp/ki/kd, model k/tau/deadtime, ...)
@@ -2207,6 +2306,7 @@ function renderStep3() {
         var copy = Object.assign({}, zones[mi] || {});
         copy.tc_type = liveZones[mi].tc_type;
         copy.cal_offset_c = liveZones[mi].cal_offset_c;
+        if ('tc_sheath_tau_s' in liveZones[mi]) copy.tc_sheath_tau_s = liveZones[mi].tc_sheath_tau_s;
         mergedZones.push(copy);
       }
       submitZonesConfig(data, mergedZones).then(function () {
@@ -2217,10 +2317,10 @@ function renderStep3() {
         // dead probe). Poll /api/status a few times and report per-zone
         // whether a valid (non-NaN) reading actually appeared, rather than
         // declaring success from the POST's 200 alone.
-        return pollVerifyAfterWrite(thermoCount, 5, 800);
+        return step3SettleThenVerify(thermoCount);
       }).then(function (allVerified) {
         if (allVerified) {
-          okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
+          okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting (tube lag tau saved, not verified).</p>';
           return postStepState(3, 'done').then(function (r) {
             if (stepSaveFailed(r)) {
               okEl.innerHTML = '<p class="hint">The thermocouple settings were written, but this step was NOT marked done.</p>';
@@ -2228,7 +2328,7 @@ function renderStep3() {
             }
             armStepMessage(3, function () {
               var ok2 = document.getElementById('step3Ok');
-              if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
+              if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting (tube lag tau saved, not verified).</p>';
             });
             loadAll();
           });
@@ -2241,7 +2341,7 @@ function renderStep3() {
       }).catch(function (e) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock3);
     });
   });
 }
@@ -2307,7 +2407,7 @@ function renderStep4() {
     var zones = data.zones || [];
     if (thermoCount === 0) {
       el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
-        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+        '<a href="#step=2" onclick="gGoto(2)">step 3</a> first.</p>';
       return;
     }
     var hystDefault = (data.on_off_hyst_c_default != null) ? data.on_off_hyst_c_default : 2.0;
@@ -2479,7 +2579,7 @@ function renderStep5() {
     var zones = data.zones || [];
     if (thermoCount === 0) {
       el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
-        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+        '<a href="#step=2" onclick="gGoto(2)">step 3</a> first.</p>';
       return;
     }
     var namesArr = (data.relay_names || []).slice();
@@ -2642,7 +2742,7 @@ function renderStep6() {
     var zones = data.zones || [];
     if (thermoCount === 0) {
       el.innerHTML = '<p class="hint">No zones configured yet -- finish ' +
-        '<a href="#step=2" onclick="gGoto(2)">step 2</a> first.</p>';
+        '<a href="#step=2" onclick="gGoto(2)">step 3</a> first.</p>';
       return;
     }
     var absMaxTempC = getAbsMaxTempC(commissioning);
@@ -2650,9 +2750,9 @@ function renderStep6() {
       'Safety processor ceiling (abs_max_temp_c): ' + absMaxTempC + ' °C. The Pico\'s ceiling is a second ' +
       'set of eyes and must never be tighter than the ESP\'s -- a zone max temp entered here ABOVE this ' +
       'ceiling is REFUSED, not clamped.' :
-      'Safety processor ceiling (abs_max_temp_c) is not known yet -- step 7 commissions it. Once set there ' +
+      'Safety processor ceiling (abs_max_temp_c) is not known yet -- step 8 commissions it. Once set there ' +
       'it must never be tighter than the highest zone max temp set here; that relationship is re-checked ' +
-      'again at step 7\'s own commit, and this screen re-checks it live at commit whenever the value ' +
+      'again at step 8\'s own commit, and this screen re-checks it live at commit whenever the value ' +
       'becomes known.') + '</p>';
     for (var i = 0; i < thermoCount; i++) html += step6ZoneRowHtml(i, zones[i] || {});
     html += '<div id="step6Err"></div><div id="step6Ok"></div>';
@@ -2763,13 +2863,13 @@ function wireStep7CtCalButtons() {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body,
-      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); })
+      }).then(function (r) { return ctCalResponseBody(r); })
         .then(function (j) {
           btn.disabled = false;
           if (j.ok) {
             result.textContent = 'ok -- k_ct_v_per_a=' + j.k_ct_v_per_a + ', zero_counts=' + j.zero_counts;
             result.className = 'ct-cal-result';
-            renderStep7();
+            // WZ-08: no renderStep7() here -- it would drop unsaved edits on the form.
           } else {
             result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
             result.className = 'ct-cal-result crc-mismatch';
@@ -2848,11 +2948,22 @@ function renderStep7() {
       '<p class="hint">Added to the safety board\'s own MAX31856 reading, before any guard sees it. ' +
       '0 means no correction.</p></div>';
 
+    html += '<div class="wfield"><label for="s7TcSheath">Safety processor thermocouple: bare or in a protection tube?</label>' +
+      '<select id="s7TcSheath"><option value="">-- choose --</option>' +
+      '<option value="bare">Bare (no tube)</option><option value="tubed">In a protection tube</option></select>' +
+      '<div id="s7TcTauWrap" style="display:none"><label for="s7TcTau">Tube time constant (tc_sheath_tau_s, s)</label>' +
+      '<input type="number" step="1" min="1" max="600" id="s7TcTau" value="60"></div>' +
+      '<p class="hint">A tube makes the reading lag the true temperature while heating. With a tube, the ' +
+      'safety processor estimates the hotter true temperature and its over-temperature guards (S1, S2) trip ' +
+      'on the higher of the raw and estimated values, so the setting can only make a trip earlier. 60 s is a ' +
+      'typical starting value for a tubed thermocouple; it has not been measured on this kiln. Bare = 0, no ' +
+      'compensation.</p></div>';
+
     html += '<div class="wfield"><label for="s7AbsMax">Absolute-maximum ceiling (abs_max_temp_c, &deg;C)</label>' +
       '<input type="number" step="any" min="0.0001" id="s7AbsMax" placeholder="e.g. 1300">' +
       '<p class="hint">The highest temperature this kiln\'s furniture/elements/brick can survive -- not the ' +
       'hottest firing you plan. Required, no "unlimited" value. Currently the highest configured zone ceiling ' +
-      'is ' + (highestZoneMax > 0 ? (highestZoneMax + ' °C') : 'not set yet (step 6)') + ' -- this value must ' +
+      'is ' + (highestZoneMax > 0 ? (highestZoneMax + ' °C') : 'not set yet (step 7)') + ' -- this value must ' +
       'never be BELOW that: the Pico\'s ceiling is a second set of eyes and must never be tighter than the ' +
       'ESP\'s. Refused, not clamped, if it would be.</p></div>';
 
@@ -2901,7 +3012,7 @@ function renderStep7() {
     }
     html += '<div class="wfield" id="s7CtMapWrap"><label>Per-zone CT channel mapping</label>' +
       '<p class="hint">Which zone each current-transformer channel actually watches -- the map itself, not just ' +
-      'a link to set it elsewhere. Required, all three together, only when CTs are fitted with per-zone ' +
+      'a link to set it elsewhere. Set all three together (a blank map is committed as unset and readiness will flag it), only when CTs are fitted with per-zone ' +
       'topology; a summed CT (one shared channel) has no per-relay question to answer here.</p>' +
       [0, 1, 2].map(function (ch) {
         return '<div class="wfield"><label for="s7CtMap' + ch + '">CT channel ' + ch + '</label>' +
@@ -2944,6 +3055,17 @@ function renderStep7() {
     if (byId[261] && byId[261].set) setVal('s7TcType', byId[261].value);
     if (byId[266] && byId[266].set) setVal('s7TcOffset', byId[266].value);
     if (byId[260] && byId[260].set) setVal('s7AbsMax', byId[260].value);
+    if (byId[267] && byId[267].set) {
+      var tau267 = Number(byId[267].value);
+      setVal('s7TcSheath', tau267 > 0 ? 'tubed' : 'bare');
+      if (tau267 > 0) setVal('s7TcTau', tau267);
+    }
+    function refreshTcTauVisibility() {
+      document.getElementById('s7TcTauWrap').style.display =
+        (document.getElementById('s7TcSheath').value === 'tubed') ? '' : 'none';
+    }
+    document.getElementById('s7TcSheath').addEventListener('change', refreshTcTauVisibility);
+    refreshTcTauVisibility();
     if (byId[265] && byId[265].set) setVal('s7CtInstalled', byId[265].value);
     if (byId[799] && byId[799].set) setVal('s7CtTopology', byId[799].value);
     if (byId[262] && byId[262].set) setVal('s7CtMap0', byId[262].value);
@@ -2979,6 +3101,8 @@ function renderStep7() {
       var tcTypeRaw = document.getElementById('s7TcType').value;
       var tcOffsetRaw = document.getElementById('s7TcOffset').value;
       var absMaxRaw = document.getElementById('s7AbsMax').value;
+      var tcSheathRaw = document.getElementById('s7TcSheath').value;
+      var tcTauRaw = document.getElementById('s7TcTau').value;
       var ctInstalledRaw = document.getElementById('s7CtInstalled').value;
       var ctTopologyRaw = document.getElementById('s7CtTopology').value;
       var ctMapRaw = [0, 1, 2].map(function (ch) { return document.getElementById('s7CtMap' + ch).value; });
@@ -2987,6 +3111,8 @@ function renderStep7() {
         tcType: tcTypeRaw === '' ? -1 : parseInt(tcTypeRaw, 10),
         tcOffsetC: tcOffsetRaw === '' ? 0 : parseFloat(tcOffsetRaw),
         absMaxTempC: parseFloat(absMaxRaw),
+        tcSheath: tcSheathRaw,
+        tcSheathTauS: tcSheathRaw === 'tubed' ? (tcTauRaw === '' ? NaN : Number(tcTauRaw)) : 0,
         ctInstalled: ctInstalledRaw === '' ? -1 : parseInt(ctInstalledRaw, 10),
         ctTopology: ctTopologyRaw === '' ? -1 : parseInt(ctTopologyRaw, 10),
         ctChannelMap: ctMapRaw.map(function (v) { return v === '' ? -1 : parseInt(v, 10); }),
@@ -3036,6 +3162,7 @@ function renderStep7() {
           { id: 261, name: 'tc_type', value: fields.tcType },
           { id: 266, name: 'tc_offset_c', value: fields.tcOffsetC },
           { id: 260, name: 'abs_max_temp_c', value: fields.absMaxTempC },
+          { id: 267, name: 'tc_sheath_tau_s', value: fields.tcSheathTauS },
           { id: 265, name: 'ct_installed', value: fields.ctInstalled },
         ];
         if (fields.ctInstalled === 1) {

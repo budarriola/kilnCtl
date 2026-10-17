@@ -642,6 +642,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # pid_fuzzy.c itself.
                        "control/pid_fuzzy_confidence.c"
                        "control/thermal_guard.c"
+                       "control/tc_lag_comp.c"
                        "control/on_off_trigger_decide.c"
                        "control/thermo_combine.c"
                        "control/thermo_channel_read.c"

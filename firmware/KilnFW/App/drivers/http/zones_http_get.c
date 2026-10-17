@@ -444,6 +444,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                                   pid_fuzzy_derive_bands(ht_model_k_dc, ht_model_tau_s, NULL, NULL);
         APPEND(
             "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.9g,"
+            "\"tc_sheath_tau_s\":%.9g,"
             "\"pid_kp\":%.9g,\"pid_ki\":%.9g,\"pid_kd\":%.9g,\"max_ramp_c_per_hr\":%.9g,"
             "\"sanity_rate_c_per_min\":%.9g,\"control_mode\":%u,\"max_temp_c\":%.9g,"
             "\"min_temp_c\":%.9g,\"heater_window_ms\":%.0f,\"heater_min_on_ms\":%.0f,"
@@ -490,6 +491,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             "\"relay_type\":%u,"
             "\"fuzzy_strength_pct\":%.2f,\"fuzzy_model_valid\":%s,",
             i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
+            (double)z->tc_sheath_tau_s,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
             (double)z->min_temp_c, (double)z->heater_window_ms, (double)z->heater_min_on_ms,

@@ -143,6 +143,46 @@ bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
     return nvs_save() == ESP_OK;
 }
 
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s)
+{
+    if (!out_tau_s || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_tau_s = (float)s_zones.cfg.zones[zone_index].tc_sheath_tau_s;
+    return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_sheath_tau and validate enforce. */
+bool zones_config_set_tc_sheath_tau_no_save(uint8_t zone_index, float tau_s)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(tau_s) || tau_s < ZONE_TC_SHEATH_TAU_MIN_S || tau_s > ZONE_TC_SHEATH_TAU_MAX_S) {
+        return false;
+    }
+    zones_cfg_lock();
+    if (zones_config_is_undecided()) {
+        zones_cfg_unlock();
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].tc_sheath_tau_s = (uint16_t)lrintf(tau_s); /* whole seconds */
+    s_config_generation++;
+    zones_cfg_unlock();
+    return true;
+}
+
+bool zones_config_set_tc_sheath_tau(uint8_t zone_index, float tau_s)
+{
+    if (zones_config_is_undecided()) {
+        return false;
+    }
+    if (!zones_config_set_tc_sheath_tau_no_save(zone_index, tau_s)) {
+        return false;
+    }
+    return nvs_save() == ESP_OK;
+}
+
 /* PID_EXPANSION_PLAN.md 3.3 consolidation -- see zones_http.h's own doc
  * comment on this pair. zone_index >= thermo_count reads as "not enabled",
  * same convention every other simple getter in this file uses (see
@@ -3100,6 +3140,7 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     F(F32, progress_band_c, 1)                                           \
     F(U8, zone_type, 1)                                                  \
     F(U8, failsafe_state, 1)                                             \
+    F(U16, tc_sheath_tau_s, 1)                                           \
     F(F32, hyst_c, 1)                                                    \
     F(U16, min_on_s, 1)                                                  \
     F(U16, min_off_s, 1)                                                 \

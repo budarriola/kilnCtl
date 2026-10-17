@@ -445,6 +445,28 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(nanOffset.valid === false, 'step3: NaN cal_offset_c is refused');
 })();
 
+(function testStep3SheathTau() {
+  const ctx = loadPageScript(noopFetch);
+  const v = (t) => ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: 0, tc_sheath_tau_s: t }], -50.0, 50.0).valid;
+  assert(v(0) && v(60) && v(600), 'step3: sheath tau 0/60/600 accepted');
+  assert(!v(601) && !v(-1) && !v(NaN) && !v(59.5) && !v('60'), 'step3: sheath tau out of range/non-integer refused');
+  assert(ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: 0 }], -50.0, 50.0).valid, 'step3: absent sheath tau is not an error');
+  assert(ctx.SHEATH_TAU_MIN_S === 0 && ctx.SHEATH_TAU_MAX_S === 600 && ctx.SHEATH_TAU_TUBED_DEFAULT_S === 60,
+    'step3: sheath tau bounds/default');
+  const base = { name: 'Z', cal_offset_c: 0 };
+  const q0 = ctx.zoneToPostParams(base, 0).join('&');
+  assert(q0.indexOf('sheath_tau') < 0, 'zoneToPostParams: absent tau is omitted (preserved), never replayed as 0');
+  const q1 = ctx.zoneToPostParams(Object.assign({}, base, { tc_sheath_tau_s: 180 }), 0).join('&');
+  assert(q1.indexOf('z0_sheath_tau=180') >= 0, 'zoneToPostParams: tau from GET is echoed');
+  const q2 = ctx.zoneToPostParams(Object.assign({}, base, { tc_sheath_tau_s: 0 }), 0).join('&');
+  assert(q2.indexOf('z0_sheath_tau=0') >= 0, 'zoneToPostParams: tau 0 is echoed');
+  const bare = ctx.step3SheathHtml(0, { tc_sheath_tau_s: 0 });
+  assert(/value="0" selected/.test(bare) && /value="60"/.test(bare), 'step3: bare TC defaults to No, tau field pre-filled 60');
+  const tubed = ctx.step3SheathHtml(0, { tc_sheath_tau_s: 240 });
+  assert(/value="1" selected/.test(tubed) && /value="240"/.test(tubed), 'step3: stored tau shows tube Yes with its value');
+  assert(/does not check this value/.test(tubed), 'step3: hint says verify does not check tau');
+})();
+
 // ---- Task requirement 4 / plan section 2: 0 means UNSET for max_temp_c and
 // max_ramp_c_per_hr (settled in 1fc9b1dd), never a valid commissioned limit.
 // isZoneCommissioned() is the single place this rule lives for the wizard;
@@ -929,7 +951,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // safety_commissioning_page.html's own GROUPS table uses.
 (function testStep7Validate() {
   const ctx = loadPageScript(noopFetch);
-  const okFields = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, ctInstalled: 1, ctTopology: 1 };
+  const okFields = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, tcSheath: 'bare', tcSheathTauS: 0, ctInstalled: 1, ctTopology: 1 };
   assert(ctx.validateStep7(okFields, [1000, 1200]).valid === true,
     'step7: a real tc_type + positive abs_max_temp_c above every zone ceiling + CT answers validates');
 
@@ -945,6 +967,22 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 
   const nanOffset = Object.assign({}, okFields, { tcOffsetC: NaN });
   assert(ctx.validateStep7(nanOffset, []).valid === false, 'step7: a non-finite tc_offset_c is refused');
+
+  // tc_sheath_tau_s (267): bare/tubed must be answered; tubed is 1..600 whole seconds.
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: '' }), []).valid === false,
+    'step7: bare/tubed must be answered');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 60 }), []).valid === true,
+    'step7: tubed 60 s validates');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 600 }), []).valid === true,
+    'step7: tubed 600 s validates (inclusive)');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 601 }), []).valid === false,
+    'step7: tubed 601 s is refused');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 0 }), []).valid === false,
+    'step7: tubed 0 s is refused (choose bare)');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 60.5 }), []).valid === false,
+    'step7: a fractional tube tau is refused (U16 seconds)');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: NaN }), []).valid === false,
+    'step7: an empty tube tau is refused');
 
   const noCtAnswer = Object.assign({}, okFields, { ctInstalled: -1 });
   assert(ctx.validateStep7(noCtAnswer, []).valid === false,
@@ -964,7 +1002,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // opposite direction.
 (function testStep7AbsMaxNeverTighterThanEsp() {
   const ctx = loadPageScript(noopFetch);
-  const base = { tcType: 3, tcOffsetC: 0, ctInstalled: 0, ctTopology: -1 };
+  const base = { tcType: 3, tcOffsetC: 0, tcSheath: 'bare', tcSheathTauS: 0, ctInstalled: 0, ctTopology: -1 };
 
   const atCeiling = Object.assign({}, base, { absMaxTempC: 1200 });
   assert(ctx.validateStep7(atCeiling, [1200]).valid === true,
@@ -1430,6 +1468,53 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
 // though POST reported ok:true") because res.ok came back true, (4) the
 // edit was reversed by hand, (5) `git diff` on commissioning_shared.js
 // confirmed empty before this pass committed.
+
+// ---- WZ-01..WZ-13 wizard review fixes (REVIEW_WIZARD) ------------------
+(function testWizardReviewFixes() {
+  const ctx = loadPageScript(noopFetch);
+  // WZ-01: float32 read-back of ordinary decimals must match.
+  const f32 = (x) => Math.fround(x);
+  assert(ctx.pidReadbackMatches(0.3, f32(0.3)) === true, 'WZ-01: Ki=0.3 float32 read-back matches');
+  assert(ctx.pidReadbackMatches(100.3, f32(100.3)) === true, 'WZ-01: Kp=100.3 float32 read-back matches');
+  assert(ctx.pidReadbackMatches(0.3, 0.31) === false, 'WZ-01: a genuinely different gain still mismatches');
+  assert(ctx.pidReadbackMatches(5, undefined) === false, 'WZ-01: a missing stored value mismatches');
+  // WZ-02: Pico A5 bounds.
+  const ok = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, tcSheath: 'bare', tcSheathTauS: 0, ctInstalled: 0 };
+  assert(ctx.validateStep7(Object.assign({}, ok, { tcOffsetC: 50 }), []).valid === true, 'WZ-02: offset 50 accepted');
+  assert(ctx.validateStep7(Object.assign({}, ok, { tcOffsetC: 60 }), []).valid === false, 'WZ-02: offset 60 refused');
+  assert(ctx.validateStep7(Object.assign({}, ok, { tcOffsetC: -50.5 }), []).valid === false, 'WZ-02: offset -50.5 refused');
+  assert(ctx.validateStep7(Object.assign({}, ok, { absMaxTempC: 2500 }), []).valid === true, 'WZ-02: abs_max 2500 accepted');
+  assert(ctx.validateStep7(Object.assign({}, ok, { absMaxTempC: 2501 }), []).valid === false, 'WZ-02: abs_max 2501 refused');
+  // WZ-03: step numbers in messages are 1-based like the headings.
+  assert(ctx.stepLabel(2) === 3, 'WZ-03: stepLabel is id+1');
+  const merged = ctx.mergeAllSteps({ version: 1, steps: { '6': { state: 'skipped' } } }, { items: [] });
+  const gate = ctx.computeCompleteness(merged, { items: [{ key: 'x', status: 'ok' }] });
+  const skipReason = gate.reasons.filter((r) => /safety-relevant and was skipped/.test(r.text))[0];
+  assert(skipReason && /^Step 7 \(Zone commissioning limits\)/.test(skipReason.text),
+    'WZ-03: skipped step id 6 is reported as "Step 7", got ' + (skipReason && skipReason.text));
+  // WZ-12: a missing cross_zone_max_delta_c is omitted, an explicit value is sent.
+  assert(!/xzone/.test(ctx.zoneToPostParams({ name: 'a' }, 0).join('&')), 'WZ-12: missing xzone is omitted');
+  assert(/z0_xzone=0/.test(ctx.zoneToPostParams({ cross_zone_max_delta_c: 0 }, 0).join('&')), 'WZ-12: stored 0 is echoed');
+  // WZ-13
+  assert(/WERE saved/.test(ctx.step11FailureText(true, 'nope')) && ctx.step11FailureText(false, 'nope') === 'nope',
+    'WZ-13: policy failure after a saved password says so');
+  // WZ-09: plain-text 400 reason survives.
+  return ctx.ctCalResponseBody({ text: () => Promise.resolve('a_fs out of range') }).then((j) => {
+    assert(j.ok === false && j.reason === 'a_fs out of range', 'WZ-09: text/plain reason is kept');
+    return ctx.ctCalResponseBody({ text: () => Promise.resolve('{"ok":true,"zero_counts":3}') });
+  }).then((j) => assert(j.ok === true, 'WZ-09: JSON body still parsed'));
+})();
+
+// WZ-04/08/10/11: source-level pins for DOM-only behaviour.
+(function testWizardDomPins() {
+  const src = fs.readFileSync(PAGE_PATH, 'utf8').replace(/\r\n/g, '\n');
+  assert(/return m\.id === 9; \}\)\[0\] \|\| \{\}\)\.detail/.test(src), 'WZ-04: step 9 status reads step 9 detail');
+  assert(/lockSave\('step3Save'\)/.test(src), 'WZ-11: step 3 Save is locked');
+  assert(/return step3SettleThenVerify\(thermoCount\)/.test(src), 'WZ-10: step 3 verify waits to settle first');
+  assert(/zz\.pid_kp > 0/.test(src), 'WZ-05: step 9 done requires every zone kp > 0');
+  const calBlock = src.slice(src.indexOf("if (j.ok) {\n            result.textContent = 'ok -- k_ct_v_per_a"));
+  assert(!/\n\s*renderStep7\(\);/.test(calBlock.slice(0, calBlock.indexOf('FAILED: '))), 'WZ-08: CT cal Apply success does not re-render step 7');
+})();
 
 Promise.resolve().then(() => {
   console.log('');

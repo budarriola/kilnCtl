@@ -1397,6 +1397,9 @@ static safety_guard_input_t safety_core_build_input(void)
         // not the Pico's own J7. The cold junction stays the Pico's own.
         .tc_valid = use_borrowed_tc ? borrowed_ok : (thermo.valid && thermo_fresh),
         .tc_c = use_borrowed_tc ? (borrowed_ok ? borrowed_c : NAN) : thermo.tc_c,
+        // TC sheath lag (0x010B) is a fact about the Pico's own J7 probe:
+        // none for a borrowed zone reading, none for a stale snapshot.
+        .tc_lead_c = (use_borrowed_tc || !thermo_fresh) ? 0.0f : thermo.tc_lead_c,
         .cj_c = thermo.cj_c,
         .cj_invalid = !thermo.cj_valid || !thermo_fresh, // review saftyfx6 F5
         .fault_bits = use_borrowed_tc ? (borrowed_ok ? borrowed_fault : 0u) : thermo.fault_bits,

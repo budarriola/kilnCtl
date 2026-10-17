@@ -954,7 +954,17 @@ typedef struct {
     // config_store.c) -- adding a field later is a struct/pack/unpack/
     // host-test change, not a layout change, same as metadata.h's own
     // signature/sig_required reservation.
-    uint8_t  reserved[264];
+    // Safety TC protection-tube (sheath) lag time constant, seconds, param
+    // 0x010B (TC sheath lag, 2026-10-16). 0 = bare TC, no compensation (the
+    // pre-existing behaviour, bit for bit). 1..CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S
+    // runs the tc_lag_comp lead estimate in thermo_task; S1 and the overshoot
+    // guard then check raw + max(0, lead), the conservative of raw and
+    // compensated. Not fields_set-gated: 0 is the safe compiled default, and
+    // unpack decodes any stored value above the max (legacy 0xFFFF reserved
+    // fill) as 0. Carved from the front of the reserved tail.
+    uint16_t tc_sheath_tau_s;
+
+    uint8_t  reserved[262];
 } config_store_record_t;
 
 // config_store_effective_zone_ct_channel() -- THE single place "which CT
@@ -1573,6 +1583,11 @@ bool config_store_get_persisted_check_period_s(uint32_t *out);
 // Same "safe to call from any task" contract as config_store_get_tc_type()
 // above.
 float config_store_get_tc_offset_c(void);
+
+// The cached safety TC sheath tau (param 0x010B), seconds. Returns 0 (no
+// compensation, the safe default) before config_store_boot_load(). Read by
+// thermo_task on every conversion.
+uint16_t config_store_get_tc_sheath_tau_s(void);
 
 // The commissioned E-stop input polarity (param 0x0212), one of
 // DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH/_LOW. Returns ACTIVE_HIGH -- the

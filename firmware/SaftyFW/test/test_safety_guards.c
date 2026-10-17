@@ -62,6 +62,54 @@ static safety_guard_cfg_t base_cfg(void)
     return cfg;
 }
 
+/* TC sheath lag (0x010B): S1 and S2 judge max(raw, raw + lead). A positive
+ * lead can only trip earlier; a negative or NaN lead never delays a trip. */
+static bool lead_run(safety_guard_cfg_t cfg, safety_guard_input_t in, int ticks)
+{
+    safety_guard_state_t s;
+    safety_guards_reset(&s);
+    bool tripped = false;
+    for (int i = 0; i < ticks && !tripped; i++) {
+        tripped = safety_guards_tick(&s, &cfg, &in);
+    }
+    return tripped;
+}
+
+static void test_tc_sheath_lead_guards(void)
+{
+    TEST_SECTION("S1/S2 -- TC sheath lead (conservative max of raw and compensated)");
+    safety_guard_cfg_t cfg = base_cfg();
+    safety_guard_input_t in = base_input();
+
+    in.tc_c = 1290.0f;
+    in.tc_lead_c = 0.0f;
+    TEST_CHECK(!lead_run(cfg, in, 100), "S1: raw under the ceiling with lead 0 does not trip");
+    in.tc_lead_c = 20.0f;
+    TEST_CHECK(lead_run(cfg, in, 3), "S1: raw under the ceiling plus a positive lead over it trips in 3 readings");
+    in.tc_c = 1400.0f;
+    in.tc_lead_c = -200.0f;
+    TEST_CHECK(lead_run(cfg, in, 3), "S1: a negative lead never delays a raw over-ceiling trip");
+    in.tc_lead_c = NAN;
+    TEST_CHECK(lead_run(cfg, in, 3), "S1: a NaN lead falls back to raw");
+
+    safety_guard_cfg_t c2 = base_cfg();
+    c2.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+    safety_guard_input_t i2 = base_input();
+    i2.context_valid = true;
+    i2.zone_count = 1u;
+    i2.max_zone_setpoint_c = 1000.0f;
+    i2.nearest_zone_measured_c = 1070.0f;
+    i2.tc_c = 1070.0f; /* under setpoint + 75 C */
+    i2.tc_lead_c = 0.0f;
+    TEST_CHECK(!lead_run(c2, i2, 1300), "S2: raw under setpoint + margin with lead 0 does not trip");
+    i2.tc_lead_c = 10.0f;
+    TEST_CHECK(lead_run(c2, i2, 1300), "S2: a positive lead over setpoint + margin trips after overshoot_time_s");
+    i2.tc_c = 1100.0f;
+    i2.nearest_zone_measured_c = 1100.0f;
+    i2.tc_lead_c = -100.0f;
+    TEST_CHECK(lead_run(c2, i2, 1300), "S2: a negative lead never delays a raw overshoot trip");
+}
+
 static void test_s1(void)
 {
     TEST_SECTION("S1 -- absolute over-temperature");
@@ -5572,6 +5620,7 @@ void run_test_safety_guards(void)
     test_test_clear_s8_tiny_window();
     test_s8_clear_followups();
     test_s1();
+    test_tc_sheath_lead_guards();
     test_s1_ceiling_properties();
     test_s5();
     test_s5_fault_bit_terms();

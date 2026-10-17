@@ -24,6 +24,9 @@ $bootDir = Join-Path $testDir "..\bootloader"
 $updateDir = Join-Path $testDir "..\src\update"
 $commonSrcDir = Join-Path $testDir "..\..\CommonFW\src"
 $commonIncDir = Join-Path $testDir "..\..\CommonFW\include"
+# TC sheath lag estimator (param 0x010B): the one pure-C module both
+# firmwares use, kept with KilnFW's control code.
+$tcLagDir = Join-Path $testDir "..\..\KilnFW\App\drivers\control"
 # HAL Phase 1a (docs/HW_ABSTRACTION.md) moved uart_owner_tx_policy.c/h
 # out of src/tasks/ into firmware/hwAbstraction/pico/uart/ (colocated with
 # the rest of the pico UART owner); it is still host-testable on its own
@@ -583,6 +586,7 @@ try {
         (Join-Path $testDir "test_thermo_task_stubs.c"),
         (Join-Path $harnessDir "task_harness.c"),
         (Join-Path $srcDir "tasks\thermo_task.c"),
+        (Join-Path $tcLagDir "tc_lag_comp.c"),
         (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
         (Join-Path $srcDir "tasks\tick_timing.c"),
         (Join-Path $srcDir "safety_guards.c"),
@@ -601,7 +605,7 @@ try {
     )
     $thermoTaskSourceArgs = ($thermoTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $thermoTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
-        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" /I `"$tcLagDir`" " +
         "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir\stubs\pico_time_clock`" /I `"$testDir`" " +
         "/Fo:`"$thermoTaskObjDir\\`" /Fe:`"$thermoTaskExe`" $thermoTaskSourceArgs"
     Add-HostBuild -Name "thermo_task_tests.exe" -ExePath $thermoTaskExe -BuildCmd $thermoTaskCmd
@@ -628,7 +632,7 @@ try {
     )
     $wdTaskSourceArgs = ($wdTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $wdTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
-        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" /I `"$tcLagDir`" " +
         "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
         "/Fo:`"$wdTaskObjDir\\`" /Fe:`"$wdTaskExe`" $wdTaskSourceArgs"
     Add-HostBuild -Name "watchdog_task_tests.exe" -ExePath $wdTaskExe -BuildCmd $wdTaskCmd
@@ -650,7 +654,7 @@ try {
     )
     $dtTaskSourceArgs = ($dtTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
     $dtTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
-        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" /I `"$tcLagDir`" " +
         "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
         "/Fo:`"$dtTaskObjDir\\`" /Fe:`"$dtTaskExe`" $dtTaskSourceArgs"
     Add-HostBuild -Name "discrete_task_tests.exe" -ExePath $dtTaskExe -BuildCmd $dtTaskCmd

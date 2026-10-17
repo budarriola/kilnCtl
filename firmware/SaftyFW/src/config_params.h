@@ -142,6 +142,11 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // magnitude of headroom for any real correction while making a blinding
 // offset unreachable. Enforced at SET_PARAM time and at load/validate time.
 #define CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C 50.0f
+
+// tc_sheath_tau_s (0x010B) range, seconds: 0 = bare TC (off) .. 600. Same
+// range as KilnFW's per-zone ZONE_TC_SHEATH_TAU_MAX_S / TC_LAG_COMP_TAU_MAX_S.
+// SET_PARAM refuses a value above the max (A5); unpack decodes one as 0.
+#define CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S 600u
 #define CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A 50.0f
 
 // Upper bounds on trip thresholds, enforced at SET_PARAM time ONLY (guard audit

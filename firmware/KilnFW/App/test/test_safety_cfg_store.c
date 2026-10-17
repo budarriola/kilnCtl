@@ -336,10 +336,10 @@ static void test_index_for_id_finds_known_and_rejects_unknown(void)
     // Note that tools/run_all_checks.ps1 does NOT run this executable, so a
     // stale pin here is only visible to a direct build_host_tests.ps1 run.
     TEST_CHECK(index_for_id(0x0101) == 0, "first table row (tc_source) is index 0");
-    TEST_CHECK(index_for_id(0x0322) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
-               "last table row (zone_ct_channel[2]) is the last index");
-    TEST_CHECK(index_for_id(0x0321) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
-               "zone_ct_channel[1] is second-to-last");
+    TEST_CHECK(index_for_id(0x010B) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
+               "last table row (tc_sheath_tau_s) is the last index");
+    TEST_CHECK(index_for_id(0x0322) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
+               "zone_ct_channel[2] is second-to-last");
     TEST_CHECK(index_for_id(0xBEEF) == -1, "an id no CONFIG_REFERENCE.md section uses is not found");
     TEST_CHECK(safety_cfg_store_param_count() == SAFETY_CFG_PARAM_COUNT,
                "safety_cfg_store_param_count() matches the table size exactly");
@@ -1046,7 +1046,7 @@ static void test_v6_blob_migrates_by_id_and_drops_removed_ids(void)
     TEST_CHECK(s_store.config_crc == 0x1234, "config_crc carried over as stored");
     TEST_CHECK(s_has_data, "migrated cache counts as data");
     size_t bad = 0;
-    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT_V7; i++) {
         safety_cfg_param_t p;
         TEST_CHECK(safety_cfg_store_get_by_index(i, &p), "row readable");
         size_t j = v6_pos_for_v7(i);
@@ -1055,10 +1055,45 @@ static void test_v6_blob_migrates_by_id_and_drops_removed_ids(void)
         }
     }
     TEST_CHECK(bad == 0, "every surviving row holds its own v6 value, mapped by id");
+    TEST_CHECK(!s_store.entries[index_for_id(0x010B)].set, "0x010B (new in v8) stays unset");
     TEST_CHECK(index_for_id(0x0401) < 0 &&
                    index_for_id(0x0404) < 0 &&
                    index_for_id(0x0405) < 0,
                "removed ids are gone from the table");
+    fake_kv_reset_all();
+}
+
+static void test_v7_blob_migrates_by_id(void)
+{
+    TEST_SECTION("nvs_load_store -- a v7 blob migrates by param id, tc_sheath_tau_s left unset");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    safety_cfg_store_blob_v7_t v7;
+    memset(&v7, 0, sizeof(v7));
+    v7.version = 7u;
+    v7.config_crc = 0x4321;
+    for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V7; j++) {
+        v7.entries[j].set = 1;
+        v7.entries[j].value.u16_val = (uint16_t)(2000u + j);
+    }
+    stage_raw_blob(&v7, sizeof(v7));
+    nvs_load_store();
+    TEST_CHECK(s_store.version == SAFETY_CFG_STORE_VERSION && s_store.config_crc == 0x4321 && s_has_data,
+               "migrated v7 store is current, config_crc carried over");
+    size_t bad = 0;
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT_V7; i++) {
+        if (!s_store.entries[i].set || s_store.entries[i].value.u16_val != (uint16_t)(2000u + i)) {
+            bad++;
+        }
+    }
+    TEST_CHECK(bad == 0, "every v7 row keeps its value at its own id");
+    TEST_CHECK(!s_store.entries[index_for_id(0x010B)].set, "0x010B stays unset until the next refetch");
+
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    stage_raw_blob(&v7, sizeof(v7) - sizeof(v7.entries[0]));
+    nvs_load_store();
+    TEST_CHECK(s_store.config_crc == 0 && !s_has_data, "a short v7 blob is unreadable");
     fake_kv_reset_all();
 }
 
@@ -1667,6 +1702,7 @@ void run_test_safety_cfg_store(void)
     test_version_refuse_older_layout_without_a_migration();
     test_v6_blob_migrates_by_id_and_drops_removed_ids();
     test_v6_blob_wrong_size_is_unreadable();
+    test_v7_blob_migrates_by_id();
     test_v5_blob_still_resets();
     test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache();
     test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles();

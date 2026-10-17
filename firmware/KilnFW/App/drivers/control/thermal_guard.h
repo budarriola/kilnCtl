@@ -348,6 +348,20 @@ typedef struct {
      * a nonzero value here simply takes priority for guards 1/2 on this
      * tick, and progress_rise_check_relaxed is ignored while it does. */
     float relay_min_swing_c;
+    /* TC protection-tube lead (2026-10-16): the sheath-lag compensation's
+     * correction this tick, i.e. compensated reading minus calibrated reading
+     * (tc_lag_comp.c's corr_c), 0 when the zone has no tube (tc_sheath_tau_s
+     * 0) or the filter just reset. measurement_c stays RAW. The guards that
+     * a lagging sensor would make late evaluate both domains and take the
+     * trip-favouring one, so a guard never reacts later than on raw alone:
+     *   guard 5 max-temp: measurement_c + max(0, lead_c)
+     *   guards 1/2 window rise: min(raw rise, compensated rise)
+     *   guard 3 runaway rise/rate: max(raw, compensated)
+     * Guards 4/6/7/8/9 and relay-stalled stay on raw (min-temp is the
+     * cooling direction, frozen/sensor-invalid/cross-zone are properties of
+     * the sensor itself). Zero-initialised by every designated initialiser
+     * that predates it. */
+    float lead_c;
 } thermal_guard_input_t;
 
 typedef struct {
@@ -358,6 +372,7 @@ typedef struct {
     /* Guards 1/2: rolling window over commanded-heat periods. */
     bool  progress_window_active;
     float progress_window_start_c;
+    float progress_window_start_lead_c; /* lead_c when progress_window_start_c was taken */
     float progress_window_elapsed_s;
     /* Relay-cycling discriminator's own running extremes across the SAME
      * window as the fields above -- see thermal_guard_input_t.relay_min_swing_c.
@@ -377,8 +392,10 @@ typedef struct {
     bool  off_window_active;
     float off_window_elapsed_s;
     float runaway_baseline_c;
+    float runaway_baseline_lead_c; /* lead_c when runaway_baseline_c was taken */
     bool  runaway_rate_baseline_valid;
     float runaway_rate_baseline_c;
+    float runaway_rate_baseline_lead_c; /* lead_c when runaway_rate_baseline_c was taken */
     float runaway_rate_elapsed_s;
 
     /* Guard 4: at_setpoint_window_active latches true once the zone has ever

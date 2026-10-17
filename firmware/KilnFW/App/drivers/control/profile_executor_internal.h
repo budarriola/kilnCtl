@@ -39,6 +39,7 @@
  * there even though it's fine in the normal separate-TU firmware build. */
 
 #include "profile_executor.h"
+#include "tc_lag_comp.h" /* zone_runtime_t::tc_lag */
 
 #include <math.h>    /* isfinite() */
 #include <stdbool.h>
@@ -619,6 +620,19 @@ typedef struct {
     /* AUDIT_CONTROL_EXECUTOR LOW-3: true while the zone had no valid sensor; the first valid tick afterwards
      * re-bases the PID derivative (pid_reseed_derivative) instead of differencing across the outage. */
     bool  pid_sensor_outage;
+    /* TC protection-tube (sheath) lag compensation, 2026-10-16. tc_lag is
+     * the filter state (cleared as one unit by tc_lag_comp_reset(), and with
+     * the rest of zone_runtime_t by the run-start memset). actual_cal_c is
+     * the calibrated reading BEFORE compensation (raw + cal_offset_c), kept
+     * so the raw-domain value stays visible; actual_c holds the compensated
+     * estimate when tc_sheath_tau_s > 0, else exactly actual_cal_c.
+     * tc_lag_corr_c = actual_c - actual_cal_c, fed to the thermal guards as
+     * thermal_guard_input_t::lead_c. A filter reset that throws away a
+     * non-zero correction sets pid_sensor_outage so the PID derivative is
+     * re-based against the new (un-led) value -- the reset-one-side pair. */
+    tc_lag_comp_state_t tc_lag;
+    float actual_cal_c;
+    float tc_lag_corr_c;
     float on_off_actuated_held_s;
 
     /* TODO.md 6A.7's max_ramp_c_per_hr re-check (see reload_zone_config()):
