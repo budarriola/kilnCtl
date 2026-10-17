@@ -451,6 +451,21 @@ static inline readiness_status_t readiness_cfg_fs_status(bool mounted)
     return mounted ? READY_OK : READY_NOT_DONE;
 }
 
+/* FS-04: detail for the "storage" item when the zone config is not valid. A load fault names itself; no fault
+ * means the config was never found (fresh, reset or erased storage), which is a commissioning step, not a fault.
+ * Header-inline so a host test can pin the wording. */
+#include <stdio.h>
+static inline void readiness_zones_storage_detail(char *out, size_t cap, bool has_fault, const char *fault_reason)
+{
+    if (has_fault) {
+        snprintf(out, cap, "zone config failed to load cleanly (%s) -- see /settings/zones",
+                 fault_reason ? fault_reason : "");
+    } else {
+        snprintf(out, cap, "storage was reset or found empty -- commission zones at /settings/zones or restore "
+                 "a backup");
+    }
+}
+
 /* Detail line for the cfg_fs item, pure so a host test can pin the text
  * (readiness_http.c itself cannot be host-compiled). The unmounted variants
  * must name POST /api/cfgfs/format_confirm: that is the operator's remedy,

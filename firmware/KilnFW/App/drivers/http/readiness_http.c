@@ -882,7 +882,9 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         readiness_status_t st = (zones_valid && all_mounted) ? READY_OK : READY_NOT_DONE;
         char detail[READINESS_DETAIL_MAX];
         if (!zones_valid) {
-            snprintf(detail, sizeof(detail), "zone config failed to load cleanly -- see /settings/zones");
+            zones_cfg_load_fault_t zfault;
+            bool has_fault = zones_config_get_load_fault(&zfault);
+            readiness_zones_storage_detail(detail, sizeof(detail), has_fault, zfault.reason);
         } else if (!all_mounted) {
             snprintf(detail, sizeof(detail), "NVS partition '%s' is not present/mounted", bad_name);
         } else {
@@ -1113,7 +1115,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                      "polarity can't see a cut signal line -- use ACTIVE_HIGH default");
         } else {
             snprintf(detail, sizeof(detail),
-                     "never confirmed -- pole 1 (contactor coil) is wiring firmware can't see. Run the "
+                     "not confirmed (also cleared when storage is reset) -- pole 1 (contactor coil) is wiring firmware can't see. Run the "
                      "E-stop verification procedure, no heat, then confirm via /safety");
         }
         size_t before_o = o;
