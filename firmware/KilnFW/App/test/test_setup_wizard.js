@@ -1469,6 +1469,53 @@ function loadCommissioningShared(fetchImpl, confirmImpl) {
 // edit was reversed by hand, (5) `git diff` on commissioning_shared.js
 // confirmed empty before this pass committed.
 
+// ---- WZ-01..WZ-13 wizard review fixes (REVIEW_WIZARD) ------------------
+(function testWizardReviewFixes() {
+  const ctx = loadPageScript(noopFetch);
+  // WZ-01: float32 read-back of ordinary decimals must match.
+  const f32 = (x) => Math.fround(x);
+  assert(ctx.pidReadbackMatches(0.3, f32(0.3)) === true, 'WZ-01: Ki=0.3 float32 read-back matches');
+  assert(ctx.pidReadbackMatches(100.3, f32(100.3)) === true, 'WZ-01: Kp=100.3 float32 read-back matches');
+  assert(ctx.pidReadbackMatches(0.3, 0.31) === false, 'WZ-01: a genuinely different gain still mismatches');
+  assert(ctx.pidReadbackMatches(5, undefined) === false, 'WZ-01: a missing stored value mismatches');
+  // WZ-02: Pico A5 bounds.
+  const ok = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, tcSheath: 'bare', tcSheathTauS: 0, ctInstalled: 0 };
+  assert(ctx.validateStep7(Object.assign({}, ok, { tcOffsetC: 50 }), []).valid === true, 'WZ-02: offset 50 accepted');
+  assert(ctx.validateStep7(Object.assign({}, ok, { tcOffsetC: 60 }), []).valid === false, 'WZ-02: offset 60 refused');
+  assert(ctx.validateStep7(Object.assign({}, ok, { tcOffsetC: -50.5 }), []).valid === false, 'WZ-02: offset -50.5 refused');
+  assert(ctx.validateStep7(Object.assign({}, ok, { absMaxTempC: 2500 }), []).valid === true, 'WZ-02: abs_max 2500 accepted');
+  assert(ctx.validateStep7(Object.assign({}, ok, { absMaxTempC: 2501 }), []).valid === false, 'WZ-02: abs_max 2501 refused');
+  // WZ-03: step numbers in messages are 1-based like the headings.
+  assert(ctx.stepLabel(2) === 3, 'WZ-03: stepLabel is id+1');
+  const merged = ctx.mergeAllSteps({ version: 1, steps: { '6': { state: 'skipped' } } }, { items: [] });
+  const gate = ctx.computeCompleteness(merged, { items: [{ key: 'x', status: 'ok' }] });
+  const skipReason = gate.reasons.filter((r) => /safety-relevant and was skipped/.test(r.text))[0];
+  assert(skipReason && /^Step 7 \(Zone commissioning limits\)/.test(skipReason.text),
+    'WZ-03: skipped step id 6 is reported as "Step 7", got ' + (skipReason && skipReason.text));
+  // WZ-12: a missing cross_zone_max_delta_c is omitted, an explicit value is sent.
+  assert(!/xzone/.test(ctx.zoneToPostParams({ name: 'a' }, 0).join('&')), 'WZ-12: missing xzone is omitted');
+  assert(/z0_xzone=0/.test(ctx.zoneToPostParams({ cross_zone_max_delta_c: 0 }, 0).join('&')), 'WZ-12: stored 0 is echoed');
+  // WZ-13
+  assert(/WERE saved/.test(ctx.step11FailureText(true, 'nope')) && ctx.step11FailureText(false, 'nope') === 'nope',
+    'WZ-13: policy failure after a saved password says so');
+  // WZ-09: plain-text 400 reason survives.
+  return ctx.ctCalResponseBody({ text: () => Promise.resolve('a_fs out of range') }).then((j) => {
+    assert(j.ok === false && j.reason === 'a_fs out of range', 'WZ-09: text/plain reason is kept');
+    return ctx.ctCalResponseBody({ text: () => Promise.resolve('{"ok":true,"zero_counts":3}') });
+  }).then((j) => assert(j.ok === true, 'WZ-09: JSON body still parsed'));
+})();
+
+// WZ-04/08/10/11: source-level pins for DOM-only behaviour.
+(function testWizardDomPins() {
+  const src = fs.readFileSync(PAGE_PATH, 'utf8').replace(/\r\n/g, '\n');
+  assert(/return m\.id === 9; \}\)\[0\] \|\| \{\}\)\.detail/.test(src), 'WZ-04: step 9 status reads step 9 detail');
+  assert(/lockSave\('step3Save'\)/.test(src), 'WZ-11: step 3 Save is locked');
+  assert(/return step3SettleThenVerify\(thermoCount\)/.test(src), 'WZ-10: step 3 verify waits to settle first');
+  assert(/zz\.pid_kp > 0/.test(src), 'WZ-05: step 9 done requires every zone kp > 0');
+  const calBlock = src.slice(src.indexOf("if (j.ok) {\n            result.textContent = 'ok -- k_ct_v_per_a"));
+  assert(!/\n\s*renderStep7\(\);/.test(calBlock.slice(0, calBlock.indexOf('FAILED: '))), 'WZ-08: CT cal Apply success does not re-render step 7');
+})();
+
 Promise.resolve().then(() => {
   console.log('');
   console.log((passed + failed) + ' assertions, ' + passed + ' passed, ' + failed + ' failed');
