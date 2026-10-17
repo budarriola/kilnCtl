@@ -3482,3 +3482,44 @@ HTTP 400 "package's safety-processor section names parameter id 1025 ... refused
 and the package hash blocks hand-stripping. `dry_run=true` did not catch it (reported OK).
 So a pre.4 -> main upgrade cannot import its own backup's kiln_configs. Imported with kiln_configs
 emptied for the round-trip test. Likely site: kiln_cfg package import validation (kiln_cfg_http / backup_import).
+
+## benchmain2 (2026-10-17): main db91b2ad4 on the bench, then back to pre.4
+
+Board was pre.4 (fcc645211), host 192.168.1.156 (COM14 main board). Flashed main db91b2ad4 (ESP `flash_firmware`, Pico `debug_program`) from a clean worktree; returned to fcc645211 the same way. Backups: `logs/benchmain_backup_pre.json` (pre.4, before), `logs/benchmain_backup_onmain.json` (exported on main), `logs/benchmain_backup_post2.json` (after return).
+
+| Step | Result |
+|---|---|
+| 1 Fresh backup | PASS (17471 B, kiln_configs 2) |
+| 2 Flash main, link, no trips | PASS: link up, trip_mask 0, Pico boot after dual flash showed no latched trip |
+| 2 safety cfg v7 -> v8 | PASS: config_crc 51536 (0xC950) identical before/after flash; S1 80 C, S8 33.3 C/min, tc_type 3, mains 120 V unchanged |
+| 2 Pico tc_sheath_tau_s (0x010B) | PASS: reads 0 (param 267) |
+| 3 BW-06 backup_import with kiln_configs (dry_run and real) | FAIL: both refused HTTP 400 "kiln_configs[0]: package hash does not match its contents". dry_run and real import agree (both refuse). The retired-id skip works, but a second cause blocks the pre.4 package. |
+| 4 TC sheath (zone 0 tau 60, Pico tau 60) | PASS: zones GET [60,0,0], Pico param 267 = 60, persisted across `sw_reset_esp` (both read back 60); `/api/control` zone 0 carries `tc_lag_corr_c` (-0.01 at 30.5 C while firing, 0.00 for tau-0 zones). Set back to 0 both sides (Pico write needs a `debug_reset` grace window, ARMED refuses). |
+| 5 Short firing (profile #1 B1_THROWAWAY, 35 C target, stopped after about 25 s at 30.5 C) and `profiles_stop()` | PASS: state 1 then 0, no trip, no fault guard |
+| 6 Return to pre.4, restore | PASS with caveats below |
+
+BW-06 root cause (not the retired ids). The package hash covers the canonical ESP form
+(`zones_config_export_canonical`, field table `ZONE_CFG_FIELDS`, which gained
+`F(U16, tc_sheath_tau_s, 1)` at firmware/KilnFW/App/drivers/persist/zones_config_accessors.c:3143). A
+package hashed on pre.4 does not include that field, so the recomputed hash on main differs and
+`validate_package_json_common` refuses at firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c:2389-2392
+(`recomputed != declared_hash`). Proof: a fresh export taken ON main shows slot 1 (the active slot,
+re-hashed when the zones v26 -> v27 migration saved it: pkg_hash 0x17ff24b6 -> 0x2753552e) importing
+cleanly, while slot 4 (inactive) still exports its stale pre.4 pkg_hash 0x24116fa8 and is refused at
+`kiln_configs[1]`. Stored hashes of inactive slots are exported as stored (kiln_cfg_store.c:2252-2255,
+`kiln_cfg_store_get_package_identity`) and never recomputed after the canonical form changed. Fix
+direction: on zones v26 -> v27 migration, or lazily at export, recompute pkg_hash for every populated
+slot (populate_pico_half_and_hash, kiln_cfg_store.c:1220-1262, keep-existing-half path). Same applies
+to any future canonical-form change. `dry_run` was correct here (it ran the same validator).
+
+Return-to-pre.4 findings:
+- Downgrade loses the zones: after flashing fcc645211, `/api/backup/export` showed `zones: 0 entries`
+  and `control_get_zones` reported 0 thermocouples (pre.4 does not read the v27 zones blob). The
+  pre.4 backup import restored them (zones 3, timing_profiles 1). Merge-mode import also created a
+  third kiln config slot `M18RR_B21renamed (3)` (id 5); no tool deletes a kiln config, left in place.
+  Export diff vs `soakmain_backup_pre4.json`: only that extra slot and relay_cycles (raise-only).
+- Pico config_crc is NOT back at 51536: it reads 38580 on pre.4 after setting Pico tau back to 0
+  by an explicit write on main (value 22083 while tau was 60). Writing tau=0 explicitly appears to
+  change the CRC versus the untouched migrated record (51536); the backup carries no Pico safety
+  cfg so the restore cannot undo it. Commissioned values (S1/S8/tc_type/mains) unchanged.
+- Dual flash after the return left an S6a (trip_mask 0x0020) with link up; cleared once.
