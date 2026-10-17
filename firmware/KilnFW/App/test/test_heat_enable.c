@@ -1511,6 +1511,7 @@ static void test_pf_first_boot_id_and_lost_trip_expiry(void)
 
     /* PF-01: before the first boot id arrives, heat is withheld and nothing is baselined. */
     reset_all(true);
+    heat_enable_note_pico_state(true, TRIPPED, false, 900u);
     heat_enable_note_boot_id_seen(false);
     heat_enable_note_pico_boot(0u, false, 0u, 1000u);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
@@ -1518,7 +1519,7 @@ static void test_pf_first_boot_id_and_lost_trip_expiry(void)
     TEST_CHECK(!heat_enable_is_granted(), "PF-01: not granted before the first boot id");
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_note_boot_id_seen(true);
-    heat_enable_note_pico_boot(1u, true, 0u, 1100u); /* first seq after the id is the baseline */
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1100u); /* first seq after the id is the baseline */
     heat_enable_get_reboot_state(&seq, &latched, &lost_only);
     TEST_CHECK(!latched && seq == 1u, "PF-01: first seq seen after the boot id is the baseline, no latch");
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
@@ -1574,6 +1575,7 @@ static void test_pf_first_boot_id_and_lost_trip_expiry(void)
     reset_all(true);
     heat_enable_note_boot_id_seen(true);
     heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
     heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 1200u);
     heat_enable_note_pico_state(true, TRIPPED, false, 1300u);
     heat_enable_note_pico_state(true, ARMED, false, 1400u);
