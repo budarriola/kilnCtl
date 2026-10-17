@@ -31,7 +31,40 @@ Each guard uses whichever of raw and compensated is more conservative for that g
   never delays a trip.
 - guards 1/2 (no heat rise): the smaller rise of raw and compensated.
 - guard 3 (runaway rise): the larger rise of raw and compensated.
-- The Pico safety processor is unchanged: it still reads its own TC raw.
+- The Pico safety processor has its own tau (next section).
+
+## Pico safety TC (`tc_sheath_tau_s`, SET_PARAM 0x010B)
+
+- Param `0x010B` (commissioning id 267), u16 seconds, 0..600, default 0 = off.
+  SET_PARAM refuses out-of-range values (A5). Stored next to `tc_offset_c` in the
+  Pico config record (reserved bytes, offset 240); an unpack above 600 reads 0.
+  No kilnlink protocol bump: it rides the generic SET_PARAM path.
+- ESP mirror: `safety_cfg_store` v8 (69 rows, 0x010B last); v7 blobs migrate by
+  param id with 0x010B unset. Backup, PcTools config_convert and the HR-02
+  running-mode gate are generic and cover it.
+- `thermo_task` runs the same estimator (`tc_lag_comp.c`, compiled by path) and
+  publishes `tc_lead_c`; `safety_core` passes 0 for a borrowed or stale reading.
+- S1/S2 (absolute ceiling, trip and clear-refuse) use `raw + max(0, lead)`.
+  S8 (rate), S11, S12 and TC disagreement stay raw.
+- Setup wizard step 7 asks bare or tubed: bare writes 0, tubed defaults to 60 s
+  (editable, 1..600).
+
+Pico S1 sim (`SaftyFW/test/test_thermo_task_faults.c`, abs_max 1250 C, relay stuck
+on from a 1200 C hold, seconds until trip):
+
+| tau true | tau set | true crosses | raw trip | compensated trip |
+|---|---|---|---|---|
+| 60 | 60 | 509.7 | 570.4 | 509.2 |
+| 60 | 30 | 509.7 | 570.4 | 540.0 |
+| 60 | 90 | 509.7 | 570.4 | 477.7 |
+| 180 | 180 | 509.7 | 690.5 | 513.8 |
+| 180 | 90 | 509.7 | 690.5 | 599.6 |
+| 180 | 270 | 509.7 | 690.5 | 445.0 |
+| 300 | 300 | 509.7 | 797.9 | 533.6 |
+| 300 | 150 | 509.7 | 797.9 | 652.2 |
+| 300 | 450 | 509.7 | 797.9 | 440.4 |
+
+An over-set tau trips early (safe side); an under-set tau still trips sooner than raw.
 
 ## Simulation (`App/test/test_tc_lag_sim.c`)
 
