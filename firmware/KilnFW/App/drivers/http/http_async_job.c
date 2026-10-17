@@ -86,10 +86,23 @@ static void http_async_job_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static bool (*s_admission_busy_probe)(void);
+
+void http_async_job_set_admission_busy_probe(bool (*probe)(void))
+{
+    s_admission_busy_probe = probe;
+}
+
 http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const char *task_name,
                                                         uint32_t stack_bytes, http_async_job_fn_t fn,
                                                         void *ctx)
 {
+    // RW-02: an update check/download holds ~21.5 KB of internal heap for its TLS session; a 10240 B job stack
+    // started beside it could push heap_internal under the 8 KB floor. Refuse BUSY while it runs.
+    if (s_admission_busy_probe != NULL && s_admission_busy_probe()) {
+        ESP_LOGW(TAG, "%s: refused, an update fetch holds the internal heap", task_name ? task_name : "?");
+        return HTTP_ASYNC_JOB_BUSY;
+    }
     // Refused while ANY safety-config writer holds the guard -- another async
     // job, a zone current sweep, a kiln config swap, or the poll-side ceiling
     // reconcile mid-write -- not just another async job. The caller replies

@@ -76,6 +76,30 @@ static void test_admits_when_idle(void)
     TEST_CHECK(http_async_job_busy(), "busy must be set the moment the job is admitted");
 }
 
+static bool s_probe_busy;
+static bool fake_admission_probe(void)
+{
+    return s_probe_busy;
+}
+
+// RW-02: an update fetch holding internal heap makes try_start refuse BUSY without touching the request.
+static void test_refused_while_update_fetch_busy(void)
+{
+    reset_stubs();
+    httpd_req_t req = {0};
+    http_async_job_set_admission_busy_probe(fake_admission_probe);
+
+    s_probe_busy = true;
+    http_async_job_start_result_t refused = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(refused == HTTP_ASYNC_JOB_BUSY, "a job must be refused BUSY while an update fetch holds the heap");
+    TEST_CHECK(!http_async_job_busy(), "a refused job must not take the writer guard");
+
+    s_probe_busy = false;
+    http_async_job_start_result_t admitted = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(admitted == HTTP_ASYNC_JOB_STARTED, "the job is admitted once the fetch is idle");
+    http_async_job_set_admission_busy_probe(NULL);
+}
+
 static void test_second_call_refused_while_busy(void)
 {
     reset_stubs();
@@ -299,6 +323,7 @@ void run_test_http_async_job(void)
     test_other_writers_refused_while_async_job_runs();
     test_failed_start_paths_release_guard_for_other_writers();
     test_admits_when_idle();
+    test_refused_while_update_fetch_busy();
     test_second_call_refused_while_busy();
     test_begin_failure_refuses_and_clears_busy();
     test_task_create_failure_undoes_begin_and_clears_busy();

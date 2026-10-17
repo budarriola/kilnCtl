@@ -118,6 +118,10 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
                                                         uint32_t stack_bytes, http_async_job_fn_t fn,
                                                         void *ctx);
 
+/* RW-02: probe that returns true while an update fetch (check or download) holds internal heap. While it does,
+ * http_async_job_try_start() refuses with BUSY. NULL clears. */
+void http_async_job_set_admission_busy_probe(bool (*probe)(void));
+
 /* True while a job started by http_async_job_try_start() is still running
  * (an ASYNC_JOB owner of the writer guard -- NOT true while a sweep, swap or
  * reconcile holds it; those make try_start() refuse, but are not "a job").

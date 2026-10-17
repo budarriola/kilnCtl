@@ -28,6 +28,7 @@
 
 #include "kilnlink/kilnlink_version.h"
 #include "http_auth_http.h" /* kiln_http_register() */
+#include "http_async_job.h"
 #include "ota_http.h"
 #include "ota_http_internal.h" /* ota_http_get_client_ip() */
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
@@ -1497,6 +1498,7 @@ esp_err_t update_fetch_start(httpd_handle_t server)
     s_c->st.verdict = "";
     s_c->st.reason = "";
     ota_http_set_fetch_busy_probe(fetch_busy_probe);
+    http_async_job_set_admission_busy_probe(fetch_busy_probe); // RW-02
     (void)stack_margin_register("update_fetch", &s_c->tls_task, FETCH_TLS_STACK_BYTES);
     (void)stack_margin_register("update_fetch_wr", &s_c->wr_task, FETCH_WR_STACK_BYTES);
 

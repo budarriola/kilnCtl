@@ -7,6 +7,7 @@
 #include "live_profile.h"
 #include "profile_executor.h"
 #include "profiles_builtin.h"
+#include "persist_scratch.h"
 #include "profiles_http.h"
 #include "profiles_http_internal.h" /* PROFILE_* bounds, profiles_validate_candidate() --
                                       * the same ones profiles_live_http.c uses.
@@ -18,11 +19,7 @@
  * the LVGL task stack should not carry. */
 static profile_t *alloc_profile(void)
 {
-    profile_t *p = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!p) {
-        p = heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_8BIT);
-    }
-    return p;
+    return persist_scratch_alloc(sizeof(profile_t)); /* RW-04: counted fallback */
 }
 
 static bool get_origin_reference(uint8_t origin_id, bool origin_is_builtin, profile_t *out)

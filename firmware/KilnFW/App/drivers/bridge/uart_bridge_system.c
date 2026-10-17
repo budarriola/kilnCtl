@@ -13,6 +13,7 @@
 #include "watchdog_cfg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "panel_spi.h" /* ILI9488_PANEL_WIDTH/HEIGHT -- TOUCH_CMD_INJECT bounds check */
@@ -66,11 +67,19 @@ static void system_bridge_task(void *arg)
      * -> cfg_fs_confirm_format_device()), and this codebase's convention
      * (uart_bridge_ext.c's own comment) is PSRAM-backed buffers must never be
      * read from inside a flash operation. */
-    uart_proto_message_t *msg = heap_caps_malloc(sizeof(*msg), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* RW-06: bounded retry (as PM-04 does) before giving up; one transient failure must not drop command
+     * dispatch for the whole boot. */
+    uart_proto_message_t *msg = NULL;
+    for (int attempt = 0; attempt < 5 && msg == NULL; attempt++) {
+        msg = heap_caps_malloc(sizeof(*msg), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (msg == NULL) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
     if (msg == NULL) {
-        ESP_LOGE(TAG, "system_bridge_task: heap_caps_malloc(%u B, INTERNAL) failed -- system "
+        ESP_LOGE(TAG, "system_bridge_task: FATAL heap_caps_malloc(%u B, INTERNAL) failed after 5 tries -- system "
                       "command dispatch (relay/CT-cal/danger-mode/factory-reset/watchdog-cfg) "
-                      "unavailable this boot, degrading cleanly instead of dereferencing NULL",
+                      "UNAVAILABLE until reboot",
                  (unsigned)sizeof(*msg));
         vTaskDeleteWithCaps(NULL);
         return;
