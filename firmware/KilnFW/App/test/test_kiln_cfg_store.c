@@ -3178,6 +3178,84 @@ static void test_import_refuses_abs_max_temp_c_tighter_than_zone_max(void)
     free(json);
 }
 
+// BW-06 (SR-31): a pre.4 package carries the retired Pico ids 0x0401/0x0404/0x0405. The hash covers
+// the original bytes; import skips the retired ids. A truly unknown id is still refused. The
+// validate-only seam (backup dry run) must give the same verdict as the real import.
+static bool bw06_build(char *json, size_t cap, const uint16_t *ids, uint8_t n, size_t *out_len)
+{
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = (uint16_t)(n + 1);
+    pico.entries[0].param_id = 0x0104u; // abs_max_temp_c, required set by the 5.3 ceiling rule
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = 1300.0f;
+    pico.entries[0].value_bits = conv.bits;
+    for (uint8_t i = 0; i < n; i++) {
+        pico.entries[i + 1].param_id = ids[i];
+        pico.entries[i + 1].type = KILNLINK_PARAM_TYPE_U16;
+        pico.entries[i + 1].flags = KILN_PKG_PARAM_FLAG_SET;
+        pico.entries[i + 1].value_bits = 5;
+    }
+    uint32_t hash = 0;
+    if (!kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash)) {
+        return false;
+    }
+    return kiln_package_export_json("Pre4", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, hash,
+                                    0x11223344u, json, cap, out_len);
+}
+
+static void test_import_skips_retired_sr31_ids_refuses_unknown(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- BW-06: retired SR-31 ids 0x0401/0x0404/0x0405 are "
+                 "skipped, an unknown id is refused, validate-only matches import");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    char reason[200] = {0};
+    char vname[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t vsch = 0;
+    uint32_t vhash = 0;
+
+    const uint16_t retired[] = {0x0401u, 0x0404u, 0x0405u};
+    TEST_CHECK(bw06_build(json, KILN_PKG_JSON_MAX_LEN, retired, 3, &len), "setup: pre.4-shaped package");
+    bool v = kiln_cfg_store_validate_package_json(json, vname, sizeof(vname), &vsch, &vhash, reason, sizeof(reason));
+    TEST_CHECK(v, "validate-only (dry run) accepts retired ids");
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(ok, "import accepts retired ids");
+    TEST_CHECK(ok == v, "dry run and import agree (accept)");
+    if (ok) {
+        kiln_pkg_safety_t pico;
+        uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+        uint16_t blen = 0;
+        memset(&pico, 0, sizeof(pico));
+        TEST_CHECK(kiln_cfg_store_get_full_package(new_id, blob, sizeof(blob), &blen, &pico, reason, sizeof(reason)),
+                   "stored package reads back");
+        TEST_CHECK(pico.count == 1 && pico.entries[0].param_id == 0x0104u, "retired ids were skipped, not stored");
+    }
+
+    const uint16_t unknown[] = {0x0401u, 0x7E7Eu};
+    TEST_CHECK(bw06_build(json, KILN_PKG_JSON_MAX_LEN, unknown, 2, &len), "setup: package with unknown id");
+    v = kiln_cfg_store_validate_package_json(json, vname, sizeof(vname), &vsch, &vhash, reason, sizeof(reason));
+    TEST_CHECK(!v, "validate-only refuses unknown id");
+    reason[0] = '\0';
+    new_id = -1;
+    ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok && ok == v, "import refuses unknown id, same as dry run");
+    TEST_CHECK(strstr(reason, "32382") != NULL, "reason names the unknown id");
+    free(json);
+}
+
 static void test_import_refuses_abs_max_temp_c_above_firmware_ceiling(void)
 {
     TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 table row 1: refuses a Pico "
@@ -4545,6 +4623,7 @@ void run_test_kiln_cfg_store(void)
     test_save_current_captures_pico_half_and_hash();
     test_save_current_unfetched_cache_is_not_marked_populated();
     test_get_package_identity_unknown_id_and_migrated_slot();
+    test_import_skips_retired_sr31_ids_refuses_unknown();
     test_apply_refuses_half_package();
     test_corrupt_store_quarantines_and_blocks_writes();
     test_nvs_load_store_migrates_v1_blob_at_full_size();

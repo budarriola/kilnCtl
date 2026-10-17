@@ -2277,6 +2277,13 @@ typedef struct {
     kiln_pkg_safety_t pico;
 } kiln_cfg_import_scratch_t;
 
+/* SR-31 (BW-06): Pico params retired from the mirror table (context_max_age_s 0x0401,
+ * mainfault_debounce_ms 0x0404, 0x0405). Packages made before the removal carry them. */
+static bool pkg_param_id_is_retired(uint16_t id)
+{
+    return id == 0x0401u || id == 0x0404u || id == 0x0405u;
+}
+
 /* ---- Shared validate-only core, factored out of kiln_cfg_store_import_
  * package_json() (docs/KILN_PROFILES_PLAN.md item 17, backup-restore
  * follow-up): the backup/restore path needs a two-pass "validate every
@@ -2357,7 +2364,8 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
     for (uint16_t i = 0; i < s->pico.count; i++) {
         uint8_t known_type = 0;
         const char *known_name = NULL;
-        if (!safety_cfg_store_lookup(s->pico.entries[i].param_id, &known_type, &known_name)) {
+        if (!safety_cfg_store_lookup(s->pico.entries[i].param_id, &known_type, &known_name) &&
+            !pkg_param_id_is_retired(s->pico.entries[i].param_id)) {
             char msg[128];
             snprintf(msg, sizeof(msg),
                      "package's safety-processor section names parameter id %u, which this firmware "
@@ -2383,6 +2391,28 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
     if (recomputed != declared_hash) {
         IMPORT_REFUSE("package hash does not match its contents -- the file is corrupted, was "
                       "hand-edited, or was truncated in transit");
+    }
+
+    /* SR-31 (BW-06): the hash above covered the ORIGINAL bytes, retired ids included. Now skip
+     * the retired ids (0x0401/0x0404/0x0405) so they are never stored or applied, and re-hash
+     * what is actually kept. Unknown ids were already refused above. */
+    {
+        uint16_t kept = 0;
+        for (uint16_t i = 0; i < s->pico.count; i++) {
+            if (pkg_param_id_is_retired(s->pico.entries[i].param_id)) {
+                ESP_LOGW(TAG, "kiln package import: skipping retired safety param id 0x%04X (SR-31)",
+                         (unsigned)s->pico.entries[i].param_id);
+                continue;
+            }
+            s->pico.entries[kept++] = s->pico.entries[i];
+        }
+        if (kept != s->pico.count) {
+            s->pico.count = kept;
+            if (!kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico,
+                                           &recomputed)) {
+                IMPORT_REFUSE("internal error: hash computation failed after retired-param skip");
+            }
+        }
     }
 
     /* ---- Compatibility 5.3, table rows 2/3 (plan section 5.3,
