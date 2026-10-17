@@ -116,6 +116,17 @@ typedef struct {
     bool              latch_tripped_seen;
     uint32_t          latch_seq;
     bool              hold_lost_trip_only;
+    /* PR-02: trip bits (trip_mask | 1<<(reason-1)) of the last TRIPPED DIAG, the bits of the trip lost across
+     * the reboot being classified, whether a claim was held (or taken) while that verdict was pending, and the
+     * expiry state of a standing claimless latch: it may expire only when the trips an operator cleared on the
+     * new boot cover latch_lost_bits (nonzero). A latch made with a claim held never expires. */
+    uint32_t          trip_bits_now;
+    uint32_t          last_pico_trip_bits;
+    uint32_t          reboot_lost_bits;
+    bool              reboot_had_claim;
+    bool              latch_expirable;
+    uint32_t          latch_lost_bits;
+    uint32_t          latch_cleared_bits;
     /* SR-11: the RP2040 cannot tell a brownout from a clean power-on (both set
      * CHIP_RESET HAD_POR), so a brownout reports as POWERON and would classify
      * benign. Bound it: a benign reboot within HE_BENIGN_REBOOT_WINDOW_MS of the
@@ -236,6 +247,13 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.latch_tripped_seen = false;
     s_he.latch_seq = 0u;
     s_he.hold_lost_trip_only = false;
+    s_he.trip_bits_now = 0u;
+    s_he.last_pico_trip_bits = 0u;
+    s_he.reboot_lost_bits = 0u;
+    s_he.reboot_had_claim = false;
+    s_he.latch_expirable = false;
+    s_he.latch_lost_bits = 0u;
+    s_he.latch_cleared_bits = 0u;
     s_he.last_benign_reboot_ms = 0u;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
@@ -492,6 +510,7 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
             /* MED-5: a verdict that was pending (or fatal) when the previous claim ended is
              * re-armed for this one, so resume/start cannot launder an undecided reboot. */
             if (s_he.reboot_verdict_pending) {
+                s_he.reboot_had_claim = true; /* PR-02 */
                 s_he.reboot_classify_pending = true;
                 if (s_he.reboot_classify_since_ms == 0u) {
                     s_he.reboot_classify_since_ms = 1u;
@@ -502,6 +521,7 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
                 s_he.reboot_hold = true;
                 s_he.hold_lost_trip_only = s_he.latch_lost_trip_only;
                 s_he.latch_lost_trip_only = false;
+                s_he.latch_expirable = false;
             }
         }
         withheld = s_he.reboot_classify_pending || s_he.reboot_hold || s_he.boot_id_unseen;
@@ -796,6 +816,9 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
          * only when a verdict resolves, never by a claim release. */
         s_he.reboot_was_tripped = (s_he.reboot_verdict_pending && s_he.reboot_was_tripped) ||
                                   s_he.last_pico_tripped;
+        s_he.reboot_lost_bits = (s_he.reboot_verdict_pending ? s_he.reboot_lost_bits : 0u) |
+                                (s_he.last_pico_tripped ? s_he.last_pico_trip_bits : 0u);
+        s_he.reboot_had_claim = (s_he.reboot_verdict_pending && s_he.reboot_had_claim) || s_he.held_mask != 0u;
         s_he.reboot_verdict_pending = true;  /* MED-5: survives release/pause */
         /* Firing audit 2 MED-1: an unconsumed fatal_latched is NOT downgraded by a newer reboot (a
          * double count of one reboot, or a fatal reboot followed by a benign one, must not erase it);
@@ -820,11 +843,21 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                 /* PF-02: only a latch made purely by the lost-trip rule may expire later. */
                 if (fatal_bits || (s_he.reboot_fatal_latched && !s_he.latch_lost_trip_only)) {
                     s_he.latch_lost_trip_only = false;
+                    s_he.latch_expirable = false;
                 } else if (s_he.reboot_was_tripped) {
+                    /* PR-02: expirable only if no claim was involved, the lost reason is known, and any
+                     * latch already standing was itself expirable. */
+                    bool prev_ok = !s_he.reboot_fatal_latched || s_he.latch_expirable;
+                    uint32_t prev_bits = (s_he.reboot_fatal_latched && s_he.latch_expirable) ? s_he.latch_lost_bits : 0u;
+                    s_he.latch_lost_bits = prev_bits | s_he.reboot_lost_bits;
+                    s_he.latch_expirable = prev_ok && !s_he.reboot_had_claim && s_he.latch_lost_bits != 0u;
                     s_he.latch_lost_trip_only = true;
                     s_he.latch_seq = s_he.seen_reboot_seq;
                     s_he.latch_tripped_seen = false;
+                    s_he.latch_cleared_bits = 0u;
                 }
+                s_he.reboot_lost_bits = 0u;
+                s_he.reboot_had_claim = false;
             }
             s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
                                           s_he.reboot_fatal_latched;
@@ -834,6 +867,8 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         if (diag_since_reboot) {
             s_he.reboot_classify_pending = false;
             s_he.reboot_verdict_pending = false;
+            s_he.reboot_lost_bits = 0u;
+            s_he.reboot_had_claim = false;
             const uint8_t fatal = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
                                   SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
                                   SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
@@ -914,7 +949,35 @@ bool heat_enable_reboot_undecided(void)
 void heat_enable_note_boot_id_seen(bool seen)
 {
     bool taken = he_lock();
+    if (seen && s_he.boot_id_unseen) {
+        /* PR-01: first boot id after an ESP boot. No lost-trip input (the TRIPPED state before it says nothing
+         * about this boot), but the fatal-boot-bit rule still applies: the next DIAG of this boot decides. */
+        s_he.reboot_was_tripped = false;
+        s_he.reboot_lost_bits = 0u;
+        s_he.reboot_verdict_pending = true;
+        if (s_he.reboot_classify_since_ms == 0u) {
+            s_he.reboot_classify_since_ms = 1u;
+        }
+    }
     s_he.boot_id_unseen = !seen;
+    he_unlock(taken);
+}
+
+bool heat_enable_boot_id_unseen_blocked(void)
+{
+    bool taken = he_lock();
+    bool b = s_he.boot_id_unseen && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return b;
+}
+
+void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask)
+{
+    bool taken = he_lock();
+    s_he.trip_bits_now = (uint32_t)trip_mask;
+    if (trip_reason >= 1u && trip_reason <= 31u) {
+        s_he.trip_bits_now |= 1u << (trip_reason - 1u);
+    }
     he_unlock(taken);
 }
 
@@ -958,18 +1021,27 @@ void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed,
                          diag_state == SAFETY_LINK_DIAG_STATE_WARN;
     if (fresh) {
         s_he.last_pico_tripped = (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+        if (s_he.last_pico_tripped) {
+            s_he.last_pico_trip_bits = s_he.trip_bits_now;
+        }
         /* PF-02: a claimless lost-trip latch expires once the SAME Pico boot (no newer reboot seq, no
          * verdict pending) shows TRIPPED and then ARMED (an operator clear). A real lost trip reboots into
          * ARMED without ever showing TRIPPED, so it never expires this way. A hold made with a claim held
          * is reboot_hold, not a latch, and is untouched. */
-        if (s_he.reboot_fatal_latched && s_he.latch_lost_trip_only && s_he.held_mask == 0u &&
+        if (s_he.reboot_fatal_latched && s_he.latch_lost_trip_only && s_he.latch_expirable && s_he.held_mask == 0u &&
             !s_he.reboot_verdict_pending && s_he.seen_reboot_seq == s_he.latch_seq) {
             if (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
                 s_he.latch_tripped_seen = true;
+                s_he.latch_cleared_bits |= s_he.trip_bits_now;
             } else if (diag_state == SAFETY_LINK_DIAG_STATE_ARMED && s_he.latch_tripped_seen) {
-                s_he.reboot_fatal_latched = false;
-                s_he.latch_lost_trip_only = false;
+                /* PR-02: only a clear of the trip(s) that were lost expires the latch. */
+                if ((s_he.latch_cleared_bits & s_he.latch_lost_bits) == s_he.latch_lost_bits) {
+                    s_he.reboot_fatal_latched = false;
+                    s_he.latch_lost_trip_only = false;
+                    s_he.latch_expirable = false;
+                }
                 s_he.latch_tripped_seen = false;
+                s_he.latch_cleared_bits = 0u;
             }
         }
     }

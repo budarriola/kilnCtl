@@ -14216,6 +14216,7 @@ static void safetyfx7_wd_case(uint8_t diag_state, profile_exec_state_t *state_ou
     s_exec.last_tick_tick = xTaskGetTickCount();
     safetyfx7_set_diag(60000u, diag_state);
     g_stub_safety_st.diag_trip_reason = 1;
+    g_stub_safety_st.pico_boot_id_ever_seen = true; /* PR-04: an unseen boot id now pauses a held claim */
     BaseType_t saved_take = g_test_stub_semaphore_take_default;
     g_test_stub_semaphore_take_default = pdTRUE;
     g_task_delay_budget = 1;
@@ -14225,6 +14226,7 @@ static void safetyfx7_wd_case(uint8_t diag_state, profile_exec_state_t *state_ou
     g_task_delay_budget = -1;
     g_test_stub_semaphore_take_default = saved_take;
     *state_out = s_exec.state;
+    g_stub_safety_st.pico_boot_id_ever_seen = false;
     safetyfx7_clear_diag();
     profile_executor_halt();
     s_exec.state = PROFILE_EXEC_IDLE;

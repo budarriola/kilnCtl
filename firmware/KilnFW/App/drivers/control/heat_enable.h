@@ -289,6 +289,12 @@ bool heat_enable_reboot_hold(void);
 void heat_enable_note_boot_id_seen(bool seen);
 // PF-03: true when the current reboot hold came from a claimless lost-trip latch, not a fatal reboot.
 bool heat_enable_reboot_hold_lost_trip_only(void);
+// PR-04: true while a claim is held but no Pico boot id has arrived (heat withheld, fail closed); the executor
+// pauses with reason "pico_boot_id_unseen" so the run shows why.
+bool heat_enable_boot_id_unseen_blocked(void);
+// PR-02: the DIAG's trip reason/mask (call before note_pico_state, only meaningful for the current boot's DIAG).
+// A claimless lost-trip latch expires only when the trips cleared on the new boot cover the lost trip's reason.
+void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask);
 // PF-03: observability for /api/status (any pointer may be NULL).
 void heat_enable_get_reboot_state(uint32_t *seq, bool *fatal_latched, bool *lost_trip_only);
 // True while a Pico reboot with a claim held is still unclassified (no DIAG of
