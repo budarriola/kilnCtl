@@ -287,6 +287,21 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
 // administrator logs in and re-saves the policy.
 bool web_auth_store_ever_enabled(void);
 
+// FS-02: boot-time decision "login storage reset vs factory-fresh". Call once
+// at boot after the default nvs and wifi_nvs partitions are up.
+// `setup_evidence_elsewhere` = Wi-Fi STA credentials (or other surviving cfg
+// state) exist. Reset = nvs sentinel missing AND (wifi_nvs mirror present OR
+// (hal_kv_partition_was_auto_erased("nvs") AND setup_evidence_elsewhere)) AND
+// no policy/marker present. When reset: latches; load_policy() then reads
+// UNREADABLE (fail closed: enabled, admin unconfigured => bootstrap offered
+// through the existing bootstrap flow); setting the admin web password clears
+// the latch and persists an enabled policy. Factory-fresh: writes the
+// sentinel (+mirror), returns false (auth off as before).
+bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere);
+bool web_auth_store_storage_reset_latched(void);
+// LCD banner text for the latched state.
+const char *web_auth_store_storage_reset_banner_text(void);
+
 // Erases the policy record AND the marker (read-back verified): the only way
 // back to the fresh-board open state. For a deliberate factory reset of auth.
 bool web_auth_store_clear_policy_and_marker(void);

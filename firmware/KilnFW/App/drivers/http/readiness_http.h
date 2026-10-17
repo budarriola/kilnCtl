@@ -686,6 +686,18 @@ static inline readiness_status_t readiness_estop_verification_status(bool verifi
     return verified ? READY_OK : READY_NOT_DONE;
 }
 
+/* FS-02: the "auth" item is listed only while the login storage was reset on a
+ * board that was set up before (web_auth_store_storage_reset_latched()); it is
+ * then always NOT_DONE until an admin is set again. Normal boards list nothing. */
+static inline bool readiness_auth_storage_item_listed(bool reset_latched)
+{
+    return reset_latched;
+}
+static inline readiness_status_t readiness_auth_storage_item_status(bool reset_latched)
+{
+    return reset_latched ? READY_NOT_DONE : READY_OK;
+}
+
 /* Registers /readiness + GET /api/readiness on the server
  * wifi_provision_http.c already started. No hardware pointers needed --
  * every hardware-adjacent fact (io_ready/thermo_ready/safety_ready) is read

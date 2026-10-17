@@ -179,8 +179,11 @@ static unsigned s_key_exists_fail_count = 0;
 static unsigned s_key_exists_fail_skip = 0; /* probes that succeed normally before the failures start */
 static hal_status_t s_key_exists_fail_status = HAL_OK;
 
+static char s_fake_auto_erased[8][FAKE_KV_MAX_NAME_LEN];
+
 void fake_kv_reset_all(void)
 {
+    memset(s_fake_auto_erased, 0, sizeof(s_fake_auto_erased));
     hal_kv_set_write_refuse_hook(NULL);
     memset(s_partitions, 0, sizeof(s_partitions));
     memset(s_handles, 0, sizeof(s_handles));
@@ -686,6 +689,23 @@ hal_status_t hal_kv_init_partition(const char *partition)
     s_partitions[free_slot].initialized = true;
     copy_bounded(s_partitions[free_slot].name, sizeof(s_partitions[free_slot].name), name);
     return HAL_OK;
+}
+
+void fake_kv_script_mark_auto_erased(const char *partition)
+{
+    const char *name = (partition == NULL ? "nvs" : partition);
+    for (int i = 0; i < 8; i++) {
+        if (s_fake_auto_erased[i][0] == '\0') { copy_bounded(s_fake_auto_erased[i], FAKE_KV_MAX_NAME_LEN, name); return; }
+    }
+}
+
+bool hal_kv_partition_was_auto_erased(const char *partition)
+{
+    const char *name = (partition == NULL ? "nvs" : partition);
+    for (int i = 0; i < 8; i++) {
+        if (s_fake_auto_erased[i][0] != '\0' && strcmp(s_fake_auto_erased[i], name) == 0) return true;
+    }
+    return false;
 }
 
 hal_status_t hal_kv_mount_probe(const char *partition)

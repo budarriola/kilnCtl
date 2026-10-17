@@ -128,6 +128,9 @@ unsigned fake_kv_get_call_count(void);
  * initialized via hal_kv_init_partition(). */
 bool fake_kv_has_uncommitted_writes(const char *partition);
 
+/* FS-02: script hal_kv_partition_was_auto_erased(partition) == true (cleared by fake_kv_reset_all). */
+void fake_kv_script_mark_auto_erased(const char *partition);
+
 /* Simulates a reboot/power-loss between set_* and commit(). Does not close
  * handles (matching real NVS: handles remain valid across a device reset).
  * DEFAULT: every pending write is KEPT (merged into committed, like a real

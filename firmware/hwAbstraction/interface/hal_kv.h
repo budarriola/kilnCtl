@@ -143,6 +143,12 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key);
  * fallback-to-erase-and-retry pattern used ~13 places at boot. */
 hal_status_t hal_kv_init_partition(const char *partition);
 
+/* FS-02: true iff hal_kv_init_partition() had to ERASE `partition` this boot
+ * (NO_FREE_PAGES / NEW_VERSION_FOUND recovery). The erase is logged loudly at
+ * the call site; this flag lets a module whose data lives in that partition
+ * tell "erased under me" from "never written". RAM-only, resets every boot. */
+bool hal_kv_partition_was_auto_erased(const char *partition);
+
 /* Non-erasing mount probe -- nvs_report_capture()'s use (re-observing a
  * partition every OTHER module has already brought up at boot, per
  * main.c ordering) must never itself trigger an erase-and-retry: erasing a

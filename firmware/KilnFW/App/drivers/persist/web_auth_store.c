@@ -39,6 +39,19 @@ typedef struct {
     uint32_t magic_inv;
 } web_auth_ever_blob_t;
 
+// FS-02: "this board's login storage was initialised" evidence. A sentinel in
+// the default `nvs` partition (erased with the credentials it vouches for) and
+// a mirror in wifi_nvs (survives an nvs erase). nvs sentinel missing while the
+// mirror (or a boot-time auto-erase plus surviving setup) says the board was
+// set up before => storage was reset => fail closed (see
+// web_auth_store_storage_reset_evaluate()).
+#define WEB_AUTH_KEY_SEEN "nvs_seen"
+NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_SEEN);
+#define WEB_AUTH_MIRROR_PARTITION "wifi_nvs"
+#define WEB_AUTH_SEEN_MAGIC 0x5345454eu
+static bool s_storage_reset_latched;
+static void storage_reset_resolve(void);
+
 // --- On-disk blob layouts ----------------------------------------------------
 // Each blob is version-tagged and CRC32'd, same convention as
 // boot_guard_record_t: a version this build does not recognise, or a CRC
@@ -661,6 +674,9 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
 
     hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
     cred_store_unlock();
+    if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
+        storage_reset_resolve();
+    }
     return wst;
 }
 
@@ -764,6 +780,98 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
 
 // --- Policy -------------------------------------------------------------------
 
+// FS-02 helpers. partition NULL == default nvs.
+static hal_status_t seen_probe(const char *partition)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (err != HAL_OK) {
+        return err;
+    }
+    err = hal_kv_key_exists(&h, WEB_AUTH_KEY_SEEN);
+    hal_kv_close(&h);
+    return err;
+}
+
+static hal_status_t seen_write(const char *partition)
+{
+    uint32_t blob[2] = {WEB_AUTH_SEEN_MAGIC, ~WEB_AUTH_SEEN_MAGIC};
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_WRITE, partition);
+    if (err != HAL_OK) {
+        return err;
+    }
+    err = hal_kv_set_blob(&h, WEB_AUTH_KEY_SEEN, blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return err;
+}
+
+bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere)
+{
+    s_storage_reset_latched = false;
+    hal_status_t nvs_st = seen_probe(NULL);
+    bool mirror_ok = hal_kv_mount_probe(WEB_AUTH_MIRROR_PARTITION) == HAL_OK;
+    if (nvs_st == HAL_OK) {
+        if (mirror_ok && seen_probe(WEB_AUTH_MIRROR_PARTITION) != HAL_OK) {
+            (void)seen_write(WEB_AUTH_MIRROR_PARTITION); // backfill, best effort
+        }
+        return false;
+    }
+    if (nvs_st != HAL_NOT_FOUND) {
+        return false; // unreadable store: the existing AZ-02 paths fail closed
+    }
+    // Pre-existing auth data without a sentinel (upgrade from before FS-02): healthy.
+    web_auth_policy_blob_t pb;
+    if (load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) != HAL_NOT_FOUND || web_auth_store_ever_enabled()) {
+        (void)seen_write(NULL);
+        if (mirror_ok) {
+            (void)seen_write(WEB_AUTH_MIRROR_PARTITION);
+        }
+        return false;
+    }
+    bool evidence = (mirror_ok && seen_probe(WEB_AUTH_MIRROR_PARTITION) == HAL_OK) ||
+                    (hal_kv_partition_was_auto_erased(NULL) && setup_evidence_elsewhere);
+    if (evidence) {
+        s_storage_reset_latched = true;
+        return true;
+    }
+    // Truly factory-fresh: record it in both places.
+    (void)seen_write(NULL);
+    if (mirror_ok) {
+        (void)seen_write(WEB_AUTH_MIRROR_PARTITION);
+    }
+    return false;
+}
+
+bool web_auth_store_storage_reset_latched(void)
+{
+    return s_storage_reset_latched;
+}
+
+const char *web_auth_store_storage_reset_banner_text(void)
+{
+    return "AUTH: login storage was reset; set admin";
+}
+
+// Admin web password was just set while latched: persist an auth-enabled
+// policy, then the sentinel, then drop the latch. Policy first so a crash in
+// between leaves a policy-present (healthy) board, never an open one.
+static void storage_reset_resolve(void)
+{
+    web_auth_policy_t p = {.web_enabled = true, .lcd_enabled = false,
+                           .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+    if (web_auth_store_set_policy(&p) != HAL_OK) {
+        return; // stays latched: fail closed (load_policy keeps reading UNREADABLE)
+    }
+    if (seen_write(NULL) == HAL_OK) {
+        (void)seen_write(WEB_AUTH_MIRROR_PARTITION);
+        s_storage_reset_latched = false;
+    }
+}
+
 bool web_auth_store_ever_enabled(void)
 {
     web_auth_ever_blob_t m;
@@ -808,8 +916,8 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
     if (err != HAL_OK) {
         // AU-02: ABSENT plus the ever-enabled marker means the record was lost
         // on a commissioned board: fail closed (UNREADABLE), never open.
-        if (web_auth_store_ever_enabled()) {
-            return WEB_AUTH_LOAD_UNREADABLE;
+        if (web_auth_store_ever_enabled() || s_storage_reset_latched) {
+            return WEB_AUTH_LOAD_UNREADABLE; // FS-02: latched storage reset also fails closed
         }
         return WEB_AUTH_LOAD_ABSENT; // item 11: absent record reads as both-off
     }

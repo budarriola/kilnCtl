@@ -1,6 +1,7 @@
 #include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "../common/json_escape_ctl.h"
 #include "readiness_http.h"
+#include "web_auth_store.h" // FS-02 storage-reset latch
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
@@ -1121,6 +1122,17 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "estop_verified", "E-stop interlock verified", st, detail,
                         "/safety", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* FS-02: login storage reset on a board that was set up before. Auth is failed closed. */
+    if (readiness_auth_storage_item_listed(web_auth_store_storage_reset_latched())) {
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "auth", "Login storage",
+                        readiness_auth_storage_item_status(true),
+                        "login storage was reset; set admin (dashboards only until then)", "/settings", &dropped);
         if (o != before_o) {
             first = false;
         }
