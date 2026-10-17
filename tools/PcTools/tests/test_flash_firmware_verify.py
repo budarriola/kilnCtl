@@ -897,7 +897,18 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         test in the report) turns this red."""
         mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         tcl = self.run_mock.call_args.args[2]
-        self.assertIn("build/KilnCtrl.bin 0x210000 verify", tcl)
+        self.assertIn("build/KilnCtrl.bin 0x210000 verify no_clock_boost", tcl)
+
+    def test_every_program_esp_disables_clock_boost(self):
+        """OpenOCD's flash_stub_clock_boost drops the USB-JTAG link
+        (-302 "Clock configuration set failed"); every program_esp must carry
+        no_clock_boost."""
+        mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        tcl = self.run_mock.call_args.args[2]
+        cmds = [c for c in tcl.split("; ") if c.startswith("program_esp")]
+        self.assertGreaterEqual(len(cmds), 3)
+        for c in cmds:
+            self.assertIn("no_clock_boost", c)
 
     def test_oversized_binary_is_refused_before_openocd(self):
         """THE new hard pre-flight size check: a KilnCtrl.bin larger than
@@ -932,8 +943,8 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
-        self.assertIn("partition_table/partition-table.bin 0x10000 verify", tcl)
-        self.assertNotIn("partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("partition_table/partition-table.bin 0x10000 verify no_clock_boost", tcl)
+        self.assertNotIn("partition-table.bin 0x8000 verify no_clock_boost", tcl)
 
     def test_partition_table_offset_absent_falls_back_with_note(self):
         """No sdkconfig at all (or none containing the key) falls back to
@@ -943,7 +954,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
-        self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("partition_table/partition-table.bin 0x8000 verify no_clock_boost", tcl)
         self.assertIn("using IDF's default", result)
 
     def test_partition_table_offset_absent_key_in_present_file_falls_back_with_note(self):
@@ -951,7 +962,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
-        self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("partition_table/partition-table.bin 0x8000 verify no_clock_boost", tcl)
         self.assertIn("using IDF's default", result)
 
     def test_partition_table_offset_malformed_refuses_before_openocd(self):
@@ -971,7 +982,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
-        self.assertIn("partition_table/partition-table.bin 0x10000 verify", tcl)
+        self.assertIn("partition_table/partition-table.bin 0x10000 verify no_clock_boost", tcl)
 
     def test_partition_table_offset_falls_back_to_build_sdkconfig(self):
         """Opus advisory 5: build_kilnfw publishes a sibling
@@ -984,7 +995,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
-        self.assertIn("partition_table/partition-table.bin 0x20000 verify", tcl)
+        self.assertIn("partition_table/partition-table.bin 0x20000 verify no_clock_boost", tcl)
         self.assertIn(build_sdkconfig, result)
 
     def test_partition_table_offset_unreadable_file_falls_back_with_note(self):
@@ -1010,7 +1021,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         # Must fall back to the plain default (0x8000), not read the value
         # that actually IS in the file (proves the PermissionError path was
         # taken, not silently swallowed and re-read).
-        self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
+        self.assertIn("partition_table/partition-table.bin 0x8000 verify no_clock_boost", tcl)
         self.assertIn("could not be read", result)
         self.assertIn("Permission denied", result)
 

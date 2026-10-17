@@ -352,7 +352,7 @@ def build_tcl(adapter_serial: str, bin_path: str, target: partition_table.Partit
     path = bin_path.replace("\\", "/")
     return (
         f"adapter serial {adapter_serial}; "
-        f'program_esp "{path}" 0x{target.offset:x} verify reset exit'
+        f'program_esp "{path}" 0x{target.offset:x} verify no_clock_boost reset exit'
     )
 
 
