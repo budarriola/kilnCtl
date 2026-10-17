@@ -106,8 +106,26 @@ static void check_bw03(void)
     free(t);
 }
 
+static void check_pm(void)
+{
+    TEST_SECTION("PM-03/04/06: scratch fallback logged, LVGL create retried, OTA part primed");
+    char *fn = body_of("persist/persist_scratch.h", "static inline void *persist_scratch_alloc(");
+    TEST_CHECK(fn != NULL && strstr(fn, "s_fallbacks++") != NULL && strstr(fn, "ESP_LOGW") != NULL,
+               "persist_scratch_alloc must count and log the internal fallback");
+    free(fn);
+    char *t = body_of("ui/ui_page_diagnostics.c", "void ui_page_diagnostics_prime_ota_state(void)");
+    TEST_CHECK(t != NULL && strstr(t, "hal_sysinfo_get_running_partition") != NULL,
+               "prime must read the running partition");
+    free(t);
+    t = body_of("ui/ui_page_diagnostics.c", "static void build_firmware_statics(void)");
+    TEST_CHECK(t != NULL && strstr(t, "hal_sysinfo_get_running_partition") == NULL,
+               "LVGL builder must not call hal_sysinfo_get_running_partition");
+    free(t);
+}
+
 void run_test_lowlink_wiring(void)
 {
+    check_pm();
     check_up01();
     check_bw01();
     check_bw02();

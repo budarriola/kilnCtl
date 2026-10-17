@@ -32,6 +32,7 @@
 #include <stdlib.h>
 
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 
 #ifdef KILNCTL_PERSIST_SCRATCH_TEST_HOOK
 /* Host-test OOM injection: the persist_scratch_test_fail_nth-th call of exactly
@@ -51,6 +52,14 @@ static inline void *persist_scratch_alloc(size_t size)
 #endif
     void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) {
+        /* PM-03: the fallback lands in internal RAM (<= 8192 B under
+         * SPIRAM_MALLOC_ALWAYSINTERNAL) and can eat the 8192 B heap_internal
+         * floor, so it is counted and logged once per translation unit. */
+        static unsigned s_fallbacks;
+        if (s_fallbacks++ == 0) {
+            ESP_LOGW("persist_scratch", "PSRAM alloc of %u B failed, using internal RAM (further fallbacks silent)",
+                     (unsigned)size);
+        }
         p = malloc(size);
     }
     return p;

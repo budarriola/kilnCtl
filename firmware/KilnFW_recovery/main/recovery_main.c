@@ -93,6 +93,10 @@ void app_main(void)
     recovery_lcd_show_message();
     recovery_wifi_start();
 
+    // Unattended install: a request left by the application install route. Runs BEFORE the HTTP
+    // server starts so the apply claim exists before any mutating route can be reached (REVIEW_AUTOFX LOW-4).
+    recovery_install_boot();
+
     // A failed start stops its own server, so it can be retried; if every
     // bounded attempt fails the image restarts (it is stateless) after leaving
     // "HTTP FAILED" on the LCD long enough to read.
@@ -129,9 +133,6 @@ void app_main(void)
         recovery_lcd_clear_error();
         recovery_health_clear_http();
     }
-
-    // Unattended install: a request left by the application install route.
-    recovery_install_boot();
 
     // wifi/lcd are snapshots (the LCD retry task may be mid re-init).
     if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {
