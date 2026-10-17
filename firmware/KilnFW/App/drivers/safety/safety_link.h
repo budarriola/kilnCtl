@@ -1051,6 +1051,7 @@ typedef struct {
      * of the new boot, so diag_boot_reason/diag_state are only trusted once it
      * reads true. diag_state itself is reset to INIT at the reboot. */
     uint32_t pico_reboot_seq;
+    bool     pico_boot_id_ever_seen;   /* PF-01: a boot id frame has arrived since the ESP booted */
     bool     diag_since_reboot;
     uint8_t  diag_flags;               /* SAFETY_LINK_DIAG_FLAG_* bits */
     uint32_t diag_log_frames_dropped;  /* Pico's log_task.c s_dropped -- LOG

@@ -477,6 +477,9 @@ typedef struct {
     size_t   heap_spiram_free;
     size_t   heap_spiram_largest_free_block;
     size_t   heap_spiram_min_free;
+    uint32_t pico_reboot_seq;           /* PF-03: heat_enable's last observed Pico reboot count */
+    bool     pico_reboot_latched;       /* PF-03: fatal verdict latched or holding heat */
+    bool     pico_reboot_lost_trip_only;/* PF-03: that latch came only from the lost-trip rule */
     uint32_t persist_scratch_fallbacks; /* FX-05: PSRAM->internal scratch fallbacks since boot */
     size_t   heap_spiram_total;
 
