@@ -1357,12 +1357,19 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
      * stack back to internal RAM.
      * 2026-09-30 history: raised 8192 -> 10240 (bench stack run, LOW 1296 B). */
     static TaskHandle_t s_lvgl_task_handle;
-    BaseType_t created_ok = xTaskCreatePinnedToCoreWithCaps(
-        lvgl_port_task, "lvgl", 10240, NULL, 4, &s_lvgl_task_handle, tskNO_AFFINITY,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* PM-04: bounded retry like uart_bridge_ext.c; PSRAM may be briefly short at boot. */
+    BaseType_t created_ok = pdFAIL;
+    for (int attempt = 0; attempt < 5 && created_ok != pdPASS; attempt++) {
+        created_ok = xTaskCreatePinnedToCoreWithCaps(
+            lvgl_port_task, "lvgl", 10240, NULL, 4, &s_lvgl_task_handle, tskNO_AFFINITY,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created_ok != pdPASS && attempt < 4) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
     if (created_ok != pdPASS) {
-        ESP_LOGE(TAG, "Failed to start lvgl_port_task (PSRAM stack) -- no local display "
-                      "this boot");
+        ESP_LOGE(TAG, "Failed to start lvgl_port_task (PSRAM stack) after 5 attempts -- no local "
+                      "display this boot");
         return ESP_ERR_NO_MEM;
     }
     TaskHandle_t created_handle = s_lvgl_task_handle;

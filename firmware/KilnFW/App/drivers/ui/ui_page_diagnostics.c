@@ -644,9 +644,13 @@ static const char *ota_state_str(esp_ota_img_states_t s)
 /* Cached OTA image state; written once by ui_page_diagnostics_prime_ota_state(). */
 static esp_ota_img_states_t s_ota_state_cached = ESP_OTA_IMG_UNDEFINED;
 static bool s_ota_state_known;
+/* PM-06: running partition cached at prime time so the LVGL task makes no esp_ota_* call. */
+static hal_sysinfo_partition_info_t s_running_info_cached;
+static bool s_running_info_known;
 
 void ui_page_diagnostics_prime_ota_state(void)
 {
+    s_running_info_known = (hal_sysinfo_get_running_partition(&s_running_info_cached) == HAL_OK);
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
     flash_xip_reader_enter();
@@ -679,8 +683,8 @@ static void build_firmware_statics(void)
 
     lv_label_set_text(s_reset_reason_label, reset_reason_str(hal_sysinfo_reset_reason()));
 
-    hal_sysinfo_partition_info_t running_info;
-    bool have_running_info = (hal_sysinfo_get_running_partition(&running_info) == HAL_OK);
+    hal_sysinfo_partition_info_t running_info = s_running_info_cached;
+    bool have_running_info = s_running_info_known;
     /* The OTA image state is read ONCE by ui_page_diagnostics_prime_ota_state()
      * from the caller of kiln_ui_init(), never here: esp_ota_get_state_partition()
      * reads otadata through esp_partition_mmap, which freezes the flash cache

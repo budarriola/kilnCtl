@@ -64,7 +64,9 @@ typedef struct {
  * "Guru Meditation" the first time an input twitched. Everything that has to
  * touch the part happens in io_bridge_task, which this only wakes.
  *
- * IRAM_ATTR so the handler stays callable with the flash cache disabled. */
+ * IRAM_ATTR keeps the handler out of flash. It is installed without
+ * ESP_INTR_FLAG_IRAM, so it is masked in any cache-off window anyway (none
+ * under XIP_FROM_PSRAM). It touches only internal-RAM state (PM-05). */
 static void IRAM_ATTR io_bridge_isr(void *arg)
 {
     io_bridge_ctx_t *ctx = (io_bridge_ctx_t *)arg;
