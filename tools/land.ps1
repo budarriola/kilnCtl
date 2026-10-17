@@ -150,6 +150,7 @@ function Run-Bounded([string]$script, [string]$verb, [double]$timeoutMin) {
         & taskkill.exe /PID $p.Id /T /F *>$null
         return -1
     }
+    $p.WaitForExit()  # parameterless wait settles ExitCode
     return [int]$p.ExitCode
 }
 function Step([string]$s) { [void]$script:steps.Add($s); Write-Host "[step] $s" -ForegroundColor Cyan }

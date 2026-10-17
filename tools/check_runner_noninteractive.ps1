@@ -25,7 +25,7 @@ try {
     if (-not $proc.WaitForExit(60000)) {
         & taskkill /PID $proc.Id /T /F | Out-Null
         $fails += "Read-Host fixture still running after 60s (would hang a suite run)"
-    } elseif ($proc.ExitCode -eq 0) {
+    } elseif (($proc.WaitForExit() -or $true) -and $proc.ExitCode -eq 0) {
         $fails += "Read-Host fixture exited 0 (prompt was answered/ignored)"
     } else {
         Write-Host "fixture failed fast: exit $($proc.ExitCode) in $([int]$sw.Elapsed.TotalSeconds)s"

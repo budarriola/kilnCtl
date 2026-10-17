@@ -90,7 +90,9 @@ $extraFiles = @(
     "firmware/KilnFW/App/drivers/http/setup_progress_http.c",
     "firmware/KilnFW/App/drivers/http/web_auth_login_http.c",
     "firmware/KilnFW/App/drivers/http/zones_http.c",
-    "firmware/KilnFW/App/drivers/safety/safety_cfg_store.c"
+    "firmware/KilnFW/App/drivers/safety/safety_cfg_store.c",
+    "firmware/KilnFW/App/drivers/ui/ui_edit_firing_apply.c",
+    "firmware/KilnFW/App/drivers/ui/ui_page_edit_firing.c"
 )
 $persistRoot = Join-Path $RepoRoot $persistDir
 if (-not (Test-Path $persistRoot)) { Write-Host "FAIL: $persistDir not found -- moved/renamed? update this script"; exit 1 }
@@ -128,8 +130,6 @@ $allow = @(
       "v1 migration buffer: bounded legacy schema struct, once-per-board migration at boot, never on the import path")
     ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,
       "v2 migration buffer (two sites): bounded legacy schema struct, once-per-board migration at boot, never on the import path")
-    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(*scratch))", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
       "24-byte job context handed to the async task, not scratch")
     ,@("firmware/KilnFW/App/drivers/http/diagnostics_http.c", "malloc((size_t)len_ul)", 1,
