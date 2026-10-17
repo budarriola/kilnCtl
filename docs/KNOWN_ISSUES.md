@@ -341,3 +341,12 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **FA-05** LOW, `persist_scratch.h:46-70`, `dashboard_http.c:563-565`. The FX-05 counter and status wiring are ESP-only, and the host test checks only JSON formatting, so removing the counter call passes. Fix: host-build `persist_scratch.c` and add a fallback round-trip test. Status open.
 - **FA-06** INFO, `update_stage.c:288-289`. A stale comment says an invalid descriptor leaves the declared version; since AUP-03 that is true only for ungated stages. Status open.
 - **FA-07** INFO. FX-02 and AUP-03 are verified: the reset gesture reopens bootstrap, the store fails closed, and neither fix adds a downgrade or channel path. Status INFO.
+
+## Review 2026-10-17: worst-case internal RAM (docs/audits/REVIEW_RAM_WORSTCASE_2026_10_17.md)
+- **RW-01** MED, `firmware/KilnFW/sdkconfig.defaults:549-562`. CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM is not pinned (IDF default 32, ~1.6 KB each, internal). 13 httpd sessions plus a TLS update check can queue up to ~52 KB of TX frames in internal RAM. Unmeasured. Fix: measure min_free under a socket storm, then pin the value. Status open.
+- **RW-02** MED, `firmware/KilnFW/App/drivers/update/update_fetch.c:1356`, `drivers/http/ota_http.c:465`, `drivers/http/http_async_job.c:120-128`. An update check does not claim the OTA mutex, so a backup import (10240 B internal stack), ESP OTA upload or other async job can start beside its ~21.5 KB TLS draw; neither has a heap admission. Fix: claim the mutex for checks too, or add a heap admission to http_async_job. Status open.
+- **RW-03** LOW, `firmware/KilnFW/App/drivers/ui/lvgl_mem_psram.c:85-97,139-143`. LVGL falls back to internal RAM, logs once, and counts nothing. Status open.
+- **RW-04** LOW, `backup_import.c:1317-1320`, `ui_edit_firing_apply.c:21-23`, `ui_page_edit_firing.c:79-81`. Open-coded internal fallbacks bypass the persist_scratch counter, with no log. Status open.
+- **RW-05** LOW, `firmware/KilnFW/App/drivers/persist/persist_scratch.h:52-70`. The fallback logs only once; nothing alarms on a non-zero counter. Status open.
+- **RW-06** LOW, `firmware/KilnFW/App/drivers/bridge/uart_bridge_system.c:69-76`. One failed boot-time allocation deletes the system command task for the whole boot. Status open.
+- **RW-07..RW-11** INFO: KDF, flash_xip lock, OTA upload chunk, backup buffers and internal NULL paths reviewed with no internal-RAM risk found; see the review. Status INFO.
