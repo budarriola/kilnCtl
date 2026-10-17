@@ -9,6 +9,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "cfg_fs_mount.h"
 #include "pref_cfg_fs.h"
 #include "persist_scratch.h"
 
@@ -391,6 +392,16 @@ static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, ui
             ESP_LOGE(ZCFG_FS_TAG, "rejected zones config file has no %s copy -- NOT overwriting it from NVS",
                      ZONES_CFG_BAD_FILE_PATH);
             return true;
+        }
+        if (nvs_valid && (cfg_fs_is_available() || cfg_fs_mount_format_ever_started()) && !s_last_reject.occurred) {
+            /* FS-01: cfg is mounted but zones.json is simply missing (storage reset or erased). Since the
+             * dual-write close nothing updates the NVS blob, so it is a frozen legacy copy that may be months
+             * stale. Do NOT adopt it silently: report untrustworthy, the caller latches a load fault and
+             * readiness shows storage not_done until zones are re-commissioned or restored. */
+            ESP_LOGE(ZCFG_FS_TAG, "zones.json missing on a mounted cfg -- NOT adopting the frozen legacy NVS "
+                     "zones blob (re-commission or restore)");
+            memset(out_cfg, 0, sizeof(*out_cfg));
+            return false;
         }
         if (nvs_valid) {
             esp_err_t werr = zones_config_cfg_fs_save(nvs_cfg, nvs_rev);

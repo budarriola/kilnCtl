@@ -2935,6 +2935,20 @@ static void stage_zones_blob(const void *data, size_t len)
     hal_kv_close(&h);
 }
 
+/* FS-01: with cfg mounted, a missing zones.json no longer adopts a legacy NVS blob, so tests that exercise
+ * migration of an older blob stage it as the zones.json file (4-byte LE rev + raw blob) instead. */
+static void stage_zones_file_blob(const void *data, size_t len)
+{
+    uint8_t buf[sizeof(zones_cfg_t) + 4];
+    if (len + 4 > sizeof(buf)) {
+        return;
+    }
+    memset(buf, 0, 4);
+    buf[0] = 1;
+    memcpy(buf + 4, data, len);
+    (void)cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, buf, len + 4);
+}
+
 static void test_nvs_load_from_too_short_is_corrupt_not_refused(void)
 {
     TEST_SECTION("nvs_load_from -- a too-short blob is corrupt: found=false, valid=false (migration may still run)");
@@ -3585,7 +3599,7 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     src.zones[0].pid_kp = 3.5f;
     src.zones[0].max_temp_c = 1150.0f;
     zh_stamp_v26_crc(&src);
-    stage_zones_blob(&src, sizeof(src));
+    stage_zones_file_blob(&src, sizeof(src));
 
     s_zones_config_valid = false;
     (void)zones_http_start(); // ESP_ERR_INVALID_STATE from the stub HTTP server is expected/ignored --
@@ -3667,7 +3681,7 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     src.zones[0].pid_kp = 2.0f;
     src.zones[0].max_temp_c = 1000.0f;
     zh_stamp_v26_crc(&src);
-    stage_zones_blob(&src, sizeof(src));
+    stage_zones_file_blob(&src, sizeof(src));
 
     // Sabotage the cfg write so BOTH write-back attempts
     // (zones_config_persist_migrated_blob_verified()'s bounded retry loop

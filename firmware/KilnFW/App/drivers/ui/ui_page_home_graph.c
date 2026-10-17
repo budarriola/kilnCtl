@@ -306,6 +306,8 @@ size_t ui_page_home_pause_reason_text(const char *reason, char *out, size_t out_
         snprintf(out, out_cap, "Heat withheld: safety processor rebooted, cause unknown");
     } else if (strcmp(reason, "pico_fatal_reboot") == 0) {
         snprintf(out, out_cap, "Paused: safety processor rebooted after a fatal fault");
+    } else if (strcmp(reason, "pico_lost_trip_latched") == 0) {
+        snprintf(out, out_cap, "Paused: safety trip was lost across a restart; clear it and resume");
     } else if (strcmp(reason, "heat_grant_unconfirmed") == 0) {
         snprintf(out, out_cap, "Paused: heat grant not confirmed by safety processor");
     } else {

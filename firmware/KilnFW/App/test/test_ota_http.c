@@ -3117,6 +3117,24 @@ static void test_heat_blocked_while_fetch_or_check_busy(void)
     ota_http_set_fetch_busy_probe(NULL);
 }
 
+// RW-02: an update check holds internal heap without claiming the update lock; the ESP OTA upload gate must
+// still refuse. Calls the evaluator the same way the real gate does and compares busy vs idle.
+static void test_check_interlocks_refuses_while_fetch_busy(void)
+{
+    TEST_SECTION("ota_http_check_interlocks -- refuses while an update fetch is busy (RW-02)");
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    s_test_sweep_active = false;
+    ota_http_set_fetch_busy_probe(fake_fetch_busy_probe);
+    s_fake_fetch_busy = true;
+    reason[0] = '\0';
+    ota_interlock_result_t busy = ota_http_check_interlocks(true, reason, sizeof(reason));
+    TEST_CHECK(busy != OTA_INTERLOCK_OK, "a busy update fetch refuses the OTA upload");
+    TEST_CHECK(strstr(reason, "update") != NULL || strstr(reason, "progress") != NULL,
+               "the refusal names the running update");
+    s_fake_fetch_busy = false;
+    ota_http_set_fetch_busy_probe(NULL);
+}
+
 static void test_ota_pico_do_stage_refuses_oversize_with_http_400(void)
 {
     TEST_SECTION("ota_pico_do_stage -- an oversize Content-Length is refused with HTTP 400, not 500 (N5)");
@@ -3257,6 +3275,7 @@ void run_test_ota_http(void)
     test_pico_img_stage_begin_refuses_oversize();
     test_ota_pico_do_stage_refuses_oversize_with_http_400();
     test_heat_blocked_while_fetch_or_check_busy();
+    test_check_interlocks_refuses_while_fetch_busy();
 }
 
 int main(void)

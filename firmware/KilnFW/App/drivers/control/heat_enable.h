@@ -284,6 +284,19 @@ bool heat_enable_grant_unconfirmed(void);
 void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
                                 uint32_t now_ms);
 bool heat_enable_reboot_hold(void);
+// PF-01: tell heat_enable whether a frame carrying a Pico boot id has arrived since the ESP booted. While
+// false, note_pico_boot takes no baseline and acquire is withheld (fail closed).
+void heat_enable_note_boot_id_seen(bool seen);
+// PF-03: true when the current reboot hold came from a claimless lost-trip latch, not a fatal reboot.
+bool heat_enable_reboot_hold_lost_trip_only(void);
+// PR-04: true while a claim is held but no Pico boot id has arrived (heat withheld, fail closed); the executor
+// pauses with reason "pico_boot_id_unseen" so the run shows why.
+bool heat_enable_boot_id_unseen_blocked(void);
+// PR-02: the DIAG's trip reason/mask (call before note_pico_state, only meaningful for the current boot's DIAG).
+// A claimless lost-trip latch expires only when the trips cleared on the new boot cover the lost trip's reason.
+void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask);
+// PF-03: observability for /api/status (any pointer may be NULL).
+void heat_enable_get_reboot_state(uint32_t *seq, bool *fatal_latched, bool *lost_trip_only);
 // True while a Pico reboot with a claim held is still unclassified (no DIAG of
 // the new boot yet): heat is withheld, the cause is unknown. The profile
 // executor shows it as pause_reason "pico_reboot_undecided" while RUNNING.

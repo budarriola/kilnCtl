@@ -64,6 +64,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "persist_scratch.h"
 
 static const char *TAG = "lvgl_mem";
 
@@ -80,7 +81,17 @@ static const char *TAG = "lvgl_mem";
  * great many times, and the flood would itself become the problem (this
  * codebase has been bitten by exactly that three times -- see
  * lvgl_port.c's touch_read_cb() and NS2009.c). */
-static bool s_fallback_warned;
+
+/* RW-03: counted in the shared persist_scratch fallback counter (shown in /api/status); logged on the first
+ * fallback and then only when the count reaches a power of two, so a flood cannot become the problem. */
+static void lvgl_note_fallback(size_t size)
+{
+    uint32_t n = persist_scratch_note_fallback();
+    if ((n & (n - 1u)) == 0u) {
+        ESP_LOGW(TAG, "PSRAM allocation of %u bytes failed -- falling back to the default heap (fallback #%u)",
+                 (unsigned)size, (unsigned)n);
+    }
+}
 
 static void *lvgl_mem_alloc(size_t size)
 {
@@ -89,11 +100,7 @@ static void *lvgl_mem_alloc(size_t size)
         return p;
     }
 
-    if (!s_fallback_warned) {
-        s_fallback_warned = true;
-        ESP_LOGW(TAG, "PSRAM allocation of %u bytes failed -- falling back to the default heap "
-                      "(further occurrences not logged)", (unsigned)size);
-    }
+    lvgl_note_fallback(size);
     return heap_caps_malloc(size, MALLOC_CAP_8BIT);
 }
 
@@ -140,6 +147,7 @@ void *lv_realloc_core(void *p, size_t new_size)
     if (out || new_size == 0) {
         return out;
     }
+    lvgl_note_fallback(new_size);
     return heap_caps_realloc(p, new_size, MALLOC_CAP_8BIT);
 }
 

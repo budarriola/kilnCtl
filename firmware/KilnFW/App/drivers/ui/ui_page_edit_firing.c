@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "persist_scratch.h"
+
 #include "esp_heap_caps.h"
 #include "kiln_ui.h"
 #include "profiles_live_http.h" /* profiles_live_decide_status() -- end-of-run decision button */
@@ -76,9 +78,9 @@ static bool ensure_pg(void)
     if (s_pg) {
         return true;
     }
-    s_pg = heap_caps_calloc(1, sizeof(*s_pg), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_pg) {
-        s_pg = heap_caps_calloc(1, sizeof(*s_pg), MALLOC_CAP_8BIT);
+    s_pg = persist_scratch_alloc(sizeof(*s_pg)); /* RW-04: counted fallback */
+    if (s_pg) {
+        memset(s_pg, 0, sizeof(*s_pg));
     }
     return s_pg != NULL;
 }

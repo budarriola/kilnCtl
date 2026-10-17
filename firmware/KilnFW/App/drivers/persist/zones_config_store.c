@@ -680,8 +680,14 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
                  ZONES_CFG_FILE_PATH, file_reject.reason, used_file ? "file" : "NVS", ZONES_CFG_BAD_FILE_PATH,
                  file_reject.preserved ? "yes" : "NO (copy failed)");
     }
-    if (!trustworthy && nvs_valid && file_rejected && file_reject.newer) {
-        /* The NVS copy was valid but deliberately NOT adopted over a newer-version file. */
+    if (!trustworthy && nvs_valid && !file_rejected && !used_file && file_on_disk_version != ZONES_CFG_RESOLVE_OOM_VERSION
+        && !s_zones_cfg_load_fault.occurred) {
+        /* FS-01: zones.json missing on a mounted cfg; the frozen legacy NVS blob was deliberately not adopted. */
+        zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_UNREADABLE, 0,
+                                   "zones.json missing; legacy NVS copy not trusted -- re-commission or restore");
+    }
+    if (!trustworthy && nvs_valid && (!file_rejected || file_reject.newer)) {
+        /* The NVS copy was valid but deliberately NOT adopted (newer-version file, or FS-01 missing file). */
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_valid) {
             *out_valid = false;

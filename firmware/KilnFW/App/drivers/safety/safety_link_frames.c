@@ -369,6 +369,7 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
     uint16_t peer_min_compatible = 0;
     uint8_t peer_boot_id = 0;
     bool have_boot_id = false;
+    bool boot_id_first_sight = false;
     bool dirty = false;
     uint8_t commit[64];
     uint8_t commit_len = 0;
@@ -406,7 +407,10 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
          * (pico_boot_id_ever_seen), not pico_boot_id_known, which a ~1.5 s link blip clears
          * (safety_reset_stale_peer_info_if_link_down). pico_boot_id itself is never cleared, so a
          * same-id relink is not a reboot; only a changed id is. */
-        boot_id_changed = (!link->pico_boot_id_ever_seen) || (peer_boot_id != link->pico_boot_id);
+        /* PF-01: the first id seen after an ESP boot is the starting value, not a reboot: it still resets
+         * the per-boot bookkeeping below (as before) but must not bump pico_reboot_seq. */
+        boot_id_first_sight = !link->pico_boot_id_ever_seen;
+        boot_id_changed = boot_id_first_sight || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
         link->pico_boot_id_known = true;
         link->pico_boot_id_ever_seen = true;
@@ -435,7 +439,11 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
                  * inputs (reboot_fatal_latched, was_tripped) and erase the T3 lost-trip latch. Keep the
                  * baseline and diag_since_reboot as the uptime path left them. */
             } else {
+                const uint32_t seq_before = link->cached.pico_reboot_seq;
                 safety_note_pico_reboot_locked(link);
+                if (boot_id_first_sight) {
+                    link->cached.pico_reboot_seq = seq_before; /* PF-01: not a reboot */
+                }
                 /* The new boot's uptime baseline is not known yet; the next
                  * DIAG seeds it (kilnlink audit 2026-10-09 M1). */
                 link->pico_uptime_baseline_known = false;

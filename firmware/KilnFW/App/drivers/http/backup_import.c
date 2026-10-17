@@ -1314,10 +1314,7 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
          * every return path, 500-equivalent refusal on OOM" convention this
          * file already uses for candidates/zone_candidates/
          * timing_profile_candidates above. */
-        backup_import_slot_scratch_t *scratch = heap_caps_malloc(sizeof(*scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!scratch) {
-            scratch = malloc(sizeof(*scratch));
-        }
+        backup_import_slot_scratch_t *scratch = persist_scratch_alloc(sizeof(*scratch)); /* RW-04: counted fallback */
         if (!scratch) {
             snprintf(err_msg, err_cap, "out of memory (profile slot scratch)");
             return false;

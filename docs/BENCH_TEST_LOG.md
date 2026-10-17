@@ -3572,3 +3572,9 @@ Step 4. `safety_test_trip(confirm=True)`: TRIP_EVENT reason 4 seq 1; `/api/statu
 
 Final state: idle, Pico armed, no trip, relays off, Kiln config 1 active, ramp assist disabled, units Fahrenheit
 (from the restored backup), readiness: only safety_commissioned (3 values missing), ct_attribution and estop_verified open.
+
+### benchmain3 step 5 follow-up (2026-10-17): E-stop attested, short firing
+- E-stop: owner re-attested in chat ("Estop is fine. This fixture is only a 4w test bed, always safe."); estop_verify recorded once, readiness estop_verified now ok. Readiness otherwise 20 ok, 1 not_done (safety_commissioned, 3 of 66 params), cannot_yet ct_attribution.
+- Web auth: /api/auth/session reports auth_enabled=false, bootstrap_needed=false (admin record present, enforcement off). Not changed.
+- Firing: profiles_start(1) ('B1_THROWAWAY', 1 segment, target 30 C, board at ~30 C). Relays R1-R3 stayed off throughout (target equals ambient, no heat demand). Within about a minute the executor showed state=2 paused, pause_reason pico_fatal_reboot ("safety processor rebooted after a fatal fault") and zone actual=0.0C invalid; no trip latched, link up, Pico armed afterwards. Not investigated (out of scope); worth a follow-up on why the Pico reported a fatal reboot at start.
+- profiles_stop(): ok. Executor state=0 idle, relays off, no trip, TC 29.9-30.1 C. Result: stop path PASS; heating firing NOT exercised (profile target = ambient, paused by pico_fatal_reboot).

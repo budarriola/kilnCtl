@@ -716,6 +716,7 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     out->age_ms = safety_age_ms_locked(link);
     out->link_up = safety_link_up_locked(link);
     out->fault_asserted = (link->fault_sources != 0u);
+    out->pico_boot_id_ever_seen = link->pico_boot_id_ever_seen; /* PF-01 */
     /* trip_event_age_ms, same "age computed on read" contract as age_ms
      * above -- meaningless (and left at whatever safety_elapsed_ms(0) works
      * out to) until trip_event_ever_received is true. */

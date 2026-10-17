@@ -2168,6 +2168,23 @@ static void test_stale_reset_never_received_is_also_down(void)
 // clearable but actually get re-populated with the NEW peer's identity,
 // which is what lets a subsequent rollback attempt compare against the
 // right baseline instead of a connection that already ended.
+static void test_first_boot_id_after_esp_boot_is_not_a_reboot(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- PF-01: the first boot id after an ESP boot is the starting value, "
+                 "a later change is a reboot");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count;
+    msg.length = set_fw_version_frame(msg.payload, false, NULL, 0, NULL, 0, 42, 0, 0);
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq == 0u, "MUST GO RED if the first boot id bumps pico_reboot_seq");
+    TEST_CHECK(link.pico_boot_id_ever_seen, "the first boot id is recorded as seen");
+    msg.length = set_fw_version_frame(msg.payload, false, NULL, 0, NULL, 0, 43, 0, 0);
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq == 1u, "a real boot id change after that still counts as a reboot");
+}
+
 static void test_link_blip_same_boot_id_is_not_a_reboot(void)
 {
     TEST_SECTION("safety_apply_fw_version -- firing audit MED-4: a link blip (known flag cleared) followed by "
@@ -4106,6 +4123,7 @@ int main(void)
     test_stale_reset_never_received_is_also_down();
     test_stale_reset_then_reapply_recovers_after_reconnect();
     test_link_blip_same_boot_id_is_not_a_reboot();
+    test_first_boot_id_after_esp_boot_is_not_a_reboot();
     test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();
     test_frames_gated_above_a_version_are_not_expected_from_that_peer();
     test_update_in_progress_does_not_relax_link_loss_block();

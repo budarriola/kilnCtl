@@ -28,6 +28,7 @@
 
 #include "kilnlink/kilnlink_version.h"
 #include "http_auth_http.h" /* kiln_http_register() */
+#include "http_async_job.h"
 #include "ota_http.h"
 #include "ota_http_internal.h" /* ota_http_get_client_ip() */
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
@@ -1024,6 +1025,7 @@ static const char *run_job(work_t *w)
     st_unlock();
     // AUP-02: /releases/latest is ordered by creation date, not version, so both channels read the list
     // endpoint and the highest eligible semver is picked (allow_prerelease filters pre-releases).
+    // FA-01: only when that page holds no eligible stable release does the stable channel fall back to /latest.
     if (!update_url_build_list(w->repo, FETCH_LIST_PER_PAGE, w->url, sizeof(w->url))) {
         return "bad_repo";
     }
@@ -1038,6 +1040,27 @@ static const char *run_job(work_t *w)
     const uint32_t max_app = update_stage_capacity(update_http_stage());
     update_rel_err_t re = update_release_pick_from_list((const char *)w->body, w->body_len, w->repo, max_app,
                                                         w->p.allow_prerelease, &w->info);
+    if (re == UPDATE_REL_E_NO_RELEASE && !w->p.allow_prerelease) {
+        // FA-01: 15 or more pre-releases can push the newest stable release off the first list page. Ask
+        // /releases/latest (GitHub never returns a pre-release there). A 404 means no stable release exists.
+        if (!update_url_build_latest(w->repo, w->url, sizeof(w->url))) {
+            return "bad_repo";
+        }
+        e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
+        if (e != NULL) {
+            st_lock();
+            const int hs = s_c->st.http_status;
+            st_unlock();
+            return (hs == 404) ? "no_stable_release" : e;
+        }
+        re = update_release_parse_api((const char *)w->body, w->body_len, w->repo, max_app, &w->info);
+        if (re == UPDATE_REL_OK && w->info.prerelease) {
+            re = UPDATE_REL_E_NO_RELEASE;
+        }
+        if (re == UPDATE_REL_E_NO_RELEASE) {
+            return "no_stable_release";
+        }
+    }
     if (re != UPDATE_REL_OK) {
         ESP_LOGW(TAG, "release parse: %s", update_rel_err_name(re));
         return update_rel_err_name(re);
@@ -1475,6 +1498,7 @@ esp_err_t update_fetch_start(httpd_handle_t server)
     s_c->st.verdict = "";
     s_c->st.reason = "";
     ota_http_set_fetch_busy_probe(fetch_busy_probe);
+    http_async_job_set_admission_busy_probe(fetch_busy_probe); // RW-02
     (void)stack_margin_register("update_fetch", &s_c->tls_task, FETCH_TLS_STACK_BYTES);
     (void)stack_margin_register("update_fetch_wr", &s_c->wr_task, FETCH_WR_STACK_BYTES);
 

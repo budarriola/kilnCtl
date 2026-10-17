@@ -69,6 +69,7 @@ function Start-Child {
 function Test-SlotHeld {
     $p = Start-Child -Mode probe -Name $slotName
     if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; throw "check_build_gate_reentrant: probe child did not exit within 120 s" }
+    $p.WaitForExit()
     return ($p.ExitCode -ne 0)
 }
 

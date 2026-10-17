@@ -4,6 +4,8 @@
 #include "ota_http_internal.h"
 #include "ota_http_util.h"
 
+static bool (*s_fetch_busy_probe)(void); // set by update_fetch (RW-02: also read by the OTA interlock snapshot)
+
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -462,7 +464,9 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     // own contract, which is exactly the read-only use this is.
     snap.run_state_interrupted = run_state_boot_record_interrupted();
 
-    snap.other_update_in_progress = ota_http_update_in_progress(NULL);
+    // RW-02: an update check does not claim the update lock but holds ~21.5 KB internal heap for TLS; count it
+    // as an update in progress so an ESP OTA upload is refused beside it.
+    snap.other_update_in_progress = ota_http_update_in_progress(NULL) || (s_fetch_busy_probe != NULL && s_fetch_busy_probe());
 
     snap.temp_ceiling_c = OTA_INTERLOCK_TEMP_CEILING_C;
 
@@ -559,7 +563,6 @@ bool ota_http_any_relay_energized(void)
 // See ota_http.h's doc comment above this function. The mirror-image glue
 // to ota_http_check_interlocks() above: same s_update_claim mutex, opposite
 // direction ("may heat proceed" instead of "may an update start").
-static bool (*s_fetch_busy_probe)(void);
 
 void ota_http_set_fetch_busy_probe(bool (*probe)(void))
 {

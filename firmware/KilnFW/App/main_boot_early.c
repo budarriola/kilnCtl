@@ -57,6 +57,7 @@
 #include "rtc_watchdog.h"
 #include "time_sync.h"
 #include "wifi_prov.h"
+#include "web_auth_store.h"
 #include "settings.h"
 
 #include "main_internal.h"
@@ -313,6 +314,15 @@ void main_boot_early(main_boot_ctx_t *ctx)
     if (wifi_err != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "wifi_prov_start failed: %s -- no Wi-Fi this boot, PC link and safety link unaffected",
                  esp_err_to_name(wifi_err));
+    }
+
+    // FS-02: decide "login storage reset" vs factory-fresh now that the default
+    // nvs and wifi_nvs partitions are both up. Surviving Wi-Fi STA credentials
+    // count as "set up before". A reset latches auth fail-closed (dashboards
+    // only until the admin is set again), LCD banner, readiness item.
+    if (web_auth_store_storage_reset_evaluate(!wifi_prov_is_unprovisioned())) {
+        ESP_LOGE(MAIN_TAG, "!!! LOGIN STORAGE WAS RESET (nvs auth data missing, board was set up before): "
+                           "auth fails CLOSED until an admin is set again (bootstrap / physical reset gesture)");
     }
 
     // Advertises this board as "kilnctl.local" over mDNS so the web UI/pc_tools

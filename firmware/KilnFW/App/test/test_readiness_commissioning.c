@@ -355,6 +355,19 @@ void run_test_readiness_cfg_fs(void)
 /* readiness_safety_context_status(): the fourth 2026-09-08 blind spot -- a
  * Pico that keeps answering GET_STATUS while PUSH_CONTEXT delivery has
  * wedged must not read as healthy just because link_up is true. */
+void run_test_readiness_zones_storage_detail(void)
+{
+    TEST_SECTION("readiness storage item (FS-04) -- reset/empty storage reads as commissioning, not a fault");
+    char d[192];
+    readiness_zones_storage_detail(d, sizeof(d), false, "");
+    TEST_CHECK(strstr(d, "reset or found empty") != NULL && strstr(d, "commission") != NULL &&
+                   strstr(d, "restore") != NULL && strstr(d, "failed") == NULL,
+               "no fault: names the reset and the remedy, no failure wording");
+    readiness_zones_storage_detail(d, sizeof(d), true, "bad crc");
+    TEST_CHECK(strstr(d, "failed to load cleanly") != NULL && strstr(d, "bad crc") != NULL,
+               "a real load fault keeps the failure wording and its reason");
+}
+
 void run_test_readiness_safety_context(void)
 {
     TEST_SECTION("readiness safety_context item -- wedged command delivery must block completeness");

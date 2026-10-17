@@ -984,6 +984,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
            (unsigned long)ds->heap_spiram_free, (unsigned long)ds->heap_spiram_largest_free_block,
            (unsigned long)ds->heap_spiram_min_free, (unsigned long)ds->heap_spiram_total);
     APPEND(",\"persist_scratch_fallbacks\":%lu", (unsigned long)ds->persist_scratch_fallbacks);
+    APPEND(",\"pico_reboot_seq\":%lu,\"pico_reboot_latched\":%s,\"pico_reboot_lost_trip_only\":%s",
+           (unsigned long)ds->pico_reboot_seq, ds->pico_reboot_latched ? "true" : "false",
+           ds->pico_reboot_lost_trip_only ? "true" : "false");
     APPEND(",\"heap_dma\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds->heap_dma_free, (unsigned long)ds->heap_dma_largest_free_block,
            (unsigned long)ds->heap_dma_min_free, (unsigned long)ds->heap_dma_total);

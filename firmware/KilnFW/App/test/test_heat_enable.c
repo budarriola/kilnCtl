@@ -669,8 +669,8 @@ static void test_watchdog_loop_and_bounded_pause_wiring(void)
     TEST_CHECK(merge && assert_fn && rel && merge < assert_fn && assert_fn < rel,
                "guard 9 merge+assert precede relay_unknown_release_locked() so APP never drops (LOW-2)");
     const char *gate = strstr(text, "if (safety_status_ok)");
-    const char *note = gate ? strstr(gate, "heat_enable_note_pico_boot(") : NULL;
-    TEST_CHECK(gate && note && (note - gate) < 80,
+    const char *note = gate ? strstr(gate, "heat_enable_note_pico_boot(") : NULL; /* PF-01: note_boot_id_seen sits between */
+    TEST_CHECK(gate && note && (note - gate) < 200,
                "MUST GO RED if note_pico_boot is no longer gated on a successful status read");
     TEST_CHECK(strstr(text, "if (true)") == NULL, "no if (true) stand-in for the status gate");
     free(text);
@@ -1500,8 +1500,203 @@ static void test_executor_autotune_and_stale_diag_wiring(void)
     free(text);
 }
 
+static void test_pf_first_boot_id_and_lost_trip_expiry(void)
+{
+    TEST_SECTION("heat_enable -- PF-01/02/03: no baseline before a boot id, ESP boot with Pico TRIPPED, expiry");
+    const uint8_t TRIPPED = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    uint32_t seq = 99u;
+    bool latched = true;
+    bool lost_only = true;
+
+    /* PF-01: before the first boot id arrives, heat is withheld and nothing is baselined. */
+    reset_all(true);
+    heat_enable_note_pico_state(true, TRIPPED, false, 900u);
+    heat_enable_note_boot_id_seen(false);
+    heat_enable_note_pico_boot(0u, false, 0u, 1000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(enable_sends() == 0, "PF-01: nothing sent while no boot id has arrived (heat withheld)");
+    TEST_CHECK(!heat_enable_is_granted(), "PF-01: not granted before the first boot id");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1100u); /* first seq after the id is the baseline */
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(!latched && seq == 1u, "PF-01: first seq seen after the boot id is the baseline, no latch");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_is_granted(), "PF-01: heat allowed once the boot id is known");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* ESP boot with the Pico already TRIPPED, then a clear, then ARMED: heat allowed, no fatal latch. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_state(true, ARMED, false, 2000u); /* operator clear */
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(!latched, "ESP boot with Pico TRIPPED then cleared: no fatal latch");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_is_granted() && !heat_enable_reboot_hold(),
+               "ESP boot with Pico TRIPPED then cleared: heat allowed");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* PF-02: a claimless lost-trip latch (bump while TRIPPED) expires after TRIPPED -> ARMED on the same boot. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_trip_info(3u, 0x4u); /* PR-02: the lost trip's reason is known */
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, false, 0u, 1200u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1300u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && lost_only, "PF-02 setup: claimless lost-trip latch is set and marked lost-trip-only");
+    heat_enable_note_pico_state(true, TRIPPED, false, 1400u);
+    heat_enable_note_pico_state(true, ARMED, false, 2000u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(!latched, "PF-02: same boot reports ARMED after a clear -> latch expired");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_is_granted() && !heat_enable_reboot_hold(), "PF-02: heat allowed after expiry");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* A real lost trip (reboot into ARMED, never TRIPPED again) keeps its latch, with the distinct reason. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1200u);
+    heat_enable_note_pico_state(true, ARMED, false, 1300u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PF-02: ARMED without ever seeing TRIPPED again does not expire a real lost trip");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_is_granted(), "the real lost trip still withholds heat");
+    TEST_CHECK(heat_enable_reboot_hold_lost_trip_only(), "PF-03: pre-start latch uses the distinct reason");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* A latch with a fatal boot bit never expires. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 1200u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1300u);
+    heat_enable_note_pico_state(true, ARMED, false, 1400u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && !lost_only, "a watchdog-cause latch is fatal, not lost-trip-only, and never expires");
+
+    /* A real boot id change (seq bump) while a claim is held and the Pico TRIPPED still latches fatal. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_is_granted(), "setup: claim held and granted");
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1200u);
+    TEST_CHECK(heat_enable_reboot_hold(), "real reboot with a claim held and Pico TRIPPED still holds fatal");
+    TEST_CHECK(!heat_enable_reboot_hold_lost_trip_only(), "and keeps the fatal pause reason");
+}
+
+static void test_pr_fixes(void)
+{
+    TEST_SECTION("heat_enable -- PR-01/02/04: first-sight fatal bits, expiry needs a covering clear, visible unseen");
+    const uint8_t TRIPPED = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    uint32_t seq = 0u;
+    bool latched = false;
+    bool lost_only = false;
+
+    /* PR-01: Pico watchdog + ESP reboot: the first boot id still applies the fatal-boot-bit rule. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(false);
+    heat_enable_note_pico_boot(0u, false, 0u, 1000u);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 1100u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && !lost_only, "PR-01: watchdog boot reason on first boot id latches fatal");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_is_granted(), "PR-01: the fatal latch withholds heat");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* PQ-01: the boot id arrived before the guard's first tick (no unseen tick ever ran, seq never bumped). */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && !lost_only, "PQ-01: watchdog boot reason latches even when the first tick already sees the id");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_is_granted(), "PQ-01: the fatal latch withholds heat");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* PR-02: brownout-lost over-temp (reason 3), new-boot S6a trip (reason 6), S6a clear: no expiry. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_trip_info(3u, 0x4u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1200u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && lost_only, "PR-02 setup: lost-trip latch set");
+    heat_enable_note_pico_trip_info(6u, 0x20u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1300u);
+    heat_enable_note_pico_state(true, ARMED, false, 1400u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PR-02: clearing a different trip does not expire the lost-trip latch");
+
+    /* PR-02: unknown lost reason never expires. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1200u);
+    heat_enable_note_pico_trip_info(3u, 0x4u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1300u);
+    heat_enable_note_pico_state(true, ARMED, false, 1400u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PR-02: an unknown lost reason never expires");
+
+    /* PR-02: a latch made with a claim held, then released, never expires. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_trip_info(3u, 0x4u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, false, 0u, 1200u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1300u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PR-02 setup: latch exists after claim release");
+    heat_enable_note_pico_state(true, TRIPPED, false, 1400u);
+    heat_enable_note_pico_state(true, ARMED, false, 1500u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PR-02: a latch made with a claim held never expires");
+
+    /* PR-02: a matching clear does expire. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 1000u);
+    heat_enable_note_pico_trip_info(3u, 0x4u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1100u);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1200u);
+    heat_enable_note_pico_state(true, TRIPPED, false, 1300u);
+    heat_enable_note_pico_state(true, ARMED, false, 1400u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(!latched, "PR-02: a clear of the same trip expires the latch");
+
+    /* PR-04: no boot id ever -> a held claim shows the visible blocked state. */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(false);
+    TEST_CHECK(!heat_enable_boot_id_unseen_blocked(), "PR-04: nothing blocked without a claim");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_boot_id_unseen_blocked(), "PR-04: claim with no boot id reports blocked");
+    heat_enable_note_boot_id_seen(true);
+    TEST_CHECK(!heat_enable_boot_id_unseen_blocked(), "PR-04: cleared once the boot id arrives");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+}
+
 void run_test_heat_enable(void)
 {
+    test_pr_fixes();
+    test_pf_first_boot_id_and_lost_trip_expiry();
     test_reboot_resets_k4_episode_and_undecided_is_visible();
     test_executor_autotune_and_stale_diag_wiring();
     test_k4_timer_and_episode_restart();

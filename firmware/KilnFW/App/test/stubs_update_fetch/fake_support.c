@@ -828,6 +828,7 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
 }
 static bool (*s_busy_probe)(void);
 void ota_http_set_fetch_busy_probe(bool (*probe)(void)) { s_busy_probe = probe; }
+void http_async_job_set_admission_busy_probe(bool (*probe)(void)) { (void)probe; }
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t n)
 {
     (void)req;

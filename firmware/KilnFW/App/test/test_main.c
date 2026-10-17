@@ -68,6 +68,7 @@ void run_test_readiness_safety_trip(void);
 void run_test_readiness_crash_report(void);
 void run_test_readiness_recovery_mode(void);
 void run_test_readiness_cfg_fs(void);
+void run_test_readiness_zones_storage_detail(void);
 void run_test_readiness_safety_context(void);
 void run_test_readiness_estop_verification(void);
 void run_test_readiness_uncalibrated_ct(void);
@@ -211,6 +212,7 @@ int main(void)
     run_test_readiness_crash_report();
     run_test_readiness_recovery_mode();
     run_test_readiness_cfg_fs();
+    run_test_readiness_zones_storage_detail();
     run_test_readiness_safety_context();
     run_test_readiness_estop_verification();
     run_test_readiness_uncalibrated_ct();

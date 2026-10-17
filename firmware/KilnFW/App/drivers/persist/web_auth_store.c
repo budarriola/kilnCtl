@@ -39,6 +39,22 @@ typedef struct {
     uint32_t magic_inv;
 } web_auth_ever_blob_t;
 
+// FS-02: "this board's login storage was initialised" evidence. A sentinel in
+// the default `nvs` partition (erased with the credentials it vouches for) and
+// a mirror in wifi_nvs (survives an nvs erase). nvs sentinel missing while the
+// mirror (or a boot-time auto-erase plus surviving setup) says the board was
+// set up before => storage was reset => fail closed (see
+// web_auth_store_storage_reset_evaluate()).
+#define WEB_AUTH_KEY_SEEN "nvs_seen"
+NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_SEEN);
+#define WEB_AUTH_MIRROR_PARTITION "wifi_nvs"
+#define WEB_AUTH_SEEN_MAGIC 0x5345454eu
+static bool s_storage_reset_latched;
+// F2-01: LCD lock is on but no admin PIN exists (set by a storage-reset recovery).
+static bool s_lcd_pin_pending;
+static void storage_reset_resolve(void);
+static void lcd_pin_pending_refresh(void);
+
 // --- On-disk blob layouts ----------------------------------------------------
 // Each blob is version-tagged and CRC32'd, same convention as
 // boot_guard_record_t: a version this build does not recognise, or a CRC
@@ -661,6 +677,9 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
 
     hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
     cred_store_unlock();
+    if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
+        storage_reset_resolve();
+    }
     return wst;
 }
 
@@ -759,10 +778,138 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
 
     hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_LCD, &blob, sizeof(blob));
     cred_store_unlock();
+    // F2-03: this is reached only from the authenticated admin dispatch
+    // (security_http_core SET_LCD_PIN), so an admin PIN also ends the reset latch.
+    if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
+        storage_reset_resolve();
+    }
+    if (wst == HAL_OK) {
+        lcd_pin_pending_refresh();
+    }
     return wst;
 }
 
 // --- Policy -------------------------------------------------------------------
+
+// FS-02 helpers. partition NULL == default nvs.
+static hal_status_t seen_probe(const char *partition)
+{
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (err != HAL_OK) {
+        return err;
+    }
+    err = hal_kv_key_exists(&h, WEB_AUTH_KEY_SEEN);
+    hal_kv_close(&h);
+    return err;
+}
+
+static hal_status_t seen_write(const char *partition)
+{
+    uint32_t blob[2] = {WEB_AUTH_SEEN_MAGIC, ~WEB_AUTH_SEEN_MAGIC};
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, WEB_AUTH_NAMESPACE, HAL_KV_MODE_READ_WRITE, partition);
+    if (err != HAL_OK) {
+        return err;
+    }
+    err = hal_kv_set_blob(&h, WEB_AUTH_KEY_SEEN, blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return err;
+}
+
+static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere);
+
+bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere)
+{
+    bool r = storage_reset_evaluate_impl(setup_evidence_elsewhere);
+    lcd_pin_pending_refresh();
+    return r;
+}
+
+static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere)
+{
+    s_storage_reset_latched = false;
+    hal_status_t nvs_st = seen_probe(NULL);
+    bool mirror_ok = hal_kv_mount_probe(WEB_AUTH_MIRROR_PARTITION) == HAL_OK;
+    if (nvs_st == HAL_OK) {
+        if (mirror_ok && seen_probe(WEB_AUTH_MIRROR_PARTITION) != HAL_OK) {
+            (void)seen_write(WEB_AUTH_MIRROR_PARTITION); // backfill, best effort
+        }
+        return false;
+    }
+    if (nvs_st != HAL_NOT_FOUND) {
+        return false; // unreadable store: the existing AZ-02 paths fail closed
+    }
+    // Pre-existing auth data without a sentinel (upgrade from before FS-02): healthy.
+    web_auth_policy_blob_t pb;
+    if (load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) != HAL_NOT_FOUND || web_auth_store_ever_enabled()) {
+        (void)seen_write(NULL);
+        if (mirror_ok) {
+            (void)seen_write(WEB_AUTH_MIRROR_PARTITION);
+        }
+        return false;
+    }
+    bool evidence = (mirror_ok && seen_probe(WEB_AUTH_MIRROR_PARTITION) == HAL_OK) ||
+                    (hal_kv_partition_was_auto_erased(NULL) && setup_evidence_elsewhere);
+    if (evidence) {
+        s_storage_reset_latched = true;
+        return true;
+    }
+    // Truly factory-fresh: record it in both places.
+    (void)seen_write(NULL);
+    if (mirror_ok) {
+        (void)seen_write(WEB_AUTH_MIRROR_PARTITION);
+    }
+    return false;
+}
+
+bool web_auth_store_storage_reset_latched(void)
+{
+    return s_storage_reset_latched;
+}
+
+const char *web_auth_store_storage_reset_banner_text(void)
+{
+    return "AUTH: login storage was reset; set admin";
+}
+
+bool web_auth_store_lcd_pin_pending(void)
+{
+    return s_lcd_pin_pending;
+}
+
+const char *web_auth_store_lcd_pin_pending_banner_text(void)
+{
+    return "AUTH: LCD locked; set LCD admin PIN or disable LCD lock";
+}
+
+// Cached: the home banner polls this. Recomputed at boot and after any PIN or policy write.
+static void lcd_pin_pending_refresh(void)
+{
+    web_auth_policy_blob_t pb;
+    s_lcd_pin_pending = load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) == HAL_OK && pb.lcd_enabled &&
+                        !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+}
+
+// Admin web password was just set while latched: persist an auth-enabled
+// policy, then the sentinel, then drop the latch. Policy first so a crash in
+// between leaves a policy-present (healthy) board, never an open one.
+static void storage_reset_resolve(void)
+{
+    // F2-01: LCD lock stays ON (gated, no PIN yet) so recovery never opens the LCD silently.
+    web_auth_policy_t p = {.web_enabled = true, .lcd_enabled = true,
+                           .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+    if (web_auth_store_set_policy(&p) != HAL_OK) {
+        return; // stays latched: fail closed (load_policy keeps reading UNREADABLE)
+    }
+    if (seen_write(NULL) == HAL_OK) {
+        (void)seen_write(WEB_AUTH_MIRROR_PARTITION);
+        s_storage_reset_latched = false;
+    }
+}
 
 bool web_auth_store_ever_enabled(void)
 {
@@ -794,6 +941,7 @@ bool web_auth_store_clear_policy_and_marker(void)
     bool gone = hal_kv_key_exists(&h, WEB_AUTH_KEY_POLICY) == HAL_NOT_FOUND &&
                 hal_kv_key_exists(&h, WEB_AUTH_KEY_EVER) == HAL_NOT_FOUND;
     hal_kv_close(&h);
+    lcd_pin_pending_refresh();
     return (a == HAL_OK || a == HAL_NOT_FOUND) && (b == HAL_OK || b == HAL_NOT_FOUND) && c == HAL_OK && gone;
 }
 
@@ -808,8 +956,8 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
     if (err != HAL_OK) {
         // AU-02: ABSENT plus the ever-enabled marker means the record was lost
         // on a commissioned board: fail closed (UNREADABLE), never open.
-        if (web_auth_store_ever_enabled()) {
-            return WEB_AUTH_LOAD_UNREADABLE;
+        if (web_auth_store_ever_enabled() || s_storage_reset_latched) {
+            return WEB_AUTH_LOAD_UNREADABLE; // FS-02: latched storage reset also fails closed
         }
         return WEB_AUTH_LOAD_ABSENT; // item 11: absent record reads as both-off
     }
@@ -848,7 +996,11 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
             return mst;
         }
     }
-    return set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+    hal_status_t pst = set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+    if (pst == HAL_OK) {
+        lcd_pin_pending_refresh();
+    }
+    return pst;
 }
 
 // --- Auth-off / first-boot / field-upgrade collapse (item 11) --------------

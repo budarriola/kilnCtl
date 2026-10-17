@@ -22,6 +22,7 @@
 #include "lvgl_port.h" /* lvgl_port_touch_is_calibrated() -- see the "touch_calibrated" /api/status field below */
 #include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
 #include "dashboard_json.h" /* json_escape()/append_zone_status_json() -- split out for host-testability, see that header */
+#include "heat_enable.h" /* heat_enable_get_reboot_state() -- PF-03 */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
 #include "kiln_io_owner.h"
@@ -562,6 +563,8 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
 #ifdef ESP_PLATFORM
     out->persist_scratch_fallbacks = persist_scratch_fallback_count();
+    heat_enable_get_reboot_state(&out->pico_reboot_seq, &out->pico_reboot_latched,
+                                 &out->pico_reboot_lost_trip_only);
 #endif
     out->heap_spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
 

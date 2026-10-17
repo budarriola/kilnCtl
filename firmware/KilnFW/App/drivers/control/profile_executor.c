@@ -2384,15 +2384,18 @@ void watchdog_task_entry(void *arg)
         bool safety_diag_tripped_any_age = false;
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
+        uint16_t safety_diag_trip_mask = 0u;
         bool safety_k4_closed = false;
         uint32_t safety_reboot_seq = 0u;
         bool safety_diag_since_reboot = false;
         uint8_t safety_boot_reason = 0u;
         bool safety_status_ok = false;
+        bool safety_boot_id_seen = false;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
                 safety_status_ok = true;
+                safety_boot_id_seen = safety_status.pico_boot_id_ever_seen;
                 safety_age_ms = safety_status.age_ms;
                 /* F5HOLDERFX4 MED-1: the DIAG's own age is diag_frame_age_ms (age_ms is the STATUS
                  * frame's). safety_diag_valid = "fresh enough to act on as OK"; a cached TRIPPED is
@@ -2405,6 +2408,7 @@ void watchdog_task_entry(void *arg)
                 safety_diag_since_reboot = safety_status.diag_since_reboot;
                 safety_boot_reason = safety_status.diag_boot_reason;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
+                safety_diag_trip_mask = safety_status.diag_trip_mask;
                 /* SAFETYFX10 LOW-1: a trip inferred from a TRIP_EVENT newer than the DIAG has no DIAG reason;
                  * name the event's own reason instead of "none". */
                 if (safety_diag_tripped_any_age && safety_status.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
@@ -2622,10 +2626,13 @@ void watchdog_task_entry(void *arg)
         uint32_t wdt_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         /* A failed status read must never feed reboot seq 0 (looks like a reboot). */
         if (safety_status_ok) {
+            heat_enable_note_boot_id_seen(safety_boot_id_seen); /* PF-01: before the reboot rule */
             heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason, wdt_now_ms);
         }
         /* A DIAG from before the latest Pico reboot describes the old boot: feed
          * INIT so its ARMED cannot satisfy the new boot's K4 check (LOW-3). */
+        heat_enable_note_pico_trip_info(safety_diag_since_reboot ? safety_diag_trip_reason : 0u,
+                                        safety_diag_since_reboot ? safety_diag_trip_mask : 0u);
         heat_enable_note_pico_state(safety_diag_valid,
                                     safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT,
                                     safety_k4_closed, wdt_now_ms);
@@ -2636,9 +2643,18 @@ void watchdog_task_entry(void *arg)
         bool hold_reboot = heat_enable_reboot_hold();
         bool hold_unconfirmed = !hold_reboot && heat_enable_grant_unconfirmed();
         if (hold_reboot) {
-            (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
-            /* Autotune has no pause state: abort is its equivalent (relays off). */
-            (void)autotune_engine_abort_bounded("pico_fatal_reboot", 100u);
+            /* PF-03: a latch from the claimless lost-trip rule is not a fatal reboot. */
+            if (heat_enable_reboot_hold_lost_trip_only()) {
+                (void)profile_executor_pause_with_reason_bounded("pico_lost_trip_latched");
+                (void)autotune_engine_abort_bounded("pico_lost_trip_latched", 100u);
+            } else {
+                (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
+                /* Autotune has no pause state: abort is its equivalent (relays off). */
+                (void)autotune_engine_abort_bounded("pico_fatal_reboot", 100u);
+            }
+        } else if (heat_enable_boot_id_unseen_blocked()) {
+            /* PR-04: no Pico boot id yet -> heat withheld; say so instead of running cold silently. */
+            (void)profile_executor_pause_with_reason_bounded("pico_boot_id_unseen");
         } else if (hold_unconfirmed) {
             (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
             (void)autotune_engine_abort_bounded("heat_grant_unconfirmed", 100u);
