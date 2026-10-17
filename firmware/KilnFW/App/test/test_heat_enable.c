@@ -1616,6 +1616,16 @@ static void test_pr_fixes(void)
     TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_is_granted(), "PR-01: the fatal latch withholds heat");
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
 
+    /* PQ-01: the boot id arrived before the guard's first tick (no unseen tick ever ran, seq never bumped). */
+    reset_all(true);
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && !lost_only, "PQ-01: watchdog boot reason latches even when the first tick already sees the id");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_is_granted(), "PQ-01: the fatal latch withholds heat");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
     /* PR-02: brownout-lost over-temp (reason 3), new-boot S6a trip (reason 6), S6a clear: no expiry. */
     reset_all(true);
     heat_enable_note_boot_id_seen(true);

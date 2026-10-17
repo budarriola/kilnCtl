@@ -112,6 +112,7 @@ typedef struct {
      * bit), so an operator clear on the same boot can expire it (latch_seq/latch_tripped_seen).
      * hold_lost_trip_only: the current reboot_hold came from such a latch (distinct pause reason). */
     bool              boot_id_unseen;
+    bool              boot_id_first_sight_done; /* PQ-01: the PR-01 first-sight rule ran this ESP boot */
     bool              latch_lost_trip_only;
     bool              latch_tripped_seen;
     uint32_t          latch_seq;
@@ -242,6 +243,7 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.reboot_was_tripped = false;
     s_he.reboot_verdict_pending = false;
     s_he.reboot_fatal_latched = false;
+    s_he.boot_id_first_sight_done = false;
     s_he.boot_id_unseen = false; /* production sets it from the guard tick before any claim matters */
     s_he.latch_lost_trip_only = false;
     s_he.latch_tripped_seen = false;
@@ -949,7 +951,10 @@ bool heat_enable_reboot_undecided(void)
 void heat_enable_note_boot_id_seen(bool seen)
 {
     bool taken = he_lock();
-    if (seen && s_he.boot_id_unseen) {
+    /* PQ-01: key on the first sight this ESP boot, not the unseen->seen edge: boot_id_unseen starts false and
+     * the guard's first tick is 2 s after start, so a boot id that arrived first never produced the edge. */
+    if (seen && !s_he.boot_id_first_sight_done) {
+        s_he.boot_id_first_sight_done = true;
         /* PR-01: first boot id after an ESP boot. No lost-trip input (the TRIPPED state before it says nothing
          * about this boot), but the fatal-boot-bit rule still applies: the next DIAG of this boot decides. */
         s_he.reboot_was_tripped = false;
