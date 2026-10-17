@@ -50,7 +50,10 @@ NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_SEEN);
 #define WEB_AUTH_MIRROR_PARTITION "wifi_nvs"
 #define WEB_AUTH_SEEN_MAGIC 0x5345454eu
 static bool s_storage_reset_latched;
+// F2-01: LCD lock is on but no admin PIN exists (set by a storage-reset recovery).
+static bool s_lcd_pin_pending;
 static void storage_reset_resolve(void);
+static void lcd_pin_pending_refresh(void);
 
 // --- On-disk blob layouts ----------------------------------------------------
 // Each blob is version-tagged and CRC32'd, same convention as
@@ -775,6 +778,14 @@ hal_status_t web_auth_store_set_pin(web_auth_role_t role, const char *pin,
 
     hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_LCD, &blob, sizeof(blob));
     cred_store_unlock();
+    // F2-03: this is reached only from the authenticated admin dispatch
+    // (security_http_core SET_LCD_PIN), so an admin PIN also ends the reset latch.
+    if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
+        storage_reset_resolve();
+    }
+    if (wst == HAL_OK) {
+        lcd_pin_pending_refresh();
+    }
     return wst;
 }
 
@@ -809,7 +820,16 @@ static hal_status_t seen_write(const char *partition)
     return err;
 }
 
+static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere);
+
 bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere)
+{
+    bool r = storage_reset_evaluate_impl(setup_evidence_elsewhere);
+    lcd_pin_pending_refresh();
+    return r;
+}
+
+static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere)
 {
     s_storage_reset_latched = false;
     hal_status_t nvs_st = seen_probe(NULL);
@@ -856,12 +876,31 @@ const char *web_auth_store_storage_reset_banner_text(void)
     return "AUTH: login storage was reset; set admin";
 }
 
+bool web_auth_store_lcd_pin_pending(void)
+{
+    return s_lcd_pin_pending;
+}
+
+const char *web_auth_store_lcd_pin_pending_banner_text(void)
+{
+    return "AUTH: LCD locked; set LCD admin PIN or disable LCD lock";
+}
+
+// Cached: the home banner polls this. Recomputed at boot and after any PIN or policy write.
+static void lcd_pin_pending_refresh(void)
+{
+    web_auth_policy_blob_t pb;
+    s_lcd_pin_pending = load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) == HAL_OK && pb.lcd_enabled &&
+                        !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+}
+
 // Admin web password was just set while latched: persist an auth-enabled
 // policy, then the sentinel, then drop the latch. Policy first so a crash in
 // between leaves a policy-present (healthy) board, never an open one.
 static void storage_reset_resolve(void)
 {
-    web_auth_policy_t p = {.web_enabled = true, .lcd_enabled = false,
+    // F2-01: LCD lock stays ON (gated, no PIN yet) so recovery never opens the LCD silently.
+    web_auth_policy_t p = {.web_enabled = true, .lcd_enabled = true,
                            .web_timeout_s = 1800, .lcd_timeout_s = 1800};
     if (web_auth_store_set_policy(&p) != HAL_OK) {
         return; // stays latched: fail closed (load_policy keeps reading UNREADABLE)
@@ -902,6 +941,7 @@ bool web_auth_store_clear_policy_and_marker(void)
     bool gone = hal_kv_key_exists(&h, WEB_AUTH_KEY_POLICY) == HAL_NOT_FOUND &&
                 hal_kv_key_exists(&h, WEB_AUTH_KEY_EVER) == HAL_NOT_FOUND;
     hal_kv_close(&h);
+    lcd_pin_pending_refresh();
     return (a == HAL_OK || a == HAL_NOT_FOUND) && (b == HAL_OK || b == HAL_NOT_FOUND) && c == HAL_OK && gone;
 }
 
@@ -956,7 +996,11 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
             return mst;
         }
     }
-    return set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+    hal_status_t pst = set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+    if (pst == HAL_OK) {
+        lcd_pin_pending_refresh();
+    }
+    return pst;
 }
 
 // --- Auth-off / first-boot / field-upgrade collapse (item 11) --------------

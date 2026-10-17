@@ -1128,11 +1128,14 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     }
 
     /* FS-02: login storage reset on a board that was set up before. Auth is failed closed. */
-    if (readiness_auth_storage_item_listed(web_auth_store_storage_reset_latched())) {
+    if (readiness_auth_storage_item_listed(web_auth_store_storage_reset_latched(), web_auth_store_lcd_pin_pending())) {
         size_t before_o = o;
+        bool latched_now = web_auth_store_storage_reset_latched();
         o = append_item(json, item_cap, o, first, "auth", "Login storage",
-                        readiness_auth_storage_item_status(true),
-                        "login storage was reset; set admin (dashboards only until then)", "/settings", &dropped);
+                        readiness_auth_storage_item_status(latched_now, web_auth_store_lcd_pin_pending()),
+                        latched_now ? "login storage was reset; set admin (dashboards only until then)"
+                                    : "LCD locked after storage reset; set LCD admin PIN or disable LCD lock",
+                        "/settings", &dropped);
         if (o != before_o) {
             first = false;
         }

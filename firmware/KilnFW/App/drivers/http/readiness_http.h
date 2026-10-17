@@ -689,13 +689,13 @@ static inline readiness_status_t readiness_estop_verification_status(bool verifi
 /* FS-02: the "auth" item is listed only while the login storage was reset on a
  * board that was set up before (web_auth_store_storage_reset_latched()); it is
  * then always NOT_DONE until an admin is set again. Normal boards list nothing. */
-static inline bool readiness_auth_storage_item_listed(bool reset_latched)
+static inline bool readiness_auth_storage_item_listed(bool reset_latched, bool lcd_pin_pending)
 {
-    return reset_latched;
+    return reset_latched || lcd_pin_pending;
 }
-static inline readiness_status_t readiness_auth_storage_item_status(bool reset_latched)
+static inline readiness_status_t readiness_auth_storage_item_status(bool reset_latched, bool lcd_pin_pending)
 {
-    return reset_latched ? READY_NOT_DONE : READY_OK;
+    return (reset_latched || lcd_pin_pending) ? READY_NOT_DONE : READY_OK;
 }
 
 /* Registers /readiness + GET /api/readiness on the server

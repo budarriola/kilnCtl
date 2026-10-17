@@ -1160,6 +1160,54 @@ static void test_az02_read_errors_fail_closed(void)
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "genuinely absent policy still ABSENT");
 }
 
+// F2-01 explicit-disable path (no PIN ever set) + F2-03 admin PIN clears latch + F2-05 gesture unlock.
+static bool fs02_locked_and_bootstrap_open(void);
+static void fs02_boot(void);
+static void fs02_make_latched(void)
+{
+    fs02_boot();
+    TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "fresh boot writes sentinel + mirror");
+    TEST_CHECK(hal_kv_erase_partition(NULL) == HAL_OK, "erase nvs");
+    TEST_CHECK(web_auth_store_storage_reset_evaluate(false), "latched");
+}
+
+static void test_fs02_followups(void)
+{
+    TEST_SECTION("F2-01 explicit disable, F2-03 admin PIN clears latch, F2-05 gesture unlock");
+    web_auth_policy_t pol;
+    // F2-01: disabling the LCD lock explicitly (no PIN) ends pending.
+    fs02_make_latched();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "GoodPass123", SALT_A, false) == HAL_OK,
+               "bootstrap");
+    TEST_CHECK(web_auth_store_lcd_pin_pending(), "pending after bootstrap without PIN");
+    web_auth_policy_t off = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = 600, .lcd_timeout_s = 600};
+    TEST_CHECK(web_auth_store_set_policy(&off) == HAL_OK, "admin disables LCD lock");
+    TEST_CHECK(!web_auth_store_lcd_pin_pending(), "pending cleared by explicit disable");
+
+    // F2-03: admin LCD PIN (authenticated dispatch path) clears the latch.
+    fs02_make_latched();
+    TEST_CHECK(web_auth_store_storage_reset_latched(), "latched before PIN");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_USER, "1234", SALT_A) == HAL_OK, "user PIN");
+    TEST_CHECK(web_auth_store_storage_reset_latched(), "user PIN does not clear latch");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678", SALT_B) == HAL_OK, "admin PIN");
+    TEST_CHECK(!web_auth_store_storage_reset_latched(), "F2-03: admin PIN clears latch");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && pol.web_enabled && pol.lcd_enabled,
+               "F2-03: enabled policy persisted");
+    TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "F2-03: next boot not a reset");
+
+    // F2-05: physical reset gesture after recovery: admin unconfigured, bootstrap offered, then unlocked.
+    fs02_make_latched();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "GoodPass123", SALT_A, false) == HAL_OK,
+               "bootstrap before gesture");
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture clear");
+    TEST_CHECK(fs02_locked_and_bootstrap_open(), "gesture: auth still on, bootstrap offered");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && pol.web_enabled, "gesture keeps policy");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "NewPass12345", SALT_B, false) == HAL_OK,
+               "bootstrap after gesture");
+    TEST_CHECK(!fs02_locked_and_bootstrap_open(), "gesture: unlocked after bootstrap");
+    TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "NewPass12345"), "new admin logs in");
+}
+
 // FS-02: nvs auth storage lost on a board that was set up before.
 static void fs02_boot(void)
 {
@@ -1184,7 +1232,7 @@ static void test_fs02_storage_reset(void)
     TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "fresh board (no flag, no mirror) is not a reset");
     TEST_CHECK(!web_auth_store_storage_reset_latched(), "fresh: not latched");
     TEST_CHECK(!fs02_locked_and_bootstrap_open(), "fresh: auth stays off, no bootstrap");
-    TEST_CHECK(!readiness_auth_storage_item_listed(web_auth_store_storage_reset_latched()), "fresh: no readiness item");
+    TEST_CHECK(!readiness_auth_storage_item_listed(web_auth_store_storage_reset_latched(), web_auth_store_lcd_pin_pending()), "fresh: no readiness item");
     // That first boot recorded the sentinel in both partitions; a normal reboot stays fresh-open.
     TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "second normal boot: not a reset");
 
@@ -1196,7 +1244,7 @@ static void test_fs02_storage_reset(void)
     TEST_CHECK(fs02_locked_and_bootstrap_open(), "locked (auth on) and bootstrap offered");
     TEST_CHECK(strstr(web_auth_store_storage_reset_banner_text(), "login storage was reset; set admin") != NULL,
                "banner text");
-    TEST_CHECK(readiness_auth_storage_item_listed(true) && readiness_auth_storage_item_status(true) == READY_NOT_DONE,
+    TEST_CHECK(readiness_auth_storage_item_listed(true, false) && readiness_auth_storage_item_status(true, false) == READY_NOT_DONE,
                "readiness auth item is listed and not_done");
     // Auto-erase but no surviving setup: still fresh.
     fs02_boot();
@@ -1216,6 +1264,26 @@ static void test_fs02_storage_reset(void)
     TEST_CHECK(!web_auth_store_storage_reset_latched(), "latch cleared after admin set");
     web_auth_policy_t pol;
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && pol.web_enabled, "enabled policy persisted");
+    // F2-01: the LCD lock stays ON after recovery (gated, no PIN), never silently open.
+    TEST_CHECK(pol.lcd_enabled, "F2-01: recovered policy keeps LCD lock enabled");
+    TEST_CHECK(web_auth_store_lcd_pin_pending(), "F2-01: LCD pin pending after recovery");
+    TEST_CHECK(readiness_auth_storage_item_listed(web_auth_store_storage_reset_latched(), web_auth_store_lcd_pin_pending()) &&
+                   readiness_auth_storage_item_status(false, web_auth_store_lcd_pin_pending()) == READY_NOT_DONE,
+               "F2-01: readiness item stays listed while LCD pin pending");
+    TEST_CHECK(strstr(web_auth_store_lcd_pin_pending_banner_text(), "LCD") != NULL, "F2-01: LCD banner text");
+    TEST_CHECK(web_auth_store_lcd_pin_pending() == (!web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR)),
+               "F2-01: pending iff no admin PIN");
+    TEST_CHECK(!web_auth_store_storage_reset_evaluate(true) && web_auth_store_lcd_pin_pending(),
+               "F2-01: pending survives reboot");
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678", SALT_B) == HAL_OK, "set admin PIN");
+    TEST_CHECK(!web_auth_store_lcd_pin_pending(), "F2-01: admin PIN ends pending");
+    {
+        web_auth_policy_t off = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = 600, .lcd_timeout_s = 600};
+        TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "5678", SALT_B) == HAL_OK, "pin again");
+        TEST_CHECK(web_auth_store_clear_policy_and_marker(), "clear policy for second pending case");
+        TEST_CHECK(web_auth_store_set_policy(&off) == HAL_OK && !web_auth_store_lcd_pin_pending(),
+                   "F2-01: explicit LCD lock disable ends pending");
+    }
     TEST_CHECK(!fs02_locked_and_bootstrap_open(), "bootstrap no longer needed");
     TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "next boot: not a reset");
     TEST_CHECK(web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "GoodPass123"), "admin can log in");
@@ -1234,6 +1302,7 @@ int main(void)
 {
     test_az01_bootstrap_only_when_never_written();
     test_fs02_storage_reset();
+    test_fs02_followups();
     test_az02_read_errors_fail_closed();
     test_crc32_vector();
     test_password_strength();
