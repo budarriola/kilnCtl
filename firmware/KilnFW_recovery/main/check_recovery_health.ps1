@@ -142,6 +142,7 @@ try {
 // RTC" -Tag "apnostay"
     Test-Mutant -File "recovery_wifi.c" -Needle "        if (s_shutting_down) {`n            break;" -Replacement "        if (0) {`n            break;" -Tag "ignoreshutdown"
     Test-Mutant -File "recovery_wifi.c" -Needle "if (rhealth_ap_reraise_failed_action(recovery_health_wifi_restarts()) ==`n                        RHEALTH_AP_RESTART_IMAGE) {" -Replacement "if (0) {" -Tag "startfailignored"
+    Test-Mutant -File "recovery_health.c" -Needle "while (recovery_apply_busy())" -Replacement "while (0)" -Tag "httpnowait"
     Test-Mutant -File "recovery_health.c" -Needle "    if (!s_keep) {" -Replacement "    if (0) {" -Tag "staleCounts"
     Test-Mutant -File "recovery_main.c" -Needle "        recovery_health_clear_http();`n    } else {" -Replacement "    } else {" -Tag "limitkeepcount"
     Test-Mutant -File "recovery_health.c" -Needle "void recovery_health_clear_wifi(void)`n{`n    s_wifi_restarts = 0;" -Replacement "void recovery_health_clear_wifi(void)`n{`n    s_wifi_restarts = s_wifi_restarts;" -Tag "clearwifinoop"

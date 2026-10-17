@@ -42,6 +42,17 @@ $ufn = [regex]::Match($util, "bool\s+ota_http_esp_target_usable\s*\([^)]*\)\s*\{
 if (-not $ufn.Success) { $fail += "ota_http_util.c: ota_http_esp_target_usable() not found" }
 elseif ($ufn.Groups['b'].Value -notmatch "return\s+target\s*!=\s*NULL\s*&&\s*target\s*!=\s*running\s*;") { $fail += "ota_http_util.c: ota_http_esp_target_usable() must return 'target != NULL && target != running;'" }
 
+# RO-02: the rollback reboot task must release the flash_xip reader bracket BEFORE esp_restart(), and must not
+# call the IDF rollback_and_reboot (it restarts inside the bracket).
+$rb = [regex]::Match($esp, "static\s+void\s+ota_rollback_reboot_task\s*\(.*?\n\}", "Singleline")
+if (-not $rb.Success) { $fail += "ota_http_esp.c: ota_rollback_reboot_task() not found" }
+else {
+    $rbv = $rb.Value
+    $ex = $rbv.IndexOf("flash_xip_reader_exit()"); $rs = $rbv.IndexOf("esp_restart()")
+    if ($rbv -match "esp_ota_mark_app_invalid_rollback_and_reboot\s*\(") { $fail += "ota_http_esp.c: ota_rollback_reboot_task() calls esp_ota_mark_app_invalid_rollback_and_reboot (restart inside the flash_xip bracket)" }
+    if ($ex -lt 0 -or $rs -lt 0 -or $ex -gt $rs) { $fail += "ota_http_esp.c: ota_rollback_reboot_task() must call flash_xip_reader_exit() before esp_restart()" }
+}
+
 $specs = @(
     @{ File = "ota_http_esp.c";  Src = $esp;  Kind = "esp";  Do = "ota_esp_do_transfer";  Ret = "return !ok;";           Args = "s_ota_esp_chunk,\s*sizeof\(s_ota_esp_chunk\)" },
     @{ File = "ota_http_pico.c"; Src = $pico; Kind = "pico"; Do = "ota_pico_do_stage";    Ret = "return !started_relay;"; Args = "chunk,\s*chunk_cap" }

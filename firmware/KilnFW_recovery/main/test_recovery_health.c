@@ -346,6 +346,11 @@ static void test_health_source(const char *path)
     CHECK(strstr(src, "RTC_NOINIT_ATTR uint32_t s_wifi_restarts") != NULL, "wifi count survives esp_restart");
     CHECK(strstr(src, "esp_reset_reason() == ESP_RST_POWERON") != NULL, "power-on reset detected");
     CHECK(count_of(src, "rhealth_restart_count_at_boot(") == 2, "both counters validated at boot");
+    // RO-01: the HTTP restart waits out a running install apply before esp_restart.
+    char *hr = between(strstr(src, "void recovery_health_restart_for_http(void)"), "\n}\n");
+    const char *busy = hr ? strstr(hr, "while (recovery_apply_busy())") : NULL;
+    const char *rst = hr ? strstr(hr, "esp_restart();") : NULL;
+    CHECK(busy && rst && busy < rst, "http restart waits for recovery_apply_busy() before esp_restart");
     char *sd = between(strstr(src, "static void on_shutdown(void)"), "\n}\n");
     CHECK(sd && strstr(sd, "if (!s_keep)") && strstr(sd, "s_http_restarts = 0;") && strstr(sd, "s_wifi_restarts = 0;"),
           "deliberate restarts zero both counters");
