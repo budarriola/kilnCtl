@@ -1,5 +1,6 @@
 #include "ota_http.h"
 #include "ota_http_internal.h"
+#include "flash_xip_lock.h"
 #include "ota_http_util.h"
 #include "ota_esp_image_header.h"
 
@@ -352,7 +353,9 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
 
     esp_progress_set(OTA_HTTP_ESP_PHASE_FINALIZING, 100);
     {
+        flash_xip_reader_enter(); /* esp_image_verify via mmap (REVIEW_FLASH_MMAP_SERIALIZATION) */
         esp_err_t rc = esp_ota_end(handle);
+        flash_xip_reader_exit();
         // esp_ota_end() frees the handle regardless of its result (see its
         // own doc comment) -- ota_began must go false here either way so
         // the cleanup block below never calls esp_ota_abort() on a handle
@@ -733,7 +736,9 @@ static void ota_rollback_reboot_task(void *arg)
     }
 
     ESP_LOGW(OTA_HTTP_TAG, "OTA rollback: rebooting now into the previous image");
+    flash_xip_reader_enter(); /* read_otadata + rewrite; released only if no reboot */
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+    flash_xip_reader_exit();
     // Only reached if the call itself failed to even start the reboot --
     // on success this line never runs, the board is already restarting.
     ESP_LOGE(OTA_HTTP_TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
@@ -789,7 +794,10 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // explicitly rather than calling esp_ota_mark_app_invalid_rollback_and_
     // reboot() blind and letting it discover there is nothing -- refuses
     // cleanly, naming the reason, same as every other interlock in this file.
-    if (!esp_ota_check_rollback_is_possible()) {
+    flash_xip_reader_enter();
+    bool rollback_possible = esp_ota_check_rollback_is_possible();
+    flash_xip_reader_exit();
+    if (!rollback_possible) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA esp rollback from %s: refused, no previous valid image to roll back to", ip);
         ota_http_update_end();
         httpd_resp_set_status(req, "409 Conflict");

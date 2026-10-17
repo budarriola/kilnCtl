@@ -618,6 +618,7 @@ static void reload_live_profile_if_changed(void)
         s_exec.profile = *candidate;
         if (clear_dwell) {
             s_exec.dwelling = false;
+            s_exec.dwell_arrived_hot = false;
             s_exec.segment_elapsed_s = 0;
             s_exec.segment_elapsed_rem_ms = 0;
             s_exec.dwell_credit_applied_s = 0.0f;
@@ -1187,6 +1188,9 @@ void executor_task_entry(void *arg)
                 s_exec.target_c = new_target;
                 if (s_exec.target_c == seg->target_c) {
                     s_exec.dwelling = true;
+                    /* CL-03: remember if the dwell starts with a zone still above target (descending
+                     * segment, free cool); the dwell timer then waits, see the dwelling branch. */
+                    s_exec.dwell_arrived_hot = ramp_assist_zones_above_band(&s_exec);
                     s_exec.segment_elapsed_s = 0;
                 s_exec.segment_elapsed_rem_ms = 0;
                     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit spend, at
@@ -1227,6 +1231,13 @@ void executor_task_entry(void *arg)
                 }
             } else {
                 s_exec.target_c = seg->target_c;
+                /* CL-03: hold the dwell TIMER (not the setpoint) until every driving zone is within the
+                 * band of target; restarts the count so the hold is timed at temperature. */
+                bool dwell_too_hot = ramp_assist_dwell_too_hot(&s_exec);
+                if (dwell_too_hot) {
+                    s_exec.segment_elapsed_s = 0;
+                    s_exec.segment_elapsed_rem_ms = 0;
+                }
                 /* PID_EXPANSION_PLAN.md sec 7.6: bounded in-dwell credit.
                  * nominal_s is the un-credited floor -- reaching it always
                  * ends the dwell, credit or not, exactly as before sec 7.3
@@ -1247,8 +1258,8 @@ void executor_task_entry(void *arg)
                 uint32_t credited_threshold_s = (total_spend_s >= (float)nominal_s)
                     ? 0u : nominal_s - (uint32_t)total_spend_s;
                 bool target_reached = ramp_assist_dwell_target_reached(&s_exec);
-                bool dwell_done = (s_exec.segment_elapsed_s >= nominal_s) ||
-                    (s_exec.segment_elapsed_s >= credited_threshold_s && target_reached);
+                bool dwell_done = !dwell_too_hot && ((s_exec.segment_elapsed_s >= nominal_s) ||
+                    (s_exec.segment_elapsed_s >= credited_threshold_s && target_reached));
                 if (dwell_done) {
                     s_exec.segment_index++;
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {

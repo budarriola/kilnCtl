@@ -2532,9 +2532,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     return true;
 }
 
+static int g_profile_delete_calls;
 bool profiles_http_delete(uint8_t id)
 {
     (void)id;
+    g_profile_delete_calls++;
     return false;
 }
 
@@ -6104,6 +6106,33 @@ static void mirror_ack_test_setup(int32_t *nonactive_count_out)
     *nonactive_count_out = nonactive;
 }
 
+// BENCH soakmain finding (KNOWN_ISSUES BW-07): a restore never deletes firing profiles. MERGE/MIRROR and
+// X-Kiln-Config-Ack-Delete concern kiln_configs[] SLOTS only; a profile that exists on the board but not in the
+// backup survives both modes, and the ack count only gates slot deletions.
+static void test_restore_never_deletes_board_only_firing_profile(void)
+{
+    TEST_SECTION("backup_import_apply -- a firing profile present on the board but absent from the backup is "
+                 "kept by MERGE and by MIRROR (with a slot-delete ack of 1): profiles are never deleted by restore");
+    for (int pass = 0; pass < 2; pass++) {
+        reset_stub_state();
+        g_profile_delete_calls = 0;
+        profile_t extra;
+        memset(&extra, 0, sizeof(extra));
+        strncpy(extra.name, "SOAK_P", sizeof(extra.name) - 1);
+        test_stub_profiles_set(5, &extra);
+        const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
+        kiln_cfg_plan_t plan;
+        memset(&plan, 0, sizeof(plan));
+        bool partial_write = false;
+        char err[160] = {0};
+        bool ok = backup_import_apply(body, pass == 0 ? KILN_CFG_RESTORE_MERGE : KILN_CFG_RESTORE_MIRROR, false, 1,
+                                      true, &plan, &partial_write, err, sizeof(err));
+        TEST_CHECK(ok, "restore of a backup without that profile succeeds (no kiln_configs key: nothing to delete)");
+        TEST_CHECK(g_profile_delete_calls == 0, "restore never calls profiles_http_delete");
+        TEST_CHECK(s_profile_present[5], "the board-only profile is still present after the restore");
+    }
+}
+
 static void test_mirror_delete_absent_ack_refuses_and_writes_nothing(void)
 {
     TEST_SECTION("backup_import_apply -- MIRROR restore that would delete kiln config slots refuses "
@@ -7816,5 +7845,6 @@ void run_test_backup_import(void)
     test_mirror_delete_absent_ack_refuses_and_writes_nothing();
     test_mirror_delete_wrong_count_refuses_and_writes_nothing();
     test_mirror_delete_correct_count_proceeds_and_keeps_active_slot();
+    test_restore_never_deletes_board_only_firing_profile();
     test_kiln_configs_partial_write_set_on_mid_pass_create_failure();
 }

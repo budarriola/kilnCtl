@@ -1,4 +1,5 @@
 #include "recovery_switch.h"
+#include "flash_xip_lock.h"
 
 #include <stdio.h>
 
@@ -38,7 +39,10 @@ static bool recovery_image_verifies(const esp_partition_t *recovery)
         .offset = recovery->address,
         .size = recovery->size,
     };
-    return esp_image_verify(ESP_IMAGE_VERIFY, &pos, &data) == ESP_OK;
+    flash_xip_reader_enter(); /* bootloader_mmap (REVIEW_FLASH_MMAP_SERIALIZATION) */
+    bool ok = esp_image_verify(ESP_IMAGE_VERIFY, &pos, &data) == ESP_OK;
+    flash_xip_reader_exit();
+    return ok;
 }
 
 recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)

@@ -105,7 +105,7 @@ Assert-True ($fe.Count -eq 1 -and $fe[0].Right.Extent.Text.Trim() -eq '$Name') "
 $cl = @(Get-Asg 'buildFailures' | Where-Object { $_.Operator -eq 'PlusEquals' } | ForEach-Object { $_.Right.Extent.Text.Trim() })
 Assert-True (-not ($cl -contains '"sim_credibility_gate_closedloop"')) "closedloop compile failure is not in buildFailures (LOW-1)"
 $te = @(Get-Asg 'totalExpected')
-Assert-True (($te | ForEach-Object { "$($_.Operator):$($_.Right.Extent.Text.Trim())" }) -join '|' -eq 'Equals:103|Equals:$script:onlySelected.Count') "`$totalExpected is only the literal 103 or the -Only selection count, no script: re-assignment (got: $(($te | % { $_.Right.Extent.Text.Trim() }) -join ' | '))"
+Assert-True (($te | ForEach-Object { "$($_.Operator):$($_.Right.Extent.Text.Trim())" }) -join '|' -eq 'Equals:104|Equals:$script:onlySelected.Count') "`$totalExpected is only the literal 104 or the -Only selection count, no script: re-assignment (got: $(($te | % { $_.Right.Extent.Text.Trim() }) -join ' | '))"
 $os = @(Get-Asg 'onlySelected')
 Assert-True (@($os | Where-Object { $_.Operator -eq 'Equals' }).Count -eq 1) "exactly one initializer of `$onlySelected"
 

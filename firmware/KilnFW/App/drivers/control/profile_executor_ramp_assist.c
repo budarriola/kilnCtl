@@ -338,3 +338,24 @@ bool ramp_assist_dwell_target_reached(const s_exec_state_t *ex)
     }
     return true; /* every active, non-faulted zone has reached target_c (or there are none) */
 }
+
+bool ramp_assist_dwell_too_hot(const s_exec_state_t *ex)
+{
+    return ex->dwelling && ex->dwell_arrived_hot && ramp_assist_zones_above_band(ex);
+}
+
+bool ramp_assist_zones_above_band(const s_exec_state_t *ex)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        const zone_runtime_t *z = &ex->zones[zi];
+        if (!z->active || z->faulted || z->monitor_only) {
+            continue;
+        }
+        /* An invalid reading says nothing about direction; the ramp lock
+         * already holds the schedule for it. */
+        if (z->actual_valid && (z->actual_c - ex->target_c) > EXEC_RAMP_LOCK_BAND_C(zi)) {
+            return true;
+        }
+    }
+    return false;
+}

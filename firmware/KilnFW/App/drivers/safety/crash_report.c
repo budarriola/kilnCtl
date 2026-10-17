@@ -1,4 +1,5 @@
 #include "crash_report.h"
+#include "flash_xip_lock.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -579,7 +580,9 @@ void crash_report_init(void)
      * See crash_report_dump_id()'s comment for why that matters. */
     esp_core_dump_summary_t summary;
     memset(&summary, 0, sizeof(summary));
+    flash_xip_reader_enter(); /* core_dump_elf mmap (REVIEW_FLASH_MMAP_SERIALIZATION) */
     esp_err_t sum_err = esp_core_dump_get_summary(&summary);
+    flash_xip_reader_exit();
     if (sum_err != ESP_OK) {
         ESP_LOGW(TAG, "coredump present but esp_core_dump_get_summary failed: %s -- no crash record captured",
                  esp_err_to_name(sum_err));

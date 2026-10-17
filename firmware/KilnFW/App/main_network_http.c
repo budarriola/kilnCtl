@@ -82,6 +82,7 @@
 #include "zones_http.h"
 
 #include "main_internal.h"
+#include "flash_xip_lock.h"
 #include "startup_faults.h"
 
 /* --- OTA rollback confirmation (UPDATE_PROTOCOL.md sec 3, TODO.md 9.2) ----
@@ -179,7 +180,9 @@ static bool main_ota_resample_nvs(void *c)
 static bool main_ota_mark_valid(void *c)
 {
     main_ota_confirm_step_ctx_t *sc = (main_ota_confirm_step_ctx_t *)c;
+    flash_xip_reader_enter(); /* mmap read_otadata + rewrite (REVIEW_FLASH_MMAP_SERIALIZATION) */
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    flash_xip_reader_exit();
     if (err == ESP_OK) {
         sc->rollback_cancel_ok = true;
         ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
@@ -201,7 +204,10 @@ static bool main_ota_read_valid(void *c)
     (void)c;
     const esp_partition_t *run = esp_ota_get_running_partition();
     esp_ota_img_states_t   state = ESP_OTA_IMG_UNDEFINED;
-    if (!run || esp_ota_get_state_partition(run, &state) != ESP_OK) {
+    flash_xip_reader_enter();
+    esp_err_t serr = run ? esp_ota_get_state_partition(run, &state) : ESP_FAIL;
+    flash_xip_reader_exit();
+    if (serr != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "ota state read-back failed -- will retry mark-valid");
         return false;
     }

@@ -1,4 +1,5 @@
 #include "ui_page_diagnostics.h"
+#include "flash_xip_lock.h"
 
 #include <math.h> /* CT_COMMISSIONING_PLAN.md step 4 -- isnan() on ct_current_a[] */
 #include <stdint.h>
@@ -648,7 +649,10 @@ void ui_page_diagnostics_prime_ota_state(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
-    if (running && esp_ota_get_state_partition(running, &st) == ESP_OK) {
+    flash_xip_reader_enter();
+    esp_err_t serr = running ? esp_ota_get_state_partition(running, &st) : ESP_FAIL;
+    flash_xip_reader_exit();
+    if (serr == ESP_OK) {
         s_ota_state_cached = st;
         s_ota_state_known = true;
     }

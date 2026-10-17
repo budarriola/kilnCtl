@@ -3474,7 +3474,7 @@ Settings backed up first (`logs/soakmain_backup_pre4.json`).
 | Short firing (profile #2, 30 C, heat pre-authorized), `profiles_stop()` | PASS; stopped, exec state 0 after reboot; firing log keeps STARTED record; run_state persistence only indirectly seen |
 | HR-02 mode gate | PASS: raw POST /api/safety/commissioning while running returned 409 "a firing or autotune run is active" (MCP tools also refuse client-side) |
 | Return to pre.4: ESP + Pico flashed from fcc645211 worktree, verified | PASS (Pico build fcc645211, link up) |
-| Settings restore | PASS: export diff vs pre-soak differs only in relay_cycles (raise-only wear counters) after deleting SOAK_P and resetting relay4_type by hand (replace-mode import did not remove the new profile) |
+| Settings restore | PASS: export diff vs pre-soak differs only in relay_cycles (raise-only wear counters) after deleting SOAK_P and resetting relay4_type by hand (restore never deletes a profile created after the backup; intended, KNOWN_ISSUES BW-09) |
 
 Bug found (compat, not a crash): a pre.4 backup that contains saved kiln_configs
 (safety section names param id 1025 = 0x0401, removed by SR-31) is refused by main with

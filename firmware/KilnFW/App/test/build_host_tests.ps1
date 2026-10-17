@@ -1555,6 +1555,16 @@ try {
             "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
     Invoke-HostTestExe -Name "sx1509_reset_first" -ExePath $exeSrf -BuildCmd $cmdSrf
 
+    # ---- test_flash_xip_lock.c: SPI1 os_func brackets and mmap readers share one lock (REVIEW_FLASH_MMAP_SERIALIZATION MED-1)
+    $exeFxl = Join-Path $outDir "kilnctl_host_tests_flash_xip_lock.exe"
+    $fxlObjDir = Join-Path $outDir "fxl"
+    New-Item -ItemType Directory -Force -Path $fxlObjDir | Out-Null
+    $cmdFxl = "cl @`"$hostTestsRsp`" /std:c11 /DFLASH_XIP_LOCK_CORE_TEST=1 " +
+            "/Fo:`"$fxlObjDir\\`" /Fe:`"$exeFxl`" " +
+            "`"$(Join-Path $testDir 'test_flash_xip_lock.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/flash_xip_lock.c')`""
+    Invoke-HostTestExe -Name "flash_xip_lock" -ExePath $exeFxl -BuildCmd $cmdFxl
+
     # ---- test_dashboard_http_relay.c: dashboard_set_relay() mapping + dashboard_http_get_safety_trip() (R2-E)
     $exeDhr = Join-Path $outDir "kilnctl_host_tests_dashboard_http_relay.exe"
     $dhrObjDir = Join-Path $outDir "dhr"
@@ -3654,7 +3664,8 @@ try {
     # 99 -> 100: safety_link_tick10 (REBOOTFX5 LOW-1, 10 ms tick period build of test_safety_link_compile.c)
     # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
     # 101 -> 103: sx1509_reset_first (boot audit MED-2) plus one executable already unaccounted for on dev (built count was 102)
-    $totalExpected = 103
+    # 103 -> 104: flash_xip_lock (REVIEW_FLASH_MMAP_SERIALIZATION MED-1)
+    $totalExpected = 104
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

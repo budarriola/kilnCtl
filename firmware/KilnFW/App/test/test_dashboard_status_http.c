@@ -345,6 +345,12 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (real trip after TEST)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "real trip after cleared TEST, DIAG not yet refreshed -> false");
     /* same seq bump but the new trip is ALSO reason 4: seq mismatch alone must drop the flag. */
+    /* TRIPFX5 LOW-2: equal seqs but the TRIP_EVENT says reason 2 -> the reason term alone must drop it. */
+    s_fake_status.trip_reason = 2u;
+    s_fake_status.trip_last_seq = 7u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (equal seq, event reason 2)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "equal seq but TRIP_EVENT reason != 4 -> false");
+    s_fake_status.trip_last_seq = 8u;
     s_fake_status.trip_reason = 4u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (seq mismatch)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "trip_seq mismatch -> false");
@@ -359,6 +365,16 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     s_fake_status.trip_event_ever_received = true;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (restored)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "all conditions hold again -> true");
+    /* TRIPFX5 LOW-1: TEST cleared; DIAG + TRIP_EVENT cache still say the TEST trip (fresh), but STATUS reads ARMED. */
+    s_fake_status.safety_relay_known = true;
+    s_fake_status.safety_heating_enabled = true;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (cleared, STATUS armed)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL,
+               "stale DIAG TRIPPED reason 4 + cache, STATUS ARMED -> false");
+    s_fake_status.safety_heating_enabled = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (STATUS tripped)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "STATUS known and not armed -> still true");
+    s_fake_status.safety_relay_known = false;
     s_fake_status.diag_frame_age_ms = 60000u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (stale)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "stale DIAG -> false");
