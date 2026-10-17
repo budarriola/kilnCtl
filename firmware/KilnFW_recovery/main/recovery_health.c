@@ -66,14 +66,14 @@ void recovery_health_clear_wifi(void)
     s_wifi_restarts = 0;
 }
 
-void recovery_health_restart_for_http(void)
+bool recovery_health_restart_for_http(void)
 {
     // RO-01: never cut a running install apply (same bounded wait as recovery_wifi.c).
     const int64_t wait_start_us = esp_timer_get_time();
     while (recovery_apply_busy()) {
         if (esp_timer_get_time() - wait_start_us > (int64_t)RHEALTH_APPLY_WAIT_MS * 1000) {
-            ESP_LOGW(TAG, "apply still busy after %d ms; restarting for HTTP anyway", RHEALTH_APPLY_WAIT_MS);
-            break;
+            ESP_LOGW(TAG, "apply still busy after %d ms; NOT restarting (FX-04), staying up", RHEALTH_APPLY_WAIT_MS);
+            return false;
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -82,6 +82,7 @@ void recovery_health_restart_for_http(void)
     esp_restart();
     for (;;) {
     }
+    return true;
 }
 
 void recovery_health_restart_for_wifi(void)
