@@ -1022,11 +1022,9 @@ static const char *run_job(work_t *w)
     st_lock();
     strlcpy(s_c->st.repo, w->repo, sizeof(s_c->st.repo));
     st_unlock();
-    // /releases/latest never returns a pre-release or a draft, so when pre-releases are allowed the
-    // list endpoint is read instead and the highest-semver usable release is picked from it.
-    const bool use_list = w->p.allow_prerelease;
-    if (!(use_list ? update_url_build_list(w->repo, FETCH_LIST_PER_PAGE, w->url, sizeof(w->url))
-                   : update_url_build_latest(w->repo, w->url, sizeof(w->url)))) {
+    // AUP-02: /releases/latest is ordered by creation date, not version, so both channels read the list
+    // endpoint and the highest eligible semver is picked (allow_prerelease filters pre-releases).
+    if (!update_url_build_list(w->repo, FETCH_LIST_PER_PAGE, w->url, sizeof(w->url))) {
         return "bad_repo";
     }
     w->deadline_tick = xTaskGetTickCount() + pdMS_TO_TICKS(FETCH_JOB_DEADLINE_MS);
@@ -1035,22 +1033,11 @@ static const char *run_job(work_t *w)
     w->mem_cap = FETCH_API_BODY_CAP;
     e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
     if (e != NULL) {
-        if (!use_list && strcmp(e, "http_status") == 0) {
-            // /releases/latest answers 404 when the repo has only pre-releases (or no release at all).
-            st_lock();
-            const int hs = s_c->st.http_status;
-            st_unlock();
-            if (hs == 404) {
-                return "no_stable_release";
-            }
-        }
         return e;
     }
     const uint32_t max_app = update_stage_capacity(update_http_stage());
-    update_rel_err_t re = use_list ? update_release_pick_from_list((const char *)w->body, w->body_len, w->repo,
-                                                                    max_app, true, &w->info)
-                                   : update_release_parse_api((const char *)w->body, w->body_len, w->repo, max_app,
-                                                              &w->info);
+    update_rel_err_t re = update_release_pick_from_list((const char *)w->body, w->body_len, w->repo, max_app,
+                                                        w->p.allow_prerelease, &w->info);
     if (re != UPDATE_REL_OK) {
         ESP_LOGW(TAG, "release parse: %s", update_rel_err_name(re));
         return update_rel_err_name(re);
