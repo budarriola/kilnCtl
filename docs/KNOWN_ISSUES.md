@@ -20,7 +20,7 @@ The single list of open problems (bugs and accepted trade-offs, not planned feat
 - Bench pre.3 cannot self-update from GitHub | HIGH (bench) | fetch refuses with `low_heap`, largest internal block 10752 B, steady state across reset | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
 - pre.3 has no `/api/update/status`, so `update_install_start` fails (404) after a PC-side stage | MED (bench) | install of staged pre.4 not completed | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
 - `flash_firmware` otadata gap | MED | JTAG flash does not touch `otadata`; a board pointing at factory/recovery boots recovery, verify fails loud | [CLAUDE.md](../CLAUDE.md) flash section, [MCP_SERVERS](MCP_SERVERS.md) | known, deliberate
-- Recovery HTTP starts before `recovery_install_boot()` (REVIEW_AUTOFX LOW-4) | LOW | a client joining in the first milliseconds can hit the mutating routes before the apply claim; unreachable in practice, fix is a recovery boot-order change | [REVIEW_AUTOFX](audits/REVIEW_AUTOFX.md), [AUDIT_RECOVERY_IMAGE](audits/AUDIT_RECOVERY_IMAGE.md) | open (`recovery_main.c` still calls `recovery_http_start` before `recovery_install_boot`)
+- Recovery HTTP starts before `recovery_install_boot()` (REVIEW_AUTOFX LOW-4) | LOW | a client joining in the first milliseconds can hit the mutating routes before the apply claim; unreachable in practice, fix is a recovery boot-order change | [REVIEW_AUTOFX](audits/REVIEW_AUTOFX.md), [AUDIT_RECOVERY_IMAGE](audits/AUDIT_RECOVERY_IMAGE.md) | fixed (8c87343f5): `recovery_main.c` calls `recovery_install_boot()` before the `recovery_http_start` loop; source-order assertion in `test_recovery_health.c`
 - Broader flash-mmap vs writer serialization (XIP cache disabled window) | MED | fixed 2026-10-17: flash_xip_lock wraps SPI1 os_func start/end, mmap readers bracket with it; LOW-3 (no lint for new mmap callers) open | [REVIEW_FLASH_MMAP_SERIALIZATION](audits/REVIEW_FLASH_MMAP_SERIALIZATION.md) | fixed
 
 ## Web / auth
@@ -118,7 +118,7 @@ fetch all refuse during a firing/autotune.
   it and installs the staged image unattended, masking the crash cause and surprising the operator.
   Fix: at app boot (after `boot_guard_init`, normal mode only) delete any stored install request and write
   a result record `reason=stale_request`, or store the request's boot_count and have recovery refuse a
-  request not issued on the immediately preceding boot. Status: open.
+  request not issued on the immediately preceding boot. Status: fixed (2035a0b92, found already in code by this sweep): `update_install_http_drop_stale_request()` runs after the boot confirm in `main_network_http.c`, under the update claim; host test in `test_update_install_record.c`.
 - **UP-03** INFO, `firmware/KilnFW/App/drivers/update/update_fetch_heap.c:4-12`,
   `update_fetch_heap.h:154-189`. pre.3's `low_heap` refusal at "10752 B largest" was the FREE check, not the
   block check: idle free 29815 B (INTERNAL_HEAP_MARGIN_2026-10-09) is below the 31728 B admission
