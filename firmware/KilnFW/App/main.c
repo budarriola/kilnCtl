@@ -52,6 +52,7 @@
 #include "relay_authority.h"
 #include "safety_link.h"
 #include "uart_log_bridge.h"
+#include "flash_xip_lock.h"
 
 #include "main_internal.h"
 
@@ -232,6 +233,11 @@ void app_main(void)
     // see uart_log_bridge_start() (main_bridges_bringup.c) for when the
     // backlog actually flushes.
     uart_log_bridge_early_init();
+
+    // Before any other task can write flash: every SPI1 op from here on holds the
+    // flash_xip_lock, so mmap readers bracketed with flash_xip_reader_enter() never
+    // read through the cache while the chip is busy (REVIEW_FLASH_MMAP_SERIALIZATION).
+    (void)flash_xip_lock_install();
 
     // Before any task that can enter a cfg save section exists (LVGL, httpd,
     // the bridges, main_boot_early's deferred tasks): makes every save section

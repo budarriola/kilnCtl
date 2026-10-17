@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "flash_xip_lock.h"
 
 static const char *BOOT_PART_TAG = "boot_part";
 
@@ -17,11 +18,14 @@ esp_err_t boot_partition_set_and_verify(const esp_partition_t *requested)
         ESP_LOGE(BOOT_PART_TAG, "boot partition request is NULL");
         return ESP_ERR_INVALID_ARG;
     }
+    /* image_validate + read_otadata are mmap reads (REVIEW_FLASH_MMAP_SERIALIZATION). */
+    flash_xip_reader_enter();
     esp_err_t err = esp_ota_set_boot_partition(requested);
+    const esp_partition_t *actual = (err == ESP_OK) ? esp_ota_get_boot_partition() : NULL;
+    flash_xip_reader_exit();
     if (err != ESP_OK) {
         return err;
     }
-    const esp_partition_t *actual = esp_ota_get_boot_partition();
     if (!boot_partition_matches(requested, actual)) {
         ESP_LOGE(BOOT_PART_TAG,
                  "boot partition read-back mismatch: requested '%s' (addr 0x%x subtype 0x%x), actual '%s' (addr 0x%x subtype 0x%x)",
