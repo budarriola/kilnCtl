@@ -30,6 +30,7 @@
 #include "fake_spi.h"
 #include "hal_spi.h"
 #include "max31856.h"
+#include "tc_lag_comp.h"
 #include "board_pins.h"
 
 #include "../src/safety_guards.h"
@@ -467,6 +468,71 @@ static void test_tc_sheath_lead(void)
     tt_stub_set_tc_sheath_tau_s(0u);
 }
 
+/* Stuck-on sim for the Pico guard (docs/TC_SHEATH_LAG_SIM.md): heater stuck
+ * full on from a 1200 C hold, kiln air dT/dt = 0.5 - (T - 20) / 3000 C/s,
+ * junction first order with tau_true. The real tc_lag_comp_step() (the code
+ * thermo_task runs) produces the lead and the real safety_guards_tick() judges
+ * S1 against abs_max 1250 C at the 0.1 s tick. Times are seconds after the
+ * stick: true crossing, S1 on raw (tau 0) and S1 with tau_set. */
+static void s1_stuck_on(float tau_true, float tau_set, float *t_true, float *t_raw, float *t_comp)
+{
+    safety_guard_cfg_t cfg = guard_cfg();
+    cfg.abs_max_temp_c = 1250.0f;
+    safety_guard_state_t g_raw, g_comp;
+    safety_guards_reset(&g_raw);
+    safety_guards_reset(&g_comp);
+    tc_lag_comp_state_t lag;
+    memset(&lag, 0, sizeof(lag));
+    const float dt = 0.1f;
+    float T = 1200.0f, Tj = 1200.0f;
+    *t_true = *t_raw = *t_comp = -1.0f;
+    for (int i = 0; i < 40000; i++) {
+        float t = (float)i * dt;
+        T += (0.5f - (T - 20.0f) / 3000.0f) * dt;
+        Tj = tau_true > 0.0f ? Tj + (T - Tj) * (dt / tau_true) : T;
+        float est = tc_lag_comp_step(&lag, tau_set, Tj, true, dt, NULL);
+        safety_guard_input_t in;
+        memset(&in, 0, sizeof(in));
+        in.tc_valid = true;
+        in.tc_c = Tj;
+        in.cj_c = 25.0f;
+        in.dt_s = dt;
+        in.current_sensing_commissioned = true;
+        in.sample_counter_advancing = true;
+        in.link_up = true;
+        if (*t_true < 0.0f && T >= 1250.0f) *t_true = t;
+        if (*t_raw < 0.0f && safety_guards_tick(&g_raw, &cfg, &in) && g_raw.reason == SAFETY_TRIP_OVERTEMP)
+            *t_raw = t;
+        in.tc_lead_c = est - Tj;
+        if (*t_comp < 0.0f && safety_guards_tick(&g_comp, &cfg, &in) && g_comp.reason == SAFETY_TRIP_OVERTEMP)
+            *t_comp = t;
+        if (*t_true >= 0.0f && *t_raw >= 0.0f && *t_comp >= 0.0f) break;
+    }
+}
+
+static void test_tc_sheath_s1_sim(void)
+{
+    TEST_SECTION("thermo_task + safety_guards -- S1 stuck-on sim with TC sheath lag");
+    static const float taus[] = {60.0f, 180.0f, 300.0f};
+    printf("  S1 stuck-on tau_true tau_set | true_cross raw_trip comp_trip (s)\n");
+    for (unsigned ti = 0; ti < 3; ti++) {
+        float tt = taus[ti];
+        const float sets[] = {tt, 0.5f * tt, 1.5f * tt};
+        for (int k = 0; k < 3; k++) {
+            float tx, tr, tc;
+            s1_stuck_on(tt, sets[k], &tx, &tr, &tc);
+            printf("              %7.0f  %6.0f | %10.1f %8.1f %9.1f\n", (double)tt, (double)sets[k], (double)tx,
+                   (double)tr, (double)tc);
+            TEST_CHECK(tx >= 0.0f && tr >= 0.0f && tc >= 0.0f, "S1 sim: everything crosses");
+            TEST_CHECK(tc <= tr, "S1 sim: with the lead, S1 never trips later than raw");
+            TEST_CHECK(tr > tx, "S1 sim: raw S1 trips after the true crossing (the sheath lag)");
+            if (k == 0) {
+                TEST_CHECK(tc - tx < (tr - tx) / 3.0f + 5.0f, "S1 sim: correct tau removes most of the trip delay");
+            }
+        }
+    }
+}
+
 static void test_recovery_after_fault_clears(void)
 {
     TEST_SECTION("thermo_task loop -- recovery after a fault clears");
@@ -589,6 +655,7 @@ void run_test_thermo_task_faults(void)
     test_drdy_silence_and_missed_edge();
     test_tc_offset();
     test_tc_sheath_lead();
+    test_tc_sheath_s1_sim();
     test_recovery_after_fault_clears();
     test_stale_publish_never_reads_good();
     test_stuck_reading_documented();

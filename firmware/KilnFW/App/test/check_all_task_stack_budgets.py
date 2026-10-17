@@ -1150,7 +1150,7 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7744,  # 2026-10-15 re-measured; honest free 21.4%
+    "http_async_job": 7760,  # 2026-10-16 tc sheath lag: backup_import_job path +16 B, honest free 21.3%; before: 2026-10-15 re-measured 7744
     # (prev note follows)  # 2026-10-12: re-measured 7728 B (was 7632 B): backup_import_job chain 5728 B after 44289aa41 uart_proto_message_t.rx_ms; honest free 2212 B (21.6%)
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
