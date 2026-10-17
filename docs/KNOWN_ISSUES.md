@@ -350,3 +350,11 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RW-05** LOW, `firmware/KilnFW/App/drivers/persist/persist_scratch.h:52-70`. The fallback logs only once; nothing alarms on a non-zero counter. Status open.
 - **RW-06** LOW, `firmware/KilnFW/App/drivers/bridge/uart_bridge_system.c:69-76`. One failed boot-time allocation deletes the system command task for the whole boot. Status open.
 - **RW-07..RW-11** INFO: KDF, flash_xip lock, OTA upload chunk, backup buffers and internal NULL paths reviewed with no internal-RAM risk found; see the review. Status INFO.
+
+## Fresh-storage boot review (docs/audits/REVIEW_FRESH_STORAGE_2026_10_17.md)
+- **FS-01** MED, `firmware/KilnFW/App/drivers/persist/zones_config_cfg_fs.c:395-401`. A missing zones.json plus a valid but frozen legacy kiln_nvs blob is adopted as trustworthy and written to the file; the board silently reverts to a stale zone config. Status open.
+- **FS-02** MED, `firmware/KilnFW/App/drivers/net/wifi_prov.c:504`, `firmware/hwAbstraction/esp/kv/hal_kv_esp.c:394-406`. The default nvs erase-retry (or any nvs erase) wipes web auth and the AU-02 `auth_ever` marker, so auth comes up off on the LAN. Status open.
+- **FS-03** LOW, `firmware/KilnFW/App/drivers/persist/cfg_fs_format_gate.c:198-217`. Auto-format ignores non-erased data outside blocks 0/1. Status open.
+- **FS-04** LOW, `firmware/KilnFW/App/drivers/http/readiness_http.c:885,1116`. Fresh-board readiness wording reads as a fault and never says the storage was reset. Status open.
+- **FS-05** LOW, `firmware/KilnFW/App/drivers/persist/cfg_fs_mount.c:343`. cfg-backed loaders are not re-run after the deferred auto-format completes. Status open.
+- **FS-06..FS-08** INFO: RAM path within the floor; the stack comment says words but the value is bytes; E-stop flag loss is fail-closed.
