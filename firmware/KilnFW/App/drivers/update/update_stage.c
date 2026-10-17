@@ -286,7 +286,7 @@ static update_stage_err_t flush_head(update_stage_t *st)
     bool dirty = false;
     if (st->semver_given) {
         // A declared version may not override a valid one in the descriptor (else 99.0.0 on an old image
-        // would walk past the downgrade gate). An invalid/blank descriptor version leaves the declared one.
+        // would walk past the downgrade gate). With a gate (AUP-03) an invalid descriptor version is refused; only an ungated stage keeps the declared one.
         // Gated stagers (hand upload AND the GitHub release fetch, which installs update_stage_manifest_gate)
         // compare the NORMALISED forms: leading v and a trailing "-dirty" (ESP-IDF's git-describe
         // PROJECT_VER, e.g. the published v1.0.0-pre.3 image reads "v1.0.0-pre.3-dirty") are dropped from the

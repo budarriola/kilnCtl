@@ -35,6 +35,7 @@ static int g_fail = 0, g_checks = 0;
 #define REPO "budarriola/kilnCtl"
 #define BASE "https://github.com/budarriola/kilnCtl/releases/download/"
 #define API_URL "https://api.github.com/repos/" REPO "/releases?per_page=15"
+#define LATEST_URL "https://api.github.com/repos/" REPO "/releases/latest"
 #define MAN_URL BASE "v1.2.3/release.json"
 #define APP_URL BASE "v1.2.3/KilnCtrl-v1.2.3.bin"
 #define COMMIT "0123456789abcdef0123456789abcdef01234567"
@@ -738,12 +739,39 @@ static void test_heap_admission_updfx3(void)
         }
         g_fr_routes[0].body_len = strlen(g_api);
     }
+    add_route(LATEST_URL, "", 0)->status = 404;
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "no_release") == 0, "pre-release only, pre-releases off: no_release");
+    CHECK(strcmp(g_error, "no_stable_release") == 0, "pre-release only, pre-releases off, /latest 404: no_stable_release");
     POST("/api/update/check", "allow_prerelease=1");
     wait_idle();
     job_result();
     CHECK(strcmp(g_error, "no_release") != 0, "pre-release only, pre-releases on: picked");
+    // FA-01: 15 pre-releases fill the first list page; the stable release is found through /releases/latest.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char single[sizeof(g_api)];
+        static char many[sizeof(g_api) * 3];
+        size_t n = strlen(g_api);
+        memcpy(single, g_api + 1, n - 2);  // strip the [ ] of the one-element list
+        single[n - 2] = '\0';
+        char *p = many;
+        *p++ = '[';
+        for (int i = 0; i < 15; i++) {
+            p += snprintf(p, sizeof(many) - (size_t)(p - many),
+                          "%s{\"tag_name\":\"v1.3.%d-pre.1\",\"draft\":false,\"prerelease\":true,\"assets\":[]}",
+                          i ? "," : "", i);
+        }
+        *p++ = ']';
+        *p = '\0';
+        static char many_buf[sizeof(many)];
+        memcpy(many_buf, many, sizeof(many));
+        g_fr_routes[0].body = many_buf;
+        g_fr_routes[0].body_len = strlen(many_buf);
+        add_route(LATEST_URL, single, strlen(single));
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0,
+          "15 pre-releases on the list page: stable found through /releases/latest");
     // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;
