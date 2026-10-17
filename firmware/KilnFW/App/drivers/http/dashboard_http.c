@@ -560,7 +560,9 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     out->heap_spiram_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+#ifdef ESP_PLATFORM
     out->persist_scratch_fallbacks = persist_scratch_fallback_count();
+#endif
     out->heap_spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
 
     /* DRAM_PSRAM_PLAN.md Phase 0 (4.1): the one capability not previously
