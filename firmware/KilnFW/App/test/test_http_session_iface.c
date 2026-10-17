@@ -590,6 +590,23 @@ static void test_destroy_all_request_applied_by_httpd(void)
                "request applies once; a later session survives");
 }
 
+// FX-01: the Wi-Fi task reads the table through http_auth_any_ap_session_active();
+// that read must never apply a posted destroy-all (only httpd does).
+static void test_fx01_wifi_read_does_not_apply_destroy_all(void)
+{
+    TEST_SECTION("FX-01 http_auth_any_ap_session_active never applies the posted destroy-all");
+    reset_all();
+    set_policy_timeout(600);
+    make_session("tok-fx01", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    http_auth_session_touch("tok-fx01", "10.0.0.5", /*via_ap=*/true);
+    http_session_destroy_all_request_post();
+    TEST_CHECK(http_auth_any_ap_session_active(false), "Wi-Fi-path read still sees the session (destroy not applied)");
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    TEST_CHECK(!http_auth_session_status("tok-fx01", "10.0.0.5", &role, NULL, NULL),
+               "httpd-side access applies the destroy-all");
+    TEST_CHECK(!http_auth_any_ap_session_active(false), "after httpd applied it the Wi-Fi read sees none");
+}
+
 static void test_expired_session_does_not_revive_after_tick_wrap(void)
 {
     TEST_SECTION("expired session is freed and stays dead across the 2^32 ms tick wrap");
@@ -635,6 +652,7 @@ static void test_session_expired_after_idle_longer_than_tick_wrap(void)
 void run_test_http_session_iface(void) {
     test_session_expired_after_idle_longer_than_tick_wrap();
     test_destroy_all_request_applied_by_httpd();
+    test_fx01_wifi_read_does_not_apply_destroy_all();
     test_expired_session_does_not_revive_after_tick_wrap();
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();

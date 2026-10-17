@@ -971,6 +971,12 @@ static void test_install_gate(void)
     make_image(30000, "v1.0.0-pre.3");
     TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty,
                "declared, clean descriptor: not dirty");
+    // AUP-03: declared version + gate set + descriptor version not parseable: refused, nothing staged.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "banana");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 && !is_staged(),
+               "AUP-03: gated, declared, unparseable descriptor version: refused");
     // REVIEW_STAGEVERFX2 LOW-1: the smallest case-variant suffix (dn is exactly "-DIRTY", dl == 6) is refused when declared too.
     reset_board();
     memset(&r, 0, sizeof(r));
@@ -1049,8 +1055,11 @@ static void test_install_gate(void)
     reset_board();
     memset(&r, 0, sizeof(r));
     make_image(30000, "not-a-version");
-    TEST_CHECK(upload_gated(30000, 4096, "2.0.0", rec_gate, &r) == UPDATE_STAGE_OK && r.calls == 1,
-               "F2: an invalid descriptor version leaves the declared one in force");
+    TEST_CHECK(upload_gated(30000, 4096, "2.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 && !is_staged(),
+               "F2/AUP-03: gated, an unparseable descriptor version is refused, not accepted under the declared one");
+    reset_board();
+    make_image(30000, "not-a-version");
+    TEST_CHECK(upload(30000, 4096, "2.0.0", NULL) == UPDATE_STAGE_OK, "AUP-03: ungated path keeps the declared version");
     reset_board();
     make_image(30000, "v1.2.3");
     TEST_CHECK(upload(30000, 4096, "99.0.0", NULL) == UPDATE_STAGE_OK, "F2: ungated (fetch) path is not subject to the check");

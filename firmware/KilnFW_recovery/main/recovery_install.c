@@ -274,6 +274,12 @@ static void recover_task(void *arg)
         act = UPD_INST_AFTER_STAY;
     }
     if (act == UPD_INST_AFTER_EXIT_APP) {
+        // RC-01: re-check the app-writer claim immediately before selecting app.
+        if (recovery_apply_busy()) {
+            ESP_LOGW(TAG, "app write in progress; not selecting app");
+            vTaskDelete(NULL);
+            return;
+        }
         // Same order as /api/recovery/exit: boot_guard (verified) first, then drop the request (the FAIL
         // result stays for the application to read), then the boot target.
         if (recovery_http_boot_guard_clear() == 0 && kv_clear(UPD_INST_KEY_REQ) == 0 &&
@@ -285,6 +291,11 @@ static void recover_task(void *arg)
     } else if (act == UPD_INST_AFTER_RESTART) {
         ESP_LOGW(TAG, "install failed with the app modified; restarting for the bounded retry");
         vTaskDelay(pdMS_TO_TICKS(RECOVER_RESTART_DELAY_MS));
+        if (recovery_apply_busy() || recovery_pico_busy()) { // RC-01: re-check right before the restart
+            ESP_LOGW(TAG, "app write in progress; restart skipped");
+            vTaskDelete(NULL);
+            return;
+        }
         esp_restart();
     } else {
         ESP_LOGW(TAG, "install failed (%s); staying in recovery", update_install_reason_name(s_recover.reason));

@@ -497,7 +497,7 @@ bool web_auth_store_verify_password(web_auth_role_t role, const char *password)
     return web_auth_constant_time_equal(computed, rec.hash, WEB_AUTH_HASH_LEN);
 }
 
-// AZ-01: true unless the admin record is truly absent (NVS not-found) or
+// AZ-01: true unless the admin record is truly absent (NVS not-found, marker clear) or
 // readable-and-unconfigured. UNREADABLE (bad CRC, version, read error) counts as
 // configured so the bootstrap route stays closed; recovery is the reset gesture.
 bool web_auth_store_admin_configured_or_unreadable(void)
@@ -505,6 +505,13 @@ bool web_auth_store_admin_configured_or_unreadable(void)
     web_auth_password_record_t rec;
     web_auth_load_status_t st = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec);
     if (st == WEB_AUTH_LOAD_UNREADABLE) {
+        return true;
+    }
+    // FX-02: key lost (NOT_FOUND) on a board that was ever set up counts as
+    // configured, same as AU-02 does for the policy key. The physical reset
+    // gesture does not erase this key: it writes an unconfigured blob (key
+    // present, configured=false), so it still reaches bootstrap.
+    if (st != WEB_AUTH_LOAD_OK && web_auth_store_ever_enabled()) {
         return true;
     }
     return st == WEB_AUTH_LOAD_OK && rec.configured;

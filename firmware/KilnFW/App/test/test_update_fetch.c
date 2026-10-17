@@ -34,7 +34,7 @@ static int g_fail = 0, g_checks = 0;
 
 #define REPO "budarriola/kilnCtl"
 #define BASE "https://github.com/budarriola/kilnCtl/releases/download/"
-#define API_URL "https://api.github.com/repos/" REPO "/releases/latest"
+#define API_URL "https://api.github.com/repos/" REPO "/releases?per_page=15"
 #define MAN_URL BASE "v1.2.3/release.json"
 #define APP_URL BASE "v1.2.3/KilnCtrl-v1.2.3.bin"
 #define COMMIT "0123456789abcdef0123456789abcdef01234567"
@@ -86,6 +86,13 @@ static void make_docs(const char *sha, uint32_t api_size)
              "{\"name\":\"KilnCtrl-v1.2.3.bin\",\"size\":%u,\"browser_download_url\":\"" APP_URL "\"},"
              "{\"name\":\"release.json\",\"size\":900,\"browser_download_url\":\"" MAN_URL "\"}]}",
              (unsigned)api_size);
+    {   // AUP-02: both channels read the releases LIST, so the fixture body is a one-element array
+        const size_t n = strlen(g_api);
+        memmove(g_api + 1, g_api, n);
+        g_api[0] = '[';
+        g_api[n + 1] = ']';
+        g_api[n + 2] = '\0';
+    }
     snprintf(g_man, sizeof(g_man),
              "{\"schema\":1,\"tag\":\"v1.2.3\",\"channel\":\"stable\",\"published\":\"2026-10-05T00:00:00Z\","
              "\"repo\":\"" REPO "\",\"commit\":\"" COMMIT "\",\"dirty\":false,\"build_date\":\"x\","
@@ -720,13 +727,30 @@ static void test_heap_admission_updfx3(void)
     CHECK(g_fr_delay_calls == 0, "no settle wait on a LOW_BLOCK verdict");
     expect_claim_balanced("block starved");
 
-    // pre-release-only repo: /releases/latest 404 is a clear no_stable_release, not a generic http_status
+    // AUP-02: the allow_prerelease flag reaches the list pick: a list holding only a pre-release is
+    // no_release with pre-releases off and is picked with them on.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        char *pr = strstr(g_api, "\"prerelease\":false");
+        CHECK(pr != NULL, "fixture release has a prerelease flag");
+        if (pr != NULL) {
+            memcpy(pr, "\"prerelease\":true ", 18);
+        }
+        g_fr_routes[0].body_len = strlen(g_api);
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "no_release") == 0, "pre-release only, pre-releases off: no_release");
+    POST("/api/update/check", "allow_prerelease=1");
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "no_release") != 0, "pre-release only, pre-releases on: picked");
+    // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "no_stable_release") == 0, "404 on releases/latest -> no_stable_release");
+    CHECK(strcmp(g_error, "http_status") == 0, "404 on the list endpoint (pre-releases off) -> http_status");
     fixture(g_sha_hex, IMG_LEN);
-    add_route("https://api.github.com/repos/" REPO "/releases?per_page=15", "{}", 2)->status = 404;
+    g_fr_routes[0].status = 404;
     POST("/api/update/check", "allow_prerelease=1");
     wait_idle();
     job_result();

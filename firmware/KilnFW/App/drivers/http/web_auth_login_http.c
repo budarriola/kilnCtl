@@ -49,8 +49,8 @@
 // his own locked slot to keep guessing from a fresh one -- more permitted
 // guesses than the global lockout this replaced, not fewer. Eviction now
 // skips any slot that is CURRENTLY LOCKED (login_lockout_slot_for()'s own
-// header comment has the full reasoning and the accepted DoS tradeoff for
-// the case where every slot ends up locked at once).
+// header comment). AZ-04: if every slot is locked, the oldest is evicted
+// as a last resort instead of refusing new local logins.
 //
 // STACK: the request body (LOGIN_BODY_MAX, 512 bytes) lives on the heap and is
 // wiped and freed before the KDF runs; the largest remaining local is the
@@ -162,39 +162,14 @@ static SemaphoreHandle_t s_login_lock;
 // slot that is currently locked (login_backoff_is_locked() true at `now`)
 // is now never a candidate for eviction.
 //
-// Returns NULL when every slot is in_use AND currently locked -- there is no
-// safe slot left to reuse for a new IP without evicting an active lock.
-// Callers MUST treat NULL as "refuse this login attempt" (see
-// login_post_handler()), not as "retry with a fresh slot" -- see this file's
-// header comment for the tradeoff this accepts: while the table is fully
-// saturated with simultaneously-locked attacker IPs, even a legitimate
-// operator's fresh address gets refused rather than bumping one of them.
-// That state requires an attacker to actively maintain LOGIN_LOCKOUT_MAX_IPS
-// concurrent locked-out addresses (each requiring OTA_AUTH_LOCKOUT_THRESHOLD
-// failed attempts to arm, and lock durations that only grow with repeated
-// failures), which is a far narrower and more expensive window than the
-// eviction-bypass this fix closes, and preserves the per-IP design's actual
-// intent -- a real lockout must mean something for its whole duration.
-//
-// ACCEPTED TRADEOFF (owner decision, 2026-09-17, not a defect awaiting a
-// fix -- do not "helpfully" undo this): with LOGIN_LOCKOUT_MAX_IPS == 16,
-// one failure is already enough to arm a slot's lock (the ladder's first
-// step, see LOGIN_BACKOFF_LADDER_MS), so an attacker who fails once from
-// each of 16 distinct LOCAL-subnet addresses and keeps re-failing each one
-// just as its wait expires can hold the whole table saturated
-// indefinitely at low request volume. While saturated, this function
-// returns NULL for any IP without an existing slot, and login_post_handler()
-// answers that with a bare 429 *before* credentials are examined --
-// including the legitimate operator's own laptop after a DHCP lease
-// change, or a phone on a different address. There is no admin override
-// and no prune of expired-but-still-in-use slots; recovery is either
-// waiting out the attacker or rebooting the board (this table is static
-// RAM, cleared by a reset). See login_post_handler()'s 429 site for the
-// matching oracle-safety note. (This is the LOCAL-subnet table only --
-// every REMOTE-subnet client shares one reserved slot instead, see this
-// file's header comment and login_backoff_slot_for() below, so this
-// specific saturation cost only applies to an attacker who can reach the
-// board from LAN-local addresses.)
+// AZ-04 (owner decision: evict-oldest): when every slot is in_use AND
+// currently locked, the OLDEST slot (by last activity, regardless of lock
+// state) is evicted for the new IP, so a LAN host holding
+// LOGIN_LOCKOUT_MAX_IPS addresses cannot lock every new local login out. The
+// other per-address lockouts stay intact. This never returns NULL in
+// practice: a slot is always free, unlocked-evictable or (last resort)
+// oldest-evictable. The NULL return and the callers' NULL handling are
+// defensive only (reachable only if LOGIN_LOCKOUT_MAX_IPS were 0).
 static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now)
 {
     int free_idx = -1;
@@ -232,10 +207,8 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
         idx = oldest_idx;
     }
     if (idx < 0) {
-        // Every slot is in_use and currently locked -- see this function's
-        // header comment. Deliberately not falling back to "evict the
-        // globally-oldest slot regardless of lock state": that is exactly
-        // the bypass this fix closes.
+        // Defensive only (AZ-04): unreachable while LOGIN_LOCKOUT_MAX_IPS > 0,
+        // since a free, unlocked or oldest slot always exists. Callers refuse.
         return NULL;
     }
     login_lockout_slot_t *s = &s_login_lockouts[idx];
@@ -377,13 +350,9 @@ static esp_err_t login_post_handler(httpd_req_t *req)
             have_slot_ip = true;
             strncpy(slot_ip_snapshot, slot->ip, sizeof(slot_ip_snapshot) - 1);
         }
-        // Finding 2 fix (kept under the new ladder): NULL means every LOCAL
-        // slot is in_use and currently locked (the table is saturated with
-        // active attacker lockouts) -- refuse this attempt outright rather
-        // than dereferencing a slot that does not exist. See
-        // login_lockout_slot_for()'s header comment for the tradeoff. A
-        // REMOTE-scope client never sees NULL here (its reserved slot is
-        // never subject to that saturation).
+        // AZ-04: login_lockout_slot_for() evicts the oldest slot when the
+        // table is full, so NULL is not expected. Kept as a defensive
+        // refuse so a slot that does not exist is never dereferenced.
         locked = (slot == NULL) || login_backoff_is_locked(&slot->backoff, now);
         if (locked) {
             // Review fix (2026-09-21, finding 1): slot == NULL (the LOCAL

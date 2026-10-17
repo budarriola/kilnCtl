@@ -333,6 +333,9 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     s_fake_status.diag_trip_reason = 2u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 2)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "live reason 2 -> false");
+    s_fake_status.persist_scratch_fallbacks = 7u; /* FX-05 */
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (FX-05)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"persist_scratch_fallbacks\":7") != NULL, "FX-05 fallback count is exposed");
     s_fake_status.diag_trip_reason = 4u;
     s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (cleared)");

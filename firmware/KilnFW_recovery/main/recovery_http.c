@@ -213,11 +213,8 @@ static esp_err_t refuse_while_applying(httpd_req_t *req)
 // POST /api/ota/esp -- open, validated, streamed (recovery_upload.c).
 // Nothing is written until the first chunk passes ric_validate_first_chunk();
 // the boot partition is set only after esp_ota_end() verified the whole image.
-static esp_err_t ota_esp_post(httpd_req_t *req)
+static esp_err_t ota_esp_post_locked(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
-        return refuse_while_applying(req);
-    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -287,6 +284,18 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
+}
+
+// RC-01: hold the apply claim for the whole direct upload so recover_task (which re-checks it right before
+// selecting app or restarting) and every other mutating route see the app partition as being written.
+static esp_err_t ota_esp_post(httpd_req_t *req)
+{
+    if (!recovery_app_write_claim()) {
+        return refuse_while_applying(req);
+    }
+    esp_err_t e = ota_esp_post_locked(req);
+    recovery_app_write_release();
+    return e;
 }
 
 // GET / -- the embedded self-contained recovery page.

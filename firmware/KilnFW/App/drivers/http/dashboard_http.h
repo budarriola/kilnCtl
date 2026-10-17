@@ -477,6 +477,7 @@ typedef struct {
     size_t   heap_spiram_free;
     size_t   heap_spiram_largest_free_block;
     size_t   heap_spiram_min_free;
+    uint32_t persist_scratch_fallbacks; /* FX-05: PSRAM->internal scratch fallbacks since boot */
     size_t   heap_spiram_total;
 
     /* MALLOC_CAP_DMA (DMA-capable internal memory) -- DRAM_PSRAM_PLAN.md

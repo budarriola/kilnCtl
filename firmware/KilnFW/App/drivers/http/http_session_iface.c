@@ -62,6 +62,14 @@ web_auth_table_t *http_session_table(void) {
     return &s_web_auth_table;
 }
 
+// FX-01: read-only table access for non-httpd tasks (wifi_prov_owner via
+// http_auth_any_ap_session_active()). Never inits and never applies the posted
+// destroy-all: only http_session_table() (httpd) does, so s_destroy_all_applied_gen
+// has a single writer task. NULL until httpd first touched the table (no sessions).
+static const web_auth_table_t *http_session_table_peek(void) {
+    return s_web_auth_table_init_done ? &s_web_auth_table : NULL;
+}
+
 // REVIEW_ALL_FIXES L3: slot timestamps are 32-bit ms. A table idle for more
 // than 2^32 ms (49.7 days) would see an expired session's elapsed time wrap
 // back to "young". Every table access goes through here first: the 64-bit gap
@@ -358,7 +366,10 @@ bool http_auth_any_ap_session_active(bool ap_station_present) {
     if (timeout.unreadable) {
         return true;
     }
-    web_auth_table_t *t = http_session_table();
+    const web_auth_table_t *t = http_session_table_peek(); // FX-01: never applies destroy-all
+    if (t == NULL) {
+        return false;
+    }
     uint32_t now = (uint32_t)hal_time_now_ms();
     // REVIEW_FIXERS LOW-1 (lockfx): READ-ONLY on purpose. This runs on the
     // wifi_prov_owner task while httpd creates/resolves sessions in the same

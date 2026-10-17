@@ -1131,6 +1131,16 @@ static void test_az01_bootstrap_only_when_never_written(void)
     TEST_CHECK(fake_kv_script_next_open_status(WEB_AUTH_NAMESPACE, HAL_IO), "script open failure 2");
     TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec) == WEB_AUTH_LOAD_UNREADABLE,
                "a read error loads UNREADABLE, not ABSENT");
+
+    // FX-02: credential key lost while the ever-enabled marker is set: closed.
+    reset_all();
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = 600, .lcd_timeout_s = 600};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "FX-02 seed policy + marker");
+    TEST_CHECK(web_auth_store_ever_enabled(), "FX-02 marker set");
+    TEST_CHECK(web_auth_store_admin_configured_or_unreadable(), "FX-02 key not found + marker: counts as configured");
+    // Physical reset on that board writes an unconfigured blob: bootstrap reachable again.
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "FX-02 physical reset ok");
+    TEST_CHECK(!web_auth_store_admin_configured_or_unreadable(), "FX-02 physical reset reopens bootstrap");
 }
 
 // AZ-02: only not-found means absent for the policy and marker reads.

@@ -303,8 +303,15 @@ static update_stage_err_t flush_head(update_stage_t *st)
                 return UPDATE_STAGE_ERR_BAD_VERSION;
             }
         }
-        if (st->gate != NULL && update_semver_parse(dn, &dv) && strcmp(dn, st->semver) != 0) {
-            return UPDATE_STAGE_ERR_VERSION_MISMATCH;
+        if (st->gate != NULL) {
+            // AUP-03: with the version check active an unparseable descriptor version is refused, not
+            // accepted under the declared one.
+            if (!update_semver_parse(dn, &dv)) {
+                return UPDATE_STAGE_ERR_BAD_VERSION;
+            }
+            if (strcmp(dn, st->semver) != 0) {
+                return UPDATE_STAGE_ERR_VERSION_MISMATCH;
+            }
         }
     } else {
         // Strip v/V and one trailing "-dirty" exactly as the declared branch does; the dirty fact goes to the

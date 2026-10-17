@@ -235,6 +235,17 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     return ESP_OK;
 }
 
+bool recovery_app_write_claim(void)
+{
+    bool expected = false;
+    return __atomic_compare_exchange_n(&s_running, &expected, true, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+void recovery_app_write_release(void)
+{
+    __atomic_store_n(&s_running, false, __ATOMIC_SEQ_CST);
+}
+
 bool recovery_apply_busy(void)
 {
     return s_running;

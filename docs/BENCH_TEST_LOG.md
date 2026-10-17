@@ -3523,3 +3523,52 @@ Return-to-pre.4 findings:
   change the CRC versus the untouched migrated record (51536); the backup carries no Pico safety
   cfg so the restore cannot undo it. Commissioned values (S1/S8/tc_type/mains) unchanged.
 - Dual flash after the return left an S6a (trip_mask 0x0020) with link up; cleared once.
+
+## benchmain3 (2026-10-17): main 176bd438c on both chips, no reflash
+
+Host 192.168.1.156, board already on 176bd438c (ESP and Pico). Backup before changes:
+`logs/benchmain3_backup_pre.json` (33041 B, kiln_configs 5 after the round trip below).
+
+| Step | Result |
+|---|---|
+| 1 Health, "Kiln: (none)" | PASS after re-select (see below). get_fw_version OK/clean, Pico armed, no trip, internal min_free 104151 B |
+| 2 BW-07 kiln config round trip | PASS |
+| 3 45 min XIP-lock soak | PASS: no reset, no panic, no trip; internal min_free 104151 B all run (floor 8192 B) |
+| 4 Test-trip flag | PASS: `trip_is_test` true after `safety_test_trip` (mask 0x0008), false after `safety_clear_trip` once armed |
+| 5 Short firing | NOT RUN: `profiles_start` refused, E-STOP INTERLOCK not verified (readiness `estop_verified` not_done). Relays all off, `profiles_stop()` ok, state 0 |
+
+Step 1. `GET /api/kiln_configs` returned `active_id:null` with 3 slots. Not a device bug: backup import
+deliberately never restores the active slot (backup_import.c "Coordinator decision (assessment task 7)";
+the plan line says "informational only -- re-apply from Kiln configs after restore"). Applied slot 1
+(`M18RR_B21renamed`, active before) with `kiln_config_apply(id=1)`: apply_status confirmed, LCD banner
+shows `Kiln: M18RR_B21ren...`. Side finding from the device log of the prior boot: at boot the cfg LittleFS
+partition mounted with "Corrupted dir pair at {0x0,0x1}" (-84), cfg_fs auto-formatted it (751 ms), then
+"zones config UNTRUSTWORTHY: cfg file zones.json missing/unreadable and NVS blob absent/invalid" and
+readiness `storage` not_done until the settings restore rewrote zones. After the restore and re-select
+readiness `storage` is ok. The cfg partition was empty/corrupt after the preceding dual flash; cause not
+established here (flash tool vs firmware). The E-stop attestation record was also gone (`estop_verified`
+never confirmed), which blocks step 5; benchmain2 fired fine, so it was lost between benchmain2 and now,
+plausibly with the same wipe or the benchmain2 return-to-pre.4 sequence.
+
+Step 2. Exported slots 1..3 (`/api/kiln_configs/export`, pkg_hash 0x3d7b692f, 0x0d67de33, 0x033b8ab8) and
+re-imported slot 1 and 2 under new names: both accepted (HTTP 200, new ids 4, 5) and re-exported with the
+identical pkg_hash. Same-name re-import is refused 400 "already has that name" (expected). Server-side
+`backup_import` dry run of the full export (5 slots) was accepted, then a real merge import was accepted
+(zones/profiles read-back match, no slot created because names matched). The two throwaway slots were
+deleted via `/api/kiln_configs/delete`; list is back to 3 slots, slot 1 active. The stale-hash slots 2 and 3
+(refused in benchmain2) now verify, so BW-07 holds.
+
+Step 3. Two overlapping soak scripts for 45 min (the second restarted after the first used a wrong Accept-Encoding and got 406 on the gzip-only
+pages): `/diagnostics`, `/ota`, `/api/status`, `/api/backup/export` read in 3 concurrent threads (~9000 ok
+reads in the second script), `POST /api/ramp_assist` toggled every 7 s (375 writes, all HTTP 200, left
+disabled), plus LCD navigation (home -> config -> Diagnostics, next page x2..x4, home) every 5 min via
+`touch_inject` for about 9 cycles. Polled `/api/status` every 30 s: uptime monotonic (1657 -> 4340 s, no reset),
+reset_reason stayed `software (esp_restart)` (the earlier boot), diag_trip_mask 0, internal min_free 104151 B
+unchanged, largest free block 32768 B unchanged. Script error count is from my own faults (nonexistent
+`/api/ota/status` 404, 406 in the first script), not the device.
+
+Step 4. `safety_test_trip(confirm=True)`: TRIP_EVENT reason 4 seq 1; `/api/status` `trip_is_test` true,
+`diag_trip_mask` 8. `safety_clear_trip()`: mask 0; `trip_is_test` false, diag_state 2, heating enabled.
+
+Final state: idle, Pico armed, no trip, relays off, Kiln config 1 active, ramp assist disabled, units Fahrenheit
+(from the restored backup), readiness: only safety_commissioned (3 values missing), ct_attribution and estop_verified open.
