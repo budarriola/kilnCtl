@@ -785,6 +785,7 @@ typedef struct {
 
     uint8_t segment_index;
     bool dwelling;
+    bool dwell_arrived_hot;      /* CL-03: dwell began with a zone above target+band (descending segment) */
     float target_c;              /* shared setpoint, stepped incrementally each tick */
     uint32_t segment_elapsed_s;  /* shared; only advances while ramp-lock is satisfied */
     /* Sub-second carry (0..999 ms) behind segment_elapsed_s/total_elapsed_s: the whole-second
@@ -1626,6 +1627,19 @@ float ramp_assist_dwell_credit_total_spend_s(const s_exec_state_t *ex, float ent
  * accrual and lag-detection gates elsewhere in this file. A run with no
  * active zones returns true (nothing to wait on). */
 bool ramp_assist_dwell_target_reached(const s_exec_state_t *ex);
+
+/* CL-03 (KNOWN_ISSUES): true while a DESCENDING segment's dwell has started
+ * (the shared setpoint jumps to the segment target at once when
+ * ramp_c_per_hr == 0) but some driving zone is still hotter than target_c by
+ * more than the ramp-lock band. The dwell timer (not the setpoint) is held
+ * for as long as this is true, so the hold cannot elapse before the kiln has
+ * physically come down to target. False when dwell_arrived_hot is false, so
+ * rising and flat segments are unchanged. */
+bool ramp_assist_dwell_too_hot(const s_exec_state_t *ex);
+
+/* Pure predicate behind it: any active, unfaulted, non-monitor zone with a valid reading above target_c by
+ * more than the ramp-lock band. Evaluated once at dwell entry to set dwell_arrived_hot. */
+bool ramp_assist_zones_above_band(const s_exec_state_t *ex);
 
 /* ---- history ring buffer unpack (profile_executor.c; history_pack()/the
  * pack-temp/unpack-temp helpers stay static there, only used by the same

@@ -2305,6 +2305,44 @@ static void test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone(void
                "a monitor-only zone must NOT floor the shared dwell credit");
 }
 
+static void test_ramp_assist_dwell_too_hot_holds_descending_dwell_timer(void)
+{
+    TEST_SECTION("ramp_assist_dwell_too_hot() -- CL-03: a descending segment's dwell timer waits while a driving "
+                 "zone is still hotter than target by more than the ramp-lock band");
+    static s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.dwelling = true;
+    ex.dwell_arrived_hot = true;
+    ex.target_c = 500.0f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = true;
+    ex.zones[0].actual_c = 900.0f; /* free-cooling from 900 C to a 500 C hold */
+    TEST_CHECK(ramp_assist_dwell_too_hot(&ex), "900 C vs 500 C target on a descending dwell holds the timer");
+    ex.zones[0].actual_c = 500.0f + EXEC_RAMP_LOCK_BAND_C(0);
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "exactly at the band edge releases the timer");
+    ex.zones[0].actual_c = 900.0f;
+    TEST_CHECK(ramp_assist_zones_above_band(&ex), "zones_above_band sees the hot zone (dwell-entry predicate)");
+    ex.dwell_arrived_hot = false;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "a dwell that did not arrive hot is never held (mid-hold overshoot unchanged)");
+    ex.dwell_arrived_hot = true;
+    ex.dwelling = false;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "not yet dwelling: the ramp itself is untouched");
+    ex.dwelling = true;
+    ex.zones[0].monitor_only = true;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "a monitor-only zone cannot hold the timer");
+    ex.zones[0].monitor_only = false;
+    ex.zones[0].faulted = true;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "a faulted zone cannot hold the timer");
+    ex.zones[0].faulted = false;
+    ex.zones[0].actual_valid = false;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "an invalid reading is the ramp lock's business, not this hold's");
+    ex.zones[0].actual_valid = true;
+    ex.zones[1].active = true;
+    ex.zones[1].actual_valid = true;
+    ex.zones[1].actual_c = 500.0f;
+    TEST_CHECK(ramp_assist_dwell_too_hot(&ex), "one hot zone among several still holds the timer");
+}
+
 static void test_pause_keeps_claim_resume_reclaims_it(void)
 {
     TEST_SECTION("profile_executor_pause()/resume() -- pause hands the claim to MANUAL (not NONE), "
@@ -13292,6 +13330,7 @@ void run_test_profile_executor_prestart(void)
     test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted();
     test_escalate_guard_trip_monitor_only_zone_excluded_from_all_faulted();
     test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone();
+    test_ramp_assist_dwell_too_hot_holds_descending_dwell_timer();
     test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run();
     test_pause_keeps_claim_resume_reclaims_it();
     test_resume_restarts_thermal_guard_windows();

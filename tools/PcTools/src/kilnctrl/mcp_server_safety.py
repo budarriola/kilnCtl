@@ -385,7 +385,10 @@ def safety_test_trip(confirm: bool = False, host: Optional[str] = None) -> str:
     Clear it afterwards with safety_clear_trip() when ready. The Pico enforces a
     10 s rate limit. Refuses unless confirm is exactly True, and refuses if the
     safety processor is already tripped. Afterwards re-reads GET_DIAG and checks
-    trip_reason == 4 and trip_mask == 1 << (4 - 1). Reports trip_seq.
+    trip_reason == 4 and trip_mask == 1 << (4 - 1) (the Pico latches one reason per
+    trip). If the DIAG has not refreshed yet, a TRIP_EVENT carrying this call's
+    trip_seq and reason 4 confirms instead (seq and reason only, no mask check).
+    Reports trip_seq.
 
     A Pico that predates TEST_TRIP answers 501 (protocol too old) or never
     answers (503 no_reply: "peer did not answer; it may predate TEST_TRIP").
