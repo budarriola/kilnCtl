@@ -1679,7 +1679,7 @@ function validateStep7(fields, zoneMaxTemps) {
   if (fields.tcOffsetC !== '' && (!isFinite(fields.tcOffsetC) ||
       Math.abs(Number(fields.tcOffsetC)) > STEP7_TC_OFFSET_MAX_C)) {
     errors.push('Calibration offset (tc_offset_c) must be a finite number within +/-' +
-      STEP7_TC_OFFSET_MAX_C + ' Â°C (the safety processor refuses more).');
+      STEP7_TC_OFFSET_MAX_C + ' °C (the safety processor refuses more).');
   }
   // tc_sheath_tau_s (id 267, 0x010B): bare = 0, tubed = a whole number of seconds 1..600.
   if (fields.tcSheath !== 'bare' && fields.tcSheath !== 'tubed') {
@@ -1692,7 +1692,7 @@ function validateStep7(fields, zoneMaxTemps) {
   }
   if (!(fields.absMaxTempC > 0) || fields.absMaxTempC > STEP7_ABS_MAX_TEMP_MAX_C) {
     errors.push('Enter the safety processor\'s absolute-maximum ceiling (abs_max_temp_c) -- a real ' +
-      'positive number up to ' + STEP7_ABS_MAX_TEMP_MAX_C + ' Â°C, no "unlimited" value.');
+      'positive number up to ' + STEP7_ABS_MAX_TEMP_MAX_C + ' °C, no "unlimited" value.');
   } else {
     var maxZone = (zoneMaxTemps || []).filter(function (v) { return v > 0; })
       .reduce(function (a, b) { return Math.max(a, b); }, 0);
