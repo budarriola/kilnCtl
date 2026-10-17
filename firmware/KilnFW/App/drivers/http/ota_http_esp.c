@@ -736,20 +736,12 @@ static void ota_rollback_reboot_task(void *arg)
     }
 
     ESP_LOGW(OTA_HTTP_TAG, "OTA rollback: rebooting now into the previous image");
-    /* RO-02: the reader bracket covers only the otadata read + rewrite; it is released BEFORE
-     * esp_restart so no IDF shutdown handler can block on the app mutex. */
-    flash_xip_reader_enter();
-    const esp_partition_t *rollback_target = esp_ota_get_next_update_partition(NULL);
-    esp_err_t err = ota_http_esp_target_usable(rollback_target, esp_ota_get_running_partition())
-                        ? esp_ota_set_boot_partition(rollback_target)
-                        : ESP_ERR_NOT_FOUND;
+    flash_xip_reader_enter(); /* read_otadata + rewrite; released only if no reboot */
+    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     flash_xip_reader_exit();
-    if (err == ESP_OK) {
-        esp_restart();
-    }
     // Only reached if the call itself failed to even start the reboot --
     // on success this line never runs, the board is already restarting.
-    ESP_LOGE(OTA_HTTP_TAG, "OTA rollback set_boot_partition/restart failed: %s -- "
+    ESP_LOGE(OTA_HTTP_TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
                   "board NOT rebooted, still running the current image",
              esp_err_to_name(err));
     // This fallback (the call itself failing to even start the reboot) is
