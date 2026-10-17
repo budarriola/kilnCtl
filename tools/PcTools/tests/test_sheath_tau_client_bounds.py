@@ -59,3 +59,28 @@ def test_zones_page_bounds_match_firmware() -> None:
     m = re.search(r'min="([0-9.]+)" max="([0-9.]+)" class="sheathtau"', text)
     assert m, "zones_page.html sheathtau input min/max not found"
     assert (float(m.group(1)), float(m.group(2))) == _fw_bounds()
+
+
+# Pico tc_sheath_tau_s (0x010B, id 267): SaftyFW SET_PARAM refuses > CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S.
+def _pico_max() -> float:
+    return _c_define(_REPO / "firmware" / "SaftyFW" / "src" / "config_params.h", "CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S")
+
+
+def test_pico_max_matches_estimator() -> None:
+    assert _pico_max() == _c_define(_DRV / "control" / "tc_lag_comp.h", "TC_LAG_COMP_TAU_MAX_S")
+
+
+def test_commissioning_page_pico_bounds() -> None:
+    text = (_DRV / "http" / "safety_commissioning_page.html").read_text(encoding="utf-8")
+    m = re.search(r"id: 267, name: 'tc_sheath_tau_s', type: 'u16'[^\n]*min: ([0-9.]+), max: ([0-9.]+)", text)
+    assert m, "safety_commissioning_page.html id 267 tc_sheath_tau_s min/max not found"
+    assert (float(m.group(1)), float(m.group(2))) == (0.0, _pico_max())
+
+
+def test_wizard_step7_pico_bounds() -> None:
+    text = (_DRV / "http" / "setup_wizard_page.html").read_text(encoding="utf-8")
+    m = re.search(r"fields\.tcSheathTauS >= 1 && fields\.tcSheathTauS <= ([0-9]+)\)", text)
+    assert m, "setup_wizard_page.html step 7 tube tau bound not found"
+    assert float(m.group(1)) == _pico_max()
+    m = re.search(r'id="s7TcTau" value="([0-9]+)"', text)
+    assert m and float(m.group(1)) == 60.0, "tubed default is not 60 s"

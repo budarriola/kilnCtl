@@ -442,8 +442,8 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(badOffset.valid === false, 'step3: an out-of-bound cal_offset_c is refused');
 
   const nanOffset = ctx.validateStep3(1, [{ tc_type: 3, cal_offset_c: NaN }], -50.0, 50.0);
-  assert(nanOffset.valid === false, 'step3: NaN cal_offset_c is refused');
-})();
+  assert(nanOffset.valid === false, 'step3: NaN cal_offset_c is refused');
+})();
 
 (function testStep3SheathTau() {
   const ctx = loadPageScript(noopFetch);
@@ -951,7 +951,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // safety_commissioning_page.html's own GROUPS table uses.
 (function testStep7Validate() {
   const ctx = loadPageScript(noopFetch);
-  const okFields = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, ctInstalled: 1, ctTopology: 1 };
+  const okFields = { tcType: 3, tcOffsetC: 0, absMaxTempC: 1300, tcSheath: 'bare', tcSheathTauS: 0, ctInstalled: 1, ctTopology: 1 };
   assert(ctx.validateStep7(okFields, [1000, 1200]).valid === true,
     'step7: a real tc_type + positive abs_max_temp_c above every zone ceiling + CT answers validates');
 
@@ -967,6 +967,22 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 
   const nanOffset = Object.assign({}, okFields, { tcOffsetC: NaN });
   assert(ctx.validateStep7(nanOffset, []).valid === false, 'step7: a non-finite tc_offset_c is refused');
+
+  // tc_sheath_tau_s (267): bare/tubed must be answered; tubed is 1..600 whole seconds.
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: '' }), []).valid === false,
+    'step7: bare/tubed must be answered');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 60 }), []).valid === true,
+    'step7: tubed 60 s validates');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 600 }), []).valid === true,
+    'step7: tubed 600 s validates (inclusive)');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 601 }), []).valid === false,
+    'step7: tubed 601 s is refused');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 0 }), []).valid === false,
+    'step7: tubed 0 s is refused (choose bare)');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: 60.5 }), []).valid === false,
+    'step7: a fractional tube tau is refused (U16 seconds)');
+  assert(ctx.validateStep7(Object.assign({}, okFields, { tcSheath: 'tubed', tcSheathTauS: NaN }), []).valid === false,
+    'step7: an empty tube tau is refused');
 
   const noCtAnswer = Object.assign({}, okFields, { ctInstalled: -1 });
   assert(ctx.validateStep7(noCtAnswer, []).valid === false,
@@ -986,7 +1002,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // opposite direction.
 (function testStep7AbsMaxNeverTighterThanEsp() {
   const ctx = loadPageScript(noopFetch);
-  const base = { tcType: 3, tcOffsetC: 0, ctInstalled: 0, ctTopology: -1 };
+  const base = { tcType: 3, tcOffsetC: 0, tcSheath: 'bare', tcSheathTauS: 0, ctInstalled: 0, ctTopology: -1 };
 
   const atCeiling = Object.assign({}, base, { absMaxTempC: 1200 });
   assert(ctx.validateStep7(atCeiling, [1200]).valid === true,

@@ -198,8 +198,12 @@ static safety_rate_guard_meta_blob_t s_rate_guard_meta;
  * 6 -> 7 (2026-10-16, SR-31): context_max_age_s (0x0401), mainfault_debounce_ms
  * (0x0404) and telemetry_period_ms (0x0405) REMOVED from the middle of the table
  * (the Pico no longer carries them; ids stay burned). Rows after them moved down,
- * so a v6 blob would remap -- the version bump (and the smaller size) refuses it. */
-#define SAFETY_CFG_STORE_VERSION 7u
+ * so a v6 blob would remap -- the version bump (and the smaller size) refuses it.
+ *
+ * 7 -> 8 (2026-10-16, TC sheath lag): tc_sheath_tau_s (0x010B) appended at the END
+ * of the table. A v7 blob is the v8 table's prefix; nvs_load_store() migrates it
+ * (and a v6 blob) by param id, keeping config_crc. */
+#define SAFETY_CFG_STORE_VERSION 8u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -336,6 +340,9 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
     { 0x0320, KILNLINK_PARAM_TYPE_U8, "zone_ct_channel[0]" },
     { 0x0321, KILNLINK_PARAM_TYPE_U8, "zone_ct_channel[1]" },
     { 0x0322, KILNLINK_PARAM_TYPE_U8, "zone_ct_channel[2]" },
+    /* 0x010B tc_sheath_tau_s -- Pico TC sheath lag tau, U16 0..600 s, 0 = bare TC
+     * (docs/TC_SHEATH_LAG_SIM.md). Tail-append, 7 -> 8 bump. */
+    { 0x010B, KILNLINK_PARAM_TYPE_U16, "tc_sheath_tau_s" },
 };
 
 // SAFETY_CFG_PARAM_COUNT (safety_cfg_store.h) is a hand-maintained literal,
@@ -529,7 +536,15 @@ static void reset_to_defaults(void)
  * (0x0401, between 0x031E and 0x0402), mainfault_debounce_ms (0x0404) and
  * telemetry_period_ms (0x0405) (both between 0x0403 and 0x0501). Values are mapped by
  * param id, so a v6 cache keeps every surviving entry and config_crc as stored. */
-#define SAFETY_CFG_PARAM_COUNT_V6 (SAFETY_CFG_PARAM_COUNT + 3u)
+/* v7 -> v8: v7 is the v8 table without its last row (0x010B), same order. */
+#define SAFETY_CFG_PARAM_COUNT_V7 (SAFETY_CFG_PARAM_COUNT - 1u)
+#define SAFETY_CFG_PARAM_COUNT_V6 (SAFETY_CFG_PARAM_COUNT_V7 + 3u)
+
+typedef struct {
+    uint8_t version;
+    uint16_t config_crc;
+    safety_cfg_entry_t entries[SAFETY_CFG_PARAM_COUNT_V7];
+} safety_cfg_store_blob_v7_t;
 
 typedef struct {
     uint8_t version;
@@ -539,6 +554,7 @@ typedef struct {
 
 typedef union {
     safety_cfg_store_blob_t cur;
+    safety_cfg_store_blob_v7_t v7;
     safety_cfg_store_blob_v6_t v6;
 } safety_cfg_load_scratch_t;
 
@@ -548,7 +564,7 @@ static int index_for_id(uint16_t id);
 static bool build_v6_id_order(uint16_t out[SAFETY_CFG_PARAM_COUNT_V6])
 {
     size_t k = 0;
-    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT; i++) {
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT_V7; i++) {
         uint16_t id = SAFETY_CFG_PARAM_TABLE[i].id;
         if (id == 0x0402 && k < SAFETY_CFG_PARAM_COUNT_V6) {
             out[k++] = 0x0401;
@@ -607,6 +623,24 @@ static void nvs_load_store(void)
         }
         s_store = scr->cur;
         s_has_data = (scr->cur.config_crc != 0);
+        free(scr);
+        return;
+    }
+    if (ver == 7u) {
+        if (len != sizeof(scr->v7)) {
+            ESP_LOGW(TAG, "safety_cfg_store v7 blob is the wrong size -- treating as unreadable");
+            free(scr);
+            return;
+        }
+        for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V7; j++) {
+            int idx = index_for_id(SAFETY_CFG_PARAM_TABLE[j].id);
+            if (idx >= 0) {
+                s_store.entries[idx] = scr->v7.entries[j];
+            }
+        } /* 0x010B stays unset: refilled by the next refetch */
+        s_store.config_crc = scr->v7.config_crc;
+        s_has_data = (s_store.config_crc != 0);
+        ESP_LOGI(TAG, "safety_cfg_store migrated v7 -> v%u", (unsigned)SAFETY_CFG_STORE_VERSION);
         free(scr);
         return;
     }

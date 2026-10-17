@@ -1657,6 +1657,15 @@ function validateStep7(fields, zoneMaxTemps) {
   if (fields.tcOffsetC !== '' && !isFinite(fields.tcOffsetC)) {
     errors.push('Calibration offset (tc_offset_c) must be a finite number.');
   }
+  // tc_sheath_tau_s (id 267, 0x010B): bare = 0, tubed = a whole number of seconds 1..600.
+  if (fields.tcSheath !== 'bare' && fields.tcSheath !== 'tubed') {
+    errors.push('Answer whether the safety processor\'s thermocouple is bare or in a protection tube ' +
+      '(tc_sheath_tau_s).');
+  } else if (fields.tcSheath === 'tubed' &&
+             !(Number.isInteger(fields.tcSheathTauS) && fields.tcSheathTauS >= 1 && fields.tcSheathTauS <= 600)) {
+    errors.push('Tube time constant (tc_sheath_tau_s) must be a whole number of seconds from 1 to 600 ' +
+      '(choose "bare" for 0).');
+  }
   if (!(fields.absMaxTempC > 0)) {
     errors.push('Enter the safety processor\'s absolute-maximum ceiling (abs_max_temp_c) -- a real ' +
       'positive number, no "unlimited" value.');
@@ -2891,6 +2900,17 @@ function renderStep7() {
       '<p class="hint">Added to the safety board\'s own MAX31856 reading, before any guard sees it. ' +
       '0 means no correction.</p></div>';
 
+    html += '<div class="wfield"><label for="s7TcSheath">Safety processor thermocouple: bare or in a protection tube?</label>' +
+      '<select id="s7TcSheath"><option value="">-- choose --</option>' +
+      '<option value="bare">Bare (no tube)</option><option value="tubed">In a protection tube</option></select>' +
+      '<div id="s7TcTauWrap" style="display:none"><label for="s7TcTau">Tube time constant (tc_sheath_tau_s, s)</label>' +
+      '<input type="number" step="1" min="1" max="600" id="s7TcTau" value="60"></div>' +
+      '<p class="hint">A tube makes the reading lag the true temperature while heating. With a tube, the ' +
+      'safety processor estimates the hotter true temperature and its over-temperature guards (S1, S2) trip ' +
+      'on the higher of the raw and estimated values, so the setting can only make a trip earlier. 60 s is a ' +
+      'typical starting value for a tubed thermocouple; it has not been measured on this kiln. Bare = 0, no ' +
+      'compensation.</p></div>';
+
     html += '<div class="wfield"><label for="s7AbsMax">Absolute-maximum ceiling (abs_max_temp_c, &deg;C)</label>' +
       '<input type="number" step="any" min="0.0001" id="s7AbsMax" placeholder="e.g. 1300">' +
       '<p class="hint">The highest temperature this kiln\'s furniture/elements/brick can survive -- not the ' +
@@ -2987,6 +3007,17 @@ function renderStep7() {
     if (byId[261] && byId[261].set) setVal('s7TcType', byId[261].value);
     if (byId[266] && byId[266].set) setVal('s7TcOffset', byId[266].value);
     if (byId[260] && byId[260].set) setVal('s7AbsMax', byId[260].value);
+    if (byId[267] && byId[267].set) {
+      var tau267 = Number(byId[267].value);
+      setVal('s7TcSheath', tau267 > 0 ? 'tubed' : 'bare');
+      if (tau267 > 0) setVal('s7TcTau', tau267);
+    }
+    function refreshTcTauVisibility() {
+      document.getElementById('s7TcTauWrap').style.display =
+        (document.getElementById('s7TcSheath').value === 'tubed') ? '' : 'none';
+    }
+    document.getElementById('s7TcSheath').addEventListener('change', refreshTcTauVisibility);
+    refreshTcTauVisibility();
     if (byId[265] && byId[265].set) setVal('s7CtInstalled', byId[265].value);
     if (byId[799] && byId[799].set) setVal('s7CtTopology', byId[799].value);
     if (byId[262] && byId[262].set) setVal('s7CtMap0', byId[262].value);
@@ -3022,6 +3053,8 @@ function renderStep7() {
       var tcTypeRaw = document.getElementById('s7TcType').value;
       var tcOffsetRaw = document.getElementById('s7TcOffset').value;
       var absMaxRaw = document.getElementById('s7AbsMax').value;
+      var tcSheathRaw = document.getElementById('s7TcSheath').value;
+      var tcTauRaw = document.getElementById('s7TcTau').value;
       var ctInstalledRaw = document.getElementById('s7CtInstalled').value;
       var ctTopologyRaw = document.getElementById('s7CtTopology').value;
       var ctMapRaw = [0, 1, 2].map(function (ch) { return document.getElementById('s7CtMap' + ch).value; });
@@ -3030,6 +3063,8 @@ function renderStep7() {
         tcType: tcTypeRaw === '' ? -1 : parseInt(tcTypeRaw, 10),
         tcOffsetC: tcOffsetRaw === '' ? 0 : parseFloat(tcOffsetRaw),
         absMaxTempC: parseFloat(absMaxRaw),
+        tcSheath: tcSheathRaw,
+        tcSheathTauS: tcSheathRaw === 'tubed' ? (tcTauRaw === '' ? NaN : Number(tcTauRaw)) : 0,
         ctInstalled: ctInstalledRaw === '' ? -1 : parseInt(ctInstalledRaw, 10),
         ctTopology: ctTopologyRaw === '' ? -1 : parseInt(ctTopologyRaw, 10),
         ctChannelMap: ctMapRaw.map(function (v) { return v === '' ? -1 : parseInt(v, 10); }),
@@ -3079,6 +3114,7 @@ function renderStep7() {
           { id: 261, name: 'tc_type', value: fields.tcType },
           { id: 266, name: 'tc_offset_c', value: fields.tcOffsetC },
           { id: 260, name: 'abs_max_temp_c', value: fields.absMaxTempC },
+          { id: 267, name: 'tc_sheath_tau_s', value: fields.tcSheathTauS },
           { id: 265, name: 'ct_installed', value: fields.ctInstalled },
         ];
         if (fields.ctInstalled === 1) {
