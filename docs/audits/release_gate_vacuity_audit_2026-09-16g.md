@@ -137,9 +137,9 @@ convention), since superseded
 by later unrelated edits to the file; the underlying finding -- that
 `json_escape()` is where the negative test was inserted and that the
 restore was byte-exact -- is unchanged, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`b6c94db7` (citation
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`039bdfe0` (citation
 refreshed 2026-09-24, again 2026-09-28 after HP-02, again 2026-10-05 after
-spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers, again 2026-10-09)) matched HEAD. Re-run: PASS.
+spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers, again 2026-10-09, again 2026-10-16)) matched HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
