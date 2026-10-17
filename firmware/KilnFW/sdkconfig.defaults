@@ -561,10 +561,12 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_RX_BA_WIN=6
 
-# RW-01: bound the Wi-Fi dynamic TX buffers (IDF default 32 x ~1.6 KB = ~52 KB internal at peak). 13 httpd
-# sessions plus a TLS update check is the stack-up App/drivers/common/dram_margin.h already recorded
-# (2026-08-22, ERR_CONNECTION_RESET). 16 caps the worst case at ~26 KB. Unmeasured under a socket storm.
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+# RW-01: the Wi-Fi TX buffers are STATIC here (CONFIG_ESP_WIFI_TX_BUFFER_TYPE=0; the DYNAMIC_TX_BUFFER_NUM symbol is
+# not even visible, kconfgen ignores it), so they are a fixed 16 x ~1.6 KB allocated at esp_wifi_init() and already
+# inside the heap_internal baseline: a socket storm cannot grow them (see App/drivers/common/dram_margin.h for the
+# 2026-08-22 13-socket case). Pin type and count so a changed IDF default cannot switch to the IDF's 32 dynamic.
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=0
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=16
 
 # CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS: IDF's lwip/Kconfig defaults this to 0 (not
 # 4) under the same SPIRAM_TRY_ALLOCATE_WIFI_LWIP condition above; per that
