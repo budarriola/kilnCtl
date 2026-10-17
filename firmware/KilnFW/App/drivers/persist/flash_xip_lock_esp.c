@@ -3,6 +3,7 @@
 
 #include "sdkconfig.h"
 #include "esp_flash.h"
+#include "esp_flash_chips/esp_flash_types.h" /* esp_flash_t / esp_flash_os_functions_t bodies */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"

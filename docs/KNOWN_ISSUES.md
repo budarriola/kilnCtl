@@ -21,7 +21,7 @@ The single list of open problems (bugs and accepted trade-offs, not planned feat
 - pre.3 has no `/api/update/status`, so `update_install_start` fails (404) after a PC-side stage | MED (bench) | install of staged pre.4 not completed | [BENCH_UPDATE_2026-10-15](bench/BENCH_UPDATE_2026-10-15.md) | open
 - `flash_firmware` otadata gap | MED | JTAG flash does not touch `otadata`; a board pointing at factory/recovery boots recovery, verify fails loud | [CLAUDE.md](../CLAUDE.md) flash section, [MCP_SERVERS](MCP_SERVERS.md) | known, deliberate
 - Recovery HTTP starts before `recovery_install_boot()` (REVIEW_AUTOFX LOW-4) | LOW | a client joining in the first milliseconds can hit the mutating routes before the apply claim; unreachable in practice, fix is a recovery boot-order change | [REVIEW_AUTOFX](audits/REVIEW_AUTOFX.md), [AUDIT_RECOVERY_IMAGE](audits/AUDIT_RECOVERY_IMAGE.md) | open (`recovery_main.c` still calls `recovery_http_start` before `recovery_install_boot`)
-- Broader flash-mmap vs writer serialization (XIP cache disabled window) | MED | only the mark-valid readback was bounded; other mmap readers vs flash writers are not serialized | [AUDIT_XIP_CACHE_DISABLED](audits/AUDIT_XIP_CACHE_DISABLED.md) | open
+- Broader flash-mmap vs writer serialization (XIP cache disabled window) | MED | fixed 2026-10-17: flash_xip_lock wraps SPI1 os_func start/end, mmap readers bracket with it; LOW-3 (no lint for new mmap callers) open | [REVIEW_FLASH_MMAP_SERIALIZATION](audits/REVIEW_FLASH_MMAP_SERIALIZATION.md) | fixed
 
 ## Web / auth
 - Web page ignores `saved:true` on a failed live-profile decide (PROFILESFX3 INFO-2) | INFO | [REVIEW_PROFILESFX3](audits/REVIEW_PROFILESFX3_2026-10-12.md) | open
