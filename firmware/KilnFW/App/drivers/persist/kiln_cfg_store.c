@@ -1045,6 +1045,40 @@ static bool name_collides(const char *normalized_name, int32_t exclude_id)
     return false;
 }
 
+/* Recompute e->pkg_hash from its stored ESP blob + Pico half in the CURRENT canonical form.
+ * RAM only (persisted by the next save); on any failure the old hash is kept. */
+static void rehash_slot_in_ram(kiln_cfg_entry_t *e)
+{
+    zones_cfg_t *cfg = persist_scratch_alloc(sizeof(*cfg));
+    uint8_t *canonical = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    size_t canonical_len = 0;
+    uint32_t hash = 0;
+    if (cfg && canonical && e->blob_len <= sizeof(*cfg)) {
+        memset(cfg, 0, sizeof(*cfg));
+        memcpy(cfg, e->blob, e->blob_len);
+        if (zones_config_export_canonical(cfg, canonical, ZONES_CONFIG_BLOB_MAX_SIZE, &canonical_len) &&
+            kiln_package_compute_hash(e->pkg_schema, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
+            hash != 0) {
+            e->pkg_hash = hash;
+        }
+    }
+    free(cfg);
+    free(canonical);
+}
+
+/* BW-06 follow-up: the canonical form that pkg_hash covers changed (zones v27 added
+ * tc_sheath_tau_s), so a stored slot can carry a stale hash that would not verify on re-import.
+ * Re-hash every populated slot from its stored blob in the current form. */
+static void rehash_all_slots_in_ram(void)
+{
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        kiln_cfg_entry_t *e = &s_store.entries[i];
+        if (e->in_use && e->pico_populated && e->pkg_hash != 0) {
+            rehash_slot_in_ram(e);
+        }
+    }
+}
+
 /* ---- Public API ------------------------------------------------------------ */
 
 esp_err_t kiln_cfg_store_init(void)
@@ -1077,6 +1111,8 @@ esp_err_t kiln_cfg_store_init(void)
             e->pkg_schema = 0;
         }
     }
+
+    rehash_all_slots_in_ram(); /* BW-06 follow-up */
 
     /* Boot-time active-config restore -- see kiln_cfg_store_init()'s doc
      * comment (kiln_cfg_store.h) for the exact three-outcome fallback this
@@ -2387,6 +2423,25 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
     uint32_t recomputed = 0;
     if (!kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico, &recomputed)) {
         IMPORT_REFUSE("internal error: hash computation failed");
+    }
+    if (recomputed != declared_hash && s->cand.version < 27) {
+        /* BW-06 follow-up: a package exported before zones v27 hashed the canonical form without
+         * tc_sheath_tau_s. Verify against that form, then re-hash in the current form. */
+        size_t legacy_len = 0;
+        uint32_t legacy = 0;
+        if (zones_config_export_canonical_pre_v27(&s->cand, s->canonical, sizeof(s->canonical), &legacy_len) &&
+            kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)legacy_len, &s->pico, &legacy) &&
+            legacy == declared_hash) {
+            for (size_t zi = 0; zi < sizeof(s->cand.zones) / sizeof(s->cand.zones[0]); zi++) {
+                s->cand.zones[zi].tc_sheath_tau_s = 0; /* v26 padding bytes, not a setting */
+            }
+            if (!zones_config_export_canonical(&s->cand, s->canonical, sizeof(s->canonical), &canonical_len) ||
+                !kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico,
+                                           &recomputed)) {
+                IMPORT_REFUSE("internal error: hash computation failed");
+            }
+            declared_hash = recomputed;
+        }
     }
     if (recomputed != declared_hash) {
         IMPORT_REFUSE("package hash does not match its contents -- the file is corrupted, was "

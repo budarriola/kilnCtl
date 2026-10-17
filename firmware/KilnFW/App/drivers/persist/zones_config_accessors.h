@@ -1880,6 +1880,10 @@ size_t zones_config_canonical_max_size(void);
  * every translation unit that includes this header. */
 bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len);
 
+/* Same as above but in the pre-v27 canonical form (no tc_sheath_tau_s per zone), which is what
+ * a package exported before ZONES_CFG_VERSION 27 hashed (BW-06 follow-up). Verification only. */
+bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len);
+
 /* Inverse of the above. `out` is memset(0) FIRST, unconditionally, before any
  * field is written -- H1's "zero-fill on reconstruction" requirement, so a
  * caller's poisoned or garbage-filled destination buffer can never leave

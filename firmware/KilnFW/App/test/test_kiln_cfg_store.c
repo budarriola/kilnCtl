@@ -228,6 +228,17 @@ bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap
     return true;
 }
 
+// Pre-v27 canonical form stub: the real one drops tc_sheath_tau_s; here it drops the last byte
+// so the legacy and current forms differ and hash differently.
+bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!zones_config_export_canonical(cfg, out, out_cap, out_len) || *out_len == 0) {
+        return false;
+    }
+    *out_len -= 1;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // 2026-09-14 follow-up (docs/KILN_PROFILES_PLAN.md items 3/4/14, "finish
 // upload/download"): kiln_cfg_store_import_package_json() also calls
@@ -3211,6 +3222,82 @@ static bool bw06_build(char *json, size_t cap, const uint16_t *ids, uint8_t n, s
                                     0x11223344u, json, cap, out_len);
 }
 
+// BW-06 follow-up: a package exported before zones v27 hashed the canonical form without
+// tc_sheath_tau_s. It must still import (and be re-hashed in the current form); a tampered one
+// must not; a stale stored slot hash is refreshed so main's own export re-imports.
+static bool bw06fx_build_v26(char *json, size_t cap, bool tamper_after_hash, size_t *out_len)
+{
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.version = 26;
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = 1;
+    pico.entries[0].param_id = 0x0104u;
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = 1300.0f;
+    pico.entries[0].value_bits = conv.bits;
+    uint32_t hash = 0;
+    if (!kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand) - 1, &pico, &hash)) {
+        return false;
+    }
+    if (tamper_after_hash) {
+        cand.zones[0].max_temp_c = 1100.0f;
+    }
+    return kiln_package_export_json("Pre27", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, hash,
+                                    0x11223344u, json, cap, out_len);
+}
+
+static void test_bw06fx_pre_v27_package_imports_and_rehashes(void)
+{
+    TEST_SECTION("BW-06 follow-up: pre-v27 package imports, tampered one is refused, stale slot hash refreshed");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    char reason[200] = {0};
+    int32_t id = -1;
+
+    TEST_CHECK(bw06fx_build_v26(json, KILN_PKG_JSON_MAX_LEN, true, &len), "setup: tampered v26 package");
+    TEST_CHECK(!kiln_cfg_store_import_package_json(json, &id, reason, sizeof(reason)),
+               "tampered pre-v27 package is refused");
+    TEST_CHECK(strstr(reason, "hash") != NULL, "refusal names the hash");
+
+    reason[0] = '\0';
+    TEST_CHECK(bw06fx_build_v26(json, KILN_PKG_JSON_MAX_LEN, false, &len), "setup: genuine v26 package");
+    TEST_CHECK(kiln_cfg_store_import_package_json(json, &id, reason, sizeof(reason)), "pre-v27 package imports");
+    int idx = find_index_by_id(id);
+    TEST_CHECK(idx >= 0, "imported slot exists");
+    if (idx >= 0) {
+        uint32_t stored = s_store.entries[idx].pkg_hash;
+        char *json2 = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+        size_t len2 = 0;
+        TEST_CHECK(json2 && kiln_cfg_store_export_package_json(id, json2, KILN_CFG_EXPORT_JSON_MAX_LEN, &len2,
+                                                               reason, sizeof(reason)),
+                   "re-export of the imported slot");
+        char *nm = json2 ? strstr(json2, "\"name\":\"Pre27\"") : NULL;
+        TEST_CHECK(nm != NULL, "found name to change");
+        if (nm) {
+            nm[strlen("\"name\":\"Pre2")] = '8';
+            int32_t id2 = -1;
+            TEST_CHECK(kiln_cfg_store_import_package_json(json2, &id2, reason, sizeof(reason)),
+                       "main's own export of the migrated slot re-imports");
+        }
+        free(json2);
+
+        s_store.entries[idx].pkg_hash = stored ^ 0x5A5A5A5Au;
+        rehash_all_slots_in_ram();
+        TEST_CHECK(s_store.entries[idx].pkg_hash == stored, "load-time re-hash restores the current-form hash");
+    }
+    free(json);
+}
+
 static void test_import_skips_retired_sr31_ids_refuses_unknown(void)
 {
     TEST_SECTION("kiln_cfg_store_import_package_json -- BW-06: retired SR-31 ids 0x0401/0x0404/0x0405 are "
@@ -4624,6 +4711,7 @@ void run_test_kiln_cfg_store(void)
     test_save_current_unfetched_cache_is_not_marked_populated();
     test_get_package_identity_unknown_id_and_migrated_slot();
     test_import_skips_retired_sr31_ids_refuses_unknown();
+    test_bw06fx_pre_v27_package_imports_and_rehashes();
     test_apply_refuses_half_package();
     test_corrupt_store_quarantines_and_blocks_writes();
     test_nvs_load_store_migrates_v1_blob_at_full_size();

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "persist_scratch.h"
 
 #include "MAX31856.h"
 #include "relay_authority.h" /* relay_authority_reset_in_flight() -- zones_config_set_coupling_cell() */
@@ -3459,6 +3460,42 @@ bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap
     uint8_t *p = out;
     encode_zones_cfg(&p, (const zones_cfg_t *)cfg);
     *out_len = (size_t)(p - out);
+    return true;
+}
+
+bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    /* The v26 canonical form is today's minus every zone's tc_sheath_tau_s (2 bytes each). Rather
+     * than a second field table, encode twice -- once as-is, once with every tau bit-flipped -- and
+     * drop the bytes that differ (exactly the tau bytes, since nothing else changed). */
+    if (!cfg || !out || !out_len || out_cap < zones_config_canonical_max_size()) {
+        return false;
+    }
+    zones_cfg_t *flipped = persist_scratch_alloc(sizeof(*flipped));
+    uint8_t *other = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    if (!flipped || !other) {
+        free(flipped);
+        free(other);
+        return false;
+    }
+    memcpy(flipped, cfg, sizeof(*flipped));
+    for (size_t i = 0; i < sizeof(flipped->zones) / sizeof(flipped->zones[0]); i++) {
+        flipped->zones[i].tc_sheath_tau_s ^= 0xFFFFu;
+    }
+    uint8_t *p = out;
+    encode_zones_cfg(&p, (const zones_cfg_t *)cfg);
+    size_t len = (size_t)(p - out);
+    uint8_t *q = other;
+    encode_zones_cfg(&q, flipped);
+    size_t kept = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (out[i] == other[i]) {
+            out[kept++] = out[i];
+        }
+    }
+    free(flipped);
+    free(other);
+    *out_len = kept;
     return true;
 }
 

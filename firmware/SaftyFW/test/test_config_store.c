@@ -3411,6 +3411,30 @@ static void test_tc_sheath_tau_param(void)
                "legacy 0xFFFF fill decodes as 0 (off), never as a huge tau");
 }
 
+// Bench benchmain2: config_crc differed after tau 0 -> 60 -> 0. By design: the record CRC covers seq
+// (the config_version source), so every commit changes it; for the SAME seq it is a function of the
+// field values only (tau written 0 equals tau never written).
+static void test_config_crc_is_value_function_at_fixed_seq(void)
+{
+    TEST_SECTION("config_store_record_crc -- same values and seq give the same CRC; a commit (seq) changes it");
+    config_store_record_t a, b;
+    kilnlink_param_value_t v;
+    memset(&v, 0, sizeof(v));
+    config_store_default(&a);
+    config_store_default(&b);
+    a.seq = 5u;
+    b.seq = 5u;
+    v.u16_val = 60u;
+    TEST_CHECK(config_params_set(&b, 0x010Bu, KILNLINK_PARAM_TYPE_U16, v), "tau 60 written");
+    TEST_CHECK(config_store_record_crc(&a) != config_store_record_crc(&b), "tau value is covered");
+    v.u16_val = 0u;
+    TEST_CHECK(config_params_set(&b, 0x010Bu, KILNLINK_PARAM_TYPE_U16, v), "tau 0 written back");
+    TEST_CHECK(config_store_record_crc(&a) == config_store_record_crc(&b),
+               "tau written 0 equals tau never written (no set flag or reserved residue)");
+    b.seq = 7u;
+    TEST_CHECK(config_store_record_crc(&a) != config_store_record_crc(&b), "seq bump changes the CRC by design");
+}
+
 // SaftyFW guard review 2026-10-09, F2: |tc_offset_c| is bounded.
 static void test_tc_offset_magnitude_bound(void)
 {
@@ -3645,6 +3669,7 @@ void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
     test_tc_sheath_tau_param();
+    test_config_crc_is_value_function_at_fixed_seq();
     test_a5_threshold_upper_bounds();
     test_sr04_05_06_physical_ranges();
     test_pack_unpack_roundtrip();
