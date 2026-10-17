@@ -29,6 +29,7 @@
  * change it. */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "esp_heap_caps.h"
@@ -40,6 +41,12 @@
 extern size_t persist_scratch_test_fail_size;
 extern int persist_scratch_test_fail_nth;
 extern int persist_scratch_test_seen;
+#endif
+
+#ifdef ESP_PLATFORM
+/* FX-05: shared atomic fallback counter (persist_scratch.c), shown in /api/status heap data. */
+uint32_t persist_scratch_note_fallback(void); /* returns the new count */
+uint32_t persist_scratch_fallback_count(void);
 #endif
 
 static inline void *persist_scratch_alloc(size_t size)
@@ -54,9 +61,13 @@ static inline void *persist_scratch_alloc(size_t size)
     if (!p) {
         /* PM-03: the fallback lands in internal RAM (<= 8192 B under
          * SPIRAM_MALLOC_ALWAYSINTERNAL) and can eat the 8192 B heap_internal
-         * floor, so it is counted and logged once per translation unit. */
-        static unsigned s_fallbacks;
+         * floor, so it is counted (one shared counter) and logged once. */
+#ifdef ESP_PLATFORM
+        if (persist_scratch_note_fallback() == 1u) {
+#else
+        static unsigned s_fallbacks; /* host builds: no shared counter */
         if (s_fallbacks++ == 0) {
+#endif
             ESP_LOGW("persist_scratch", "PSRAM alloc of %u B failed, using internal RAM (further fallbacks silent)",
                      (unsigned)size);
         }

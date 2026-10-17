@@ -9,6 +9,7 @@
 
 #include "esp_flash.h" /* esp_flash_get_size() -- flash_size below, same call as ui_page_diagnostics.c */
 #include "dram_watch.h" /* dram_watch_get() -- heap_internal_largest_low below */
+#include "persist_scratch.h" /* persist_scratch_fallback_count() -- FX-05 */
 #include "esp_heap_caps.h"
 #include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below, address/size now sourced from hal_sysinfo */
 #include "esp_log.h"
@@ -559,6 +560,7 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     out->heap_spiram_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    out->persist_scratch_fallbacks = persist_scratch_fallback_count();
     out->heap_spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
 
     /* DRAM_PSRAM_PLAN.md Phase 0 (4.1): the one capability not previously
