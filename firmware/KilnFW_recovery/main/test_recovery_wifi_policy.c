@@ -199,7 +199,7 @@ static void test_http(const char *path)
         }
     }
     // R2-I1: ota_esp_post clears (gated) BEFORE the upload overwrites `app`.
-    char *o = fn_body(src, "esp_err_t ota_esp_post(");
+    char *o = fn_body(src, "esp_err_t ota_esp_post_locked(");
     CHECK(o != NULL, "ota_esp_post found");
     if (o) {
         const char *g = strstr(o, "if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {");

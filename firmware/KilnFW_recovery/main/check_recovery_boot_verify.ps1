@@ -34,11 +34,17 @@ function Get-FuncBody([string]$Src, [string]$Name) {
     $end = $rest.IndexOf("`n}")
     return $rest.Substring(0, $end)
 }
-$ota = Get-FuncBody $http "ota_esp_post"
+# RC-01 split ota_esp_post into a claim-taking wrapper plus ota_esp_post_locked (the real body).
+$otaWrap = Get-FuncBody $http "ota_esp_post"
+if ($otaWrap -notmatch 'ota_esp_post_locked\(req\)') {
+    Write-Host "FAIL: ota_esp_post must call ota_esp_post_locked() (the body whose ordering is checked)."
+    exit 1
+}
+$ota = Get-FuncBody $http "ota_esp_post_locked"
 $iClear = $ota.IndexOf("boot_guard_clear_or_na(")
 $iSet = $ota.IndexOf("recovery_boot_partition_set_and_verify(")
 if ($iClear -lt 0 -or $iSet -lt 0 -or $iClear -gt $iSet) {
-    Write-Host "FAIL: ota_esp_post must clear boot_guard before recovery_boot_partition_set_and_verify()."
+    Write-Host "FAIL: ota_esp_post_locked must clear boot_guard before recovery_boot_partition_set_and_verify()."
     exit 1
 }
 $apply = Get-FuncBody $http "apply_staged_post"
