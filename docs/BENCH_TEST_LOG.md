@@ -3455,3 +3455,30 @@ end: app partition erased, no Wi-Fi, no link; needs a physical USB power cycle
 (the flash tool's own hint), then a flash of the dev tip. No firmware bug is
 proven; the wedge looks like the flash-write-protect-stuck state or a USB-JTAG
 fault.
+
+## soakmain (2026-10-16/17): main ad565107a soak on the bench, then back to pre.4
+
+Board was pre.4 (fcc645211). Flashed main ad565107a (ESP `flash_firmware`, Pico `debug_program`) from clean worktrees.
+Settings backed up first (`logs/soakmain_backup_pre4.json`).
+
+| Item | Result |
+|---|---|
+| Boot, link up, `safety_get_status`, no trip, S6a not seen | PASS (Pico ad565107a, boot ids 95/144/150, proto v18) |
+| Soak | PASS: ESP uptime 26442 s (about 7.3 h, past the 45 min target), no reset/panic/crash banner |
+| Heap internal | free 117-122 KB, largest block 31744 B constant, min_free 100935 B (floor 8192, SK-04 7168 B), DMA min_free 93147 B; sampled every 5 min for 20 min, then at 7.3 h |
+| safety_cfg_store v6 -> v7 | PASS: config_crc 0xC950 and commissioning (S1 80 C, S8 33.3 C/min, tc_type 3, CT cal, mains 120 V) identical before/after |
+| Backup export, import round trip | PASS with a caveat below; no 400 on the async-job stack (import ok in 1.26 s) |
+| PSRAM-stack saves survive `sw_reset_esp`: profile save (#2), relay4_type, zone_type | PASS |
+| Live profile edit (fork + edit while running) | PASS (accepted; not separately checked across reboot) |
+| ct_cal write | NOT RUN (would alter commissioning) |
+| Short firing (profile #2, 30 C, heat pre-authorized), `profiles_stop()` | PASS; stopped, exec state 0 after reboot; firing log keeps STARTED record; run_state persistence only indirectly seen |
+| HR-02 mode gate | PASS: raw POST /api/safety/commissioning while running returned 409 "a firing or autotune run is active" (MCP tools also refuse client-side) |
+| Return to pre.4: ESP + Pico flashed from fcc645211 worktree, verified | PASS (Pico build fcc645211, link up) |
+| Settings restore | PASS: export diff vs pre-soak differs only in relay_cycles (raise-only wear counters) after deleting SOAK_P and resetting relay4_type by hand (replace-mode import did not remove the new profile) |
+
+Bug found (compat, not a crash): a pre.4 backup that contains saved kiln_configs
+(safety section names param id 1025 = 0x0401, removed by SR-31) is refused by main with
+HTTP 400 "package's safety-processor section names parameter id 1025 ... refused, not skipped",
+and the package hash blocks hand-stripping. `dry_run=true` did not catch it (reported OK).
+So a pre.4 -> main upgrade cannot import its own backup's kiln_configs. Imported with kiln_configs
+emptied for the round-trip test. Likely site: kiln_cfg package import validation (kiln_cfg_http / backup_import).
