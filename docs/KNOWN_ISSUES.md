@@ -322,3 +322,15 @@ Static review of `origin/dev` b44f30112. HIGH 0, MED 0, LOW 2, INFO 2.
 - **RC-02** LOW, `tools/run_all_checks.ps1:632-637`. Problem: `-Fast` drops `check_00_kilnfw_recovery_target_build.ps1`, so the batch runs on the dev tip never compile the recovery image, which links app drivers (`update_install_record.c`, `stage_header.c`, `ota_image_crc.c`). A breaking app-side change shows up only at the full promote run or at `make_release`. Fix: compile the recovery project in the batch. Status open.
 - **RC-03** INFO, ESP-IDF `check_sizes.py:88-102`. The `build_kilnfw` warning "recovery app partition too small for KilnCtrl.bin (overflow 0xf97f0)" is expected: IDF checks the app against every app partition, `app` (0x400000) fits, `recovery` (0x1E0000) does not, so it only warns. KilnCtrl.bin is never written to `recovery`. Fix (optional): document the warning. Status open.
 - **RC-04** INFO. recovery.bin is built only by the full-run target-build check and by `make_release.ps1`, and is attached to releases as the `recovery` image. No field path writes the `recovery` partition; the only path is `flash_recovery` (JTAG). Status: observation, no action.
+
+## Review 2026-10-17: landed fixes (docs/audits/REVIEW_FIXES_2026_10_17.md)
+
+HIGH 0, MED 1, LOW 4, INFO 2.
+
+- **FX-01** MED, `firmware/KilnFW/App/drivers/http/http_session_iface.c` `http_session_table()`. The AZ-03 destroy-all runs on whichever task calls the table first. That includes `wifi_prov_owner` through `http_auth_any_ap_session_active()`, so the table is again changed outside httpd during login. Fix: a read-only accessor for the Wi-Fi path, plus a test. Status open.
+- **FX-02** LOW, `firmware/KilnFW/App/drivers/persist/web_auth_store.c` `web_auth_store_admin_configured_or_unreadable()`. A lost web-credential key (NOT_FOUND) on a board with the ever-enabled marker set reopens unauthenticated bootstrap. Fix: count NOT_FOUND plus the marker as configured. First confirm the physical reset path. Status open.
+- **FX-03** LOW, `firmware/KilnFW/App/drivers/http/web_auth_login_http.c` `login_lockout_slot_for()`. The header comment and the dead `idx < 0` branch still describe the old refusal (NULL / 429) that AZ-04 removed. Fix: update the comments and drop the dead branch. Status open.
+- **FX-04** LOW, `firmware/KilnFW_recovery/main/recovery_health.c` `recovery_health_restart_for_http()`. After the 10-minute wait it restarts anyway, mid-apply, and the "HTTP FAILED / restarting" banner can hide "DO NOT POWER-CYCLE". Fix: stay up on timeout. Status open.
+- **FX-05** LOW, `firmware/KilnFW/App/drivers/persist/persist_scratch.h`. The PM-03 counter is a per-TU static that nothing reads. Fix: one exported atomic counter in diagnostics. Status open.
+- **FX-06** INFO, `firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c` `ui_page_diagnostics_prime_ota_state()`. The running-partition lookups run outside the reader bracket; they are cached in practice. Status open.
+- **FX-07** INFO. The PM-04 retry and PM-06 cache have only source-text tests, and the RO-01 timeout is untested. Status open.
