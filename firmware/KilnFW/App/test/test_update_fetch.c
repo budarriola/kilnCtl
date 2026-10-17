@@ -727,6 +727,23 @@ static void test_heap_admission_updfx3(void)
     CHECK(g_fr_delay_calls == 0, "no settle wait on a LOW_BLOCK verdict");
     expect_claim_balanced("block starved");
 
+    // AUP-02: the allow_prerelease flag reaches the list pick: a list holding only a pre-release is
+    // no_release with pre-releases off and is picked with them on.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        char *pr = strstr(g_api, "\"prerelease\":false");
+        CHECK(pr != NULL, "fixture release has a prerelease flag");
+        if (pr != NULL) {
+            memcpy(pr, "\"prerelease\":true ", 18);
+        }
+        g_fr_routes[0].body_len = strlen(g_api);
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "no_release") == 0, "pre-release only, pre-releases off: no_release");
+    POST("/api/update/check", "allow_prerelease=1");
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "no_release") != 0, "pre-release only, pre-releases on: picked");
     // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;
