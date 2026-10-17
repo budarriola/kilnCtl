@@ -311,6 +311,9 @@ static void test_main_source(const char *path)
     CHECK(start != NULL, "recovery_main calls recovery_http_start");
     CHECK(start && strstr(start - 20 > src ? start - 20 : src, "esp_err_t herr =") != NULL,
           "recovery_main keeps recovery_http_start's result");
+    const char *inst = strstr(src, "recovery_install_boot();");
+    CHECK(inst != NULL && start && inst < start, "install claim (recovery_install_boot) precedes recovery_http_start");
+    CHECK(inst != NULL && count_of(src, "recovery_install_boot();") == 1, "recovery_install_boot is called once");
     CHECK(strstr(src, "RHEALTH_HTTP_START_ATTEMPTS") != NULL, "http start is retried a bounded number of times");
     const char *rs = strstr(src, "recovery_health_restart_for_http();");
     const char *up = strstr(src, "recovery image up");
