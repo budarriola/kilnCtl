@@ -102,6 +102,17 @@ void safety_guards_clear(safety_guard_state_t *state)
 #define S8_POST_WIN_MIN_S 60.0f
 #define S8_POST_WIN_MAX_S 600.0f
 
+/* TC sheath lag (param 0x010B): the over-temperature reading S1 and S2
+ * check. raw + max(0, lead) is the conservative of raw and compensated: a
+ * positive lead (heating behind a protection tube) makes them react sooner,
+ * a negative lead (cooling) never delays them. tc_lead_c is 0 when the
+ * sheath tau is 0, so a bare TC sees exactly in->tc_c. */
+static float guard_hot_c(const safety_guard_input_t *in)
+{
+    float lead = in->tc_lead_c;
+    return (lead > 0.0f) ? (in->tc_c + lead) : in->tc_c; /* NaN lead compares false */
+}
+
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
     state->is_tripped = true;
@@ -319,7 +330,7 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                 * (REVIEW_SAFTYFW_TRIP_PATH T1: the S1 debounce counts exactly
                                 * this level; refusing here never loosens the guard). */
         /* Review saftyfx6 F4: an unknown reading (bad TC) is not a pass -- refuse. */
-        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || in->tc_c > cfg->abs_max_temp_c);
+        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || guard_hot_c(in) > cfg->abs_max_temp_c);
     case SAFETY_TRIP_RATE: /* S8 -- see s8_clear_refuse(); strict = a real RATE trip is latched */
         return s8_clear_refuse(cfg, in, state, true);
     case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
@@ -327,7 +338,7 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
                /* A8 (guard audit 2026-10-14): an unknown reading is not a pass -- refuse, as S1 does. */
                (!in->tc_valid ||
-                in->tc_c > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT));
+                guard_hot_c(in) > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT));
     case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 -- current still present with nothing commanded on */
         return in->context_valid && in->any_current_present && !in->relay_commanded_recently;
     case SAFETY_TRIP_FROZEN_SENSOR: /* S11 -- reading still sitting at the value that tripped it.
@@ -920,13 +931,13 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * has been removed. */
         float ceiling = cfg->abs_max_temp_c;
 
-        if (in->tc_valid && in->tc_c > ceiling) {
+        if (in->tc_valid && guard_hot_c(in) > ceiling) {
             if (state->s1_over_ceiling_streak < UINT8_MAX) {
                 state->s1_over_ceiling_streak++;
             }
             if (state->s1_over_ceiling_streak >= S1_OVER_CEILING_STREAK_TO_TRIP) {
                 trip(state, SAFETY_TRIP_OVERTEMP, "%.1fC > ceiling %.1fC for %u consecutive valid readings",
-                     (double)in->tc_c, (double)ceiling, (unsigned)state->s1_over_ceiling_streak);
+                     (double)guard_hot_c(in), (double)ceiling, (unsigned)state->s1_over_ceiling_streak);
                 return true;
             }
         } else {
@@ -1116,13 +1127,13 @@ context_guards:
         } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
-            if (in->tc_c > in->max_zone_setpoint_c + margin) {
+            if (guard_hot_c(in) > in->max_zone_setpoint_c + margin) {
                 state->s2_over_elapsed_s += in->dt_s;
                 float time_th = effective_f(cfg->overshoot_time_s, OVERSHOOT_TIME_S_DEFAULT);
                 if (state->s2_over_elapsed_s >= time_th) {
                     trip(state, SAFETY_TRIP_OVER_SETPOINT,
                          "%.1fC > max setpoint %.1fC + overshoot_margin_c %.1fC for %.0fs",
-                         (double)in->tc_c, (double)in->max_zone_setpoint_c, (double)margin,
+                         (double)guard_hot_c(in), (double)in->max_zone_setpoint_c, (double)margin,
                          (double)state->s2_over_elapsed_s);
                     return true;
                 }

@@ -22,21 +22,25 @@ absolute_time_t get_absolute_time(void)
 uint32_t to_ms_since_boot(absolute_time_t t) { return (uint32_t)(t.us / 1000u); }
 
 static float    s_tc_offset_c;
+static uint16_t s_tc_sheath_tau_s;
 static bool     s_tc_type_set = true;
 static unsigned s_checkins[WATCHDOG_CHECKIN_COUNT];
 
 void tt_stub_reset(void)
 {
     s_tc_offset_c = 0.0f;
+    s_tc_sheath_tau_s = 0u;
     s_tc_type_set = true;
     memset(s_checkins, 0, sizeof(s_checkins));
 }
 void tt_stub_set_tc_offset_c(float offset) { s_tc_offset_c = offset; }
+void tt_stub_set_tc_sheath_tau_s(uint16_t tau) { s_tc_sheath_tau_s = tau; }
 void tt_stub_set_tc_type_set(bool is_set) { s_tc_type_set = is_set; }
 unsigned tt_stub_checkin_count_thermo(void) { return s_checkins[WATCHDOG_CHECKIN_THERMO_TASK]; }
 
 uint8_t config_store_get_tc_type(void) { return MAX31856_TC_TYPE_K; }
 float   config_store_get_tc_offset_c(void) { return s_tc_offset_c; }
+uint16_t config_store_get_tc_sheath_tau_s(void) { return s_tc_sheath_tau_s; }
 bool    config_store_is_tc_type_set(void) { return s_tc_type_set; }
 bool    config_store_get_full_record(config_store_record_t *out)
 {

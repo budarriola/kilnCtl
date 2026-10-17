@@ -133,7 +133,10 @@
 //               230 instead (config_store_effective_zone_ct_channel()).
 //               Carved out of the front of the former 267 B reserved
 //               block, same convention as every field above.
-//    240   264  reserved, 0xFF-filled (headroom for a future field)
+//    240     2  tc_sheath_tau_s (u16 LE) -- param 0x010B, safety TC sheath
+//               lag tau in s. Values above CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S
+//               (0xFFFF reserved fill, anything garbled) decode as 0 = off.
+//    242   262  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -246,8 +249,9 @@
 // ct_topology-derived map rather than to a channel id nothing is wired to.
 #define REC_OFF_ZONE_CT_CHANNEL        (REC_OFF_ESTOP_ACTIVE_LEVEL + 1u)  /* 237 */
 #define REC_ZONE_CT_CHANNEL_LEN        3u
-#define REC_OFF_RESERVED               (REC_OFF_ZONE_CT_CHANNEL + REC_ZONE_CT_CHANNEL_LEN) /* 240 */
-#define REC_RESERVED_LEN               264u
+#define REC_OFF_TC_SHEATH_TAU_S        (REC_OFF_ZONE_CT_CHANNEL + REC_ZONE_CT_CHANNEL_LEN) /* 240 */
+#define REC_OFF_RESERVED               (REC_OFF_TC_SHEATH_TAU_S + 2u) /* 242 */
+#define REC_RESERVED_LEN               262u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -506,6 +510,7 @@ void config_store_pack(const config_store_record_t *rec,
 
     memcpy(&out[REC_OFF_ZONE_CT_CHANNEL], rec->zone_ct_channel, REC_ZONE_CT_CHANNEL_LEN);
 
+    put_u16_le(&out[REC_OFF_TC_SHEATH_TAU_S], rec->tc_sheath_tau_s);
     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved));
     // bytes [REC_OFF_RESERVED + REC_RESERVED_LEN, REC_OFF_CRC) already 0xFF
     // from the initial memset -- further headroom.
@@ -722,6 +727,12 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
         }
     }
 
+    {
+        // 0x010B: anything above the max (legacy 0xFF fill reads 0xFFFF)
+        // decodes as 0 = no compensation, the pre-existing behaviour.
+        uint16_t tau = get_u16_le(&in[REC_OFF_TC_SHEATH_TAU_S]);
+        out->tc_sheath_tau_s = (tau <= CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S) ? tau : 0u;
+    }
     memcpy(out->reserved, &in[REC_OFF_RESERVED], sizeof(out->reserved));
 }
 

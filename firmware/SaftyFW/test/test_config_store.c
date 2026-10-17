@@ -3373,6 +3373,44 @@ static void test_tc_type_voltage_mode_clamp_v1_migration(void)
     TEST_CHECK(out.tc_type == 0x03u, "real v1 tc_type passes through the clamp unchanged");
 }
 
+// TC sheath lag tau (0x010B): U16 0..600 s at SET_PARAM and validate time;
+// pack/unpack round trip; an old record's 0xFFFF reserved fill decodes as 0.
+static void test_tc_sheath_tau_param(void)
+{
+    TEST_SECTION("tc_sheath_tau_s (0x010B) -- bounds, round trip, legacy fill");
+    config_store_record_t rec;
+    kilnlink_param_value_t v;
+    memset(&v, 0, sizeof(v));
+    config_store_default(&rec);
+    TEST_CHECK(rec.tc_sheath_tau_s == 0u, "default tau is 0 (bare TC, no compensation)");
+    v.u16_val = CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S;
+    TEST_CHECK(config_params_set(&rec, 0x010Bu, KILNLINK_PARAM_TYPE_U16, v), "600 s is accepted (inclusive)");
+    TEST_CHECK(rec.tc_sheath_tau_s == 600u, "and stored");
+    v.u16_val = CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S + 1u;
+    TEST_CHECK(!config_params_set(&rec, 0x010Bu, KILNLINK_PARAM_TYPE_U16, v), "601 s is refused at SET_PARAM");
+    TEST_CHECK(rec.tc_sheath_tau_s == 600u, "rec untouched by the refused write");
+    v.f32_val = 60.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x010Bu, KILNLINK_PARAM_TYPE_F32, v), "wrong type is refused");
+
+    const char *field = NULL, *rule = NULL; config_params_reject_reason_t reason;
+    config_store_default(&rec);
+    rec.tc_sheath_tau_s = 60u;
+    TEST_CHECK(config_params_validate_ranges(&rec, &field, &rule, &reason), "stored 60 s validates");
+    rec.tc_sheath_tau_s = 601u;
+    TEST_CHECK(!config_params_validate_ranges(&rec, &field, &rule, &reason), "stored 601 s fails validation");
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t back;
+    config_store_default(&rec);
+    rec.tc_sheath_tau_s = 60u;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back) && back.tc_sheath_tau_s == 60u, "60 s survives pack/unpack");
+    rec.tc_sheath_tau_s = 0xFFFFu; /* what the old reserved 0xFF fill reads as */
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back) && back.tc_sheath_tau_s == 0u,
+               "legacy 0xFFFF fill decodes as 0 (off), never as a huge tau");
+}
+
 // SaftyFW guard review 2026-10-09, F2: |tc_offset_c| is bounded.
 static void test_tc_offset_magnitude_bound(void)
 {
@@ -3606,6 +3644,7 @@ static void test_unpack_clamps_tc_offset_on_v2_migration_and_reports(void)
 void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
+    test_tc_sheath_tau_param();
     test_a5_threshold_upper_bounds();
     test_sr04_05_06_physical_ranges();
     test_pack_unpack_roundtrip();

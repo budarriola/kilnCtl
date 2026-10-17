@@ -1913,7 +1913,8 @@ static const f1_field_t k_f1_fields[] = {
     F1(config_check_period_s, K_SAFETY), F1(ct_cal, K_SAFETY), F1(max_expected_power_w, K_ALLOWED),
     F1(i_normal_a, K_SAFETY), F1(overcurrent_pct, K_SAFETY), F1(overcurrent_time_s, K_SAFETY),
     F1(ct_topology, K_SAFETY), F1(zone_ct_channel, K_SAFETY), F1(i_present_a_manual, K_ALLOWED),
-    F1(tc_offset_c, K_SAFETY), F1(estop_active_level, K_SAFETY), F1(reserved, K_ALLOWED),
+    F1(tc_offset_c, K_SAFETY), F1(estop_active_level, K_SAFETY), F1(tc_sheath_tau_s, K_SAFETY),
+    F1(reserved, K_ALLOWED),
 };
 #undef F1
 // Bytes of config_store_record_t that belong to no member (compiler padding).

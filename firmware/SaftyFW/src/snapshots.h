@@ -51,6 +51,11 @@ typedef struct {
     // register itself faulted -- those cases are genuinely indistinguishable
     // from "chip not converting" and must stay NaN.
     bool     cj_valid;
+    // TC sheath lag (param 0x010B): the tc_lag_comp lead estimate for tc_c,
+    // degC (compensated - raw). Exactly 0 when tau is 0 (bare TC), when the
+    // reading is invalid, and on any injected snapshot. Guards use only its
+    // positive part, on top of raw tc_c (never in place of it).
+    float    tc_lead_c;
 } thermo_snapshot_t;
 
 // current_snapshot_t -- current_task / adc_owner (docs/ARCHITECTURE.md

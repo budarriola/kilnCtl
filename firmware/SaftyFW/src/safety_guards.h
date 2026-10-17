@@ -333,6 +333,9 @@ typedef struct {
 typedef struct {
     bool     tc_valid;
     float    tc_c;         /* NaN when !tc_valid */
+    float    tc_lead_c;    /* TC sheath lag lead (0x010B), degC; 0 = none. S1 and the overshoot
+                            * guard check tc_c + max(0, tc_lead_c): the conservative of raw and
+                            * compensated. Zero-init keeps every guard on raw. */
     float    cj_c;         /* NaN when !tc_valid */
     bool     cj_invalid;   /* true when the cold junction reading is not valid (thermo_snapshot_t.cj_valid
                             * false). Inverted sense so a zero-initialised input means "valid". Guard

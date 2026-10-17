@@ -42,6 +42,7 @@
 // Test seams defined in test_thermo_task_stubs.c.
 void  tt_stub_reset(void);
 void  tt_stub_set_tc_offset_c(float offset);
+void  tt_stub_set_tc_sheath_tau_s(uint16_t tau);
 void  tt_stub_set_tc_type_set(bool is_set);
 unsigned tt_stub_checkin_count_thermo(void);
 
@@ -433,6 +434,39 @@ static void test_tc_offset(void)
     TEST_CHECK(isnan(s_out[1].tc_c) && !s_out[1].valid, "NaN + offset stays NaN: an open TC never becomes a number");
 }
 
+static void test_tc_sheath_lead(void)
+{
+    TEST_SECTION("thermo_task loop -- tc sheath lag lead (0x010B)");
+    // tau 0: lead is exactly zero on every iteration (byte-identical when off).
+    setup_chip(true);
+    tt_stub_set_tc_sheath_tau_s(0u);
+    step_t s0[6];
+    for (unsigned i = 0; i < 6; i++) s0[i] = good_step(100.0f + 5.0f * (float)i);
+    run_steps(s0, 6);
+    bool all_zero = true;
+    for (unsigned i = 0; i < 6; i++) all_zero = all_zero && s_out[i].tc_lead_c == 0.0f;
+    TEST_CHECK(all_zero, "tau 0: tc_lead_c is exactly 0");
+    TEST_CHECK(s_out[5].tc_c == 125.0f, "tau 0: the published reading is unchanged");
+
+    // tau 60 s on a rising ramp: the lead goes positive, tc_c stays raw.
+    setup_chip(true);
+    tt_stub_set_tc_sheath_tau_s(60u);
+    step_t s1[MAX_STEPS];
+    for (unsigned i = 0; i < MAX_STEPS; i++) s1[i] = good_step(100.0f + 2.0f * (float)i);
+    run_steps(s1, MAX_STEPS);
+    TEST_CHECK(s_out[MAX_STEPS - 1].tc_lead_c > 0.0f, "tau 60 on a rising ramp: lead is positive");
+    TEST_CHECK(s_out[MAX_STEPS - 1].tc_c == 100.0f + 2.0f * (float)(MAX_STEPS - 1),
+               "tau 60: tc_c stays the raw (offset) reading; the lead is separate");
+
+    // An open TC publishes no lead.
+    setup_chip(true);
+    tt_stub_set_tc_sheath_tau_s(60u);
+    step_t s2[3] = { good_step(100.0f), good_step(110.0f), sr_step(120.0f, MAX31856_FAULT_OPEN) };
+    run_steps(s2, 3);
+    TEST_CHECK(!s_out[2].valid && s_out[2].tc_lead_c == 0.0f, "open TC: lead is 0");
+    tt_stub_set_tc_sheath_tau_s(0u);
+}
+
 static void test_recovery_after_fault_clears(void)
 {
     TEST_SECTION("thermo_task loop -- recovery after a fault clears");
@@ -554,6 +588,7 @@ void run_test_thermo_task_faults(void)
     test_cr1_unverified();
     test_drdy_silence_and_missed_edge();
     test_tc_offset();
+    test_tc_sheath_lead();
     test_recovery_after_fault_clears();
     test_stale_publish_never_reads_good();
     test_stuck_reading_documented();

@@ -66,6 +66,9 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
                                            // after 0x0109, deliberately
                                            // adjacent to tc_type (0x0105) in
                                            // this same section-1 group
+    { 0x010Bu, KILNLINK_PARAM_TYPE_U16 }, // tc_sheath_tau_s -- TC sheath lag
+                                           // 2026-10-16, next id after
+                                           // tc_offset_c (0x010A)
     { 0x0201u, KILNLINK_PARAM_TYPE_F32 }, // firing_margin_c -- INERT since the
                                            // 2026-09-24 SET_FIRING_CEILING
                                            // revert; commissionable/persisted,
@@ -199,6 +202,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x0105u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->tc_type; return true;
     case 0x0109u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_installed; return true;
     case 0x010Au: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->tc_offset_c; return true;
+    case 0x010Bu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = rec->tc_sheath_tau_s; return true;
     case 0x0106u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[0]; return true;
     case 0x0107u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[1]; return true;
     case 0x0108u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[2]; return true;
@@ -487,6 +491,8 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     // +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C (guard review F2). Not fields_set-gated
     // (0.0f is a safe "no correction" default).
     case 0x010Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); if (value.f32_val > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C || value.f32_val < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) { return false; } rec->tc_offset_c = value.f32_val; return true;
+    // tc_sheath_tau_s: 0..CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S, refused above (A5).
+    case 0x010Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); CHECK_U16_MAX(CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S); rec->tc_sheath_tau_s = value.u16_val; return true;
 
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
     case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); CHECK_F32_MAX(CONFIG_PARAMS_OVERSHOOT_MARGIN_MAX_C); rec->overshoot_margin_c = value.f32_val; return true;
@@ -785,6 +791,9 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     if (rec->tc_offset_c > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C || rec->tc_offset_c < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
         RANGE_FAIL("tc_offset_c", "magnitude beyond CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C (a larger offset can hide the real temperature from every guard)");
     }
+    if (rec->tc_sheath_tau_s > CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S) {
+        RANGE_FAIL("tc_sheath_tau_s", "above CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S");
+    }
     RANGE_F32_FINITE(rec->cj_warn_c, "cj_warn_c");
     RANGE_F32_FINITE(rec->cj_max_c, "cj_max_c");
     RANGE_F32_RANGE_OR_ZERO(rec->k_ct_v_per_a[0], CONFIG_PARAMS_CT_SCALE_MIN, CONFIG_PARAMS_CT_SCALE_MAX, "k_ct_v_per_a[0]");
@@ -968,6 +977,7 @@ static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
     { "abs_max_temp_c", 0x0104u },
     { "tc_type", 0x0105u },
     { "tc_offset_c", 0x010Au },
+    { "tc_sheath_tau_s", 0x010Bu },
     { "borrowed_type_expected", 0x0210u },
     { "i_present_a", 0x0301u },
     { "max_expected_power_w", 0x0319u },
