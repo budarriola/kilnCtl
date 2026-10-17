@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "persist_scratch.h"
 
 #include "MAX31856.h"
 #include "relay_authority.h" /* relay_authority_reset_in_flight() -- zones_config_set_coupling_cell() */
@@ -3470,8 +3471,8 @@ bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t
     if (!cfg || !out || !out_len || out_cap < zones_config_canonical_max_size()) {
         return false;
     }
-    zones_cfg_t *flipped = malloc(sizeof(*flipped));
-    uint8_t *other = malloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    zones_cfg_t *flipped = persist_scratch_alloc(sizeof(*flipped));
+    uint8_t *other = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
     if (!flipped || !other) {
         free(flipped);
         free(other);
