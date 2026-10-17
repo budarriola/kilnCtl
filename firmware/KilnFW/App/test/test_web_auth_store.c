@@ -1104,8 +1104,55 @@ static void test_setters_recheck_epoch_under_store_lock(void)
     TEST_CHECK(s_cred_store_busy == 0u, "the store lock is released after every path");
 }
 
+// AZ-01: bootstrap_password may open only when the admin record was never
+// written. Unreadable (bad CRC, version, read error) counts as configured.
+static void test_az01_bootstrap_only_when_never_written(void)
+{
+    TEST_SECTION("AZ-01 admin record unreadable keeps bootstrap closed");
+    reset_all();
+    TEST_CHECK(!web_auth_store_admin_configured_or_unreadable(), "never written: bootstrap may open");
+
+    web_auth_web_blob_t wblob;
+    memset(&wblob, 0, sizeof(wblob));
+    wblob.version = WEB_AUTH_STORE_VERSION;
+    wblob.crc32 = web_blob_crc(&wblob) ^ 0xFFu; // bad CRC
+    TEST_CHECK(set_blob_verified(WEB_AUTH_KEY_WEB, &wblob, sizeof(wblob)) == HAL_OK, "seed bad-CRC blob");
+    TEST_CHECK(web_auth_store_admin_configured_or_unreadable(), "bad CRC counts as configured");
+
+    wblob.version = WEB_AUTH_STORE_VERSION + 1;
+    wblob.crc32 = web_blob_crc(&wblob);
+    TEST_CHECK(set_blob_verified(WEB_AUTH_KEY_WEB, &wblob, sizeof(wblob)) == HAL_OK, "seed wrong-version blob");
+    TEST_CHECK(web_auth_store_admin_configured_or_unreadable(), "wrong version counts as configured");
+
+    reset_all();
+    TEST_CHECK(fake_kv_script_next_open_status(WEB_AUTH_NAMESPACE, HAL_IO), "script open failure");
+    TEST_CHECK(web_auth_store_admin_configured_or_unreadable(), "a read error counts as configured");
+    web_auth_password_record_t rec;
+    TEST_CHECK(fake_kv_script_next_open_status(WEB_AUTH_NAMESPACE, HAL_IO), "script open failure 2");
+    TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec) == WEB_AUTH_LOAD_UNREADABLE,
+               "a read error loads UNREADABLE, not ABSENT");
+}
+
+// AZ-02: only not-found means absent for the policy and marker reads.
+static void test_az02_read_errors_fail_closed(void)
+{
+    TEST_SECTION("AZ-02 transient NVS errors fail closed");
+    reset_all();
+    web_auth_policy_t pol;
+    TEST_CHECK(fake_kv_script_next_open_status(WEB_AUTH_NAMESPACE, HAL_IO), "script open failure");
+    TEST_CHECK(web_auth_store_ever_enabled(), "marker read error means ever-enabled (fail closed)");
+    TEST_CHECK(fake_kv_script_next_open_status(WEB_AUTH_NAMESPACE, HAL_IO), "script open failure 2");
+    web_auth_load_status_t st = web_auth_store_load_policy(&pol);
+    TEST_CHECK(st == WEB_AUTH_LOAD_UNREADABLE, "policy read error loads UNREADABLE");
+    TEST_CHECK(web_auth_policy_effective_enabled(st, pol.web_enabled), "auth stays on");
+    TEST_CHECK(!web_auth_store_ever_enabled(), "genuinely absent marker still reads false");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "genuinely absent policy still ABSENT");
+}
+
 int main(void)
 {
+    test_az01_bootstrap_only_when_never_written();
+    test_az02_read_errors_fail_closed();
     test_crc32_vector();
     test_password_strength();
     test_pin_strength();

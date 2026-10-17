@@ -458,7 +458,7 @@ static esp_err_t auth_bootstrap_password_post_handler(httpd_req_t *req)
     // predicate the enforcement pre-handler already gated on, never a
     // separate/looser check.
     bool effective_enabled = http_auth_policy_web_enabled();
-    bool admin_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    bool admin_configured = web_auth_store_admin_configured_or_unreadable();
     if (!web_auth_admin_bootstrap_needed(effective_enabled, admin_configured)) {
         // No HTTPD_409_CONFLICT in esp_http_server.h's httpd_err_code_t --
         // set the status line directly, same convention

@@ -447,8 +447,11 @@ web_auth_load_status_t web_auth_store_load_password(web_auth_role_t role,
 
     web_auth_web_blob_t blob;
     hal_status_t err = load_blob(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
-    if (err != HAL_OK) {
+    if (err == HAL_NOT_FOUND) {
         return WEB_AUTH_LOAD_ABSENT; // never written -- shipped default / pre-upgrade board
+    }
+    if (err != HAL_OK) {
+        return WEB_AUTH_LOAD_UNREADABLE; // AZ-01: read error / wrong size is not "never written"
     }
     if (blob.version != WEB_AUTH_STORE_VERSION) {
         // Includes "newer than this build knows" (OTA rollback hazard,
@@ -492,6 +495,19 @@ bool web_auth_store_verify_password(web_auth_role_t role, const char *password)
         return false;
     }
     return web_auth_constant_time_equal(computed, rec.hash, WEB_AUTH_HASH_LEN);
+}
+
+// AZ-01: true unless the admin record is truly absent (NVS not-found) or
+// readable-and-unconfigured. UNREADABLE (bad CRC, version, read error) counts as
+// configured so the bootstrap route stays closed; recovery is the reset gesture.
+bool web_auth_store_admin_configured_or_unreadable(void)
+{
+    web_auth_password_record_t rec;
+    web_auth_load_status_t st = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec);
+    if (st == WEB_AUTH_LOAD_UNREADABLE) {
+        return true;
+    }
+    return st == WEB_AUTH_LOAD_OK && rec.configured;
 }
 
 bool web_auth_store_password_configured(web_auth_role_t role)
@@ -748,7 +764,9 @@ bool web_auth_store_ever_enabled(void)
     if (err == HAL_OK) {
         return true; // present, whatever the contents: fail closed
     }
-    return err == HAL_INVALID_SIZE; // wrong-size record exists: still a marker
+    // AZ-02: only a true not-found means "never enabled"; any other error
+    // (open failure, wrong size, I/O) fails closed as "was enabled".
+    return err != HAL_NOT_FOUND;
 }
 
 static hal_status_t set_ever_enabled_marker(void)
@@ -777,6 +795,9 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
     memset(out, 0, sizeof(*out));
     web_auth_policy_blob_t blob;
     hal_status_t err = load_blob(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+    if (err != HAL_OK && err != HAL_NOT_FOUND) {
+        return WEB_AUTH_LOAD_UNREADABLE; // AZ-02: transient read error must not read as auth off
+    }
     if (err != HAL_OK) {
         // AU-02: ABSENT plus the ever-enabled marker means the record was lost
         // on a commissioned board: fail closed (UNREADABLE), never open.
