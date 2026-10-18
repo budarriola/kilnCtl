@@ -71,7 +71,7 @@ static void run_job(http_async_job_run_ctx_t *rc)
     // replaced a local s_busy flag cleared in the same critical section as
     // the handle; ordering gives the same guarantee across the two locks.)
     portENTER_CRITICAL(&s_mux);
-    s_task_handle = NULL;
+    stack_margin_task_exit(&s_task_handle); /* UB-01: nested spinlock, never blocks */
     portEXIT_CRITICAL(&s_mux);
     (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
 }

@@ -486,7 +486,7 @@ static void ota_pico_rollback_task(void *arg)
     // this TCB. (A reader racing this line and seeing the handle just before
     // it's cleared is benign: uxTaskGetStackHighWaterMark() on a task that is
     // about to be deleted but not yet reclaimed is still a valid read.)
-    s_ota_pico_rollback_task = NULL;
+    stack_margin_task_exit(&s_ota_pico_rollback_task); /* UB-01 */
 
     // Released here, on EVERY outcome, now that the WHOLE rollback attempt
     // (send-burst/reply-window leg AND the boot_id-reconnect watch) has run

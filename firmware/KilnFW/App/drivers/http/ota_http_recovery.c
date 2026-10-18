@@ -113,7 +113,7 @@ static void ota_recovery_exit_reboot_task(void *arg)
     // this TCB. (A reader racing this assignment and seeing the handle just
     // before it's cleared is benign: uxTaskGetStackHighWaterMark() on a task
     // that is about to be deleted but not yet reclaimed is still valid.)
-    s_recovery_exit_reboot_task = NULL;
+    stack_margin_task_exit(&s_recovery_exit_reboot_task); /* UB-01 */
     vTaskDelete(NULL); /* defensive only: hal_wdt_reboot() is not declared noreturn (the host
                          * fake deliberately returns so tests can observe the call -- see
                          * fake_wdt.c), so this guards a real backend that somehow returns
@@ -255,7 +255,7 @@ static void ota_recovery_boot_reboot_task(void *arg)
     /* Internal-RAM stack required: esp_restart() disables the flash cache --
      * see ota_recovery_exit_reboot_task() above. */
     hal_wdt_reboot();
-    s_recovery_boot_reboot_task = NULL; /* see ota_recovery_exit_reboot_task() on why null-then-delete */
+    stack_margin_task_exit(&s_recovery_boot_reboot_task); /* UB-01 */ /* see ota_recovery_exit_reboot_task() on why null-then-delete */
     vTaskDelete(NULL);
 }
 

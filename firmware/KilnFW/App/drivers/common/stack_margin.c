@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/portmacro.h" /* portMUX_TYPE (host stubs do not pull it in via FreeRTOS.h) */
 
 static const char *TAG = "stack_margin";
 
@@ -18,6 +19,19 @@ typedef struct {
 
 static stack_margin_entry_t s_entries[STACK_MARGIN_MAX_TASKS];
 static size_t s_count;
+/* UB-01: guards slot load + stack walk in stack_margin_read() against
+ * stack_margin_task_exit() clearing the slot and the TCB being freed. */
+static portMUX_TYPE s_read_lock = portMUX_INITIALIZER_UNLOCKED;
+
+void stack_margin_task_exit(void *task_handle_slot)
+{
+    if (task_handle_slot == NULL) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_read_lock);
+    *(TaskHandle_t *)task_handle_slot = NULL;
+    taskEXIT_CRITICAL(&s_read_lock);
+}
 
 bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t configured_stack_bytes)
 {
@@ -108,7 +122,6 @@ bool stack_margin_read(size_t index, const char **name, uint32_t *configured_sta
         return false;
     }
     const stack_margin_entry_t *e = &s_entries[index];
-    TaskHandle_t handle = *e->handle_slot; /* fresh read -- see stack_margin.h's registration comment */
 
     if (name) {
         *name = e->name;
@@ -116,6 +129,19 @@ bool stack_margin_read(size_t index, const char **name, uint32_t *configured_sta
     if (configured_stack_bytes) {
         *configured_stack_bytes = e->configured_stack_bytes;
     }
+
+    /* UB-01: the slot load and the stack walk stay inside one critical
+     * section shared with stack_margin_task_exit(), so the handle cannot be
+     * cleared and its TCB freed between the two. uxTaskGetStackHighWaterMark()
+     * never blocks. Its result is in WORDS -- see stack_margin_calc.h's
+     * STACK_MARGIN_WORD_BYTES comment. */
+    taskENTER_CRITICAL(&s_read_lock);
+    TaskHandle_t handle = *e->handle_slot; /* fresh read -- see stack_margin.h's registration comment */
+    UBaseType_t hwm_words = 0;
+    if (handle != NULL) {
+        hwm_words = uxTaskGetStackHighWaterMark(handle);
+    }
+    taskEXIT_CRITICAL(&s_read_lock);
 
     if (handle == NULL) {
         if (hwm_bytes) {
@@ -130,10 +156,6 @@ bool stack_margin_read(size_t index, const char **name, uint32_t *configured_sta
         return true;
     }
 
-    /* uxTaskGetStackHighWaterMark() returns WORDS -- see stack_margin_calc.h's
-     * STACK_MARGIN_WORD_BYTES comment for why that conversion is not
-     * optional. */
-    UBaseType_t hwm_words = uxTaskGetStackHighWaterMark(handle);
     uint32_t bytes = stack_margin_words_to_bytes((uint32_t)hwm_words);
 
     if (hwm_bytes) {

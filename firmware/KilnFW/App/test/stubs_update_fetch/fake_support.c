@@ -872,6 +872,12 @@ bool stack_margin_register(const char *name, void *slot, uint32_t bytes)
     (void)name; (void)slot; (void)bytes;
     return true;
 }
+void stack_margin_task_exit(void *slot)
+{
+    if (slot) {
+        *(void **)slot = NULL;
+    }
+}
 bool update_settings_repo_copy(char *out, size_t cap)
 {
     if (g_fr_repo[0] == 0) {

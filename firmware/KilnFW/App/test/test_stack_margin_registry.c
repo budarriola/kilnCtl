@@ -21,6 +21,7 @@
 // relying on every call site being effectively single-threaded with it --
 // this test exercises that documented contract's OTHER half, the de-dup
 // itself, which needs no threading to reach.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -164,6 +165,101 @@ static void test_retain_exit_keeps_minimum(void)
     TEST_CHECK(seen == 1, "registry_test_task row found once");
 }
 
+// UB-01: a self-deleting task clears its slot through stack_margin_task_exit(); the read path then
+// reports the task dead and never calls uxTaskGetStackHighWaterMark() on the stale handle.
+static void test_task_exit_clears_slot_and_reads_dead(void)
+{
+    TEST_SECTION("stack_margin: stack_margin_task_exit() clears the slot, read reports alive=false (UB-01)");
+    static int fake_tcb;
+    s_slot_a = &fake_tcb;
+    size_t idx = (size_t)-1;
+    size_t n = stack_margin_count();
+    for (size_t i = 0; i < n; i++) {
+        const char *name = NULL;
+        if (stack_margin_read(i, &name, NULL, NULL, NULL, NULL) && name && strcmp(name, "registry_test_task") == 0) {
+            idx = i;
+        }
+    }
+    TEST_CHECK(idx != (size_t)-1, "registry_test_task row present");
+    bool alive = false;
+    TEST_CHECK(stack_margin_read(idx, NULL, NULL, NULL, NULL, &alive) && alive, "non-NULL slot reads alive");
+    stack_margin_task_exit(&s_slot_a);
+    TEST_CHECK(s_slot_a == NULL, "stack_margin_task_exit() NULLs the caller's slot");
+    uint32_t hwm = 123;
+    alive = true;
+    TEST_CHECK(stack_margin_read(idx, NULL, NULL, &hwm, NULL, &alive), "read after exit succeeds");
+    TEST_CHECK(!alive && hwm == 0, "read after exit reports alive=false, hwm 0");
+    stack_margin_task_exit(NULL); /* must be a no-op, not a crash */
+}
+
+static char *ub01_read(const char *rel_from_test)
+{
+    char alt1[160], alt2[200];
+    snprintf(alt1, sizeof(alt1), "App/%s", rel_from_test + 3);
+    snprintf(alt2, sizeof(alt2), "firmware/KilnFW/App/%s", rel_from_test + 3);
+    const char *const candidates[] = {rel_from_test, alt1, alt2};
+    char *t = test_read_source_anchored(__FILE__, rel_from_test, candidates, 3);
+    if (t) { /* normalise CRLF so multi-line patterns match either ending */
+        char *w = t;
+        for (char *r = t; *r; r++) {
+            if (*r != '\r') {
+                *w++ = *r;
+            }
+        }
+        *w = '\0';
+    }
+    return t;
+}
+
+// UB-01 source scan: the read path holds s_read_lock across the slot load AND the stack walk, and every
+// registered self-deleting task clears its slot through stack_margin_task_exit(), never a bare store.
+static void test_ub01_read_lock_and_exit_sites(void)
+{
+    TEST_SECTION("stack_margin: read holds the lock across load + HWM; self-deleting tasks use task_exit (UB-01)");
+    char *c = ub01_read("../drivers/common/stack_margin.c");
+    TEST_CHECK(c != NULL, "stack_margin.c readable");
+    if (c) {
+        const char *rd = strstr(c, "bool stack_margin_read(");
+        const char *lk = rd ? strstr(rd, "taskENTER_CRITICAL(&s_read_lock)") : NULL;
+        const char *ld0 = rd ? strstr(rd, "*e->handle_slot") : NULL;
+        const char *hw = ld0 ? strstr(ld0, "uxTaskGetStackHighWaterMark(handle)") : NULL;
+        const char *ul = hw ? strstr(hw, "taskEXIT_CRITICAL(&s_read_lock)") : NULL;
+        TEST_CHECK(rd && lk && ld0 && hw && ul && lk < ld0, "stack_margin_read(): ENTER(s_read_lock) < slot load < HWM < EXIT");
+        const char *ex = strstr(c, "void stack_margin_task_exit(");
+        const char *exl = ex ? strstr(ex, "taskENTER_CRITICAL(&s_read_lock)") : NULL;
+        const char *exs = exl ? strstr(exl, "= NULL;") : NULL;
+        const char *exu = exs ? strstr(exs, "taskEXIT_CRITICAL(&s_read_lock)") : NULL;
+        TEST_CHECK(ex && exl && exs && exu, "stack_margin_task_exit(): slot cleared under s_read_lock");
+        free(c);
+    }
+    static const struct {
+        const char *file;
+        const char *call;
+        const char *bare;
+    } sites[] = {
+        {"../drivers/http/ota_http_esp.c", "stack_margin_task_exit(&s_ota_rollback_reboot_task)", "s_ota_rollback_reboot_task = NULL;"},
+        {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_exit_reboot_task)", "s_recovery_exit_reboot_task = NULL;"},
+        {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_boot_reboot_task)", "s_recovery_boot_reboot_task = NULL;"},
+        {"../drivers/http/ota_http_pico.c", "stack_margin_task_exit(&s_ota_pico_rollback_task)", "s_ota_pico_rollback_task = NULL;"},
+        {"../drivers/net/pico_auto_update_boot.c", "stack_margin_task_exit(&s_task)", "done:\n    s_task = NULL;"},
+        {"../drivers/update/update_fetch.c", "stack_margin_task_exit(&s_c->wr_task)", "s_c->wr_task = NULL;\n            xSemaphoreGive"},
+        {"../drivers/update/update_fetch.c", "stack_margin_task_exit(&s_c->tls_task)", "s_c->tls_task = NULL;\n    s_c->busy = 0;"},
+        {"../main_network_http.c", "stack_margin_task_exit(&s_ota_confirm_task)", "s_ota_confirm_task = NULL;\n            vTaskDelete"},
+        {"../drivers/control/zones_current_sweep_task.c", "stack_margin_task_exit(&s_sweep.task)", "s_sweep.task = NULL;\n    /* Release"},
+        {"../drivers/http/http_async_job.c", "stack_margin_task_exit(&s_task_handle)", "    s_task_handle = NULL;\n    portEXIT_CRITICAL"},
+    };
+    for (size_t i = 0; i < sizeof(sites) / sizeof(sites[0]); i++) {
+        char *t = ub01_read(sites[i].file);
+        if (!t) {
+            TEST_CHECK(false, sites[i].file);
+            continue;
+        }
+        TEST_CHECK(strstr(t, sites[i].call) != NULL, sites[i].call);
+        TEST_CHECK(strstr(t, sites[i].bare) == NULL, sites[i].bare);
+        free(t);
+    }
+}
+
 void run_test_stack_margin_registry(void)
 {
     TEST_SECTION("stack_margin registry: register() de-dup by (name, slot)");
@@ -172,4 +268,6 @@ void run_test_stack_margin_registry(void)
     test_registry_reads_back_the_dedup_row();
     test_main_network_http_registrations_pass_slot_addresses();
     test_retain_exit_keeps_minimum();
+    test_task_exit_clears_slot_and_reads_dead();
+    test_ub01_read_lock_and_exit_sites();
 }

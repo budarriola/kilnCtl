@@ -185,6 +185,16 @@ bool stack_margin_retained(size_t index, uint32_t *free_bytes);
 bool stack_margin_read(size_t index, const char **name, uint32_t *configured_stack_bytes,
                         uint32_t *hwm_bytes, stack_margin_level_t *level, bool *alive);
 
+/* UB-01: a registered task that deletes itself MUST clear its slot with this
+ * call (never a bare `slot = NULL;`) as its last act before vTaskDelete(NULL).
+ * stack_margin_read() loads the slot and walks the task's stack under the
+ * same spinlock this takes, so once this returns no reader still holds the
+ * old handle -- the TCB can then be freed safely. A bare store let a reader
+ * on the other core load the handle, lose the race to the delete + TCB free,
+ * and dereference freed memory (bench crash 2026-10-18: info_uart_bridge
+ * LoadProhibited in uxTaskGetStackHighWaterMark at uptime 13 s). */
+void stack_margin_task_exit(void *task_handle_slot);
+
 #ifdef __cplusplus
 }
 #endif
