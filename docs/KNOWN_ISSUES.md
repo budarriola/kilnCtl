@@ -397,7 +397,7 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AF-04** INFO. Policy-then-sentinel order and the cut windows are sound; no window reads as auth off.
 - **AF-05** INFO. F2-04 and FS-05 accept reasons are sound; FS-03 cites an owner decision with no reference.
 ## Review 2026-10-18: AF/PZ fixes (docs/audits/REVIEW_AFPZ_2026_10_18.md)
-- **AP-01** LOW, `heat_enable.c` first-sight classify. A first-sight re-arm stamps `reboot_classify_since_ms = 1`, and the benign DIAG records `last_benign_reboot_ms = 1`, so a benign Pico reboot in the first 15 min of ESP uptime with a claim held trips SR-11 repeated-benign hold. A false hold, fails closed. Status open.
+- **AP-01** LOW, `heat_enable.c` first-sight classify. A first-sight re-arm stamps `reboot_classify_since_ms = 1`, and the benign DIAG records `last_benign_reboot_ms = 1`, so a benign Pico reboot in the first 15 min of ESP uptime with a claim held trips SR-11 repeated-benign hold. A false hold, fails closed. Status fixed (37dd0d4c2): the benign-reboot window ignores the since_ms == 1 first-sight sentinel; host test + negtest.
 - **AP-02** INFO. AF-01/02 tests cover gesture, stale-CRC and short blobs; the old heal clears all three. Sound.
 - **AP-03** INFO. PZ-02 test asserts no send before the DIAG and one send after a benign DIAG (no deadlock). Sound.
 - **AP-04** INFO. First sight sets `reboot_had_claim`, so the lost-trip latch is not expirable (conservative).
