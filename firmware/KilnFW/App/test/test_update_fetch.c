@@ -828,6 +828,21 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_state, "done") == 0 && g_error[0] == 0,
           "oversized 15-release list: per_page=5 retry supplies the release without /releases/latest (GP-02)");
+    // GD-03: pre-releases allowed: an oversized list stays a hard too_large failure (no per_page=5 retry, no /latest).
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char big3[300u * 1024u];
+        memset(big3, ' ', sizeof(big3) - 1);
+        big3[sizeof(big3) - 1] = '\0';
+        g_fr_routes[0].body = big3;
+        g_fr_routes[0].body_len = strlen(big3);
+        add_route(API_URL5, g_api, strlen(g_api));
+        add_route(LATEST_URL, g_api + 1, strlen(g_api) - 2);
+    }
+    POST("/api/update/check", "allow_prerelease=1");
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "too_large") == 0, "oversized list with pre-releases allowed stays too_large (GD-03)");
     // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;

@@ -814,6 +814,15 @@ static void test_user_login_refused_503_when_table_full_of_admins(void)
             const char *w1 = m ? strstr(m, "login_wipe(token_hex") : NULL;
             const char *w2 = m ? strstr(m, "login_wipe(token_hash") : NULL;
             TEST_CHECK(ret && w1 && w2 && w1 < ret && w2 < ret, "503 refusal wipes token_hex and token_hash before returning (DF-01)");
+            // GD-04 source scan: token_hash is wiped right after create_session (covers success and 500), and the
+            // Set-Cookie 500 path destroys the orphan session.
+            const char *cs = strstr(src, "web_auth_table_create_session(http_session_table(), token_hash");
+            const char *wh = cs ? strstr(cs, "login_wipe(token_hash") : NULL;
+            const char *r503 = cs ? strstr(cs, "all sessions in use by admins") : NULL;
+            TEST_CHECK(wh && r503 && wh < r503, "token_hash wiped right after create_session, before any branch (GD-04)");
+            const char *sc = strstr(src, "Set-Cookie formatting failed");
+            const char *ds = sc ? strstr(sc - 300, "web_auth_table_destroy_session(http_session_table(), session_idx)") : NULL;
+            TEST_CHECK(sc && ds && ds < sc, "Set-Cookie 500 path destroys the orphan session (GD-04)");
             free(src);
         }
     }
