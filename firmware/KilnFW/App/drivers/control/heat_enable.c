@@ -951,7 +951,7 @@ bool heat_enable_reboot_undecided(void)
 void heat_enable_note_boot_id_seen(bool seen)
 {
     bool taken = he_lock();
-    /* PQ-01: key on the first sight this ESP boot, not the unseen->seen edge: boot_id_unseen starts false and
+    /* PQ-01: key on the first sight this ESP boot, not the unseen->seen edge: boot_id_unseen once started false and
      * the guard's first tick is 2 s after start, so a boot id that arrived first never produced the edge. */
     if (seen && !s_he.boot_id_first_sight_done) {
         s_he.boot_id_first_sight_done = true;
@@ -963,11 +963,18 @@ void heat_enable_note_boot_id_seen(bool seen)
         if (s_he.reboot_classify_since_ms == 0u) {
             s_he.reboot_classify_since_ms = 1u;
         }
+        /* PZ-02: a claim held while the boot id was unseen (PR-03) is classified by this boot's DIAG
+         * before reconcile may grant it; acquire's was_empty re-arm never runs for an already-held claim. */
+        if (s_he.held_mask != 0u) {
+            s_he.reboot_had_claim = true;
+            s_he.reboot_classify_pending = true;
+        }
     }
     s_he.boot_id_unseen = !seen;
     he_unlock(taken);
 }
 
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
 void heat_enable_assume_boot_id_seen_for_host_tests(void)
 {
     /* Host fixtures only: the pre-PR-03 starting point (boot id known, first sight already consumed). */
@@ -976,6 +983,7 @@ void heat_enable_assume_boot_id_seen_for_host_tests(void)
     s_he.boot_id_first_sight_done = true;
     he_unlock(taken);
 }
+#endif
 
 bool heat_enable_boot_id_unseen_blocked(void)
 {

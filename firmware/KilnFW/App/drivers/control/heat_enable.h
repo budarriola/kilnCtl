@@ -295,7 +295,9 @@ bool heat_enable_boot_id_unseen_blocked(void);
 
 // Host tests only: mark the boot id as seen and its first sight consumed. Production never calls this
 // (heat_enable_init starts with the boot id unseen, PR-03).
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
 void heat_enable_assume_boot_id_seen_for_host_tests(void);
+#endif
 // PR-02: the DIAG's trip reason/mask (call before note_pico_state, only meaningful for the current boot's DIAG).
 // A claimless lost-trip latch expires only when the trips cleared on the new boot cover the lost trip's reason.
 void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask);

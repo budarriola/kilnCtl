@@ -1519,6 +1519,12 @@ static void test_pr03_default_unseen(void)
     heat_enable_note_boot_id_seen(true);
     TEST_CHECK(!heat_enable_boot_id_unseen_blocked(), "PR-03: unblocked once the boot id arrives");
     TEST_CHECK(!heat_enable_is_granted(), "PQ-02: still not granted until the new boot's DIAG classifies");
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 0 && !heat_enable_is_granted(), "PZ-02: reconcile does not grant before the DIAG");
+    TEST_CHECK(heat_enable_reboot_undecided(), "PZ-02: held claim is undecided after first sight");
+    heat_enable_note_pico_boot(0u, true, 0u, 3000u);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "PZ-02: benign DIAG then reconcile sends enable (no deadlock)");
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
 }
 

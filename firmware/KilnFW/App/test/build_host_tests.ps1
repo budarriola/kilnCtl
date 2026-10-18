@@ -465,6 +465,8 @@ try {
         # a float under default argument promotion and wrote the ceiling as 0.
         "/we4013"
         "/EHsc"
+        # PZ-01: host-only test hooks (heat_enable_assume_boot_id_seen_for_host_tests); the target build never defines it.
+        "/DKILNCTL_HEAT_ENABLE_TEST_HOOK"
         "/I`"$stubDir`""
         "/I`"$commonInc`""
         "/I`"$driversDir`""
