@@ -67,7 +67,7 @@ recovery_apply_result_t recovery_apply_run(const recovery_apply_io_t *io, uint8_
     set_phase(prog, RECOVERY_APPLY_CHECKING);
     if (!io || !scratch || scratch_len < RECOVERY_APPLY_CHUNK || !io->stage_read || !io->stage_erase ||
         !io->app_read || !io->app_erase || !io->app_write || !io->sha_start || !io->sha_update ||
-        !io->sha_finish || !io->app_verify || !io->set_boot ||
+        !io->sha_finish || !io->stage_verify || !io->app_verify || !io->set_boot ||
         io->stage_size < STAGE_IMAGE_OFFSET + RECOVERY_APPLY_CHUNK || io->app_size == 0 ||
         (io->app_size % RECOVERY_APPLY_ERASE_BLOCK) != 0) {
         return fail(prog, RECOVERY_APPLY_ERR_ARG);
@@ -118,6 +118,12 @@ recovery_apply_result_t recovery_apply_run(const recovery_apply_io_t *io, uint8_
         return fail(prog, RECOVERY_APPLY_ERR_TOO_BIG);
     }
     if (vr != RIC_OK) {
+        return fail(prog, RECOVERY_APPLY_ERR_BAD_IMAGE);
+    }
+
+    // 3b. OP-01: full esp_image_verify (every segment, checksum, digest) over the STAGED image
+    // before app is touched. The stage SHA only ties the header to the received bytes.
+    if (io->stage_verify(io->ctx, len) != 0) {
         return fail(prog, RECOVERY_APPLY_ERR_BAD_IMAGE);
     }
 

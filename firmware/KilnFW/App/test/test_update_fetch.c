@@ -219,6 +219,29 @@ static void test_download_happy(void)
     expect_claim_balanced("happy download");
 }
 
+static HANDLE g_hold_ev;
+static void hold_job(void) { WaitForSingleObject(g_hold_ev, 20000); }
+
+// BT-01: the download handler must not refuse itself through the RW-02 interlock (which counts a running fetch),
+// yet a second fetch beside a running one is still refused.
+static void test_download_not_self_blocked(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(POST("/api/update/download", NULL) == 202, "BT-01: idle download is 202, not self-blocked");
+    wait_idle();
+    expect_claim_balanced("BT-01 idle download");
+    fixture(g_sha_hex, IMG_LEN);
+    g_hold_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
+    g_fr_routes[0].on_read = hold_job;
+    CHECK(POST("/api/update/download", NULL) == 202, "BT-01: first download accepted");
+    CHECK(POST("/api/update/download", NULL) == 409, "BT-01: second download beside a running fetch refused");
+    CHECK(POST("/api/update/check", NULL) == 409, "BT-01: check beside a running fetch refused");
+    POST("/api/update/fetch/cancel", NULL);
+    SetEvent(g_hold_ev);
+    wait_idle();
+    expect_claim_balanced("BT-01 refused beside running");
+}
+
 // Gap 1: a body that ends before the advertised Content-Length must abort the stage, not finish it.
 static void test_short_body_http_layer(void)
 {
@@ -1042,9 +1065,6 @@ static void test_redirect_hop_frees_first_client(void)
     expect_claim_balanced("redirect hop");
 }
 
-static HANDLE g_hold_ev;
-static void hold_job(void) { WaitForSingleObject(g_hold_ev, 20000); }
-
 static void test_handler_refusals(void)
 {
     fixture(g_sha_hex, IMG_LEN);
@@ -1089,7 +1109,7 @@ static void test_handler_refusals(void)
     g_fr_routes[0].on_read = hold_job;
     CHECK(POST("/api/update/download", NULL) == 202, "job started and parked in its first read");
     CHECK(POST("/api/update/check", NULL) == 409 && resp_has("fetch_busy"), "check while busy -> 409 fetch_busy");
-    CHECK(POST("/api/update/download", NULL) == 409 && resp_has("fetch_busy"), "download while busy -> 409");
+    CHECK(POST("/api/update/download", NULL) == 409, "download while busy -> 409 (RW-02 interlock sees the running fetch)");
     CHECK(POST("/api/update/fetch/cancel", NULL) == 200 && resp_has("\"cancelling\":true"), "cancel while busy");
     SetEvent(g_hold_ev);
     wait_idle();
@@ -1409,6 +1429,7 @@ int main(void)
 
     test_check_happy();
     test_download_happy();
+    test_download_not_self_blocked();
     test_short_body_http_layer();
     test_short_body_chunked();
     test_sha_mismatch();

@@ -2647,6 +2647,9 @@ void watchdog_task_entry(void *arg)
             if (heat_enable_reboot_hold_lost_trip_only()) {
                 (void)profile_executor_pause_with_reason_bounded("pico_lost_trip_latched");
                 (void)autotune_engine_abort_bounded("pico_lost_trip_latched", 100u);
+            } else if (heat_enable_reboot_hold_repeated_benign()) {
+                (void)profile_executor_pause_with_reason_bounded("pico_repeated_reboot");
+                (void)autotune_engine_abort_bounded("pico_repeated_reboot", 100u);
             } else {
                 (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
                 /* Autotune has no pause state: abort is its equivalent (relays off). */
@@ -2655,6 +2658,8 @@ void watchdog_task_entry(void *arg)
         } else if (heat_enable_boot_id_unseen_blocked()) {
             /* PR-04: no Pico boot id yet -> heat withheld; say so instead of running cold silently. */
             (void)profile_executor_pause_with_reason_bounded("pico_boot_id_unseen");
+            /* HH-03: autotune has no pause state; abort so it does not run cold without a reason. */
+            (void)autotune_engine_abort_bounded("pico_boot_id_unseen", 100u);
         } else if (hold_unconfirmed) {
             (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
             (void)autotune_engine_abort_bounded("heat_grant_unconfirmed", 100u);

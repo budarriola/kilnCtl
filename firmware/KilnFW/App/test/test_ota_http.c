@@ -3173,6 +3173,16 @@ static void test_upload_deadline_helpers(void)
     TEST_CHECK(strcmp(OTA_HTTP_UPLOAD_SLOW_ERROR, "upload_too_slow") == 0, "deadline error name");
 }
 
+static void test_rollback_reboot_failure_releases_claim_op02(void)
+{
+    TEST_SECTION("ota_rollback_reboot_task -- OP-02: a failed reboot call releases the OTA claim");
+    ota_http_update_end();
+    TEST_CHECK(ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP), "claim taken (as the rollback handler does)");
+    TEST_CHECK(ota_http_update_in_progress(NULL), "claim held before the task runs");
+    ota_rollback_reboot_task(NULL); /* stub esp_ota_mark_app_invalid_rollback_and_reboot returns ESP_FAIL */
+    TEST_CHECK(!ota_http_update_in_progress(NULL), "claim released after the reboot call failed");
+}
+
 void run_test_ota_http(void)
 {
     test_upload_deadline_helpers();
@@ -3228,6 +3238,7 @@ void run_test_ota_http(void)
 
     test_pico_rollback_post_returns_pending_without_blocking();
     test_reboot_handlers_reply_only_after_task_created();
+    test_rollback_reboot_failure_releases_claim_op02();
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();

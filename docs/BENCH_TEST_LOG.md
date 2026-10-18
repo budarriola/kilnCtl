@@ -3585,3 +3585,27 @@ Final state: idle, Pico armed, no trip, relays off, Kiln config 1 active, ramp a
 - Profile #0 M18C_TEST (40 C, 900 C/hr, 2 min dwell, then 30 C) started immediately after the ESP restart with pause_reason none. This confirms the PF-01..03 / PQ-01 fix (no pico_fatal_reboot pause as in benchmain3 step 5).
 - Zones rose from 32 C to about 45.9 C (about 6 C overshoot on the 4 W fixture); Pico TC read 42.8 C. The run completed.
 - profiles_stop and ack followed; K4 dropped.
+
+## benchmain7 (2026-10-18): main d47a9c64f, Pico reboot rule, 30 min RAM soak, GitHub update
+Board 192.168.1.156 (COM14), running main d47a9c64f (ESP and Pico flashed earlier today), idle, link up, Pico armed, no trip before. Backup first: logs/benchmain7_backup_pre.json (v7, 2 profiles, 3 zones, 3 kiln configs, no Wi-Fi/password fields).
+
+Step 1, Pico reboot rule: PASS.
+- profiles_start(0) 'M18C_TEST' at about 00:26:50: K4 (`safety_relay_energized`) true, `safety_heating_enabled` true, zones 29.4 -> 38.9 C in 90 s.
+- Reboot 1 (`debug_reset(peer=pico)`, 00:28:25; the tool printed "Failed to select multidrop rp2040.dap1" and an error although the reset happened, `pico_reboot_seq` 0 -> 1): K4 dropped at once, DIAG state 1 (booting). Pico ARMED (diag 2) and `heating_enabled` back at 00:29:26 (61 s), K4 energized at 00:29:29 (64 s) with no operator action, pause_reason none, temperature kept rising to 44.2 C. This is the 2026-10-10 benign-reboot auto-resume rule.
+- Reboot 2 (about 00:29:50, 85 s after reboot 1, inside the 15 min repeated window): Pico armed again at 00:30:46 (about 56 s) but K4 stayed open for the 60 s observed afterwards; executor state=2 paused, pause_reason `pico_fatal_reboot` ("safety processor rebooted after a fatal fault") although the Pico's boot reason was power-on (see BT-02). Heat held, as the rule requires.
+- profiles_stop at 00:31:3x: executor idle, hold released with the last release (`heat_enable.c:625`); profiles_ack_last_run answered "nothing to acknowledge: no previous-run record" (the stop left no record). No trip, mask 0, relays off.
+
+Step 2, 30 min RAM soak: PASS, no approach to the floor.
+- `latency_soak_start` 1800 s, 5 s interval, job ffd8632e: OK, 361 ticks, 3610 samples over 10 GET surfaces, 0 errors, 0 clustered stalls. p95 about 310 ms on every surface except status (568 ms); max 623 ms (status).
+- In parallel: a status poll every 10 s (170 polls, 0 errors, uptime advanced 7370 -> 9091 s, no reboot), 2 LCD webcam captures, 5 `update_check` calls (stable and allow_prerelease) during the soak.
+- Heap before (uptime 6991 s) and after (9162 s): internal min_free 103579 B both (floor 8192 B; 95.4 KB of margin), internal largest free block 32768 B (low-water 32768 B since uptime 2 s; SK-04 alarm 7168 B), internal free 124927 -> 124635 B, DMA min_free 95791 B both. PSRAM free 4846392 -> 4844896 B, largest block 4718592 B, PSRAM min_free 4818224 -> 4529180 B (the drop came with the update checks, TLS in PSRAM; stable across the later checks). Link: link_reply timeouts 0.
+- The `update_check` heap sample during checks: low-water free 115159 B internal, largest block 32768 B.
+
+Step 3, GitHub update end to end: PARTIAL, blocked by BT-01 and by a classifier denial.
+- Existing releases (GitHub API): v1.0.0-pre.1, pre.3, pre.4, all pre-releases, no stable release. No release or tag created.
+- `update_check` stable: FAILED `no_stable_release`, http 404 (stable path: the board reads the releases list, FA-01 falls back to /releases/latest, which is 404 because only pre-releases exist). This is the expected FA-01 result. PASS.
+- `update_check(allow_prerelease)`: ok, tag v1.0.0-pre.4, verdict `refuse_downgrade` (candidate schema lower than the board, WARNING zones_cfg_lower), sha256 3b36b1f0..., 2975824 B. PASS (the downgrade gate works).
+- `update_stage_release(confirm, allow_prerelease, allow_downgrade, confirm_downgrade=v1.0.0-pre.4)` (also with force): REFUSED every time, HTTP 409 "an update is already in progress", also after `update_stage_clear`, `update_fetch_cancel` and a clean ESP reset (`debug_reset(esp)`, no claim logged at boot; log line "update_http: update download ... refused by interlock: an update is already in progress"). Cause found in source, see BT-01. FAIL.
+- The stage held a verified upload of pre.4 (source=upload) at the start; I cleared it with `update_stage_clear` while diagnosing, so the stage is now blank.
+- Fallback attempted: download the pre.4 asset to the PC to push it with `update_stage_upload`. The auto mode classifier DENIED the download (curl of the release asset). I stopped that step and did not route around it. The recovery AP join, recovery_apply_staged and the return flash were therefore not run. The board never left main d47a9c64f: the final state is the ESP reset once (uptime 93 s at last read), link up, Pico armed (`diag_state` 2), trip_mask 0, relays off, no profile; so no reflash and no settings restore was needed (the backup is unused).
+- Tooling note, not a device bug: `debug_reset(peer=pico)` reports an error while the reset succeeds (openocd "Failed to select multidrop rp2040.dap1" on the second core).

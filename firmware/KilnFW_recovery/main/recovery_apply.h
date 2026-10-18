@@ -63,6 +63,7 @@ typedef struct {
     int (*sha_update)(void *ctx, const void *buf, size_t len);
     int (*sha_finish)(void *ctx, uint8_t out[RECOVERY_APPLY_SHA_LEN]);
     void (*sha_abort)(void *ctx); // may be NULL
+    int (*stage_verify)(void *ctx, uint32_t image_len); // esp_image_verify over the STAGED image, before app is erased; 0 = valid
     int (*app_verify)(void *ctx, uint32_t image_len); // esp_image_verify; 0 = valid
     int (*set_boot)(void *ctx);                       // esp_ota_set_boot_partition(app); 0 = ok
     void (*yield)(void *ctx);                         // optional, ~every 64 KB

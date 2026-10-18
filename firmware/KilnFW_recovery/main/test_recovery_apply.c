@@ -153,9 +153,10 @@ typedef struct {
     bool fail_sha_update;
     bool fail_sha_finish;
     bool fail_verify;
+    bool fail_stage_verify;
     // Counters.
     unsigned mut_ops, writes, reads, violations, bad_ranges;
-    unsigned stage_erases, set_boots, verifies, aborts;
+    unsigned stage_erases, set_boots, verifies, aborts, stage_verifies, erases_at_stage_verify;
     unsigned app_erases, app_erase_max, yields, yield_writes[8]; // erase-ahead granularity (R2-I4)
 } fl_t;
 
@@ -325,6 +326,14 @@ static int cb_app_verify(void *c, uint32_t len)
     }
     return memcmp(f->app, g_image, IMG_LEN) == 0 ? 0 : -1;
 }
+// OP-01: esp_image_verify over the staged image; f->fail_stage_verify models a truncated/corrupt one.
+static int cb_stage_verify(void *c, uint32_t len)
+{
+    fl_t *f = c;
+    f->stage_verifies++;
+    f->erases_at_stage_verify = f->app_erases;
+    return (f->dead || f->fail_stage_verify || len != IMG_LEN) ? -1 : 0;
+}
 static int cb_set_boot(void *c)
 {
     fl_t *f = c;
@@ -358,6 +367,7 @@ static void io_init(recovery_apply_io_t *io, fl_t *f)
     io->sha_update = cb_sha_update;
     io->sha_finish = cb_sha_finish;
     io->sha_abort = cb_sha_abort;
+    io->stage_verify = cb_stage_verify;
     io->app_verify = cb_app_verify;
     io->set_boot = cb_set_boot;
 }
@@ -705,6 +715,20 @@ static int seq_verify(void *c, uint32_t l)
     return cb_app_verify(c, l);
 }
 
+static void test_stage_verify_op01(void)
+{
+    fl_t *f = malloc(sizeof(*f));
+    fresh(f);
+    recovery_apply_progress_t p;
+    CHECK(run(f, &p) == RECOVERY_APPLY_OK, "op01: good stage applies");
+    CHECK(f->stage_verifies == 1 && f->erases_at_stage_verify == 0, "op01: stage verified once, before the first app erase");
+    fresh(f);
+    f->fail_stage_verify = true; // sha-consistent but structurally truncated/corrupt
+    expect_refused("op01 stage esp_image_verify fails", f, RECOVERY_APPLY_ERR_BAD_IMAGE);
+    CHECK(f->app_erases == 0 && f->writes == 0, "op01: app never erased or written");
+    free(f);
+}
+
 static void test_order(void)
 {
     fl_t *f = malloc(sizeof(*f));
@@ -795,6 +819,7 @@ int main(void)
     test_refusals();
     test_failures_after_copy_started();
     test_order();
+    test_stage_verify_op01();
     test_power_cut_at_every_step();
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;

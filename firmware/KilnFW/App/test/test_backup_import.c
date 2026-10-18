@@ -5900,6 +5900,29 @@ static void test_safety_i_normal_a_write_failure_aborts_whole_import(void)
               "since the safety write happens before the per-zone commit loop");
 }
 
+static void test_safety_i_normal_a_import_refuses_while_writer_guard_held(void)
+{
+    TEST_SECTION("RX-02: backup import claims the Pico writer guard around its i_normal_a stage+commit; "
+                 "a held guard refuses the import with no Pico traffic");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    s_pico_i_normal_a_known[1] = true;
+    s_pico_i_normal_a[1] = 7.6543f;
+    TEST_CHECK(run_export() == ESP_OK, "export must succeed");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "another writer holds the guard");
+    char err[256];
+    bool ok = test_backup_import_apply(s_export_body, err, sizeof(err));
+    TEST_CHECK(!ok, "RX-02: import refused while a bench_preset-style writer holds the guard");
+    TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1, "RX-02: no pairs staged");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_ASYNC_JOB, "RX-02: the holder claim is untouched");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
+    ok = test_backup_import_apply(s_export_body, err, sizeof(err));
+    TEST_CHECK(ok, "RX-02: import succeeds once the guard is free");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "RX-02: import released the guard");
+}
+
 static void test_safety_i_normal_a_absent_key_never_calls_write(void)
 {
     TEST_SECTION("backup_import_apply -- a backup with NO safety_i_normal_a key at all makes ZERO calls "
@@ -7839,6 +7862,7 @@ void run_test_backup_import(void)
     test_safety_i_normal_a_round_trips_through_export_import();
     test_safety_i_normal_a_write_failure_aborts_whole_import();
     test_safety_i_normal_a_absent_key_never_calls_write();
+    test_safety_i_normal_a_import_refuses_while_writer_guard_held();
 
     test_export_never_contains_credential_markers();
 

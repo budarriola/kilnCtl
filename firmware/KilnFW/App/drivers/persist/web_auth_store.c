@@ -879,6 +879,24 @@ bool web_auth_store_storage_reset_latched(void)
     return s_storage_reset_latched;
 }
 
+bool web_auth_store_storage_reset_bootstrap_allowed(void)
+{
+    if (!s_storage_reset_latched) {
+        return true;
+    }
+    // RT-01: latched = dashboards only until an admin re-setup. Open bootstrap is allowed
+    // only after the physical reset gesture, which leaves a valid web blob whose admin
+    // record is unconfigured with must_change set (persisted, so it survives a reboot).
+    web_auth_web_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    if (load_blob(WEB_AUTH_KEY_WEB, &blob, sizeof(blob)) != HAL_OK || blob.version != WEB_AUTH_STORE_VERSION ||
+        web_blob_crc(&blob) != blob.crc32) {
+        return false;
+    }
+    const web_auth_password_record_t *admin = &blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR];
+    return !admin->configured && admin->must_change;
+}
+
 const char *web_auth_store_storage_reset_banner_text(void)
 {
     return "AUTH: login storage was reset; set admin";

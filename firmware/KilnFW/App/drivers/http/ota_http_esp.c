@@ -756,6 +756,9 @@ static void ota_rollback_reboot_task(void *arg)
     // as alive and calls uxTaskGetStackHighWaterMark() on it, does not read
     // back "alive" for a task that is about to be deleted, then delete the
     // task explicitly so the function never actually returns.
+    // OP-02: the client was already told "rebooting"; release the OTA claim taken by the handler so
+    // a failed reboot does not leave heat and updates refused until a manual reboot.
+    ota_http_update_end();
     s_ota_rollback_reboot_task = NULL;
     vTaskDelete(NULL);
 }

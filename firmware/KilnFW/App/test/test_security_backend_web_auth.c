@@ -385,6 +385,35 @@ static void test_clear_all_credentials(void)
     }
 }
 
+/* RT-01: while the FS-02 storage-reset latch is held, bootstrap is 403 unless the physical gesture ran. */
+static void test_bootstrap_refused_while_storage_reset_latched(void)
+{
+    TEST_SECTION("RT-01: bootstrap_password 403 while the storage-reset latch is held, allowed after the gesture");
+    reset_all();
+    security_backend_web_auth_start();
+    TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "wifi_nvs up");
+    TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "fresh boot writes sentinel + mirror");
+    TEST_CHECK(hal_kv_erase_partition(NULL) == HAL_OK, "erase nvs");
+    TEST_CHECK(web_auth_store_storage_reset_evaluate(false), "latched");
+    f_web_enabled = true;
+    TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403, "RT-01: latched => 403");
+    TEST_CHECK(strstr(s_reply, "reset gesture") != NULL, "RT-01: 403 body names the recovery path");
+    TEST_CHECK(strstr(s_reply, "PIN") == NULL, "RX-01: 403 body does not advertise an LCD PIN recovery");
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "RT-01: nothing stored");
+    {
+        /* a valid web blob that is NOT the gesture result (admin record untouched, must_change false) */
+        uint8_t usalt[WEB_AUTH_SALT_LEN] = {7};
+        TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", PW, usalt, false) == HAL_OK, "seed user");
+        TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403,
+                   "RT-01: a blob without the gesture marker is still 403");
+    }
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "physical gesture clear");
+    TEST_CHECK(web_auth_store_storage_reset_latched(), "still latched after the gesture");
+    TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 200, "RT-01: gesture done => bootstrap ok");
+    TEST_CHECK(!web_auth_store_storage_reset_latched(), "bootstrap clears the latch");
+    reset_all();
+}
+
 static void test_bootstrap_handler(void)
 {
     TEST_SECTION("POST /api/auth/bootstrap_password: only while bootstrap is needed, body validation, strength, one-shot");
@@ -436,6 +465,7 @@ int main(void)
     test_invalidate_sessions();
     test_clear_all_credentials();
     test_bootstrap_handler();
+    test_bootstrap_refused_while_storage_reset_latched();
     printf("security_backend_web_auth: %d checks, %d failures\n", g_test_count, g_test_failures);
     return g_test_failures ? 1 : 0;
 }

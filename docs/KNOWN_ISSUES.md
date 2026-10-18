@@ -402,3 +402,50 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AP-03** INFO. PZ-02 test asserts no send before the DIAG and one send after a benign DIAG (no deadlock). Sound.
 - **AP-04** INFO. First sight sets `reboot_had_claim`, so the lost-trip latch is not expirable (conservative).
 - **AP-05** INFO. `KILNCTL_HEAT_ENABLE_TEST_HOOK` is defined only in build_host_tests.ps1; no target CMake defines it.
+## Review 2026-10-18: heat_enable holistic (docs/audits/REVIEW_HEATENABLE_HOLISTIC_2026_10_18.md)
+- **HH-01** MED, `heat_enable.c:833-867`. A benign Pico reboot classified with no claim held never enters the SR-11 window. This covers an idle reboot and also a reboot during a firing whose claim was released before the DIAG. A second benign reboot within 15 min then auto-resumes heat. Fix: apply the window in the claimless benign branch. Status fixed (00d7eec68).
+- **HH-02** LOW, `heat_enable.c:823-831, 534-561`. A grant standing when a reboot is noted stays `granted` until the DIAG: is_granted reports true and a second claimant's acquire returns true before a verdict. No send, and K4 stays open. Status fixed (00d7eec68).
+- **HH-03** LOW, `profile_executor.c:2655`. boot_id_unseen pauses the firing but does not abort autotune; the autotune claim runs cold with no reason shown. Status fixed (00d7eec68).
+- **HH-04** INFO. since_ms 0/1 and last_benign 0 sentinels collide with tick 0/1 or a 49.7-day wrap; negligible.
+- **HH-05** INFO. An undecided verdict with no DIAG never times out (by design, fail safe, not a deadlock).
+- **HH-06** INFO. since_ms is never cleared after a verdict; the `== 0` re-arm guards rely on note_pico_boot's early return while unseen.
+- **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm. Status fixed, tests added (00d7eec68).
+- **HF-01** MED, `heat_enable.c:366-373`. An enable that lands while classify_pending is set clears `pending`. After a benign verdict reconcile never re-requests heat, and the firing runs cold with no pause reason. Predates 00d7eec68 (SL3-R2 A3). Fix: keep pending when there is no hold. Status fixed (9997a797f); host test, negtest caught.
+- **HF-02** LOW. The HH-03 `pico_boot_id_unseen` autotune abort has no test; the source scan at test_heat_enable.c:1574 covers only the other two reasons. Status fixed (9997a797f); source scan added, negtest caught.
+- **HF-03** INFO. The per-tick autotune abort while unseen is idempotent; only the lock-busy warning can repeat, as in the existing branches.
+- **HF-04** INFO. HH-01 lets an idle benign reboot seed the 15 min window (by design); no permanent hold, single benign reboots auto-resume.
+- **HF-05** INFO. The HH-07 latch-plus-re-arm assertions each map to a distinct mutant, but no negtest has been run on test_hh_fixes.
+## Review 2026-10-18: OTA failure paths (docs/audits/REVIEW_OTA_FAILPATHS_2026_10_18.md)
+- **OP-01** MED, `recovery_apply.c` step 3, `update_stage.c` upload_finish. Only the first chunk of the image is structurally checked before app is erased. A corrupt or truncated hand-staged .bin is staged VERIFIED, because its SHA covers only the bytes received. It then fails esp_image_verify only after app is rewritten, which leaves the board in recovery until a good image is pushed. Fixed (298a4f4c6): recovery runs esp_image_verify over the staged image before the first app erase (recovery_apply stage_verify, ERR_BAD_IMAGE), and update_stage upload_finish runs image_verify before the VERIFIED header is written; host tests, mutants caught.
+- **OP-02** LOW, `ota_http_esp.c:715-761`. If mark_app_invalid_rollback_and_reboot fails, the rollback task exits without ota_http_update_end, so the claim is held until reboot (fail safe). Unreachable on single-slot (route answers 409). Fixed (298a4f4c6): the task calls ota_http_update_end() before it exits; host test, mutant caught.
+- **OP-03** INFO. The recovery direct ESP push erases app as it streams, before esp_ota_end verifies it; inherent to the design, and a retry is possible.
+- **OP-04** INFO. When the fetch writer wedges, heat is allowed again while a late stage-only flash op may run; deliberate, covered earlier.
+- **OP-05** INFO. A 50 ms lock timeout in ota_http_update_end leaves the claim held (fail safe).
+
+
+## Review 2026-10-18: route tiers (docs/audits/REVIEW_ROUTE_TIERS_2026_10_18.md)
+
+- **RT-01** MED, `persist/web_auth_store.c:519`. While the FS-02 storage-reset latch is held with the admin key NOT_FOUND, `web_auth_store_admin_configured_or_unreadable` ignores the latch, so bootstrap is needed and the OPEN POST /api/auth/bootstrap_password lets any LAN client set the admin password, against the FS-02 "dashboards only until admin re-setup" decision. Status: fixed (cb1e85565), coordinator fail-closed choice, owner may revise: POST /api/auth/bootstrap_password is 403 while the FS-02 storage-reset latch is held unless the physical reset gesture ran (persisted marker: valid web blob, admin unconfigured + must_change). Recovery cannot latch forever: do the four-corner gesture (the only exit; then bootstrap works). Fresh never-written boards (no latch) unchanged.
+- **RT-02** LOW, `safety_cfg_http.c:2333`. POST /api/safety/rate_guard/auto has no 409 mode gate while running; it writes Pico 0x0204 (can loosen with confirm=1). Pico ARMED refusal is the backstop. Status: fixed (cb1e85565) 409 system_mode_gate while running.
+- **RT-03** LOW, `safety_cfg_http.c:2049`. POST /api/safety/commissioning/bench_preset has no 409 mode gate; it commits 32 Pico params. Status: fixed (cb1e85565) 409 system_mode_gate while running.
+- **RT-04** LOW, `safety_cfg_http.c:1763`. CT auto-zero refuses while running with 200 ok:false, not 409, and does not cover a restore in flight. Status: fixed (cb1e85565) 409 while running/autotune or a backup restore is in flight; no PcTools parser depended on the old 200 ok:false.
+- **RT-05** INFO, `net/web_auth_session.c`. No absolute session lifetime (idle-only expiry, `issued_ms` unused, "never" timeout accepted). Status: info.
+- **RT-06** INFO, `security_backend_web_auth.c`. TOTP reset destroys web sessions directly without `ui_lcd_lock_force_lock`. Status: info.
+- **RT-07** INFO, `http_origin_check.h`. Origin compare ignores scheme, default port 80, no Origin/Referer allowed; SameSite=Strict mitigates. Status: info.
+- **RT-08** INFO, `route_tier_table.h`. SAFETY_REDUCE tier unused. Status: info.
+
+## Review 2026-10-18: RT/OP fixes (docs/audits/REVIEW_RTOP_FIX_2026_10_18.md)
+- **RX-01** LOW, `security_backend_web_auth.c` bootstrap 403, `web_auth_store.h`. They say an LCD admin PIN recovers the FS-02 latch, but set_pin is reachable only through the web admin dispatch (no admin can log in while latched) and no UI path sets a PIN, so the gesture is the only recovery. Status: fixed (1cd8eb405): text corrected, the gesture is the only exit.
+- **RX-02** LOW, `safety_cfg_http.c` bench_preset, rate_guard/auto. The restore fence was added to ct_auto_zero only. Backup import does not claim the safety_cfg writer guard, so these handlers can stage and commit Pico params while a restore is doing the same. Status: fixed (1cd8eb405): the restore fence is in the shared safety_cfg_mode_gate_refuse (all Pico param writers), and backup import claims the HTTP_SYNC writer guard around its i_normal_a stage+commit.
+- **RX-03** INFO. The RT-02/03/04 mode gates are entry checks; a firing that starts during a ct_auto_zero or bench_preset job is handled by the existing preconditions.
+- **RX-04** INFO. If the gesture's LCD blob write fails after the web blob write, the marker is still left and bootstrap is allowed (physical presence was still shown).
+- **RX-05** INFO. The RT-01 marker cannot be written from the network while latched; first boot and post-gesture bootstrap work; no permanent latch.
+- **RX-06** LOW, `update_http.c` io_image_verify, `recovery_apply_esp.c` cb_stage_verify. No target run shows that a real good image passes the new verify, or how long it takes. Bench: upload a release .bin, then do a recovery apply. Status open.
+- **RX-07** INFO. The app holds the flash_xip bracket for the full ~2 MB verify, which blocks all SPI1 ops (estimated under 1 s, unmeasured).
+- **RX-08** INFO. The update_stage image_verify NULL-skip is not reachable on target: the only constructor wires it. No check pins the wiring.
+- **RX-09** INFO. OP-02 release is correct: it releases once, only on the failure path, after the bracket exit.
+- **RX-10** INFO. OP-01/OP-02 tests map to the intended mutants.
+
+## Bench 2026-10-18 benchmain7 (docs/BENCH_TEST_LOG.md)
+- **BT-01** FIXED (sha 37d6b9674) HIGH, `firmware/KilnFW/App/drivers/update/update_fetch.c` download handler (`job_try_begin()` sets `busy` at ~line 1366, then `update_http_gate_refuses()` runs `ota_interlock_check`), `firmware/KilnFW/App/drivers/http/ota_http.c:469`. RW-02 (f3762bb08) made the interlock count `fetch_busy_probe()` (`s_c->busy`) as `other_update_in_progress`. POST /api/update/download takes `busy` first and then runs the interlock, so it refuses itself: every GitHub stage download answers 409 "an update is already in progress" (stage blank or full, after fetch_cancel, after an ESP reset; `update_status` shows busy=false). The GitHub auto-update (update_stage_release) is dead on main d47a9c64f; stage upload and update_check are unaffected. Fix: run the gates before `job_try_begin()`, or exclude the caller's own busy flag from the interlock for the download handler. Needs a host test that drives the download route and expects 202. Status open.
+- **BT-02** FIXED (sha 37d6b9674) LOW, `firmware/KilnFW/App/drivers/control/heat_enable.c:895-905`. A repeated benign Pico reboot inside the 15 min window holds heat (correct) but the executor pause reason is `pico_fatal_reboot` ("rebooted after a fatal fault") while the DIAG boot reason is power-on, so the operator is told of a fatal fault that did not happen. Measured benchmain7: reboot 2, 85 s after reboot 1. Wording only; heat behaviour is as the owner rule requires. Status open.

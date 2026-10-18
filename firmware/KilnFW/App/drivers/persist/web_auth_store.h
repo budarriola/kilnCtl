@@ -299,6 +299,10 @@ bool web_auth_store_ever_enabled(void);
 // sentinel (+mirror), returns false (auth off as before).
 bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere);
 bool web_auth_store_storage_reset_latched(void);
+// RT-01: false while latched unless the physical reset gesture ran in this episode
+// (persisted: valid web blob, admin unconfigured + must_change). True when not latched.
+// Recovery while refused: only the physical gesture (E-stop + four corners); an LCD PIN cannot be set while latched.
+bool web_auth_store_storage_reset_bootstrap_allowed(void);
 // LCD banner text for the latched state.
 const char *web_auth_store_storage_reset_banner_text(void);
 // F2-01: after a storage-reset recovery the LCD lock stays ON with no admin PIN (LCD gated). True

@@ -1364,17 +1364,20 @@ static esp_err_t download_post_handler(httpd_req_t *req)
     if (bo > 0) {
         return send_backoff_json(req, bo);
     }
-    if (!job_try_begin()) {
-        return send_error_json(req, "409 Conflict", "fetch_busy");
-    }
     if (!clock_synced()) {
-        s_c->busy = 0;
         return send_error_json(req, "409 Conflict", "clock_not_synced");
     }
+    // BT-01: the gates run BEFORE job_try_begin(). Since RW-02 the OTA interlock counts our own busy flag as an
+    // update in progress, so claiming busy first made every download refuse itself. A fetch that is already
+    // running (check or download) still refuses here through that same interlock / the update claim.
     // Same refusals, same order, as the manual upload: mode gate, OTA interlock, update claim.
     if (update_http_gate_refuses(req, "update download", ip)) {
-        s_c->busy = 0;
         return ESP_OK;
+    }
+    if (!job_try_begin()) {
+        // A check began between the gate and here: release the update claim the gate took.
+        ota_http_update_end();
+        return send_error_json(req, "409 Conflict", "fetch_busy");
     }
     p.claimed = true;
     ESP_LOGW(TAG, "download requested from %s (downgrade=%d prerelease=%d force=%d)", ip, p.allow_downgrade,

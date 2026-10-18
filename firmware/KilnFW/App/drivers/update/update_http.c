@@ -10,6 +10,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -19,6 +20,7 @@
 #include "psa/crypto.h"
 
 #include "hal_time.h"
+#include "flash_xip_lock.h"
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "ota_http.h"
 #include "ota_http_internal.h"
@@ -48,6 +50,18 @@ static bool s_sha_active;
 // Result of the one boot-time stale-stage check (update_http_stale_stage_check()). BOOT-scoped: set once per
 // boot, never reset by a later upload or clear, so GET reports it as boot_auto_clear. One enum, a few bytes of .bss.
 static update_stale_result_t s_last_auto_clear;
+
+// OP-01: esp_image_verify over the staged image (runs in upload_finish, before the VERIFIED header).
+static int io_image_verify(void *ctx, uint32_t image_len)
+{
+    (void)ctx;
+    const esp_partition_pos_t pos = {.offset = s_part->address + STAGE_IMAGE_OFFSET, .size = image_len};
+    esp_image_metadata_t meta;
+    flash_xip_reader_enter(); /* bootloader_mmap */
+    bool ok = esp_image_verify(ESP_IMAGE_VERIFY, &pos, &meta) == ESP_OK && meta.image_len <= image_len;
+    flash_xip_reader_exit();
+    return ok ? 0 : -1;
+}
 
 static int io_erase(void *ctx, uint32_t off, uint32_t len)
 {
@@ -703,6 +717,7 @@ esp_err_t update_http_start(void)
         .sha_update = io_sha_update,
         .sha_finish = io_sha_finish,
         .sha_abort = io_sha_abort,
+        .image_verify = io_image_verify,
         .lock = io_lock,
         .unlock = io_unlock,
         .yield = io_yield,
