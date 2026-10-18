@@ -399,6 +399,13 @@ static void test_bootstrap_refused_while_storage_reset_latched(void)
     TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403, "RT-01: latched => 403");
     TEST_CHECK(strstr(s_reply, "reset gesture") != NULL, "RT-01: 403 body names the recovery path");
     TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "RT-01: nothing stored");
+    {
+        /* a valid web blob that is NOT the gesture result (admin record untouched, must_change false) */
+        uint8_t usalt[WEB_AUTH_SALT_LEN] = {7};
+        TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", PW, usalt, false) == HAL_OK, "seed user");
+        TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403,
+                   "RT-01: a blob without the gesture marker is still 403");
+    }
     TEST_CHECK(web_auth_store_clear_for_physical_reset(), "physical gesture clear");
     TEST_CHECK(web_auth_store_storage_reset_latched(), "still latched after the gesture");
     TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 200, "RT-01: gesture done => bootstrap ok");
