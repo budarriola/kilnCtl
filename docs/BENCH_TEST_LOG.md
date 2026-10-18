@@ -3623,3 +3623,17 @@ Task 3, RX-06/RX-07: FAIL. update_stage_upload of firmware/KilnFW/build/KilnCtrl
 Task 4, return to main: PASS. flash_firmware(confirm, set_otadata_app, allow_unreadable_board_state) flashed and verified main 1342a0f1d (elf a037664e5ceb), boot_guard cleared. Pico S6b trip (mask 0x0040 = 1<<6, cause: ESP offline in recovery) cleared with safety_clear_trip; safety_get_status: link up, SaftyFW armed. control_get_zones reads intact (Kp/Ki/Kd, plant model, coupling present), no restore needed.
 
 New: RX-11 (HIGH) in KNOWN_ISSUES. BT-01 verified; BT-02 not re-exercised.
+
+## benchmain9 (2026-10-18, main 207134862, ESP flashed)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain9_backup_pre.json (post export byte-identical). Pico not reflashed (unchanged).
+
+Task 1, build and flash: PASS. build_kilnfw ok, flash_firmware(confirm) flashed and verified (elf d7c0e2ca4759), boot_guard cleared. safety_get_status: link up, SaftyFW armed.
+
+Task 2, RX-06 app path: PASS (staging). update_stage_upload of the local build refused first by the downgrade gate (running version unknown), then with force + confirm_downgrade staged and verified by read-back (1.0.0-pre.1-201-g2071348, 2992976 B, sha256 78a77f93...). Stage cleared, not applied. Verify wall time NOT measured: the timing Bash call was denied by the classifier and was not routed around. RAM and update_fetch_wr high-water NOT measured: get_stack_margin failed every time (INFO 0x04 ACKed, no reply in 2 s); kiln_find for a heap tool was denied by the classifier.
+
+Task 3, GitHub OTA: PASS (staging). update_check(allow_prerelease): v1.0.0-pre.4, refuse_downgrade, heap low-water free=110327 dma=102519 largest=32768. update_stage_release(allow_prerelease, allow_downgrade, confirm_downgrade=1.0.0-pre.4 failed bad_confirm; the tag form v1.0.0-pre.4 worked) staged and verified (2975824 B, source=github). Cleared, not applied.
+
+Task 4, recovery apply: skipped, AP-only (RX-12).
+
+End state: board on main 207134862, link up, armed, backup unchanged. Result: RX-11 fix confirmed on target; RX-06 timing, RX-07, BX-03, RY-02 numbers still open.
