@@ -13,7 +13,6 @@
 #include "bootloader_common.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
@@ -106,9 +105,9 @@ static int io_image_verify(void *ctx, uint32_t image_len)
     const stage_image_io_t io = {.ctx = &h, .read = iv_read, .sha_begin = iv_sha_begin,
                                  .sha_update = iv_sha_update, .sha_finish = iv_sha_finish, .chip_ok = iv_chip_ok};
     uint32_t len = 0;
-    const int64_t t0 = esp_timer_get_time();
+    const int64_t t0 = (int64_t)hal_time_now_us();
     const bool ok = (stage_image_verify(&io, image_len, &len) == STAGE_IMG_OK && len <= image_len);
-    s_last_verify_us = (uint32_t)(esp_timer_get_time() - t0); // RX-06 measurement hook
+    s_last_verify_us = (uint32_t)((int64_t)hal_time_now_us() - t0); // RX-06 measurement hook
     return ok ? 0 : -1;
 }
 

@@ -637,7 +637,9 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // SL-01: table full of ADMIN sessions; a USER login never evicts one.
         ESP_LOGW(TAG, "login refused: session table full of ADMIN sessions");
         // SL-07: temporary condition, not a server fault; the login page shows this text.
-        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE, "all sessions in use by admins, try later");
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "all sessions in use by admins, try later");
         return ESP_OK;
     }
     // 2026-09-29 owner decision: tag the session's initial AP-origin state at

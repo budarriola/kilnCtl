@@ -797,9 +797,10 @@ static void test_user_login_refused_503_when_table_full_of_admins(void)
                    "test setup: ADMIN session fills a slot");
     }
     s_last_err_status = 0;
+    s_last_status_line = 0;
     s_last_set_cookie[0] = '\0';
     do_login("operator", "user-password-123456");
-    TEST_CHECK(s_last_err_status == 503, "refused with 503 service unavailable");
+    TEST_CHECK(s_last_status_line == 503, "refused with 503 service unavailable");
     TEST_CHECK(s_last_set_cookie[0] == '\0', "no session cookie minted");
 }
 
