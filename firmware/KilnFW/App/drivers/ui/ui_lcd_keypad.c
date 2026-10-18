@@ -1,5 +1,6 @@
 #include "ui_lcd_keypad.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -176,7 +177,8 @@ typedef struct {
 } pin_job_t;
 
 static pin_job_t s_job;
-static bool s_worker_running;  /* LVGL task only: a worker exists and its result is not yet consumed */
+static atomic_bool s_worker_running;  /* a worker exists and its result is not yet consumed (LA-01: written by the worker too) */
+static atomic_bool s_post_failed;     /* LA-01: worker could not post its result; LVGL task clears the stale status */
 
 static void handle_result(lcd_keypad_submit_result_t result, lcd_pin_role_t role, uint32_t now_ms)
 {
@@ -242,10 +244,24 @@ static void pin_verify_worker_task(void *arg)
     (void)arg;
     s_job.role = lcd_keypad_state_verify(s_job.digits, s_job.len);
     memset(s_job.digits, 0, sizeof(s_job.digits));
-    if (lv_async_call(pin_verify_done_async, NULL) != LV_RESULT_OK) {
-        /* Cannot post: fail closed (deny); the next try_submit() starts fresh. */
+    bool posted = false;
+    for (int i = 0; i < 20 && !posted; i++) {
+        posted = (lv_async_call(pin_verify_done_async, NULL) == LV_RESULT_OK);
+        if (!posted) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    if (!posted) {
+        /* LA-01: cannot post: fail closed (deny). A wrong PIN still counts toward the lockout
+         * (counted here, before releasing the worker flag, so no LVGL callback is needed;
+         * try_submit() cannot run submit_begin while s_worker_running is set). A right PIN is
+         * dropped. The LVGL task clears "Checking PIN..." via s_post_failed. */
+        if (s_job.role == LCD_PIN_ROLE_NONE) {
+            (void)lcd_keypad_state_submit_finish(&s_ks, (uint32_t)lv_tick_get(), LCD_PIN_ROLE_NONE, NULL);
+        }
         s_job.role = LCD_PIN_ROLE_NONE;
-        s_worker_running = false;
+        atomic_store(&s_post_failed, true);
+        atomic_store(&s_worker_running, false);
     }
     vTaskDelete(NULL);
 }
@@ -255,6 +271,10 @@ static void try_submit(void)
     if (!lcd_pin_entry_can_submit(&s_ks.entry)) {
         /* "OK is inert below 4 digits" -- do nothing, not even a status
          * message, since the digit dots already show the count. */
+        return;
+    }
+    if (atomic_exchange(&s_post_failed, false)) {
+        set_status("Busy, try again");
         return;
     }
     if (s_worker_running) {
@@ -294,6 +314,9 @@ static void bm_value_changed_cb(lv_event_t *e)
         return;
     }
 
+    if (atomic_exchange(&s_post_failed, false)) {
+        set_status("Busy, try again");
+    }
     if (s_worker_running && strcmp(key, "OK") != 0) {
         return; /* digits are frozen while the PIN is being checked */
     }

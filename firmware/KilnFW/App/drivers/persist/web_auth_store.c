@@ -706,6 +706,15 @@ web_auth_load_status_t web_auth_store_load_pin(web_auth_role_t role, web_auth_pi
     return WEB_AUTH_LOAD_OK;
 }
 
+/* LA-02: non-elidable wipe (a plain memset of a dying local may be optimised away). */
+static void pin_secure_wipe(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) {
+        *v++ = 0;
+    }
+}
+
 bool web_auth_store_verify_pin(web_auth_role_t role, const char *pin)
 {
     if (pin == NULL) {
@@ -713,14 +722,19 @@ bool web_auth_store_verify_pin(web_auth_role_t role, const char *pin)
     }
     web_auth_pin_record_t rec;
     if (web_auth_store_load_pin(role, &rec) != WEB_AUTH_LOAD_OK) {
+        pin_secure_wipe(&rec, sizeof(rec));
         return false;
     }
     if (!rec.configured) {
+        pin_secure_wipe(&rec, sizeof(rec));
         return false;
     }
     uint8_t computed[WEB_AUTH_HASH_LEN];
     web_auth_hash_compute((const uint8_t *)pin, strlen(pin), rec.salt, rec.iterations, computed);
-    return web_auth_constant_time_equal(computed, rec.hash, WEB_AUTH_HASH_LEN);
+    bool ok = web_auth_constant_time_equal(computed, rec.hash, WEB_AUTH_HASH_LEN);
+    pin_secure_wipe(computed, sizeof(computed));
+    pin_secure_wipe(&rec, sizeof(rec));
+    return ok;
 }
 
 bool web_auth_store_pin_configured(web_auth_role_t role)
