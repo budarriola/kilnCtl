@@ -137,6 +137,7 @@ $requiredNames = @(
     # is precisely why it is not allowed on the shared httpd worker stack --
     # so its live margin has to stay measurable.
     "kiln_cfg_swap",
+    "esp_timer",  # liveness: on-demand -- IDF-owned esp_timer task, resolved by xTaskGetHandle in ota_http_esp.c on the first rollback request (ET-02)
 
     # Review finding at 4ddad119 (CLAUDE.md "Register every new task for
     # stack-margin reporting"): zones_current_sweep_task.c's one-shot,
@@ -669,6 +670,7 @@ $stackSkipAllowed = @{
     'spi_owner_task' = 'create site only: FreeRTOS name behind the spi_owner registration; the size arrives through the stack_depth parameter, not a literal'
     'sw_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
     'http_async_job' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'esp_timer' = 'register site only: IDF-owned task, resolved by xTaskGetHandle(), never created by this firmware'
     'httpd_worker' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'i2c_owner_ns2009' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
     'i2c_owner_sx1509' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'

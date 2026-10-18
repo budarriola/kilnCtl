@@ -1158,6 +1158,57 @@ static void test_reboot_handlers_reply_only_after_task_created(void)
     s_stub_recovery_mode = false;
 }
 
+static void test_rollback_timer_create_failure_and_rearm_et03(void)
+{
+    TEST_SECTION("ota_esp_rollback_post_handler -- ET-03: esp_timer_create failure answers 500 and releases "
+                 "the claim; a retry after a failed callback re-arms the same timer");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_test_sweep_active = false;
+    s_update_claim = OTA_UPDATE_NONE;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    s_fake_rollback_possible = true;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+
+    /* create failure: reset the lazily created static handle first */
+    s_ota_rollback_reboot_timer = NULL;
+    s_stub_timer_create_result = ESP_FAIL;
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    int starts_before = s_stub_timer_start_once_calls;
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "ET-03: esp_timer_create failure answers 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL && strstr(s_last_sendstr_body, "\"ok\":true") == NULL,
+               "ET-03: no ok:true when the timer could not be created");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "ET-03: create failure releases the OTA claim");
+    TEST_CHECK(s_ota_rollback_reboot_timer == NULL, "ET-03: create failure leaves the handle NULL");
+    TEST_CHECK(s_stub_timer_start_once_calls == starts_before, "ET-03: nothing is armed after a create failure");
+
+    /* create ok: arms once */
+    s_stub_timer_create_result = ESP_OK;
+    int creates_before = s_stub_timer_create_calls;
+    s_last_resp_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(s_stub_timer_create_calls == creates_before + 1, "ET-03: timer created on first successful use");
+    TEST_CHECK(s_stub_timer_start_once_calls == starts_before + 1, "ET-03: first request arms the timer");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "ET-03: success replies rebooting");
+
+    /* the callback fails (stub reboot returns ESP_FAIL) and releases the claim; a retry re-arms */
+    ota_rollback_reboot_timer_cb(NULL);
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "ET-03: failed callback released the claim");
+    s_last_resp_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(s_stub_timer_start_once_calls == starts_before + 2, "ET-03: retry after a failed callback re-arms");
+    TEST_CHECK(s_stub_timer_create_calls == creates_before + 1, "ET-03: re-arm reuses the existing timer handle");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "ET-03: retry replies rebooting");
+
+    s_update_claim = OTA_UPDATE_NONE;
+    s_fake_rollback_possible = false;
+    ota_http_safety = NULL;
+}
+
 static void test_pico_rollback_status_reports_idle_before_any_request(void)
 {
     TEST_SECTION("ota_pico_rollback_status_get_handler -- reports 'idle' before any rollback has "
@@ -3244,6 +3295,7 @@ void run_test_ota_http(void)
     test_pico_rollback_post_returns_pending_without_blocking();
     test_reboot_handlers_reply_only_after_task_created();
     test_rollback_reboot_failure_releases_claim_op02();
+    test_rollback_timer_create_failure_and_rearm_et03();
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();
