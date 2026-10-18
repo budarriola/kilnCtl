@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include "esp_app_format.h"
 #include "esp_err.h"
 
 typedef enum {
@@ -23,6 +24,8 @@ typedef struct {
     uint32_t start_addr;
     uint32_t image_len;
 } esp_image_metadata_t;
+
+typedef enum { ESP_IMAGE_BOOTLOADER = 0, ESP_IMAGE_APPLICATION } esp_image_type;
 
 esp_err_t esp_image_verify(esp_image_load_mode_t mode, const esp_partition_pos_t *part,
                            esp_image_metadata_t *data);

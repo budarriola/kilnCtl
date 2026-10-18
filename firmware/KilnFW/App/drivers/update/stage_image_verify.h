@@ -28,6 +28,9 @@ typedef struct {
     int (*sha_begin)(void *ctx);                                    // 0 = ok
     int (*sha_update)(void *ctx, const void *data, uint32_t len);   // 0 = ok
     int (*sha_finish)(void *ctx, uint8_t out[32]);                  // 0 = ok; must release on any call order
+    // RY-01: chip validity of the 24-byte header (IDF bootloader_common_check_chip_validity: chip id and
+    // min/max chip revision vs this chip). 0 = ok. Required; runs before any hashing.
+    int (*chip_ok)(void *ctx, const uint8_t hdr[24]);
 } stage_image_io_t;
 
 typedef enum {
@@ -36,7 +39,8 @@ typedef enum {
     STAGE_IMG_BAD_HEADER,
     STAGE_IMG_BAD_SEGMENT,
     STAGE_IMG_MISALIGNED,
-    STAGE_IMG_TOO_LONG,
+    STAGE_IMG_TOO_SHORT,    // image ends before its own segments/padding/digest (truncated)
+    STAGE_IMG_BAD_CHIP_REV, // RY-01: chip revision range excludes this chip
     STAGE_IMG_BAD_CHECKSUM,
     STAGE_IMG_NO_HASH,
     STAGE_IMG_BAD_HASH,

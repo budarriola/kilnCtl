@@ -11,6 +11,7 @@
 #include "update_fetch.h"
 #include "update_http_internal.h"
 
+#include "bootloader_common.h"
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -1094,4 +1095,12 @@ stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t ava
         *out_len = avail;
     }
     return STAGE_IMG_OK;
+}
+
+esp_err_t bootloader_common_check_chip_validity(const esp_image_header_t *img_hdr, esp_image_type type)
+{
+    (void)type;
+    uint32_t mn = img_hdr->min_chip_rev_full;
+    uint32_t mx = img_hdr->max_chip_rev_full;
+    return (1u >= mn && 1u <= mx) ? ESP_OK : ESP_FAIL;
 }

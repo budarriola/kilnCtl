@@ -10,6 +10,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "bootloader_common.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -90,12 +91,18 @@ static int iv_sha_finish(void *c, uint8_t out[32])
     h->active = false;
     return (st == PSA_SUCCESS && n == 32) ? 0 : -1;
 }
+static int iv_chip_ok(void *c, const uint8_t hdr[24])
+{
+    (void)c;
+    return bootloader_common_check_chip_validity((const esp_image_header_t *)hdr, ESP_IMAGE_APPLICATION) == ESP_OK ? 0 : -1;
+}
 static int io_image_verify(void *ctx, uint32_t image_len)
 {
     (void)ctx;
-    iv_sha_t h = {0};
+    static iv_sha_t h; // RY-02: off the 4096 B update_fetch_wr stack; upload_finish is serialized by the stage claim
+    memset(&h, 0, sizeof(h));
     const stage_image_io_t io = {.ctx = &h, .read = iv_read, .sha_begin = iv_sha_begin,
-                                 .sha_update = iv_sha_update, .sha_finish = iv_sha_finish};
+                                 .sha_update = iv_sha_update, .sha_finish = iv_sha_finish, .chip_ok = iv_chip_ok};
     uint32_t len = 0;
     return (stage_image_verify(&io, image_len, &len) == STAGE_IMG_OK && len <= image_len) ? 0 : -1;
 }
