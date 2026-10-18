@@ -883,7 +883,9 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
             s_he.reboot_was_tripped = false;
             /* SR-11: repeated "benign" reboots are a sagging rail, not luck. */
             uint32_t this_ms = s_he.reboot_classify_since_ms;
-            if ((boot_reason & fatal) == 0u && !lost_trip) {
+            /* AP-01: since_ms == 1 is the first-sight / re-arm sentinel, not a real reboot time; it must
+             * neither count as nor seed the repeated-benign window. */
+            if ((boot_reason & fatal) == 0u && !lost_trip && this_ms != 1u) {
                 if (s_he.last_benign_reboot_ms != 0u &&
                     (uint32_t)(this_ms - s_he.last_benign_reboot_ms) < HE_BENIGN_REBOOT_WINDOW_MS) {
                     repeated_benign = true;
