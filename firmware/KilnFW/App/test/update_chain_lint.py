@@ -23,9 +23,9 @@ else:
     if not (0 <= i < j < k):
         bad.append("LOW-1: claim_refuses must take the claim, then re-check the mode gate, then release on refusal")
 
-if re.search(r"xSemaphoreTake\(s_c->wr_done,\s*portMAX_DELAY\)", fetch):
+if re.search(r"xSemaphoreTake\((?:s_c->wr_done|s_wr_done),\s*portMAX_DELAY\)", fetch):
     bad.append("LOW-2: wr_done wait is unbounded")
-if not re.search(r"xSemaphoreTake\(s_c->wr_done,\s*pdMS_TO_TICKS\(FETCH_WR_TIMEOUT_MS\)\)", fetch):
+if not re.search(r"xSemaphoreTake\((?:s_c->wr_done|s_wr_done),\s*pdMS_TO_TICKS\(FETCH_WR_TIMEOUT_MS\)\)", fetch):
     bad.append("LOW-2: wr_call has no bounded wait")
 if "uint8_t scratch[" in fetch or "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)" not in fetch.split("static void fetch_task")[1]:
     bad.append("MED-1: fetch scratch must be a MALLOC_CAP_INTERNAL allocation")

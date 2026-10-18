@@ -763,7 +763,7 @@ TASKS = [
          # (esp_flash chip ops, PSA driver dispatch) stays unresolved: lower bound, INDETERMINATE.
          stack=lambda: extract_local_macro("drivers/update/update_fetch.c",
              r'#define FETCH_WR_STACK_BYTES\s+(\d+)',
-             r'xTaskCreatePinnedToCore\(wr_task,\s*"update_fetch_wr",\s*FETCH_WR_STACK_BYTES'),
+             r'xTaskCreateStaticPinnedToCore\(wr_task,\s*"update_fetch_wr",\s*FETCH_WR_STACK_BYTES'),
          extra_roots=[("io_image_verify", "update_http.c"), ("iv_sha_finish", "update_http.c"),
                       ("iv_read", "update_http.c"), ("iv_sha_update", "update_http.c")]),
     dict(name="info_uart_bridge", root="info_bridge_task",
