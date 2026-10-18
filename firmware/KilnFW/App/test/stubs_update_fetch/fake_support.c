@@ -861,6 +861,12 @@ void time_sync_get_status(time_sync_status_t *out)
     out->ever_synced = g_fr_clock_synced;
     out->now_epoch = (time_t)g_fr_now_epoch;
 }
+bool stack_margin_retain_exit(const char *name, uint32_t free_bytes)
+{
+    (void)name; (void)free_bytes;
+    return true;
+}
+
 bool stack_margin_register(const char *name, void *slot, uint32_t bytes)
 {
     (void)name; (void)slot; (void)bytes;

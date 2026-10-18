@@ -12,6 +12,8 @@ typedef struct {
     char name[STACK_MARGIN_NAME_MAX];
     TaskHandle_t *handle_slot; /* the caller's own TaskHandle_t*, read fresh every time -- see stack_margin.h */
     uint32_t configured_stack_bytes;
+    uint32_t retained_bytes; /* min free stack retained at task exit; valid iff retained_valid */
+    bool retained_valid;
 } stack_margin_entry_t;
 
 static stack_margin_entry_t s_entries[STACK_MARGIN_MAX_TASKS];
@@ -65,6 +67,32 @@ bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t co
     e->handle_slot = (TaskHandle_t *)task_handle_slot;
     e->configured_stack_bytes = configured_stack_bytes;
     s_count++;
+    return true;
+}
+
+bool stack_margin_retain_exit(const char *name, uint32_t free_bytes)
+{
+    for (size_t i = 0; i < s_count; i++) {
+        if (name && strncmp(s_entries[i].name, name, STACK_MARGIN_NAME_MAX - 1) == 0) {
+            stack_margin_entry_t *e = &s_entries[i];
+            if (!e->retained_valid || free_bytes < e->retained_bytes) {
+                e->retained_bytes = free_bytes;
+            }
+            e->retained_valid = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool stack_margin_retained(size_t index, uint32_t *free_bytes)
+{
+    if (index >= s_count || !s_entries[index].retained_valid) {
+        return false;
+    }
+    if (free_bytes) {
+        *free_bytes = s_entries[index].retained_bytes;
+    }
     return true;
 }
 

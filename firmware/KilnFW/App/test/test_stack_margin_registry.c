@@ -139,6 +139,31 @@ static void test_main_network_http_registrations_pass_slot_addresses(void)
     free(text);
 }
 
+static void test_retain_exit_keeps_minimum(void)
+{
+    // Measurement hook: a task that exits retains its min free stack; the registry keeps the smallest.
+    TEST_CHECK(!stack_margin_retain_exit("no_such_task", 100), "retain for an unregistered name is refused");
+    TEST_CHECK(stack_margin_retain_exit("registry_test_task", 900), "retain for a registered name succeeds");
+    TEST_CHECK(stack_margin_retain_exit("registry_test_task", 1500), "second retain succeeds");
+    TEST_CHECK(stack_margin_retain_exit("registry_test_task", 700), "third retain succeeds");
+    int seen = 0;
+    for (size_t i = 0; i < stack_margin_count(); i++) {
+        const char *name = NULL;
+        bool alive = true;
+        uint32_t ret = 0;
+        TEST_CHECK(stack_margin_read(i, &name, NULL, NULL, NULL, &alive), "read ok");
+        if (name && strcmp(name, "registry_test_task") == 0) {
+            seen++;
+            TEST_CHECK(!alive, "NULL-handle task reads as not alive");
+            TEST_CHECK(stack_margin_retained(i, &ret), "retained value present");
+            TEST_CHECK(ret == 700, "retained value is the minimum across exits (700)");
+        } else if (name && strcmp(name, "update_fetch_wr") != 0) {
+            TEST_CHECK(!stack_margin_retained(i, &ret), "tasks that never retained report none");
+        }
+    }
+    TEST_CHECK(seen == 1, "registry_test_task row found once");
+}
+
 void run_test_stack_margin_registry(void)
 {
     TEST_SECTION("stack_margin registry: register() de-dup by (name, slot)");
@@ -146,4 +171,5 @@ void run_test_stack_margin_registry(void)
     test_same_name_different_slot_is_refused_not_appended();
     test_registry_reads_back_the_dedup_row();
     test_main_network_http_registrations_pass_slot_addresses();
+    test_retain_exit_keeps_minimum();
 }

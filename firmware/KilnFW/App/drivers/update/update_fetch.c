@@ -616,6 +616,8 @@ static void wr_task(void *arg)
         case WR_FINISH: c->res = update_stage_upload_finish(st); break;
         case WR_ABORT: update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB); break;
         case WR_EXIT:
+            (void)stack_margin_retain_exit("update_fetch_wr",
+                                           stack_margin_words_to_bytes((uint32_t)uxTaskGetStackHighWaterMark(NULL)));
             s_c->wr_task = NULL;
             xSemaphoreGive(s_c->wr_done);
             vTaskDelete(NULL);

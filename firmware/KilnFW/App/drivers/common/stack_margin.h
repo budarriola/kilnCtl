@@ -167,6 +167,13 @@ bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t co
 /* Number of tasks currently registered (<= STACK_MARGIN_MAX_TASKS). */
 size_t stack_margin_count(void);
 
+/* Measurement hook: a short-lived task (update_fetch_wr) calls this just before it deletes itself,
+ * passing its min free stack in bytes (uxTaskGetStackHighWaterMark() * word size), because the
+ * registry cannot read a deleted task. Keeps the minimum across calls. Returns false if no entry
+ * with that name is registered. stack_margin_retained() reads it back (false = none retained). */
+bool stack_margin_retain_exit(const char *name, uint32_t free_bytes);
+bool stack_margin_retained(size_t index, uint32_t *free_bytes);
+
 /* Reads one registered entry's live figures by index
  * (0 <= index < stack_margin_count()). Returns false (nothing written) for
  * an out-of-range index.

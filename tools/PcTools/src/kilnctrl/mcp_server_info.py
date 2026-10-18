@@ -110,6 +110,12 @@ def get_stack_margin() -> str:
         return "device reported no instrumented tasks"
     lines = []
     for e in entries:
+        if e.exited_retained:
+            lines.append(
+                f"{e.name}: exited, {e.hwm_bytes} B free at worst of {e.configured_stack_bytes} B "
+                f"(retained at task exit) [{e.level.name}]"
+            )
+            continue
         if not e.alive:
             lines.append(f"{e.name}: not running (configured {e.configured_stack_bytes} B)")
             continue

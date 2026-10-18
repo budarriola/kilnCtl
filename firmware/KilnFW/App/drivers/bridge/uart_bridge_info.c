@@ -215,7 +215,19 @@ static size_t build_stack_margin_reply(uint8_t *out, size_t start_index)
         out[o++] = (uint8_t)((hwm_bytes >> 8) & 0xFF);
         out[o++] = (uint8_t)((hwm_bytes >> 16) & 0xFF);
         out[o++] = (uint8_t)((hwm_bytes >> 24) & 0xFF);
-        out[o++] = (uint8_t)((alive ? 0x01u : 0x00u) | (((uint8_t)level & 0x03u) << 1));
+        uint8_t exited_flag = 0;
+        uint32_t retained = 0;
+        if (!alive && stack_margin_retained(i, &retained)) {
+            /* bit3: task exited; hwm field carries the min free stack retained at exit */
+            exited_flag = 0x08u;
+            hwm_bytes = retained;
+            level = stack_margin_classify(retained, configured_bytes);
+            out[o - 4] = (uint8_t)(hwm_bytes & 0xFF);
+            out[o - 3] = (uint8_t)((hwm_bytes >> 8) & 0xFF);
+            out[o - 2] = (uint8_t)((hwm_bytes >> 16) & 0xFF);
+            out[o - 1] = (uint8_t)((hwm_bytes >> 24) & 0xFF);
+        }
+        out[o++] = (uint8_t)((alive ? 0x01u : 0x00u) | (((uint8_t)level & 0x03u) << 1) | exited_flag);
         n++;
     }
 

@@ -188,6 +188,7 @@ class StackMarginEntry:
     hwm_bytes: int
     alive: bool
     level: StackMarginLevel
+    exited_retained: bool = False  # flags bit3: task exited; hwm_bytes is the min free stack retained at exit
 
     @property
     def headroom_pct(self) -> "float | None":
@@ -201,6 +202,8 @@ class StackMarginEntry:
 
     def describe(self) -> str:
         """One-line summary, e.g. ``rules_task: 1024/3072 B free (33%) OK``."""
+        if self.exited_retained:
+            return f"{self.name}: exited, {self.hwm_bytes}/{self.configured_stack_bytes} B free at worst (retained)"
         if not self.alive:
             return f"{self.name}: not running"
         pct = self.headroom_pct
@@ -264,6 +267,7 @@ def parse_stack_margin_page(payload: bytes) -> "tuple[list[StackMarginEntry], bo
             "<IIB", payload[name_end:entry_end]
         )
         alive = bool(flags & 0x01)
+        exited_retained = bool(flags & 0x08) and not alive
         level_val = (flags >> 1) & 0x03
         try:
             level = StackMarginLevel(level_val)
@@ -279,6 +283,7 @@ def parse_stack_margin_page(payload: bytes) -> "tuple[list[StackMarginEntry], bo
                 hwm_bytes=hwm_bytes,
                 alive=alive,
                 level=level,
+                exited_retained=exited_retained,
             )
         )
         offset = entry_end

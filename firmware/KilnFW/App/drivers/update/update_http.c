@@ -13,6 +13,7 @@
 #include "bootloader_common.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
@@ -96,6 +97,7 @@ static int iv_chip_ok(void *c, const uint8_t hdr[24])
     (void)c;
     return bootloader_common_check_chip_validity((const esp_image_header_t *)hdr, ESP_IMAGE_APPLICATION) == ESP_OK ? 0 : -1;
 }
+static volatile uint32_t s_last_verify_us; // 0 = no verify run since boot
 static int io_image_verify(void *ctx, uint32_t image_len)
 {
     (void)ctx;
@@ -104,7 +106,10 @@ static int io_image_verify(void *ctx, uint32_t image_len)
     const stage_image_io_t io = {.ctx = &h, .read = iv_read, .sha_begin = iv_sha_begin,
                                  .sha_update = iv_sha_update, .sha_finish = iv_sha_finish, .chip_ok = iv_chip_ok};
     uint32_t len = 0;
-    return (stage_image_verify(&io, image_len, &len) == STAGE_IMG_OK && len <= image_len) ? 0 : -1;
+    const int64_t t0 = esp_timer_get_time();
+    const bool ok = (stage_image_verify(&io, image_len, &len) == STAGE_IMG_OK && len <= image_len);
+    s_last_verify_us = (uint32_t)(esp_timer_get_time() - t0); // RX-06 measurement hook
+    return ok ? 0 : -1;
 }
 
 static int io_erase(void *ctx, uint32_t off, uint32_t len)
@@ -535,12 +540,12 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     }
     // semver is validated charset (digits, '.', '-', '+', alnum) and commit is
     // lowercase hex, by stage_header_decode(); no escaping needed.
-    char json[608];
+    char json[640];
     int n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"phase\":\"%s\",\"busy\":%s,\"bytes_done\":%u,\"bytes_total\":%u,"
                      "\"staged\":%s,\"reason\":\"%s\",\"header\":\"%s\",\"capacity\":%u,"
                      "\"image_length\":%u,\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\","
-                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s}",
+                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s,\"last_verify_us\":%u}",
                      update_stage_phase_name(info.phase), info.busy ? "true" : "false",
                      (unsigned)info.bytes_done, (unsigned)info.bytes_total, info.staged ? "true" : "false",
                      info.reason ? info.reason : "", stage_hdr_status_name(info.hdr_status),
@@ -548,7 +553,7 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
                      hdr_ok ? stage_state_name(info.state) : "", hdr_ok ? info.semver : "",
                      hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u,
                      update_stale_result_name(s_last_auto_clear),
-                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false");
+                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false", (unsigned)s_last_verify_us);
     return ota_http_send_json_clamped(req, json, n, sizeof(json));
 }
 
