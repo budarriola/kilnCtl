@@ -410,8 +410,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **HH-05** INFO. An undecided verdict with no DIAG never times out (by design, fail safe, not a deadlock).
 - **HH-06** INFO. since_ms is never cleared after a verdict; the `== 0` re-arm guards rely on note_pico_boot's early return while unseen.
 - **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm. Status fixed, tests added (00d7eec68).
-- **HF-01** MED, `heat_enable.c:366-373`. An enable that lands while classify_pending is set clears `pending`. After a benign verdict reconcile never re-requests heat, and the firing runs cold with no pause reason. Predates 00d7eec68 (SL3-R2 A3). Fix: keep pending when there is no hold. Status fixed (605e02c2a); host test, negtest caught.
-- **HF-02** LOW. The HH-03 `pico_boot_id_unseen` autotune abort has no test; the source scan at test_heat_enable.c:1574 covers only the other two reasons. Status fixed (605e02c2a); source scan added, negtest caught.
+- **HF-01** MED, `heat_enable.c:366-373`. An enable that lands while classify_pending is set clears `pending`. After a benign verdict reconcile never re-requests heat, and the firing runs cold with no pause reason. Predates 00d7eec68 (SL3-R2 A3). Fix: keep pending when there is no hold. Status fixed (9997a797f); host test, negtest caught.
+- **HF-02** LOW. The HH-03 `pico_boot_id_unseen` autotune abort has no test; the source scan at test_heat_enable.c:1574 covers only the other two reasons. Status fixed (9997a797f); source scan added, negtest caught.
 - **HF-03** INFO. The per-tick autotune abort while unseen is idempotent; only the lock-busy warning can repeat, as in the existing branches.
 - **HF-04** INFO. HH-01 lets an idle benign reboot seed the 15 min window (by design); no permanent hold, single benign reboots auto-resume.
 - **HF-05** INFO. The HH-07 latch-plus-re-arm assertions each map to a distinct mutant, but no negtest has been run on test_hh_fixes.
