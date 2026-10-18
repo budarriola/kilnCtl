@@ -2937,6 +2937,22 @@ static void test_rt_posts_refused_409(void)
     TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "RT-04: restore in flight is 409");
     TEST_CHECK(strstr(s_stub_last_httpd_resp, "restore") != NULL, "RT-04: body names the restore");
     s_stub_restore_in_flight = false;
+
+    /* RX-02: the fence is in the shared gate, so every Pico param writer refuses during a restore. */
+    const sync_writer_fn_t all[] = { rate_guard_auto_post_handler, bench_preset_post_handler, ct_auto_zero_post_handler,
+                                     commissioning_post_handler, relay_type_post_handler, ct_cal_post_handler,
+                                     ct_trim_post_handler };
+    for (size_t h = 0; h < sizeof(all) / sizeof(all[0]); h++) {
+        reset_all();
+        s_stub_last_status[0] = '\0';
+        s_stub_restore_in_flight = true;
+        httpd_req_t rq = { .content_len = 0 };
+        TEST_CHECK(all[h](&rq) == ESP_OK, "RX-02: restore refusal returns normally");
+        TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "RX-02: restore in flight is 409");
+        TEST_CHECK(s_stub_set_param_calls == 0 && s_stub_commit_calls == 0, "RX-02: nothing staged or committed");
+        TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "RX-02: writer guard never claimed");
+    }
+    s_stub_restore_in_flight = false;
 }
 
 static void test_safety_posts_refused_409_while_run_active(void)

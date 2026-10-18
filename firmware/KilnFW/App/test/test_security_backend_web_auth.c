@@ -398,6 +398,7 @@ static void test_bootstrap_refused_while_storage_reset_latched(void)
     f_web_enabled = true;
     TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403, "RT-01: latched => 403");
     TEST_CHECK(strstr(s_reply, "reset gesture") != NULL, "RT-01: 403 body names the recovery path");
+    TEST_CHECK(strstr(s_reply, "PIN") == NULL, "RX-01: 403 body does not advertise an LCD PIN recovery");
     TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "RT-01: nothing stored");
     {
         /* a valid web blob that is NOT the gesture result (admin record untouched, must_change false) */

@@ -68,6 +68,12 @@ static kiln_io_t *s_hw_io = NULL; // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_
  * Runs BEFORE the writer claim and body read. Returns true when it sent the refusal. */
 static bool safety_cfg_mode_gate_refuse(httpd_req_t *req, esp_err_t *out)
 {
+    /* RX-02: every Pico param writer here (incl. bench_preset, rate_guard/auto) is fenced against a backup restore. */
+    if (backup_import_restore_in_flight()) {
+        *out = system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
+        return true;
+    }
     sys_mode_snapshot_t snap = { 0 };
     relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
     char reason[SYSTEM_MODE_GATE_REASON_MAX];
@@ -1763,14 +1769,10 @@ static void ct_auto_zero_job(httpd_req_t *async_req, void *arg)
 
 static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
 {
-    /* RT-04: 409 system_mode_gate (running / autotune) and a restore fence, like the other safety writes. */
+    /* RT-04/RX-02: 409 for a running firing/autotune or a backup restore, via the shared gate above. */
     esp_err_t gate_err;
     if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
         return gate_err;
-    }
-    if (backup_import_restore_in_flight()) {
-        return system_mode_gate_http_send_refusal(
-            req, "a backup restore or configuration change is in progress -- retry when it finishes");
     }
     char body[SAFETY_CT_AUTO_ZERO_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {

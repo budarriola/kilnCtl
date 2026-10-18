@@ -71,6 +71,7 @@
                                       * with profiles_http.c's own first-free-slot scan */
 #include "safety_ceiling_sync.h" /* 2026-09-10: a restored backup can raise max_temp_c same as a POST -- see
                                   * the guard immediately before the zone-tuning commit loop below. */
+#include "safety_cfg_writer_guard.h" /* RX-02 */
 #include "safety_cfg_write.h" /* 2026-09-16: safety_cfg_write_apply_pairs() -- the same stage/COMMIT_CONFIG/
                                 * forced-read-back-confirm path safety_cfg_http.c's own POST handler uses,
                                 * reused here so the Pico's i_normal_a[0..2] restore is never trusted on a
@@ -2493,8 +2494,15 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             char reason[128];
             safety_ceiling_refusal_class_t out_class = SAFETY_CEILING_REFUSAL_NONE;
             uint64_t pico_roundtrip_start_us = hal_time_now_us();
+            /* RX-02: take the shared Pico-param writer guard for the stage+commit so a bench_preset job, a sweep,
+             * or an HTTP sync writer cannot interleave and have its COMMIT_CONFIG commit our half-staged set. */
+            if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+                snprintf(err_msg, err_cap, "another commissioning operation is running; retry the restore");
+                return false;
+            }
             bool pico_ok = safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
                                               sizeof(reason), &out_class);
+            (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
             ESP_LOGI(BACKUP_TAG, "backup import: Pico i_normal_a round trip (%d pairs) took %lld ms",
                     n_pairs, (long long)((hal_time_now_us() - pico_roundtrip_start_us) / 1000u));
             if (!pico_ok) {
