@@ -410,3 +410,9 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **HH-05** INFO. An undecided verdict with no DIAG never times out (by design, fail safe, not a deadlock).
 - **HH-06** INFO. since_ms is never cleared after a verdict; the `== 0` re-arm guards rely on note_pico_boot's early return while unseen.
 - **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm.
+## Review 2026-10-18: OTA failure paths (docs/audits/REVIEW_OTA_FAILPATHS_2026_10_18.md)
+- **OP-01** MED, `recovery_apply.c` step 3, `update_stage.c` upload_finish. Only the first chunk of the image is structurally checked before app is erased. A corrupt or truncated hand-staged .bin is staged VERIFIED, because its SHA covers only the bytes received. It then fails esp_image_verify only after app is rewritten, which leaves the board in recovery until a good image is pushed. Fix: run esp_image_verify over the stage region before the first app erase. Status open.
+- **OP-02** LOW, `ota_http_esp.c:715-761`. If mark_app_invalid_rollback_and_reboot fails, the rollback task exits without ota_http_update_end, so the claim is held until reboot (fail safe). Unreachable on single-slot (route answers 409). Status open.
+- **OP-03** INFO. The recovery direct ESP push erases app as it streams, before esp_ota_end verifies it; inherent to the design, and a retry is possible.
+- **OP-04** INFO. When the fetch writer wedges, heat is allowed again while a late stage-only flash op may run; deliberate, covered earlier.
+- **OP-05** INFO. A 50 ms lock timeout in ota_http_update_end leaves the claim held (fail safe).
