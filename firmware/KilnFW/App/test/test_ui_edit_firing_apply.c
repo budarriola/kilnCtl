@@ -697,8 +697,7 @@ static void test_lu03_lu04_source_pins(void)
     TEST_CHECK(n != NULL, "read ui_page_network_manage.c");
     if (n) {
         char *w = strstr(n, "static void connect_worker_task");
-        char *end = w ? strstr(w, "
-}") : NULL;
+        char *end = w ? strstr(w, "\n}") : NULL;
         char *add = w ? strstr(w, "wifi_prov_add_network(") : NULL;
         char *wipe = w ? strstr(w, "memset(s_connect_job_password, 0, sizeof(s_connect_job_password))") : NULL;
         TEST_CHECK(w && end && add && wipe && wipe > add && wipe < end, "worker wipes password after the save");
