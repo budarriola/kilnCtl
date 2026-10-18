@@ -1066,3 +1066,16 @@ uint64_t hal_time_now_us(void)
 {
     return 0; /* update_http.c upload deadline: frozen clock never trips it */
 }
+
+/* OP-01: update_http.c's io_image_verify calls esp_image_verify over the stage; the fetch/refusal
+ * tests never reach upload_finish with it, so a fixed answer is enough here. */
+#include "esp_image_format.h"
+esp_err_t esp_image_verify(esp_image_load_mode_t mode, const esp_partition_pos_t *part, esp_image_metadata_t *data)
+{
+    (void)mode;
+    if (data != NULL) {
+        data->start_addr = part != NULL ? part->offset : 0;
+        data->image_len = part != NULL ? part->size : 0;
+    }
+    return ESP_OK;
+}

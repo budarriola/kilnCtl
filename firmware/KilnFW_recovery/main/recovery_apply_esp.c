@@ -113,6 +113,19 @@ static void cb_sha_abort(void *c)
     }
 }
 
+// OP-01: esp_image_verify over the STAGED image (at STAGE_IMAGE_OFFSET), run before app is
+// erased, so a truncated or corrupt staged image is refused with app untouched.
+static int cb_stage_verify(void *c, uint32_t image_len)
+{
+    apply_ctx_t *a = c;
+    const esp_partition_pos_t pos = {.offset = a->stage->address + STAGE_IMAGE_OFFSET, .size = image_len};
+    esp_image_metadata_t meta;
+    if (esp_image_verify(ESP_IMAGE_VERIFY, &pos, &meta) != ESP_OK) {
+        return -1;
+    }
+    return meta.image_len <= image_len ? 0 : -1;
+}
+
 // esp_image_verify over the copy: image header, every segment, the appended
 // checksum and (when enabled) the SHA-256 digest. The image must also end
 // within the length that was staged.
@@ -167,6 +180,7 @@ static void apply_task(void *arg)
         .sha_update = cb_sha_update,
         .sha_finish = cb_sha_finish,
         .sha_abort = cb_sha_abort,
+        .stage_verify = cb_stage_verify,
         .app_verify = cb_app_verify,
         .set_boot = cb_set_boot,
         .yield = cb_yield,

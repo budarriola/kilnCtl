@@ -502,6 +502,13 @@ update_stage_err_t update_stage_upload_finish(update_stage_t *st)
         return fail(st, UPDATE_STAGE_ERR_READBACK);
     }
 
+    // OP-01: the SHA above only covers the bytes received. Verify the whole image structurally
+    // (every segment, checksum, digest) before it can be marked VERIFIED. No header is written yet,
+    // so a refused image leaves the stage reading as not staged.
+    if (st->io.image_verify != NULL && st->io.image_verify(st->io.ctx, st->total) != 0) {
+        return fail(st, UPDATE_STAGE_ERR_BAD_IMAGE);
+    }
+
     stage_header_t h;
     memset(&h, 0, sizeof(h));
     h.state = STAGE_STATE_VERIFIED;

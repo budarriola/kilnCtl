@@ -133,6 +133,9 @@ typedef struct {
     bool last_mut_was_write;
     sha_t sha;
     bool sha_open;
+    bool fail_image_verify;
+    unsigned image_verify_calls;
+    uint32_t image_verify_len;
 } fl_t;
 
 static int fl_erase(void *c, uint32_t off, uint32_t len)
@@ -229,6 +232,13 @@ static void fl_sha_abort(void *c)
     f->sha_aborts++;
     f->sha_open = false;
 }
+static int fl_image_verify(void *c, uint32_t len)
+{
+    fl_t *f = c;
+    f->image_verify_calls++;
+    f->image_verify_len = len;
+    return f->fail_image_verify ? -1 : 0;
+}
 static void fl_lock(void *c) { ((fl_t *)c)->lock_n++; }
 static update_stage_t g_st;
 // Review 7 L2 probe: at every unlock, an UPLOADING phase must already carry the owner it was begun with.
@@ -260,6 +270,7 @@ static void reset_board(void)
         .sha_update = fl_sha_update,
         .sha_finish = fl_sha_finish,
         .sha_abort = fl_sha_abort,
+        .image_verify = fl_image_verify,
         .lock = fl_lock,
         .unlock = fl_unlock,
         .yield = NULL,
@@ -439,6 +450,21 @@ static void test_size_limits(void)
     TEST_CHECK(is_staged(), "and reports staged");
     update_stage_info_t i = status();
     TEST_CHECK(i.image_length == CAP, "full-capacity length reported");
+}
+
+static void test_image_verify_op01(void)
+{
+    TEST_SECTION("update_stage -- OP-01 full image verify before VERIFIED");
+    reset_board();
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK && is_staged(), "OP-01: good image staged");
+    TEST_CHECK(g_fl.image_verify_calls == 1 && g_fl.image_verify_len == 30000u, "OP-01: image_verify ran once over the whole length");
+    reset_board();
+    g_fl.fail_image_verify = true; /* sha-consistent but truncated/corrupt past the first chunk */
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_BAD_IMAGE, "OP-01: structurally invalid image refused");
+    TEST_CHECK(!is_staged() && g_fl.image_verify_calls == 1, "OP-01: never marked VERIFIED");
+    TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE, "OP-01: idle after the refusal");
 }
 
 static void test_bad_images(void)
@@ -1376,6 +1402,7 @@ void run_test_update_stage(void)
     test_semver_and_commit_args();
     test_size_limits();
     test_bad_images();
+    test_image_verify_op01();
     test_wrong_project_refused();
     test_install_gate();
     test_gate_refusal_keeps_stage();
