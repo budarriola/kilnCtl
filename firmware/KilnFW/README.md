@@ -47,6 +47,16 @@ Hardware configuration (every pin, bus, clock and timeout) lives under
 `idf.py -C firmware/KilnFW menuconfig` → **KilnCtrl Hardware Configuration**; `App/drivers/hw/settings.h`
 translates those into the plain names the drivers use.
 
+### Disabling the OTA chip revision check
+
+`KILNCTL_STAGE_CHIP_REV_CHECK` (menuconfig, **KilnCtrl Hardware Configuration**; default **y**) makes the
+staged-image verify refuse an image whose header chip revision range excludes this chip. Setting it to `n`
+skips only that step (build-time; there is no runtime or web switch). With it off, an image built for another
+chip revision can pass stage verify; in the recovery image the app partition is then erased before the
+post-copy `esp_image_verify` refuses it, leaving the board in recovery. The recovery project
+(`firmware/KilnFW_recovery`) defines the same symbol in its own `main/Kconfig.projbuild`; set it in both
+builds to disable it end to end.
+
 ### Building against the simulated plant
 
 For developing the control stack without a kiln (or without a thermocouple

@@ -466,7 +466,7 @@ static void test_lockout_eviction_never_evicts_a_locked_slot(void)
     }
     unsigned locked_count = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
+        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff[LOGIN_LADDER_ADMIN], now_ms())) {
             locked_count++;
         }
     }
@@ -485,7 +485,7 @@ static void test_lockout_eviction_never_evicts_a_locked_slot(void)
     unsigned still_locked = 0;
     bool new_ip_got_a_slot = false;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
+        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff[LOGIN_LADDER_ADMIN], now_ms())) {
             still_locked++;
         }
         if (s_login_lockouts[i].in_use && strcmp(s_login_lockouts[i].ip, "10.2.9.99") == 0) {
@@ -746,6 +746,61 @@ static void test_success_resets_the_ladder(void)
     TEST_CHECK(s_last_status_line == 429, "locked after the post-success failure");
     TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 5u,
                "a success resets the ladder back to its first (5s) step");
+}
+
+// SS-01: ladders are per (slot, role).
+static void set_user_credential(const char *username, const char *password)
+{
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, username, password, TEST_SALT, false) == HAL_OK,
+               "test setup: user credential stores cleanly");
+}
+
+static void test_user_success_does_not_reset_admin_ladder(void)
+{
+    TEST_SECTION("login backoff -- a USER success does not reset the ADMIN ladder (SS-01)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    set_user_credential("operator", "user-password-123456");
+    strncpy(s_stub_client_ip, "10.9.0.7", sizeof(s_stub_client_ip) - 1);
+
+    do_login("admin", "wrong-password");
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+    do_login("admin", "wrong-password"); // admin failure #2 -> 10s
+    TEST_CHECK(s_last_status_line != 429, "test setup: failure #2 ran");
+
+    s_last_set_cookie[0] = '\0';
+    esp_err_t err = do_login("operator", "user-password-123456");
+    TEST_CHECK(err == ESP_OK && strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "the USER login succeeds while the ADMIN ladder is locked (per-role lock)");
+
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[1] + 1u);
+    do_login("admin", "wrong-password"); // failure #3 -> 30s only if ADMIN ladder survived
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "ADMIN locked after failure #3");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 30u,
+               "the USER success left the ADMIN ladder at its 3rd step (30s)");
+}
+
+static void test_remote_success_does_not_reset_remote_ladder(void)
+{
+    TEST_SECTION("login backoff -- a success from the shared off-subnet slot does not reset it (SS-01)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "8.8.8.8", sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK && strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "test setup: the remote success minted a session");
+    do_login("admin", "wrong-password"); // would be step 1 (5s) if the success had reset the ladder
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "locked after the post-success remote failure");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 10u,
+               "the remote success did not reset the shared ladder (2nd failure -> 10s)");
 }
 
 static void test_refused_attempt_does_not_count_or_extend_wait(void)
@@ -1325,6 +1380,8 @@ void run_test_web_auth_login_http(void)
     test_ladder_retry_after_steps();
     test_ladder_cycle_resets_after_full_window();
     test_success_resets_the_ladder();
+    test_user_success_does_not_reset_admin_ladder();
+    test_remote_success_does_not_reset_remote_ladder();
     test_refused_attempt_does_not_count_or_extend_wait();
     test_remote_failure_delays_a_different_remote_address();
     test_remote_failure_does_not_delay_a_local_address();

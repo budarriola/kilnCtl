@@ -46,6 +46,10 @@ int update_semver_compare(const update_semver_t *a, const update_semver_t *b);
 // written (excluding NUL), or 0 if buf is too small / args NULL.
 size_t update_semver_format(const update_semver_t *v, char *buf, size_t buf_len);
 
+// Map a `git describe` firmware version (esp_app_desc_t::version) to a comparable semver string; see
+// update_semver.c. Writes "" and returns false when no valid base version can be read.
+bool update_semver_from_describe(const char *desc, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -7,6 +7,9 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "flash_xip_lock.h"
 
 #include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- reviewer advisory (a): the
                                         * embedded-image path had no equivalent of
@@ -326,6 +329,30 @@ static bool attempt_update_embedded(const pico_image_embedded_info_t *emb, int s
 #define PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT 0
 #endif
 
+/* OA-02: never push a new Pico pair on behalf of an ESP image that is still PENDING_VERIFY. A freshly
+ * applied image that fails its soak rolls back to recovery, which would leave the Pico on firmware the
+ * ESP side that remains did not ship with. Blocks (bounded poll, no timeout: nothing waits on this
+ * task) until the running partition's otadata state reads VALID, i.e. mark-valid and the boot_guard
+ * soak have completed. A factory boot has no pending-verify slot and counts as confirmed. */
+#define ESP_CONFIRM_POLL_MS 5000
+static void wait_for_esp_image_confirmed(void)
+{
+    for (;;) {
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        if (run != NULL && run->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY) {
+            return;
+        }
+        esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+        flash_xip_reader_enter();
+        esp_err_t err = run != NULL ? esp_ota_get_state_partition(run, &state) : ESP_FAIL;
+        flash_xip_reader_exit();
+        if (err == ESP_OK && state == ESP_OTA_IMG_VALID) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(ESP_CONFIRM_POLL_MS));
+    }
+}
+
 static void pico_auto_update_task(void *arg)
 {
     (void)arg;
@@ -341,6 +368,8 @@ static void pico_auto_update_task(void *arg)
         "deliberately_off: safety processor has no confirmed update-capable bootloader", false);
     goto done;
 #endif
+
+    wait_for_esp_image_confirmed(); /* OA-02: after the compiled-off gate, before any image/decision work */
 
     /* Owner decision 2026-09-20: the embedded pair (baked into THIS build, see
      * pico_image_embedded.h) is the primary image source -- unlike the

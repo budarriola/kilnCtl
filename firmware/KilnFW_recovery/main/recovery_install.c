@@ -270,13 +270,13 @@ static void recover_task(void *arg)
         act = update_install_after_fail(s_recover.reason, s_recover.app_modified, verifies, request_attempts_left());
     }
     // The verify took seconds: an operator apply or a Pico relay may have started meanwhile. Never switch or reset under it.
-    if (recovery_apply_busy() || recovery_pico_busy()) {
+    if (recovery_apply_busy() || recovery_pico_busy() || recovery_http_restart_pending()) {
         act = UPD_INST_AFTER_STAY;
     }
     if (act == UPD_INST_AFTER_EXIT_APP) {
         // RC-01: re-check the app-writer claim immediately before selecting app.
-        if (recovery_apply_busy()) {
-            ESP_LOGW(TAG, "app write in progress; not selecting app");
+        if (recovery_apply_busy() || recovery_http_restart_pending()) {
+            ESP_LOGW(TAG, "app write in progress or restart pending; not selecting app");
             vTaskDelete(NULL);
             return;
         }
@@ -291,7 +291,7 @@ static void recover_task(void *arg)
     } else if (act == UPD_INST_AFTER_RESTART) {
         ESP_LOGW(TAG, "install failed with the app modified; restarting for the bounded retry");
         vTaskDelay(pdMS_TO_TICKS(RECOVER_RESTART_DELAY_MS));
-        if (recovery_apply_busy() || recovery_pico_busy()) { // RC-01: re-check right before the restart
+        if (recovery_apply_busy() || recovery_pico_busy() || recovery_http_restart_pending()) { // RC-01: re-check right before the restart
             ESP_LOGW(TAG, "app write in progress; restart skipped");
             vTaskDelete(NULL);
             return;

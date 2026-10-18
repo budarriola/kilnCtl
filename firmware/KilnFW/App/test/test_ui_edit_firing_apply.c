@@ -684,7 +684,7 @@ static void test_lu03_lu04_source_pins(void)
         /* LU-01: the PBKDF2 verify must run on a worker, never inline on the LVGL task. */
         TEST_CHECK(strstr(k, "lcd_keypad_state_submit(") == NULL, "keypad never calls the inline submit");
         TEST_CHECK(strstr(k, "lcd_keypad_state_submit_begin(") != NULL, "keypad runs the begin half");
-        TEST_CHECK(strstr(k, "xTaskCreate(pin_verify_worker_task") != NULL, "verify runs on a worker task");
+        TEST_CHECK(strstr(k, "ui_worker_submit(pin_verify_worker_task") != NULL, "verify runs on a worker task");
         TEST_CHECK(strstr(k, "lv_async_call(pin_verify_done_async") != NULL, "result posted back to the LVGL task");
         char *w = strstr(k, "static void pin_verify_worker_task");
         char *v = w ? strstr(w, "lcd_keypad_state_verify(") : NULL;
@@ -697,7 +697,7 @@ static void test_lu03_lu04_source_pins(void)
     TEST_CHECK(n != NULL, "read ui_page_network_manage.c");
     if (n) {
         char *w = strstr(n, "static void connect_worker_task");
-        char *end = w ? strstr(w, "vTaskDelete(NULL)") : NULL;
+        char *end = w ? strstr(w, "\n}") : NULL;
         char *add = w ? strstr(w, "wifi_prov_add_network(") : NULL;
         char *wipe = w ? strstr(w, "memset(s_connect_job_password, 0, sizeof(s_connect_job_password))") : NULL;
         TEST_CHECK(w && end && add && wipe && wipe > add && wipe < end, "worker wipes password after the save");

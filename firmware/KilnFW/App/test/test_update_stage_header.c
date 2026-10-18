@@ -131,8 +131,8 @@ static void test_decode_rejections(void)
         memcpy(b, base, sizeof(b));
         b[8] = (uint8_t)s;
         refresh_crc(b);
-        stage_hdr_status_t want = (s >= 1 && s <= 3) ? STAGE_HDR_OK : STAGE_HDR_BAD_STATE;
-        TEST_CHECK(stage_header_decode(b, 256, CAP, &d) == want, "state 0 and 4+ invalid, 1..3 valid");
+        stage_hdr_status_t want = (s >= 1 && s <= 2) ? STAGE_HDR_OK : STAGE_HDR_BAD_STATE;
+        TEST_CHECK(stage_header_decode(b, 256, CAP, &d) == want, "state 0 and 3+ invalid (3 = removed APPLYING), 1..2 valid");
     }
 
     memcpy(b, base, sizeof(b));
@@ -237,16 +237,17 @@ static void test_state_machine(void)
     TEST_CHECK(stage_header_is_installable(&h), "VERIFIED is installable");
     h.state = STAGE_STATE_WRITING;
     TEST_CHECK(!stage_header_is_installable(&h), "WRITING is not installable");
-    h.state = STAGE_STATE_APPLYING;
-    TEST_CHECK(!stage_header_is_installable(&h), "APPLYING is not installable (interrupted apply needs a re-verify)");
+    h.state = (stage_state_t)3;
+    TEST_CHECK(!stage_header_is_installable(&h), "removed APPLYING value 3 is not installable");
+    {
+        uint8_t enc[STAGE_HEADER_SIZE];
+        TEST_CHECK(stage_header_encode(&h, 0x100000u, enc) == STAGE_HDR_BAD_STATE, "state 3 (removed APPLYING) is not encodable");
+    }
     TEST_CHECK(!stage_header_is_installable(NULL), "NULL not installable");
 
     TEST_CHECK(stage_header_transition_allowed(STAGE_STATE_WRITING, STAGE_STATE_VERIFIED), "WRITING->VERIFIED");
-    TEST_CHECK(stage_header_transition_allowed(STAGE_STATE_VERIFIED, STAGE_STATE_APPLYING), "VERIFIED->APPLYING");
-    TEST_CHECK(!stage_header_transition_allowed(STAGE_STATE_WRITING, STAGE_STATE_APPLYING),
-               "WRITING->APPLYING skips verification");
+    TEST_CHECK(!stage_header_transition_allowed(STAGE_STATE_VERIFIED, (stage_state_t)3), "no VERIFIED->APPLYING (OA-01)");
     TEST_CHECK(!stage_header_transition_allowed(STAGE_STATE_VERIFIED, STAGE_STATE_WRITING), "no backward step");
-    TEST_CHECK(!stage_header_transition_allowed(STAGE_STATE_APPLYING, STAGE_STATE_VERIFIED), "APPLYING is terminal");
     TEST_CHECK(!stage_header_transition_allowed(STAGE_STATE_VERIFIED, STAGE_STATE_VERIFIED), "no self transition");
 
     h = good();

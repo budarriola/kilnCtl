@@ -226,8 +226,8 @@ size_t rpp_pack_begin(uint8_t *payload, uint32_t length, uint32_t crc32, const c
     // KILNLINK_MIN_COMPATIBLE 7 (CommonFW kilnlink_version.h) are mirrored here
     // so this pure file needs no extra include; the receiver only compares
     // protocol_version against its own minimum.
-    const uint16_t protocol_version = 16;
-    const uint16_t min_compatible = 7;
+    const uint16_t protocol_version = (uint16_t)RPP_ANNOUNCE_PROTOCOL; // RE-05: shared CommonFW define
+    const uint16_t min_compatible = (uint16_t)RPP_ANNOUNCE_MIN_COMPATIBLE;
     uint8_t *h = payload + 1;
     payload[0] = RPP_CMD_UPDATE_BEGIN;
     put_u32_le(h, 0x53414655u);

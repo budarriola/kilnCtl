@@ -5,6 +5,12 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "psa/crypto.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "hal_kv.h"
 #include "http_auth_http.h" /* kiln_http_register() */
@@ -147,15 +153,81 @@ static void install_undo(void)
     }
 }
 
-static int stale_req_erase(void)
+// OA-03 glue (only the recovery-side ops the recorded drop uses; the rest stay NULL).
+static int stale_req_read(void *ctx, uint8_t *buf, size_t cap, size_t *len)
 {
+    (void)ctx;
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, UPD_INST_NS, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION_NAME) != HAL_OK) {
+        return 1; // namespace never created: no request
+    }
+    size_t n = cap;
+    hal_status_t e = hal_kv_get_blob(&h, UPD_INST_KEY_REQ, buf, &n);
+    hal_kv_close(&h);
+    if (e == HAL_NOT_FOUND) {
+        return 1;
+    }
+    if (e != HAL_OK) {
+        return -1;
+    }
+    *len = n;
+    return 0;
+}
+
+static int stale_req_clear(void *ctx)
+{
+    (void)ctx;
     return kv_erase_verified(UPD_INST_KEY_REQ);
+}
+
+static int stale_res_write(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    return kv_write_verified(UPD_INST_KEY_RES, buf, len);
+}
+
+// True only when the first req->image_length bytes of the RUNNING app partition hash to req->sha256
+// (the same bytes recovery copied and re-hashed). Called under the update claim, so the shared chunk
+// buffer is free. Any read/hash trouble answers false (recorded as outcome_unknown).
+static bool stale_running_matches(void *ctx, const update_install_req_t *req)
+{
+    (void)ctx;
+    const esp_partition_t *app = esp_ota_get_running_partition();
+    size_t cap = 0;
+    uint8_t *buf = ota_http_esp_chunk_buf(&cap);
+    if (app == NULL || buf == NULL || cap == 0 || req->image_length > app->size) {
+        return false;
+    }
+    psa_hash_operation_t sha = psa_hash_operation_init();
+    if (psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        return false;
+    }
+    for (uint32_t off = 0; off < req->image_length;) {
+        size_t n = req->image_length - off < cap ? (size_t)(req->image_length - off) : cap;
+        if (esp_partition_read(app, off, buf, n) != ESP_OK || psa_hash_update(&sha, buf, n) != PSA_SUCCESS) {
+            psa_hash_abort(&sha);
+            return false;
+        }
+        off += (uint32_t)n;
+        vTaskDelay(1);
+    }
+    uint8_t out[UPD_INST_SHA_LEN];
+    size_t outn = 0;
+    if (psa_hash_finish(&sha, out, sizeof(out), &outn) != PSA_SUCCESS || outn != sizeof(out)) {
+        return false;
+    }
+    return memcmp(out, req->sha256, sizeof(out)) == 0;
 }
 
 int update_install_http_drop_stale_request(void)
 {
     bool claimed = ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP);
-    int rc = update_install_drop_stale(claimed, stale_req_erase);
+    update_install_ops_t ops;
+    memset(&ops, 0, sizeof(ops));
+    ops.req_read = stale_req_read;
+    ops.req_clear = stale_req_clear;
+    ops.res_write = stale_res_write;
+    int rc = update_install_drop_stale_recorded(claimed, &ops, stale_running_matches, NULL);
     if (claimed) {
         ota_http_update_end();
     }

@@ -16,6 +16,7 @@
 #include <strings.h>
 
 #include "build_info.h"
+#include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -40,6 +41,7 @@
 #include "update_policy.h"
 #include "update_fetch_heap.h"
 #include "update_release.h"
+#include "update_semver.h"
 #include "update_settings.h"
 #include "update_stage.h"
 #include "update_wr_arb.h"
@@ -554,6 +556,17 @@ static void running_identity(update_identity_t *r, const update_identity_t *cand
 {
     memset(r, 0, sizeof(*r));
     strlcpy(r->version, FW_RELEASE_VERSION, sizeof(r->version));
+    if (r->version[0] == '\0') {
+        // BM-02: a dev build bakes no release tag; take its `git describe` firmware version so the
+        // policy can still order it against a candidate instead of treating it as unknown.
+        const esp_app_desc_t *d = esp_app_get_description();
+        if (d != NULL) {
+            char dv[sizeof(d->version) + 1];
+            memcpy(dv, d->version, sizeof(d->version));
+            dv[sizeof(d->version)] = '\0';
+            (void)update_semver_from_describe(dv, r->version, sizeof(r->version));
+        }
+    }
     strlcpy(r->partitions_sha256, FW_PARTITIONS_SHA256, sizeof(r->partitions_sha256));
     r->zones_cfg_version = ZONES_CFG_VERSION;
     r->kilnlink_version = KILNLINK_PROTOCOL_VERSION;
@@ -1034,12 +1047,18 @@ static const char *run_job(work_t *w)
     st_set_stage("release");
     w->mem_cap = FETCH_API_BODY_CAP;
     e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
-    if (e != NULL) {
+    // GF-02: a list page that overflows the body cap (long release notes) is treated like "no eligible release
+    // on the page" on the stable channel, so the /releases/latest fallback below still runs.
+    const bool list_overflow = (e != NULL) && strcmp(e, "too_large") == 0 && !w->p.allow_prerelease;
+    if (e != NULL && !list_overflow) {
         return e;
     }
     const uint32_t max_app = update_stage_capacity(update_http_stage());
-    update_rel_err_t re = update_release_pick_from_list((const char *)w->body, w->body_len, w->repo, max_app,
-                                                        w->p.allow_prerelease, &w->info);
+    update_rel_err_t re = UPDATE_REL_E_NO_RELEASE;
+    if (!list_overflow) {
+        re = update_release_pick_from_list((const char *)w->body, w->body_len, w->repo, max_app,
+                                           w->p.allow_prerelease, &w->info);
+    }
     if (re == UPDATE_REL_E_NO_RELEASE && !w->p.allow_prerelease) {
         // FA-01: 15 or more pre-releases can push the newest stable release off the first list page. Ask
         // /releases/latest (GitHub never returns a pre-release there). A 404 means no stable release exists.
@@ -1480,6 +1499,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return rc;
 }
 
+static size_t internal_largest_block_probe(void)
+{
+    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
 static bool fetch_busy_probe(void)
 {
     return s_c != NULL && s_c->busy != 0;
@@ -1504,6 +1528,7 @@ esp_err_t update_fetch_start(httpd_handle_t server)
     s_c->st.reason = "";
     ota_http_set_fetch_busy_probe(fetch_busy_probe);
     http_async_job_set_admission_busy_probe(fetch_busy_probe); // RW-02
+    http_async_job_set_largest_block_probe(internal_largest_block_probe); // RF-03
     (void)stack_margin_register("update_fetch", &s_c->tls_task, FETCH_TLS_STACK_BYTES);
     (void)stack_margin_register("update_fetch_wr", &s_c->wr_task, FETCH_WR_STACK_BYTES);
 

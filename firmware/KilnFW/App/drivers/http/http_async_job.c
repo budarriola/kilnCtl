@@ -88,6 +88,13 @@ static void http_async_job_task(void *arg)
 
 static bool (*s_admission_busy_probe)(void);
 
+static size_t (*s_largest_block_probe)(void);
+
+void http_async_job_set_largest_block_probe(size_t (*probe)(void))
+{
+    s_largest_block_probe = probe;
+}
+
 void http_async_job_set_admission_busy_probe(bool (*probe)(void))
 {
     s_admission_busy_probe = probe;
@@ -101,6 +108,14 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
     // started beside it could push heap_internal under the 8 KB floor. Refuse BUSY while it runs.
     if (s_admission_busy_probe != NULL && s_admission_busy_probe()) {
         ESP_LOGW(TAG, "%s: refused, an update fetch holds the internal heap", task_name ? task_name : "?");
+        return HTTP_ASYNC_JOB_BUSY;
+    }
+    // RF-03: the job stack is one contiguous internal block; refuse BUSY (before taking the writer guard) when
+    // fragmentation leaves the largest free block under stack + margin, instead of failing in xTaskCreate.
+    if (s_largest_block_probe != NULL &&
+        s_largest_block_probe() < (size_t)stack_bytes + HTTP_ASYNC_JOB_STACK_MARGIN_BYTES) {
+        ESP_LOGW(TAG, "%s: refused, largest internal block is below the %u B stack + margin",
+                 task_name ? task_name : "?", (unsigned)stack_bytes);
         return HTTP_ASYNC_JOB_BUSY;
     }
     // Refused while ANY safety-config writer holds the guard -- another async

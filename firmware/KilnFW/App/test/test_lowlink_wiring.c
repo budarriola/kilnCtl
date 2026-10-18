@@ -40,6 +40,28 @@ static char *body_of(const char *rel, const char *sig)
     return out;
 }
 
+static void check_oa02(void)
+{
+    TEST_SECTION("OA-02: Pico auto-update waits for the ESP image to be VALID");
+    char *w = body_of("net/pico_auto_update_boot.c", "wait_for_esp_image_confirmed(void)");
+    TEST_CHECK(w != NULL, "could not locate wait_for_esp_image_confirmed body");
+    if (w) {
+        TEST_CHECK(strstr(w, "esp_ota_get_state_partition") != NULL && strstr(w, "ESP_OTA_IMG_VALID") != NULL,
+                   "gate must read the otadata state and require VALID");
+        free(w);
+    }
+    char *t = body_of("net/pico_auto_update_boot.c", "pico_auto_update_task(void *arg)");
+    TEST_CHECK(t != NULL, "could not locate pico_auto_update_task body");
+    if (t) {
+        const char *off = strstr(t, "goto done;");
+        const char *gate = strstr(t, "wait_for_esp_image_confirmed();");
+        const char *use = strstr(t, "pico_image_embedded_describe");
+        TEST_CHECK(off != NULL && gate != NULL && use != NULL && off < gate && gate < use,
+                   "gate must run after the compiled-off exit and before any image/decision work");
+        free(t);
+    }
+}
+
 static void check_up01(void)
 {
     TEST_SECTION("UP-01: attempt_update_acquire re-checks run/interlocks after the claim");
@@ -127,6 +149,7 @@ void run_test_lowlink_wiring(void)
 {
     check_pm();
     check_up01();
+    check_oa02();
     check_bw01();
     check_bw02();
     check_bw03();

@@ -128,12 +128,52 @@ extern const uint8_t login_page_html_gz_end[] asm("_binary_login_page_html_gz_en
 // LCD's instance as WEB_AUTH_PLAN.md section 7 requires -- only the ladder
 // constant and the four pure functions are now shared, never the state.
 
+// SS-01: one ladder per (slot, role). A wrong ADMIN password advances only the
+// ADMIN ladder and a USER success resets only the USER ladder, so a USER
+// password holder cannot wipe the admin guess penalty.
+#define LOGIN_LADDER_ADMIN 0
+#define LOGIN_LADDER_USER 1
+#define LOGIN_LADDER_COUNT 2
+
 typedef struct {
     bool in_use;
     char ip[46];
     uint32_t last_activity_ms;
-    login_backoff_state_t backoff;
+    login_backoff_state_t backoff[LOGIN_LADDER_COUNT];
 } login_lockout_slot_t;
+
+static unsigned ladder_for_role(web_auth_session_role_t role)
+{
+    return (role == WEB_AUTH_SESSION_ROLE_ADMIN) ? LOGIN_LADDER_ADMIN : LOGIN_LADDER_USER;
+}
+
+static void slot_cycle_reset_if_due(login_lockout_slot_t *s, uint32_t now)
+{
+    for (unsigned r = 0; r < LOGIN_LADDER_COUNT; r++) {
+        login_backoff_cycle_reset_if_due(&s->backoff[r], now);
+    }
+}
+
+// Both ladders locked (callers: slot == NULL counts as locked separately).
+static bool slot_all_ladders_locked(const login_lockout_slot_t *s, uint32_t now)
+{
+    for (unsigned r = 0; r < LOGIN_LADDER_COUNT; r++) {
+        if (!login_backoff_is_locked(&s->backoff[r], now)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool slot_any_ladder_locked(const login_lockout_slot_t *s, uint32_t now)
+{
+    for (unsigned r = 0; r < LOGIN_LADDER_COUNT; r++) {
+        if (login_backoff_is_locked(&s->backoff[r], now)) {
+            return true;
+        }
+    }
+    return false;
+}
 static EXT_RAM_BSS_ATTR login_lockout_slot_t s_login_lockouts[LOGIN_LOCKOUT_MAX_IPS];
 
 // Reserved shared slot for every client classified LOGIN_IP_SCOPE_REMOTE
@@ -179,7 +219,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
     uint32_t oldest_age = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
         login_lockout_slot_t *s = &s_login_lockouts[i];
-        login_backoff_cycle_reset_if_due(&s->backoff, now);
+        slot_cycle_reset_if_due(s, now);
         if (s->in_use && strcmp(s->ip, ip) == 0) {
             s->last_activity_ms = now;
             return s;
@@ -191,7 +231,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
             oldest_age = (uint32_t)(now - s->last_activity_ms);
             oldest_idx = (int)i;
         }
-        if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
+        if (s->in_use && !slot_any_ladder_locked(s, now) &&
             (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
             /* largest unsigned elapsed wins: wrap-safe LRU */
             lru_age = (uint32_t)(now - s->last_activity_ms);
@@ -223,7 +263,7 @@ static login_lockout_slot_t *login_lockout_slot_for(const char *ip, uint32_t now
 // REMOTE and UNKNOWN cases below (finding 3) route here.
 static login_lockout_slot_t *claim_remote_slot(uint32_t now)
 {
-    login_backoff_cycle_reset_if_due(&s_remote_login_slot.backoff, now);
+    slot_cycle_reset_if_due(&s_remote_login_slot, now);
     s_remote_login_slot.in_use = true;
     strncpy(s_remote_login_slot.ip, "*remote*", sizeof(s_remote_login_slot.ip) - 1);
     s_remote_login_slot.ip[sizeof(s_remote_login_slot.ip) - 1] = '\0';
@@ -334,6 +374,39 @@ static void login_wipe(void *buf, size_t len)
     }
 }
 
+// Sends the 429 refusal. Shared by the pre-body check and the SS-01 per-role
+// check so both answer byte-identically.
+static esp_err_t login_send_429(httpd_req_t *req, const char *ip, bool ip_known, const char *slot_ip,
+                            uint32_t retry_after_ms)
+{
+    // Deliberately identical status line and body whether `slot` was a
+    // genuine per-IP lockout or NULL (the LOCAL table saturated with
+    // OTHER IPs' locks -- see login_lockout_slot_for()'s header comment
+    // for the tradeoff). If the saturation case answered any
+    // differently, the response itself would be an oracle telling an
+    // attacker whether the table is full, which is exactly the kind of
+    // side channel this backoff exists to deny -- so a legitimate
+    // operator refused here sees the same "too many failed attempts"
+    // message a genuinely locked-out IP does. Retry-After is safe to
+    // disclose either way: it names how long THIS response is refused
+    // for, not anything about other clients' state. Rounded up so a
+    // client that honors it never retries a fraction of a second early.
+    uint32_t retry_after_s = (retry_after_ms == 0) ? 1u : (retry_after_ms + 999u) / 1000u;
+    // Log-only (never in the response, which stays deliberately scope-
+    // blind per the comment above): so a locked-out client leaves a
+    // trace in the device log. Never logs username/password -- neither
+    // is available yet at this point in the handler.
+    ESP_LOGW(TAG, "login blocked (429) from %s scope=%s retry_after=%us", ip,
+         login_scope_label_for_log(ip, ip_known, slot_ip),
+         (unsigned)retry_after_s);
+    char retry_after_hdr[16];
+    snprintf(retry_after_hdr, sizeof(retry_after_hdr), "%u", (unsigned)retry_after_s);
+    httpd_resp_set_hdr(req, "Retry-After", retry_after_hdr);
+    httpd_resp_set_status(req, "429 Too Many Requests");
+    httpd_resp_send(req, "too many failed attempts, try again later", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 static esp_err_t login_post_handler(httpd_req_t *req)
 {
     char ip[46];
@@ -343,6 +416,10 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     bool have_slot_ip = false;
     char slot_ip_snapshot[46] = { 0 };
     uint32_t retry_after_ms = 0;
+    // SS-01: per-role lock snapshot taken in the same locked section, so the
+    // post-body role check needs no second slot lookup (no extra STA cache read).
+    bool role_locked[LOGIN_LADDER_COUNT] = { false, false };
+    uint32_t role_retry_ms[LOGIN_LADDER_COUNT] = { 0, 0 };
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         uint32_t now = now_ms();
         login_lockout_slot_t *slot = login_backoff_slot_for(ip, ip_known, now);
@@ -353,7 +430,15 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // AZ-04: login_lockout_slot_for() evicts the oldest slot when the
         // table is full, so NULL is not expected. Kept as a defensive
         // refuse so a slot that does not exist is never dereferenced.
-        locked = (slot == NULL) || login_backoff_is_locked(&slot->backoff, now);
+        // Refuse before reading the body only when EVERY role's ladder is
+        // locked; a single locked role is refused once the role is known.
+        locked = (slot == NULL) || slot_all_ladders_locked(slot, now);
+        if (slot != NULL) {
+            for (unsigned r = 0; r < LOGIN_LADDER_COUNT; r++) {
+                role_locked[r] = login_backoff_is_locked(&slot->backoff[r], now);
+                role_retry_ms[r] = login_backoff_remaining_ms(&slot->backoff[r], now);
+            }
+        }
         if (locked) {
             // Review fix (2026-09-21, finding 1): slot == NULL (the LOCAL
             // table saturated with OTHER IPs' active locks, see
@@ -368,8 +453,16 @@ static esp_err_t login_post_handler(httpd_req_t *req)
             // instead, matching what a maximally-escalated genuine lock
             // would also show, so saturation is indistinguishable from an
             // ordinary long lock.
-            retry_after_ms = (slot != NULL) ? login_backoff_remaining_ms(&slot->backoff, now)
-                                             : LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1];
+            uint32_t shortest = LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1];
+            if (slot != NULL) {
+                shortest = role_retry_ms[0];
+                for (unsigned r = 1; r < LOGIN_LADDER_COUNT; r++) {
+                    if (role_retry_ms[r] < shortest) {
+                        shortest = role_retry_ms[r];
+                    }
+                }
+            }
+            retry_after_ms = shortest;
         }
         xSemaphoreGive(s_login_lock);
     } else {
@@ -378,32 +471,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
     if (locked) {
-        // Deliberately identical status line and body whether `slot` was a
-        // genuine per-IP lockout or NULL (the LOCAL table saturated with
-        // OTHER IPs' locks -- see login_lockout_slot_for()'s header comment
-        // for the tradeoff). If the saturation case answered any
-        // differently, the response itself would be an oracle telling an
-        // attacker whether the table is full, which is exactly the kind of
-        // side channel this backoff exists to deny -- so a legitimate
-        // operator refused here sees the same "too many failed attempts"
-        // message a genuinely locked-out IP does. Retry-After is safe to
-        // disclose either way: it names how long THIS response is refused
-        // for, not anything about other clients' state. Rounded up so a
-        // client that honors it never retries a fraction of a second early.
-        uint32_t retry_after_s = (retry_after_ms == 0) ? 1u : (retry_after_ms + 999u) / 1000u;
-        // Log-only (never in the response, which stays deliberately scope-
-        // blind per the comment above): so a locked-out client leaves a
-        // trace in the device log. Never logs username/password -- neither
-        // is available yet at this point in the handler.
-        ESP_LOGW(TAG, "login blocked (429) from %s scope=%s retry_after=%us", ip,
-                 login_scope_label_for_log(ip, ip_known, have_slot_ip ? slot_ip_snapshot : NULL),
-                 (unsigned)retry_after_s);
-        char retry_after_hdr[16];
-        snprintf(retry_after_hdr, sizeof(retry_after_hdr), "%u", (unsigned)retry_after_s);
-        httpd_resp_set_hdr(req, "Retry-After", retry_after_hdr);
-        httpd_resp_set_status(req, "429 Too Many Requests");
-        httpd_resp_send(req, "too many failed attempts, try again later", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return login_send_429(req, ip, ip_known, have_slot_ip ? slot_ip_snapshot : NULL, retry_after_ms);
     }
 
     if (req->content_len <= 0 || req->content_len >= LOGIN_BODY_MAX) {
@@ -462,6 +530,13 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     web_auth_session_role_t candidate_role = web_auth_login_role_for_username(username, admin_username);
     web_auth_role_t store_role =
         (candidate_role == WEB_AUTH_SESSION_ROLE_ADMIN) ? WEB_AUTH_ROLE_ADMINISTRATOR : WEB_AUTH_ROLE_USER;
+    // SS-01: this role's own ladder may be locked even though the other is not.
+    // Refuse before the KDF, same response as the pre-body refusal.
+    if (role_locked[ladder_for_role(candidate_role)]) {
+        login_wipe(password, sizeof(password));
+        return login_send_429(req, ip, ip_known, have_slot_ip ? slot_ip_snapshot : NULL,
+                              role_retry_ms[ladder_for_role(candidate_role)]);
+    }
 
     bool ok = web_auth_store_verify_password(store_role, password);
 
@@ -493,10 +568,16 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // this file's header comment -- a refused attempt never reaches
         // this line at all, and therefore never counts or extends the wait.
         if (slot != NULL) {
+            login_backoff_state_t *ladder = &slot->backoff[ladder_for_role(candidate_role)];
             if (ok) {
-                login_backoff_record_success(&slot->backoff);
+                // SS-01: success resets only the ladder of the role that logged
+                // in, and never the shared off-subnet slot (a remote success
+                // must not clear an attacker's remote ladder; it only decays).
+                if (slot != &s_remote_login_slot) {
+                    login_backoff_record_success(ladder);
+                }
             } else {
-                login_backoff_record_failure(&slot->backoff, now);
+                login_backoff_record_failure(ladder, now);
             }
         }
         xSemaphoreGive(s_login_lock);
@@ -545,6 +626,8 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 
     uint8_t token_hash[32];
     http_session_hash_token(token_hex, strlen(token_hex), token_hash);
+    // SS-04: the raw bytes are only needed for the hex form; wipe them now.
+    login_wipe(token_raw, sizeof(token_raw));
 
     web_auth_session_role_t session_role =
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
@@ -573,7 +656,10 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     char cookie[128];
     int cookie_len = snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s; HttpOnly; SameSite=Strict; Path=/",
                                token_hex);
+    // SS-04: the cookie now carries the only copy needed; wipe the hex form.
+    login_wipe(token_hex, sizeof(token_hex));
     if (cookie_len < 0 || (size_t)cookie_len >= sizeof(cookie)) {
+        login_wipe(cookie, sizeof(cookie));
         ESP_LOGE(TAG, "Set-Cookie formatting failed");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
         return ESP_OK;
@@ -582,7 +668,11 @@ static esp_err_t login_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "login succeeded from %s (role=%d)", ip, (int)session_role);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    esp_err_t send_err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    // SS-04: httpd keeps the header pointer until the response is sent, so the
+    // cookie buffer is wiped only now (volatile wipe, not elidable).
+    login_wipe(cookie, sizeof(cookie));
+    return send_err;
 }
 
 // POST /api/auth/logout -- ROUTE_TIER_USER (route_tier_table.h), so an

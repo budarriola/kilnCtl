@@ -15,6 +15,7 @@
 #include "ui_page_profile_picker_format.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "ui_worker.h"
 #include "wifi_prov.h"
 
 // See ui_page_network_manage.h's header comment for why this page exists
@@ -132,7 +133,6 @@ static void scan_worker_task(void *arg)
     s_scan_job.busy = false;
     xSemaphoreGive(s_scan_job.lock);
 
-    vTaskDelete(NULL);
 }
 
 /* Renders the current page of s_scan_results into s_scan_list (L4). */
@@ -242,7 +242,6 @@ static void connect_worker_task(void *arg)
     s_connect_job.done = true;
     s_connect_job.busy = false;
     xSemaphoreGive(s_connect_job.lock);
-    vTaskDelete(NULL);
 }
 
 static void connect_modal_close(void);
@@ -302,7 +301,6 @@ static void forget_worker_task(void *arg)
     s_forget_job.done = true;
     s_forget_job.busy = false;
     xSemaphoreGive(s_forget_job.lock);
-    vTaskDelete(NULL);
 }
 
 static void apply_forget_job_result(void)
@@ -403,8 +401,8 @@ static void connect_submit_apply(void *user_data)
     snprintf(s_connect_job_password, sizeof(s_connect_job_password), "%s", password);
     lv_label_set_text(s_connect_status_label, "Connecting...");
 
-    BaseType_t created = xTaskCreate(connect_worker_task, "wifi_connect_ui", 4096, NULL, 5, NULL);
-    if (created != pdPASS) {
+    bool created = ui_worker_submit(connect_worker_task, NULL); /* RF-01 */
+    if (!created) {
         xSemaphoreTake(s_connect_job.lock, portMAX_DELAY);
         s_connect_job.busy = false;
         xSemaphoreGive(s_connect_job.lock);
@@ -456,8 +454,8 @@ static void forget_apply(void *user_data)
 
     snprintf(s_forget_job_ssid, sizeof(s_forget_job_ssid), "%s", s_pending_forget_ssid);
 
-    BaseType_t created = xTaskCreate(forget_worker_task, "wifi_forget_ui", 4096, NULL, 5, NULL);
-    if (created != pdPASS) {
+    bool created = ui_worker_submit(forget_worker_task, NULL); /* RF-01 */
+    if (!created) {
         xSemaphoreTake(s_forget_job.lock, portMAX_DELAY);
         s_forget_job.busy = false;
         xSemaphoreGive(s_forget_job.lock);
@@ -525,8 +523,8 @@ static void scan_btn_cb(lv_event_t *e)
     lv_obj_clean(s_scan_list);
     lv_label_set_text(s_scan_status_label, "Scanning...");
 
-    BaseType_t created = xTaskCreate(scan_worker_task, "wifi_scan_ui", 4096, NULL, 5, NULL);
-    if (created != pdPASS) {
+    bool created = ui_worker_submit(scan_worker_task, NULL); /* RF-01 */
+    if (!created) {
         xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
         s_scan_job.busy = false;
         xSemaphoreGive(s_scan_job.lock);

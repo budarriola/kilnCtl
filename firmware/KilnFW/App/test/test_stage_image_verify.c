@@ -197,6 +197,16 @@ static void test_chip_rev_and_padding(void)
     f.img[17] = 0;
     f.img[18] = 0; // max_chip_rev_full 0 < chip rev 1
     TEST_CHECK(run(&f, IMG_CAP, NULL) == STAGE_IMG_BAD_CHIP_REV, "max chip rev below this chip refused");
+    // Owner opt-out (KILNCTL_STAGE_CHIP_REV_CHECK=n): the chip step is skipped, other checks still run.
+    build(&f, 0x420000D4u);
+    f.img[15] = 2;
+    f.chip_calls = 0;
+    {
+        const stage_image_io_t io = {.ctx = &f, .read = fx_read, .sha_begin = fx_begin, .sha_update = fx_update, .sha_finish = fx_finish, .chip_ok = fx_chip};
+        TEST_CHECK(stage_image_verify_opt(&io, IMG_CAP, NULL, 0) == STAGE_IMG_BAD_HASH && f.chip_calls == 0, "chip check off: bad-rev image gets past the chip step (digest of the edited header then mismatches), callback not called");
+        TEST_CHECK(stage_image_verify_opt(&io, IMG_CAP, NULL, 1) == STAGE_IMG_BAD_CHIP_REV, "chip check on: same image refused");
+        TEST_CHECK(STAGE_IMG_CHIP_REV_CHECK == 1, "host default is check on");
+    }
     // Segments end at 24+3*8+204 = 252; padding 252..255 (checksum at 255), digest 256..288.
     build(&f, 0x420000D4u);
     TEST_CHECK(n == 288, "fixture layout as assumed");

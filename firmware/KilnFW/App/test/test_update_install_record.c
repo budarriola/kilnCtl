@@ -460,6 +460,58 @@ static void test_reason_lcd_fits(void)
 }
 
 /* LOW-4: a leftover request/* LOW-4: a leftover request is dropped on a healthy boot, never while the update claim is held. */
+static bool g_match_ret;
+static int g_match_calls;
+static bool match_fn(void *c, const update_install_req_t *r)
+{
+    (void)c;
+    g_match_calls++;
+    return g_match_ret && r->image_length == 2956144u;
+}
+
+static void test_drop_stale_recorded(void)
+{
+    fake_t f;
+    update_install_ops_t o;
+    update_install_res_t d;
+
+    // OA-03: stale request whose image is the running app -> OK recorded, request gone.
+    fake_init(&f);
+    o = ops_for(&f);
+    g_match_ret = true;
+    g_match_calls = 0;
+    TEST_CHECK(update_install_drop_stale_recorded(true, &o, match_fn, NULL) == 0, "OA-03: match -> 0");
+    TEST_CHECK(f.have_req == 0 && f.res_writes == 1, "OA-03: request cleared, one result written");
+    TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
+                   strcmp(d.semver, "1.0.0-pre.3") == 0 && d.id[0] == 0xA0,
+               "OA-03: OK result with the request's semver and id");
+    TEST_CHECK(index_of(&f, EV_RES) < index_of(&f, EV_CLEAR), "OA-03: result written before the request is cleared");
+
+    // Running app is not that image -> FAIL outcome_unknown, never OK.
+    fake_init(&f);
+    o = ops_for(&f);
+    g_match_ret = false;
+    TEST_CHECK(update_install_drop_stale_recorded(true, &o, match_fn, NULL) == 0, "OA-03: mismatch -> 0");
+    TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_FAIL &&
+                   d.reason == UPD_INST_REASON_OUTCOME_UNKNOWN,
+               "OA-03: mismatch records FAIL outcome_unknown, not OK");
+
+    // Claim busy: nothing read, nothing written.
+    fake_init(&f);
+    o = ops_for(&f);
+    g_match_calls = 0;
+    TEST_CHECK(update_install_drop_stale_recorded(false, &o, match_fn, NULL) == 1 && f.have_req == 1 &&
+                   f.res_writes == 0 && g_match_calls == 0,
+               "OA-03: claim busy leaves everything alone");
+
+    // No request: nothing recorded.
+    fake_init(&f);
+    f.have_req = 0;
+    o = ops_for(&f);
+    TEST_CHECK(update_install_drop_stale_recorded(true, &o, match_fn, NULL) == 0 && f.res_writes == 0,
+               "OA-03: no request -> no result");
+}
+
 static void test_drop_stale(void)
 {
     g_erase_calls = 0;
@@ -733,6 +785,7 @@ void run_test_update_install_record(void)
     test_boot_logic();
     test_pre_boot();
     test_drop_stale();
+    test_drop_stale_recorded();
     test_reason_lcd_fits();
     test_res_versions();
     test_refusal_clear_failure();

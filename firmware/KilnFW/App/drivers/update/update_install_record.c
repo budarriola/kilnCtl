@@ -270,6 +270,34 @@ int update_install_drop_stale(bool claimed, int (*req_erase)(void))
     return req_erase() == 0 ? 0 : -1;
 }
 
+int update_install_drop_stale_recorded(bool claimed, const update_install_ops_t *ops,
+                                       bool (*running_matches)(void *ctx, const update_install_req_t *req),
+                                       void *match_ctx)
+{
+    if (!claimed) {
+        return 1;
+    }
+    if (!ops || !ops->req_read || !ops->req_clear) {
+        return -1;
+    }
+    uint8_t blob[UPD_INST_REQ_SIZE];
+    size_t len = sizeof(blob);
+    int rr = ops->req_read(ops->ctx, blob, sizeof(blob), &len);
+    if (rr == 1) {
+        return 0; // no request: nothing to drop
+    }
+    if (rr == 0) {
+        update_install_req_t req;
+        if (update_install_req_decode(blob, len, &req)) {
+            bool match = running_matches != NULL && running_matches(match_ctx, &req);
+            (void)update_install_record_result(ops, match ? UPD_INST_RES_OK : UPD_INST_RES_FAIL,
+                                               match ? UPD_INST_REASON_NONE : UPD_INST_REASON_OUTCOME_UNKNOWN,
+                                               req.semver, req.sha256);
+        }
+    }
+    return ops->req_clear(ops->ctx) == 0 ? 0 : -1;
+}
+
 static update_install_boot_outcome_t refuse_ex(const update_install_ops_t *ops, uint8_t reason, uint8_t detail,
                                                const char *semver, const uint8_t *id, update_install_res_t *res_out)
 {

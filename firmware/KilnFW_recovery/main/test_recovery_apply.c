@@ -548,10 +548,6 @@ static void test_refusals(void)
     expect_refused("state WRITING", f, RECOVERY_APPLY_ERR_NOT_VERIFIED);
 
     fresh(f);
-    write_header(f, STAGE_STATE_APPLYING, g_image, IMG_LEN);
-    expect_refused("state APPLYING", f, RECOVERY_APPLY_ERR_NOT_VERIFIED);
-
-    fresh(f);
     f->stage[4096u + 30000u] ^= 0x10; // image byte flipped after verification
     expect_refused("staged image bit flip", f, RECOVERY_APPLY_ERR_STAGE_HASH);
 

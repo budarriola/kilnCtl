@@ -555,12 +555,6 @@ foreach ($f in $sourceFiles) {
 $exemptCreatedNames = @{
     # (a) short-lived / self-deleting -- exits on its own, no ongoing stack
     # margin to track past the moment it was created.
-    "wifi_mode_ui"      = "ui_page_network.c mode_worker_task: one-shot Wi-Fi mode change, self-deletes"
-    "wifi_ap_id_ui"     = "ui_page_network.c ap_identity_worker_task: one-shot AP identity fetch, self-deletes"
-    "wifi_connect_ui"   = "ui_page_network_manage.c connect_worker_task: one-shot connect attempt, self-deletes"
-    "wifi_forget_ui"    = "ui_page_network_manage.c forget_worker_task: one-shot forget-network call, self-deletes"
-    "lcd_pin_ui"        = "ui_lcd_keypad.c pin_verify_worker_task: one-shot LCD PIN KDF check (LU-01), self-deletes"
-    "wifi_scan_ui"      = "ui_page_network_manage.c scan_worker_task: one-shot Wi-Fi scan, self-deletes"
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
     "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
@@ -581,12 +575,6 @@ $exemptCreatedNames = @{
 # Every exemption is pinned to the ONE file and task function that may create that name (REVIEW_LCD19FX6 INFO-3), so a
 # second create reusing an exempt name in another file (or with another function) is not silently waved through.
 $exemptCreatePin = @{
-    "wifi_mode_ui"         = "ui_page_network.c|mode_worker_task"
-    "wifi_ap_id_ui"        = "ui_page_network.c|ap_identity_worker_task"
-    "wifi_connect_ui"      = "ui_page_network_manage.c|connect_worker_task"
-    "wifi_forget_ui"       = "ui_page_network_manage.c|forget_worker_task"
-    "lcd_pin_ui"           = "ui_lcd_keypad.c|pin_verify_worker_task"
-    "wifi_scan_ui"         = "ui_page_network_manage.c|scan_worker_task"
     "cfg_autofmt"          = "cfg_fs_mount.c|cfg_fs_auto_format_task"
     "factory_reset_reboot" = "factory_reset.c|reboot_task"
     "ota_rollback_reboot"  = "ota_http_esp.c|ota_rollback_reboot_task"
@@ -683,12 +671,6 @@ $stackSkipAllowed = @{
     'ota_pico_relay' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
     'spi_owner_task' = 'create site only: FreeRTOS name behind the spi_owner registration; the size arrives through the stack_depth parameter, not a literal'
     'sw_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
-    'wifi_ap_id_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_connect_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_forget_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'lcd_pin_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_mode_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_scan_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
     'http_async_job' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'httpd_worker' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'i2c_owner_ns2009' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'

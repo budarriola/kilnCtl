@@ -1,0 +1,16 @@
+menu "KilnCtrl Recovery"
+
+    config KILNCTL_STAGE_CHIP_REV_CHECK
+        bool "Check the image chip revision range when verifying a staged OTA image"
+        default y
+        help
+            Build-time owner opt-out for RY-01. On: stage verify refuses an image whose
+            header min/max chip revision excludes this chip (IDF
+            bootloader_common_check_chip_validity) before anything is erased. Off: such an
+            image passes the stage verify. In the recovery image the app partition is then
+            erased and only the post-copy esp_image_verify refuses it, leaving the board
+            in recovery with no app. Keep on unless you deliberately flash images built
+            for a different chip revision. Not a runtime or web setting. The recovery
+            image defines the same symbol (KilnFW_recovery/main/Kconfig.projbuild).
+
+endmenu

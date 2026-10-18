@@ -153,9 +153,9 @@ try {
     Test-Mutant -File "recovery_main.c" -Needle "if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {" -Replacement "if (1) {" -Tag "mainungated"
 
     # RC-01: direct upload claim and recover_task re-check.
-    Test-Mutant -File "recovery_http.c" -Needle "if (!recovery_app_write_claim()) {" -Replacement "if (0) {" -Tag "rc01noclaim"
-    Test-Mutant -File "recovery_install.c" -Needle "        if (recovery_apply_busy()) {`n            ESP_LOGW(TAG, `"app write in progress; not selecting app`");" -Replacement "        if (0) {`n            ESP_LOGW(TAG, `"app write in progress; not selecting app`");" -Tag "rc01noselectrecheck"
-    Test-Mutant -File "recovery_install.c" -Needle "if (recovery_apply_busy() || recovery_pico_busy()) { // RC-01" -Replacement "if (0) { // RC-01" -Tag "rc01norestartrecheck"
+    Test-Mutant -File "recovery_http.c" -Needle "if (recovery_http_restart_pending() || !recovery_app_write_claim()) {" -Replacement "if (0) {" -Tag "rc01noclaim"
+    Test-Mutant -File "recovery_install.c" -Needle "        if (recovery_apply_busy() || recovery_http_restart_pending()) {`n            ESP_LOGW(TAG, `"app write in progress or restart pending; not selecting app`");" -Replacement "        if (0) {`n            ESP_LOGW(TAG, `"app write in progress or restart pending; not selecting app`");" -Tag "rc01noselectrecheck"
+    Test-Mutant -File "recovery_install.c" -Needle "if (recovery_apply_busy() || recovery_pico_busy() || recovery_http_restart_pending()) { // RC-01" -Replacement "if (0) { // RC-01" -Tag "rc01norestartrecheck"
 
     # FX-04: no restart after the wait times out; banners gated on the apply.
     Test-Mutant -File "recovery_health.c" -Needle "            return false;" -Replacement "            break;" -Tag "fx04breaks"

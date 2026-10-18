@@ -256,6 +256,11 @@ void web_auth_lcd_session_destroy(web_auth_lcd_session_t *s);
 // tree takes its inputs as parameters instead of reaching into a global
 // config store.
 #define WEB_AUTH_TIMEOUT_NEVER_S    0u
+// SS-03: absolute session lifetime, 12 h from issued_ms. Idle expiry alone let
+// a session that is touched at least once per timeout live forever; this caps
+// it regardless of activity (touches never extend issued_ms). Not applied when
+// the idle timeout is WEB_AUTH_TIMEOUT_NEVER_S (owner: "never" means never).
+#define WEB_AUTH_SESSION_MAX_LIFETIME_MS (12u * 60u * 60u * 1000u)
 #define WEB_AUTH_PROMPT_WINDOW_MS   10000u // "the 10-second stay-unlocked prompt"
 
 // True iff a session last seen at `last_seen_ms`, under a timeout of

@@ -50,4 +50,18 @@ typedef enum {
 // including checksum padding and digest (always <= avail).
 stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len);
 
+// Same, with the RY-01 chip revision step selectable. chip_check == 0 skips io->chip_ok (the header's
+// magic, chip id and segment count are still checked). stage_image_verify() passes STAGE_IMG_CHIP_REV_CHECK.
+stage_image_result_t stage_image_verify_opt(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len, int chip_check);
+
+// Owner opt-out (Kconfig KILNCTL_STAGE_CHIP_REV_CHECK, default y). Host builds always check.
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
+#if defined(ESP_PLATFORM) && !defined(CONFIG_KILNCTL_STAGE_CHIP_REV_CHECK)
+#define STAGE_IMG_CHIP_REV_CHECK 0
+#else
+#define STAGE_IMG_CHIP_REV_CHECK 1
+#endif
+
 #endif

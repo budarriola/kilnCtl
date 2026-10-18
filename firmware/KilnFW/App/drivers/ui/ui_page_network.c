@@ -15,6 +15,7 @@
 #include "ui_lcd_lock.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "ui_worker.h"
 #include "wifi_prov.h"
 #include "wifi_status_ui.h"
 
@@ -257,7 +258,6 @@ static void mode_worker_task(void *arg)
     xSemaphoreTake(s_mode_job.lock, portMAX_DELAY);
     s_mode_job.busy = false;
     xSemaphoreGive(s_mode_job.lock);
-    vTaskDelete(NULL);
 }
 
 static void request_mode_change(wifi_prov_mode_t mode)
@@ -269,12 +269,14 @@ static void request_mode_change(wifi_prov_mode_t mode)
     xSemaphoreGive(s_mode_job.lock);
     if (already_busy) return; /* one mode switch at a time */
 
-    BaseType_t created =
-        xTaskCreate(mode_worker_task, "wifi_mode_ui", 4096, (void *)(intptr_t)mode, 5, NULL);
-    if (created != pdPASS) {
+    bool created = ui_worker_submit(mode_worker_task, (void *)(intptr_t)mode); /* RF-01 */
+    if (!created) {
         xSemaphoreTake(s_mode_job.lock, portMAX_DELAY);
         s_mode_job.busy = false;
         xSemaphoreGive(s_mode_job.lock);
+        /* RF-02: never fail silently -- log and tell the operator. */
+        ESP_LOGW(TAG, "wifi_prov_set_mode(%d): UI worker could not start", (int)mode);
+        if (s_status_label) lv_label_set_text(s_status_label, "Could not start");
     }
 }
 
@@ -333,7 +335,6 @@ static void ap_identity_worker_task(void *arg)
     s_ap_identity_job.done = true;
     s_ap_identity_job.busy = false;
     xSemaphoreGive(s_ap_identity_job.lock);
-    vTaskDelete(NULL);
 }
 
 static void ap_edit_modal_close(void);
@@ -665,8 +666,8 @@ static void ap_edit_apply_gated(void *user_data)
     snprintf(s_ap_identity_job_password, sizeof(s_ap_identity_job_password), "%s", s_ap_pending_password);
     lv_label_set_text(s_ap_edit_status_label, "Applying...");
 
-    BaseType_t created = xTaskCreate(ap_identity_worker_task, "wifi_ap_id_ui", 4096, NULL, 5, NULL);
-    if (created != pdPASS) {
+    bool created = ui_worker_submit(ap_identity_worker_task, NULL); /* RF-01 */
+    if (!created) {
         xSemaphoreTake(s_ap_identity_job.lock, portMAX_DELAY);
         s_ap_identity_job.busy = false;
         xSemaphoreGive(s_ap_identity_job.lock);

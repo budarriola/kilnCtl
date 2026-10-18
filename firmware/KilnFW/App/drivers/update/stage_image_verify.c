@@ -46,7 +46,7 @@ static int feed(const stage_image_io_t *io, uint32_t off, uint32_t len, uint8_t 
     return 0;
 }
 
-static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len, bool *finished)
+static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len, bool *finished, int chip_check)
 {
     uint8_t hdr[IMG_HDR_LEN];
     if (avail < IMG_HDR_LEN + HASH_LEN + 16u) {
@@ -60,7 +60,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
     if (hdr[0] != IMAGE_MAGIC || nseg == 0 || nseg > STAGE_IMG_MAX_SEGMENTS || chip != STAGE_IMG_CHIP_ID_ESP32S3) {
         return STAGE_IMG_BAD_HEADER;
     }
-    if (io->chip_ok(io->ctx, hdr) != 0) {
+    if (chip_check && io->chip_ok(io->ctx, hdr) != 0) {
         return STAGE_IMG_BAD_CHIP_REV; // before any erase: bootloader and cb_app_verify only run after it
     }
     if (hdr[23] != 1u) {
@@ -134,6 +134,11 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
 
 stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len)
 {
+    return stage_image_verify_opt(io, avail, out_len, STAGE_IMG_CHIP_REV_CHECK);
+}
+
+stage_image_result_t stage_image_verify_opt(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len, int chip_check)
+{
     if (io == NULL || io->read == NULL || io->sha_begin == NULL || io->sha_update == NULL || io->sha_finish == NULL || io->chip_ok == NULL) {
         return STAGE_IMG_IO;
     }
@@ -141,7 +146,7 @@ stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t ava
         return STAGE_IMG_IO;
     }
     bool finished = false;
-    stage_image_result_t r = walk(io, avail, out_len, &finished);
+    stage_image_result_t r = walk(io, avail, out_len, &finished, chip_check);
     if (!finished) {
         uint8_t discard[HASH_LEN];
         (void)io->sha_finish(io->ctx, discard); // release the hash on every failure path

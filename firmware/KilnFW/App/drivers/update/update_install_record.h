@@ -206,6 +206,16 @@ int update_install_post_boot(const update_install_ops_t *ops, const char *semver
 // 0 = erased (or nothing to do), 1 = skipped, claim busy, -1 = erase failed.
 int update_install_drop_stale(bool claimed, int (*req_erase)(void));
 
+// OA-03: same drop, but first records the outcome the lost recovery post_boot would have written. The
+// request is read through ops->req_read; when it decodes and `running_matches` says the running app is
+// that staged image (length and sha256 of the request), an OK result is written, else FAIL
+// outcome_unknown. The result is written BEFORE the request is cleared (a cut in between just repeats).
+// 0 = done (or no request), 1 = claim busy, -1 = request clear failed. A result write failure is not
+// an error here (nothing is lost that the old code kept).
+int update_install_drop_stale_recorded(bool claimed, const update_install_ops_t *ops,
+                                       bool (*running_matches)(void *ctx, const update_install_req_t *req),
+                                       void *match_ctx);
+
 // ---- Application side: write the request before the reboot into recovery ----
 // Injected IO for update_install_prepare (the install route's prepare hook).
 typedef struct {

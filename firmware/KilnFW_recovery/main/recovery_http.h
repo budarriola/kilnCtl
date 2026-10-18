@@ -3,6 +3,8 @@
 #ifndef RECOVERY_HTTP_H
 #define RECOVERY_HTTP_H
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -43,6 +45,9 @@ void recovery_http_app_verify_invalidate(void);
 // Selects `app` as the boot target (set + read back) and schedules the restart. 0 = done; nonzero = nothing
 // changed or the switch failed (stay in recovery). The caller clears boot_guard and the request first.
 int recovery_http_select_app_and_restart(void);
+
+// RE-01: true once a route has scheduled a chip restart. Writers must refuse.
+bool recovery_http_restart_pending(void);
 
 #ifdef __cplusplus
 }

@@ -100,6 +100,30 @@ static void test_refused_while_update_fetch_busy(void)
     http_async_job_set_admission_busy_probe(NULL);
 }
 
+static size_t s_largest_block;
+static size_t fake_largest_block_probe(void)
+{
+    return s_largest_block;
+}
+
+// RF-03: a fragmented internal heap (largest block < stack + margin) refuses BUSY and takes no guard.
+static void test_refused_when_largest_block_too_small(void)
+{
+    reset_stubs();
+    httpd_req_t req = {0};
+    http_async_job_set_largest_block_probe(fake_largest_block_probe);
+
+    s_largest_block = 4096 + HTTP_ASYNC_JOB_STACK_MARGIN_BYTES - 1;
+    http_async_job_start_result_t refused = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(refused == HTTP_ASYNC_JOB_BUSY, "a job must be refused BUSY when the largest internal block is under stack + margin");
+    TEST_CHECK(!http_async_job_busy(), "a heap-refused job must not take the writer guard");
+
+    s_largest_block = 4096 + HTTP_ASYNC_JOB_STACK_MARGIN_BYTES;
+    http_async_job_start_result_t admitted = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(admitted == HTTP_ASYNC_JOB_STARTED, "the job is admitted when the largest block fits stack + margin");
+    http_async_job_set_largest_block_probe(NULL);
+}
+
 static void test_second_call_refused_while_busy(void)
 {
     reset_stubs();
@@ -316,6 +340,31 @@ static void test_failed_start_paths_release_guard_for_other_writers(void)
     TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "xTaskCreate() failure must free the guard");
 }
 
+// RF-01: the LCD PIN / Wi-Fi UI jobs run on the shared ui_worker, never a per-tap xTaskCreate().
+static void test_lcd_ui_jobs_use_shared_worker(void)
+{
+    const char *files[] = {"../drivers/ui/ui_lcd_keypad.c", "../drivers/ui/ui_page_network.c",
+                           "../drivers/ui/ui_page_network_manage.c"};
+    const char *self = __FILE__;
+    const char *slash = strrchr(self, 0x5c);
+    const char *slash2 = strrchr(self, '/');
+    if (slash2 > slash) slash = slash2;
+    size_t dirlen = slash ? (size_t)(slash - self) + 1 : 0;
+    for (int f = 0; f < 3; f++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%.*s%s", (int)dirlen, self, files[f]);
+        FILE *fp = fopen(path, "rb");
+        TEST_CHECK(fp != NULL, "UI source is readable");
+        if (!fp) continue;
+        static char src[400000];
+        size_t n = fread(src, 1, sizeof(src) - 1, fp);
+        src[n] = '\0';
+        fclose(fp);
+        TEST_CHECK(strstr(src, "ui_worker_submit(") != NULL, "UI jobs go through ui_worker_submit()");
+        TEST_CHECK(strstr(src, "xTaskCreate(") == NULL, "UI file creates no per-tap internal-stack task");
+    }
+}
+
 void run_test_http_async_job(void)
 {
     test_guard_basic_claim_release_semantics();
@@ -324,6 +373,8 @@ void run_test_http_async_job(void)
     test_failed_start_paths_release_guard_for_other_writers();
     test_admits_when_idle();
     test_refused_while_update_fetch_busy();
+    test_refused_when_largest_block_too_small();
+    test_lcd_ui_jobs_use_shared_worker();
     test_second_call_refused_while_busy();
     test_begin_failure_refuses_and_clears_busy();
     test_task_create_failure_undoes_begin_and_clears_busy();

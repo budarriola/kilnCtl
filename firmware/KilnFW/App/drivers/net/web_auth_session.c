@@ -19,20 +19,53 @@ bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, si
     return diff == 0;
 }
 
-static size_t find_lru_slot(const web_auth_table_t *t, uint32_t now_ms)
+// SS-03: true iff the session's absolute lifetime (WEB_AUTH_SESSION_MAX_LIFETIME_MS,
+// measured from issued_ms, never extended by touches) has run out. Unsigned
+// elapsed arithmetic, wrap-safe like the idle check; expired slots are reaped
+// before the 2^32 ms alias point (web_auth_table_reap_expired()).
+// Not applied when the idle policy is "never" (owner decision: a never-expire
+// session must really never expire; see web_auth_session_is_valid()).
+static bool slot_lifetime_exceeded(const web_auth_slot_t *slot, uint32_t timeout_s, uint32_t now_ms)
 {
-    // Largest unsigned elapsed time wins (wrap-safe across the 49.7-day tick
-    // wrap; a raw "<" compare would evict a freshly touched post-wrap slot).
-    size_t lru = 0;
-    uint32_t oldest_age = (uint32_t)(now_ms - t->slots[0].last_seen_ms);
-    for (size_t i = 1; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+    if (timeout_s == WEB_AUTH_TIMEOUT_NEVER_S) {
+        return false;
+    }
+    return (uint32_t)(now_ms - slot->issued_ms) > WEB_AUTH_SESSION_MAX_LIFETIME_MS;
+}
+
+// SS-02: LRU victim among slots of `role` only (wrap-safe: largest unsigned
+// elapsed time wins; a raw "<" compare would evict a freshly touched
+// post-wrap slot). Returns WEB_AUTH_WEB_SLOT_COUNT when no slot has the role.
+static size_t find_lru_slot_of_role(const web_auth_table_t *t, web_auth_session_role_t role, uint32_t now_ms)
+{
+    size_t lru = WEB_AUTH_WEB_SLOT_COUNT;
+    uint32_t oldest_age = 0;
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        if (!t->slots[i].in_use || t->slots[i].role != role) {
+            continue;
+        }
         uint32_t age = (uint32_t)(now_ms - t->slots[i].last_seen_ms);
-        if (age > oldest_age) {
+        if (lru == WEB_AUTH_WEB_SLOT_COUNT || age > oldest_age) {
             oldest_age = age;
             lru = i;
         }
     }
     return lru;
+}
+
+// SS-02: a USER session is always evicted before any ADMIN session, so a
+// USER-password holder cannot push a live ADMIN session out by logging in
+// repeatedly. An ADMIN session is evicted only when no USER session exists.
+static size_t find_lru_slot(const web_auth_table_t *t, uint32_t now_ms)
+{
+    size_t idx = find_lru_slot_of_role(t, WEB_AUTH_SESSION_ROLE_USER, now_ms);
+    if (idx == WEB_AUTH_WEB_SLOT_COUNT) {
+        idx = find_lru_slot_of_role(t, WEB_AUTH_SESSION_ROLE_ADMIN, now_ms);
+    }
+    if (idx == WEB_AUTH_WEB_SLOT_COUNT) {
+        idx = 0; // unreachable when the table is full of in-use slots
+    }
+    return idx;
 }
 
 size_t web_auth_table_create_session(web_auth_table_t *t, const uint8_t token_hash[WEB_AUTH_TOKEN_HASH_LEN],
@@ -112,7 +145,8 @@ bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t ti
 {
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
         const web_auth_slot_t *slot = &t->slots[i];
-        if (slot->in_use && slot->via_ap && web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms)) {
+        if (slot->in_use && slot->via_ap && web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms) &&
+            !slot_lifetime_exceeded(slot, timeout_s, now_ms)) {
             return true;
         }
     }
@@ -126,7 +160,8 @@ size_t web_auth_table_reap_expired(web_auth_table_t *t, uint32_t timeout_s, uint
         return 0;
     }
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
-        if (t->slots[i].in_use && !web_auth_session_is_valid(t->slots[i].last_seen_ms, timeout_s, now_ms)) {
+        if (t->slots[i].in_use && (!web_auth_session_is_valid(t->slots[i].last_seen_ms, timeout_s, now_ms) ||
+                                   slot_lifetime_exceeded(&t->slots[i], timeout_s, now_ms))) {
             memset(&t->slots[i], 0, sizeof(t->slots[i]));
             freed++;
         }
@@ -239,7 +274,8 @@ web_auth_session_role_t web_auth_effective_role(const web_auth_table_t *t, bool 
         return WEB_AUTH_SESSION_ROLE_NONE;
     }
     const web_auth_slot_t *slot = &t->slots[(size_t)idx];
-    if (!web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms)) {
+    if (!web_auth_session_is_valid(slot->last_seen_ms, timeout_s, now_ms) ||
+        slot_lifetime_exceeded(slot, timeout_s, now_ms)) {
         return WEB_AUTH_SESSION_ROLE_NONE;
     }
     // Finding 1 fix (2026-09-17 review / prior defect 5): enforce the
