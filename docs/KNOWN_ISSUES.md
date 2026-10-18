@@ -391,8 +391,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **OF-04** INFO. FA-02 fail-safe (station OR kept, auth-off path untouched); FX-01 and FA-05 tests catch removal.
 
 ## Review 2026-10-18: auth fix F2-02 (docs/audits/REVIEW_AUTHFX_2026_10_18.md)
-- **AF-01** MED, `firmware/KilnFW/App/drivers/persist/web_auth_store.c` storage_reset_evaluate_impl. The F2-02 self-heal fires on any web blob, including the gesture's unconfigured-admin blob, so it clears the FS-02 latch/banner with no admin set (bootstrap stays open as before; not fail-open). The test plants a zeroed blob and so encodes the bug. Status fixed (94425f349).: heal only on a configured admin record; fix the test.
-- **AF-02** LOW, same function. A corrupt or wrong-size web blob also heals, which locks the admin out with no banner until the gesture. Fails closed. Status fixed (94425f349). (closed by the AF-01 fix).
-- **AF-03** LOW, docs/KNOWN_ISSUES.md F2-05. "negtested" is claimed for the F2-02 test with no record; a mutant dropping the configured check survives. Status fixed, negtest drop-configured mutant CAUGHT (94425f349).
+- **AF-01** MED, `firmware/KilnFW/App/drivers/persist/web_auth_store.c` storage_reset_evaluate_impl. The F2-02 self-heal fires on any web blob, including the gesture's unconfigured-admin blob, so it clears the FS-02 latch/banner with no admin set (bootstrap stays open as before; not fail-open). The test plants a zeroed blob and so encodes the bug. Status fixed (5dcca2a73).: heal only on a configured admin record; fix the test.
+- **AF-02** LOW, same function. A corrupt or wrong-size web blob also heals, which locks the admin out with no banner until the gesture. Fails closed. Status fixed (5dcca2a73). (closed by the AF-01 fix).
+- **AF-03** LOW, docs/KNOWN_ISSUES.md F2-05. "negtested" is claimed for the F2-02 test with no record; a mutant dropping the configured check survives. Status fixed, negtest drop-configured mutant CAUGHT (5dcca2a73).
 - **AF-04** INFO. Policy-then-sentinel order and the cut windows are sound; no window reads as auth off.
 - **AF-05** INFO. F2-04 and FS-05 accept reasons are sound; FS-03 cites an owner decision with no reference.
