@@ -831,12 +831,13 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     int n = snprintf(body, sizeof(body), "{\"ok\":true,\"status\":\"rebooting\",\"version_before\":\"%s\"}",
                       version_before);
 
-    // The mutex is intentionally left held across the reboot -- there is no
+    // The claim is intentionally left held on the success path -- there is no
     // "release it after the transfer" moment here the way ota_esp_do_
     // transfer()'s cleanup path has, because the board is about to reboot
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
-    // is nothing left to release.
+    // is nothing left to release. On the failure path (reboot task not
+    // created, below) it IS released (OP-02) so the board is not wedged.
     //
     // The reply is sent only AFTER the reboot task exists (campaign 9b LOW):
     // the task waits 500 ms before rebooting, so the response still goes out

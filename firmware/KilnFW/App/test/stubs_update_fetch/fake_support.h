@@ -52,6 +52,8 @@ extern volatile long g_fr_wr_wait_after_wedge; // writer-op waits begun after th
 extern bool g_fr_wr_missed_give;            // the writer's next completion give is dropped (LOW-1 case)
 extern volatile long g_fr_wr_give_dropped;  // 1 once that give was dropped
 extern int g_fr_flash_erase_n, g_fr_flash_write_n;
+extern int g_fr_image_verify_n;   /* BX-07 */
+extern bool g_fr_image_verify_fail;
 void fr_flash_release(void);
 
 // ---- update claim / interlock / mode / clock / heap ----

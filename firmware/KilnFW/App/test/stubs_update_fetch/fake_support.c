@@ -52,6 +52,8 @@ bool g_fr_flash_write_block;
 volatile long g_fr_wr_wait_after_wedge;
 volatile long g_fr_flash_blocked_n;
 int g_fr_flash_erase_n, g_fr_flash_write_n;
+int g_fr_image_verify_n;
+bool g_fr_image_verify_fail;
 static HANDLE s_flash_ev;
 bool g_fr_wr_missed_give;
 volatile long g_fr_wr_give_dropped;
@@ -124,6 +126,8 @@ void fr_reset(void)
     g_fr_wr_wait_after_wedge = 0;
     g_fr_sem_idle_waiters = 0;
     g_fr_flash_erase_n = g_fr_flash_write_n = 0;
+    g_fr_image_verify_n = 0;
+    g_fr_image_verify_fail = false;
     if (s_flash_ev == NULL) {
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
     }
@@ -1081,6 +1085,10 @@ uint64_t hal_time_now_us(void)
 esp_err_t esp_image_verify(esp_image_load_mode_t mode, const esp_partition_pos_t *part, esp_image_metadata_t *data)
 {
     (void)mode;
+    g_fr_image_verify_n++;
+    if (g_fr_image_verify_fail) {
+        return ESP_FAIL;
+    }
     if (data != NULL) {
         data->start_addr = part != NULL ? part->offset : 0;
         data->image_len = part != NULL ? part->size : 0;

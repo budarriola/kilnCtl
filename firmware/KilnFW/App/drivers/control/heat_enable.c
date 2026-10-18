@@ -909,9 +909,14 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                 s_he.last_benign_reboot_ms = this_ms;
             }
             if ((boot_reason & fatal) != 0u || lost_trip || repeated_benign) {
+                /* BX-02: a hold already standing for a stronger cause (fatal / lost trip) is never
+                 * relabelled repeated-benign by a later benign reboot; only a standing
+                 * repeated-benign hold (or a fresh hold) takes the new label. */
+                const bool was_hold = s_he.reboot_hold;
                 s_he.reboot_hold = true;
                 s_he.hold_lost_trip_only = false; /* real reboot during a claim keeps the fatal text */
-                s_he.hold_repeated_benign = repeated_benign && (boot_reason & fatal) == 0u && !lost_trip;
+                s_he.hold_repeated_benign = repeated_benign && (boot_reason & fatal) == 0u && !lost_trip &&
+                                            (!was_hold || s_he.hold_repeated_benign);
                 log_lost_trip = lost_trip;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
                 if (s_he.granted || s_he.pending) {

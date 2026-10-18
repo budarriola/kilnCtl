@@ -2427,8 +2427,17 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
         }
         safety_ceiling_sync_result_t ceiling_result;
         char ceiling_reason[128];
-        if (!safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
-                                              ceiling_reason, sizeof(ceiling_reason), NULL)) {
+        /* BX-01: the raise stages abs_max_temp_c and sends COMMIT_CONFIG; hold the shared writer guard (refuse
+         * before anything is committed when busy), exactly as zones_http_post.c does. */
+        if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+            snprintf(err_msg, err_cap, "another commissioning operation is running; retry the restore");
+            return false;
+        }
+        const bool raise_ok = safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT,
+                                                              &ceiling_result, ceiling_reason,
+                                                              sizeof(ceiling_reason), NULL);
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+        if (!raise_ok) {
             /* Fixed prefix alone is already ~110 chars against a 160-byte err_cap -- room
              * for ceiling_reason must be bounded explicitly (%.48s) rather than left open,
              * or a long Pico-side reason string silently truncates this whole message
@@ -3158,8 +3167,16 @@ static BACKUP_IMPORT_NOINLINE void backup_import_track_ceiling_lower(void)
     safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
     char ceiling_reason[192];
     ceiling_reason[0] = '\0';
-    safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
-                                     ceiling_reason, sizeof(ceiling_reason));
+    /* BX-01: lower also stages + commits; claim the writer guard. Busy => skip (best effort, the Pico ceiling
+     * simply stays wider until the next zones save, same as a failed lower). */
+    if (safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+        safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                         ceiling_reason, sizeof(ceiling_reason));
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+    } else {
+        ceiling_result = SAFETY_CEILING_SYNC_LOWER_FAILED;
+        snprintf(ceiling_reason, sizeof(ceiling_reason), "another commissioning operation is running");
+    }
     if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
         ESP_LOGW(BACKUP_TAG,
                  "backup import: safety processor ceiling not lowered to track the live zone max -- %s -- "
