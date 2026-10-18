@@ -475,3 +475,7 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **SS-04** INFO, `web_auth_login_http.c:541-547`. Raw token/hex/cookie buffers not wiped from httpd stack. Status: open.
 - **SS-05** INFO, `web_auth_login_http.c:173-220`. AZ-04 evict-oldest lets 17+ addresses rotate fresh ladders; owner-accepted. Status: info.
 - **SS-06** INFO. Entropy, cookie flags, hashing, IP binding, expiry, invalidation paths, CSRF guard and constant-time compares verified correct. Status: info.
+
+## Review 2026-10-18 LCD auth (docs/audits/REVIEW_LCD_AUTH_2026_10_18.md)
+- **LA-01** LOW, `firmware/KilnFW/App/drivers/ui/ui_lcd_keypad.c:245-249` (`pin_verify_worker_task`). If `lv_async_call()` fails, the worker sets role NONE and clears `s_worker_running` but never calls `lcd_keypad_state_submit_finish()`, so a wrong PIN is not counted toward the lockout and the keypad stays on "Checking PIN...". `s_worker_running` is also written from the worker task while the LVGL task reads it (plain bool, no atomic). Rare (LVGL alloc failure). Fix: record the failure on the LVGL side (e.g. retry the post, or a pending-failure atomic consumed by the next `try_submit()`), make the flag atomic. Status open.
+- **LA-02** INFO, `firmware/KilnFW/App/drivers/persist/web_auth_store.c:714-723` (`web_auth_store_verify_pin`). `computed[]` and `rec` (salt + stored hash) are left on the stack after the compare; the plaintext copy in `s_job.digits` is wiped. Fix: `memset` both before return (cheap hygiene, not reachable remotely). Status open.
