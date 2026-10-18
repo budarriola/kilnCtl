@@ -435,8 +435,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RT-08** INFO, `route_tier_table.h`. SAFETY_REDUCE tier unused. Status: info.
 
 ## Review 2026-10-18: RT/OP fixes (docs/audits/REVIEW_RTOP_FIX_2026_10_18.md)
-- **RX-01** LOW, `security_backend_web_auth.c` bootstrap 403, `web_auth_store.h`. They say an LCD admin PIN recovers the FS-02 latch, but set_pin is reachable only through the web admin dispatch (no admin can log in while latched) and no UI path sets a PIN, so the gesture is the only recovery. Fix: correct the text. Status open.
-- **RX-02** LOW, `safety_cfg_http.c` bench_preset, rate_guard/auto. The restore fence was added to ct_auto_zero only. Backup import does not claim the safety_cfg writer guard, so these handlers can stage and commit Pico params while a restore is doing the same. Status open.
+- **RX-01** LOW, `security_backend_web_auth.c` bootstrap 403, `web_auth_store.h`. They say an LCD admin PIN recovers the FS-02 latch, but set_pin is reachable only through the web admin dispatch (no admin can log in while latched) and no UI path sets a PIN, so the gesture is the only recovery. Status: fixed (1cd8eb405): text corrected, the gesture is the only exit.
+- **RX-02** LOW, `safety_cfg_http.c` bench_preset, rate_guard/auto. The restore fence was added to ct_auto_zero only. Backup import does not claim the safety_cfg writer guard, so these handlers can stage and commit Pico params while a restore is doing the same. Status: fixed (1cd8eb405): the restore fence is in the shared safety_cfg_mode_gate_refuse (all Pico param writers), and backup import claims the HTTP_SYNC writer guard around its i_normal_a stage+commit.
 - **RX-03** INFO. The RT-02/03/04 mode gates are entry checks; a firing that starts during a ct_auto_zero or bench_preset job is handled by the existing preconditions.
 - **RX-04** INFO. If the gesture's LCD blob write fails after the web blob write, the marker is still left and bootstrap is allowed (physical presence was still shown).
 - **RX-05** INFO. The RT-01 marker cannot be written from the network while latched; first boot and post-gesture bootstrap work; no permanent latch.
