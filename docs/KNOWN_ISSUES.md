@@ -455,6 +455,14 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RY-06** INFO. A secure-boot signature block is ignored; signature verify needed before erase if secure boot is ever enabled. Accepted.
 - **RY-07** INFO. Checksum and hash are checked even with JTAG attached (IDF skips them). Stricter. Accepted.
 
+## Review 2026-10-18: OTA apply path (docs/audits/REVIEW_OTA_APPLY_2026_10_18.md)
+- **OA-01** LOW, `stage_header.h` / `recovery_apply.c`. STAGE_STATE_APPLYING is never written; recovery copies under a VERIFIED header, so with kiln NVS unreadable a cut mid-copy leaves no stage evidence that app was touched (fail safe, stays in recovery). Fix: write APPLYING before the first erase, or remove the dead state.
+- **OA-02** LOW (latent), `pico_auto_update_boot.c`. Auto Pico update does not wait for ESP mark-valid / soak; compiled off today. Gate it on a VALID read-back before enabling.
+- **OA-03** LOW, `update_install_record.c` post_boot / drop_stale. A cut or req_clear failure between set_boot and post_boot boots the new image, the stale request is dropped and no result is recorded (status "none" after a good install). Fix: record OK when the dropped request's sha matches the running app.
+- **OA-04** INFO. Verify-to-copy TOCTOU closed: no recovery writer during apply (CAS claim, httpd serialization); readback hash catches flash faults. Accepted.
+- **OA-05** INFO. Failed post-apply header erase leaves a VERIFIED header; update_stale_stage drops it by hash proof. Accepted.
+- **OA-06** INFO. No OTA claim leak in ota_recovery_boot_run or recovery apply_task. Accepted.
+
 ## Review 2026-10-18: HF/BT/RX/OP fixes (docs/audits/REVIEW_BTHFRX_2026_10_18.md)
 - **BX-01** LOW, `backup_import.c:2430,3161`. Import's Pico ceiling raise/lower (COMMIT_CONFIG) still runs outside the safety_cfg writer guard; zones_http_post wraps the same raise. A running bench_preset job or sweep can interleave. Status: b8ee244e5 fixed.
 - **BX-02** LOW, `heat_enable.c:914`. A benign reboot inside the window relabels a standing fatal hold as pico_repeated_reboot (hold stays, cause text lost). Status: b8ee244e5 fixed.
