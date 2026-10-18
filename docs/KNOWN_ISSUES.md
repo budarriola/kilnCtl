@@ -573,7 +573,7 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **OR-05..OR-07** INFO. Stage upload/verify/install/browser OTA use no runtime heap; RF-03 gate not on update paths; mbedTLS already PSRAM.
 
 ## REVIEW_OR03_TIMER_2026_10_18 (ET)
-- **ET-01** LOW. OR-03 rollback timer cb comment says no lock/queue wait; it waits portMAX_DELAY on uart tx_lock and the flash XIP mutex, stalling esp_timer callbacks (bounded, pre-reboot). Fix the comment.
-- **ET-02** LOW. Rollback chain (otadata write + esp_restart handlers) now runs on the 3584 B default esp_timer stack, unmeasured, stack_margin slot removed. Measure once on the bench.
-- **ET-03** LOW. Tests never hit the esp_timer_create failure branch (stub always OK) and never re-arm.
+- **ET-01** LOW. OR-03 rollback timer cb comment says no lock/queue wait; it waits portMAX_DELAY on uart tx_lock and the flash XIP mutex, stalling esp_timer callbacks (bounded, pre-reboot). Fix the comment. FIXED (1a1efeb58): comment now states the bounded tx_lock/flash XIP waits and that the esp_timer stall is accepted (reboot follows).
+- **ET-02** LOW. Rollback chain (otadata write + esp_restart handlers) now runs on the 3584 B default esp_timer stack, unmeasured, stack_margin slot removed. Measure once on the bench. FIXED (1a1efeb58): CONFIG_ESP_TIMER_TASK_STACK_SIZE=4608 pinned in KilnFW sdkconfig.defaults (recovery has its own, unchanged); esp_timer task registered with stack_margin via xTaskGetHandle on first rollback request. No static TASKS ceiling row (IDF task, not a project root; known-unceilinged). BENCH-PENDING: read the esp_timer row after one bench rollback.
+- **ET-03** LOW. Tests never hit the esp_timer_create failure branch (stub always OK) and never re-arm. FIXED (1a1efeb58): stub esp_timer_create failure; tests cover 500 + claim release and re-arm after a failed callback; negtested.
 - **ET-04..ET-07** INFO. Claim released exactly once per path; repeat requests refused by the held claim; flash_xip bracket balanced; Pico rollback still a task.
