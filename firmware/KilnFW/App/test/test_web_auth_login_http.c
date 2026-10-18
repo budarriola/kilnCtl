@@ -802,6 +802,21 @@ static void test_user_login_refused_503_when_table_full_of_admins(void)
     do_login("operator", "user-password-123456");
     TEST_CHECK(s_last_status_line == 503, "refused with 503 service unavailable");
     TEST_CHECK(s_last_set_cookie[0] == '\0', "no session cookie minted");
+    // DF-01 source scan: the refusal path wipes token_hex and token_hash before it returns.
+    {
+        const char *anchors[] = {"../drivers/http/web_auth_login_http.c", "App/drivers/http/web_auth_login_http.c",
+                                 "firmware/KilnFW/App/drivers/http/web_auth_login_http.c"};
+        char *src = test_read_source_anchored(__FILE__, "../drivers/http/web_auth_login_http.c", anchors, 3);
+        TEST_CHECK(src != NULL, "login source readable");
+        if (src) {
+            const char *m = strstr(src, "all sessions in use by admins, try later");
+            const char *ret = m ? strstr(m, "return ESP_OK;") : NULL;
+            const char *w1 = m ? strstr(m, "login_wipe(token_hex") : NULL;
+            const char *w2 = m ? strstr(m, "login_wipe(token_hash") : NULL;
+            TEST_CHECK(ret && w1 && w2 && w1 < ret && w2 < ret, "503 refusal wipes token_hex and token_hash before returning (DF-01)");
+            free(src);
+        }
+    }
 }
 
 static void test_remote_success_does_not_reset_remote_ladder(void)
