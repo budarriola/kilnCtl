@@ -403,13 +403,13 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AP-04** INFO. First sight sets `reboot_had_claim`, so the lost-trip latch is not expirable (conservative).
 - **AP-05** INFO. `KILNCTL_HEAT_ENABLE_TEST_HOOK` is defined only in build_host_tests.ps1; no target CMake defines it.
 ## Review 2026-10-18: heat_enable holistic (docs/audits/REVIEW_HEATENABLE_HOLISTIC_2026_10_18.md)
-- **HH-01** MED, `heat_enable.c:833-867`. A benign Pico reboot classified with no claim held never enters the SR-11 window. This covers an idle reboot and also a reboot during a firing whose claim was released before the DIAG. A second benign reboot within 15 min then auto-resumes heat. Fix: apply the window in the claimless benign branch. Status open.
-- **HH-02** LOW, `heat_enable.c:823-831, 534-561`. A grant standing when a reboot is noted stays `granted` until the DIAG: is_granted reports true and a second claimant's acquire returns true before a verdict. No send, and K4 stays open. Status open.
-- **HH-03** LOW, `profile_executor.c:2655`. boot_id_unseen pauses the firing but does not abort autotune; the autotune claim runs cold with no reason shown. Status open.
+- **HH-01** MED, `heat_enable.c:833-867`. A benign Pico reboot classified with no claim held never enters the SR-11 window. This covers an idle reboot and also a reboot during a firing whose claim was released before the DIAG. A second benign reboot within 15 min then auto-resumes heat. Fix: apply the window in the claimless benign branch. Status fixed (00d7eec68).
+- **HH-02** LOW, `heat_enable.c:823-831, 534-561`. A grant standing when a reboot is noted stays `granted` until the DIAG: is_granted reports true and a second claimant's acquire returns true before a verdict. No send, and K4 stays open. Status fixed (00d7eec68).
+- **HH-03** LOW, `profile_executor.c:2655`. boot_id_unseen pauses the firing but does not abort autotune; the autotune claim runs cold with no reason shown. Status fixed (00d7eec68).
 - **HH-04** INFO. since_ms 0/1 and last_benign 0 sentinels collide with tick 0/1 or a 49.7-day wrap; negligible.
 - **HH-05** INFO. An undecided verdict with no DIAG never times out (by design, fail safe, not a deadlock).
 - **HH-06** INFO. since_ms is never cleared after a verdict; the `== 0` re-arm guards rely on note_pico_boot's early return while unseen.
-- **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm.
+- **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm. Status fixed, tests added (00d7eec68).
 ## Review 2026-10-18: OTA failure paths (docs/audits/REVIEW_OTA_FAILPATHS_2026_10_18.md)
 - **OP-01** MED, `recovery_apply.c` step 3, `update_stage.c` upload_finish. Only the first chunk of the image is structurally checked before app is erased. A corrupt or truncated hand-staged .bin is staged VERIFIED, because its SHA covers only the bytes received. It then fails esp_image_verify only after app is rewritten, which leaves the board in recovery until a good image is pushed. Fix: run esp_image_verify over the stage region before the first app erase. Status open.
 - **OP-02** LOW, `ota_http_esp.c:715-761`. If mark_app_invalid_rollback_and_reboot fails, the rollback task exits without ota_http_update_end, so the claim is held until reboot (fail safe). Unreachable on single-slot (route answers 409). Status open.
