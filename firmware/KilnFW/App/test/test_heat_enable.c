@@ -1147,6 +1147,18 @@ static void test_pico_repeated_benign_reboot_holds(void)
     TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_reboot_hold_repeated_benign(),
                "BT-02: a fatal-cause hold is not flagged repeated-benign");
 
+    /* BX-02: benign (seeds window), fatal (hold), benign inside the window: the fatal label must stand. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 3000u);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_reboot_hold_repeated_benign(), "BX-02: fatal hold standing");
+    heat_enable_note_pico_boot(4u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 4000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "BX-02: hold still standing after the benign reboot");
+    TEST_CHECK(!heat_enable_reboot_hold_repeated_benign(),
+               "BX-02: a later benign reboot does not relabel a fatal hold as repeated-benign");
+
     reset_all(true);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_note_pico_boot(1u, true, 0u, 1000u);
@@ -1602,6 +1614,11 @@ static void test_executor_autotune_and_stale_diag_wiring(void)
     const char *unseen = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_boot_id_unseen\")");
     const char *at3 = strstr(text, "autotune_engine_abort_bounded(\"pico_boot_id_unseen\"");
     TEST_CHECK(unseen && at3 && at3 > unseen, "HF-02: unseen boot id pause also aborts autotune");
+    /* BX-06: the repeated-benign pause must be followed by its own autotune abort, inside the same branch. */
+    const char *rp = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_repeated_reboot\")");
+    const char *ra = strstr(text, "autotune_engine_abort_bounded(\"pico_repeated_reboot\"");
+    const char *rf = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
+    TEST_CHECK(rp && ra && ra > rp && rf && ra < rf, "BX-06: pico_repeated_reboot pause also aborts autotune");
     TEST_CHECK(strstr(text, "safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT") != NULL,
                "an old-boot DIAG is fed as INIT so its ARMED cannot satisfy the new boot's K4 check");
     free(text);

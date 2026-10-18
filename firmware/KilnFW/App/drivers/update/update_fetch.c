@@ -1375,7 +1375,9 @@ static esp_err_t download_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
     if (!job_try_begin()) {
-        // A check began between the gate and here: release the update claim the gate took.
+        // BX-04: unreachable today (check and download both run on the single httpd task and the gate above
+        // already refused a busy job), so no host test can reach it; kept as defence in depth. If it ever fires,
+        // release the update claim the gate took.
         ota_http_update_end();
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
