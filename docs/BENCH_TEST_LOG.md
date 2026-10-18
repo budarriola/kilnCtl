@@ -3609,3 +3609,17 @@ Step 3, GitHub update end to end: PARTIAL, blocked by BT-01 and by a classifier 
 - The stage held a verified upload of pre.4 (source=upload) at the start; I cleared it with `update_stage_clear` while diagnosing, so the stage is now blank.
 - Fallback attempted: download the pre.4 asset to the PC to push it with `update_stage_upload`. The auto mode classifier DENIED the download (curl of the release asset). I stopped that step and did not route around it. The recovery AP join, recovery_apply_staged and the return flash were therefore not run. The board never left main d47a9c64f: the final state is the ESP reset once (uptime 93 s at last read), link up, Pico armed (`diag_state` 2), trip_mask 0, relays off, no profile; so no reflash and no settings restore was needed (the backup is unused).
 - Tooling note, not a device bug: `debug_reset(peer=pico)` reports an error while the reset succeeds (openocd "Failed to select multidrop rp2040.dap1" on the second core).
+
+## benchmain8 (2026-10-18, main 1342a0f1d, ESP and Pico flashed)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain8_backup_pre.json. Start: link up, Pico armed.
+
+Task 1, short heat check: PASS. profiles_start(0) 'M18C_TEST': dwell target 40 C, zones 35.0/33.4/34.3 C at 60 s with relays on (duty 0.57-0.80), segment 1 target 30 C relays off at 46-48 C, run ended itself after about 2.5 min (state 3), pause_reason none throughout. profiles_stop and profiles_ack_last_run ok.
+
+Task 2, GitHub OTA: FAIL. update_check(allow_prerelease) ok (v1.0.0-pre.4, refuse_downgrade). update_stage_release(allow_prerelease, allow_downgrade, confirm_downgrade=v1.0.0-pre.4, with and without force): BT-01 verified FIXED (no 409, download ran), but it failed with error=not_an_esp32s3_app_image after the download. Stage stayed blank; nothing applied.
+
+Task 3, RX-06/RX-07: FAIL. update_stage_upload of firmware/KilnFW/build/KilnCtrl.bin (force + confirm_downgrade, running version unknown to the gate) -> HTTP 400 not_an_esp32s3_app_image, same cause as task 2: OP-01 io_image_verify rejects a good image on target (RX-11, suspected 0x611000 non-64KB-aligned stage image). No recovery apply possible; esp_image_verify time and flash_xip bracket impact not measured. I then did recovery_enter (to try recovery_push_esp_image); the recovery image never served HTTP on the LAN address in about 6 min (ping ok, TCP timeout), Pico tripped S6b (LINK_DEAD).
+
+Task 4, return to main: PASS. flash_firmware(confirm, set_otadata_app, allow_unreadable_board_state) flashed and verified main 1342a0f1d (elf a037664e5ceb), boot_guard cleared. Pico S6b trip (mask 0x0040 = 1<<6, cause: ESP offline in recovery) cleared with safety_clear_trip; safety_get_status: link up, SaftyFW armed. control_get_zones reads intact (Kp/Ki/Kd, plant model, coupling present), no restore needed.
+
+New: RX-11 (HIGH) in KNOWN_ISSUES. BT-01 verified; BT-02 not re-exercised.

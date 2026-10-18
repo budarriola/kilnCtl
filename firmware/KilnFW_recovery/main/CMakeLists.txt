@@ -11,6 +11,7 @@ idf_component_register(
         "recovery_install.c"
         "${APP_DRIVERS_DIR}/update/update_install_record.c"
         "${APP_DRIVERS_DIR}/update/stage_header.c"
+        "${APP_DRIVERS_DIR}/update/stage_image_verify.c"
         "${APP_DRIVERS_DIR}/update/update_semver.c"
         "${APP_DRIVERS_DIR}/http/ota_image_crc.c"
         "recovery_wifi.c"

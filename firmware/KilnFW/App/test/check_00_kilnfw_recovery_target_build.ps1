@@ -206,6 +206,7 @@ try {
     # removed from the source never lingers in the build directory.
     $sharedFiles = @(
         "update\stage_header.c", "update\stage_header.h",
+        "update\stage_image_verify.c", "update\stage_image_verify.h",
         "update\update_semver.c", "update\update_semver.h",
         "update\update_install_record.c", "update\update_install_record.h",
         "http\ota_image_crc.c", "http\ota_image_crc.h",
