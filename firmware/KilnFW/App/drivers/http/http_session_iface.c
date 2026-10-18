@@ -29,13 +29,25 @@
 #include "web_auth_store.h" // web_auth_policy_t, web_auth_store_load_policy()
 
 static EXT_RAM_BSS_ATTR web_auth_table_t s_web_auth_table;
-static bool s_web_auth_table_init_done = false;
+static volatile bool s_web_auth_table_init_done = false; /* FA-03: read cross-task via atomics */
 
 // AZ-03: the table has no lock and is owned by httpd. Other tasks (the LVGL
 // four-corner reset gesture) must not mutate it; they post a destroy-all
 // request that httpd applies here, before its next table access.
 static volatile uint32_t s_destroy_all_posted_gen;
-static uint32_t s_destroy_all_applied_gen;
+static volatile uint32_t s_destroy_all_applied_gen;
+
+#if defined(__GNUC__)
+#define SESSION_LOAD(v) __atomic_load_n(&(v), __ATOMIC_SEQ_CST)
+#define SESSION_STORE(v, x) __atomic_store_n(&(v), (x), __ATOMIC_SEQ_CST)
+#else
+#define SESSION_LOAD(v) (v)
+#define SESSION_STORE(v, x) ((v) = (x))
+#endif
+static bool session_flag_load(void) { return SESSION_LOAD(s_web_auth_table_init_done); }
+static void session_flag_store(bool v) { SESSION_STORE(s_web_auth_table_init_done, v); }
+static uint32_t session_posted_gen_load(void) { return SESSION_LOAD(s_destroy_all_posted_gen); }
+static uint32_t s_destroy_all_applied_gen_load(void) { return SESSION_LOAD(s_destroy_all_applied_gen); }
 
 void http_session_destroy_all_request_post(void) {
 #if defined(__GNUC__)
@@ -46,17 +58,17 @@ void http_session_destroy_all_request_post(void) {
 }
 
 web_auth_table_t *http_session_table(void) {
-    if (!s_web_auth_table_init_done) {
+    if (!session_flag_load()) {
         web_auth_table_init(&s_web_auth_table);
-        s_web_auth_table_init_done = true;
+        session_flag_store(true);
     }
 #if defined(__GNUC__)
     uint32_t posted = __atomic_load_n(&s_destroy_all_posted_gen, __ATOMIC_SEQ_CST);
 #else
     uint32_t posted = s_destroy_all_posted_gen;
 #endif
-    if (posted != s_destroy_all_applied_gen) {
-        s_destroy_all_applied_gen = posted;
+    if (posted != s_destroy_all_applied_gen_load()) {
+        SESSION_STORE(s_destroy_all_applied_gen, posted);
         web_auth_table_destroy_all(&s_web_auth_table);
     }
     return &s_web_auth_table;
@@ -67,7 +79,14 @@ web_auth_table_t *http_session_table(void) {
 // destroy-all: only http_session_table() (httpd) does, so s_destroy_all_applied_gen
 // has a single writer task. NULL until httpd first touched the table (no sessions).
 static const web_auth_table_t *http_session_table_peek(void) {
-    return s_web_auth_table_init_done ? &s_web_auth_table : NULL;
+    if (!session_flag_load()) {
+        return NULL;
+    }
+    /* FA-02: a posted-but-unapplied destroy-all already revoked every session. */
+    if (session_posted_gen_load() != s_destroy_all_applied_gen_load()) {
+        return NULL;
+    }
+    return &s_web_auth_table;
 }
 
 // REVIEW_ALL_FIXES L3: slot timestamps are 32-bit ms. A table idle for more
@@ -78,16 +97,20 @@ static const web_auth_table_t *http_session_table_peek(void) {
 // more with a finite timeout means every session has long expired and the
 // table is cleared instead of trusting the wrapped 32-bit difference.
 #define SESSION_WRAP_GAP_MS 0x80000000ULL
-static uint64_t s_last_access_ms;
-static bool s_have_last_access;
+/* FA-03/OF-01: the Wi-Fi task reads the timestamp while httpd writes it.
+ * hal_time_now_ms() is a uint32 ms tick, so the timestamp is ONE 32-bit atomic
+ * (tear-free by construction; the old hi/lo pair tore on a hi carry). */
+static volatile uint32_t s_last_access_ms;
+static volatile bool s_have_last_access;
 
 static bool session_table_gap_wrapped(uint32_t timeout_s)
 {
-    if (!s_have_last_access || timeout_s == 0u) {
+    if (!SESSION_LOAD(s_have_last_access) || timeout_s == 0u) {
         return false;
     }
     uint64_t now64 = (uint64_t)hal_time_now_ms();
-    return now64 >= s_last_access_ms && (now64 - s_last_access_ms) >= SESSION_WRAP_GAP_MS;
+    uint64_t last = (uint64_t)SESSION_LOAD(s_last_access_ms); /* OF-02: load once */
+    return now64 >= last && (now64 - last) >= SESSION_WRAP_GAP_MS;
 }
 
 static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
@@ -95,8 +118,8 @@ static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
     if (session_table_gap_wrapped(timeout_s)) {
         web_auth_table_init(t);
     }
-    s_last_access_ms = (uint64_t)hal_time_now_ms();
-    s_have_last_access = true;
+    SESSION_STORE(s_last_access_ms, hal_time_now_ms());
+    SESSION_STORE(s_have_last_access, true);
 }
 
 // Plain SHA-256 of the raw bearer token -- NOT HMAC (there is no shared

@@ -465,6 +465,8 @@ try {
         # a float under default argument promotion and wrote the ceiling as 0.
         "/we4013"
         "/EHsc"
+        # PZ-01: host-only test hooks (heat_enable_assume_boot_id_seen_for_host_tests); the target build never defines it.
+        "/DKILNCTL_HEAT_ENABLE_TEST_HOOK"
         "/I`"$stubDir`""
         "/I`"$commonInc`""
         "/I`"$driversDir`""
@@ -2093,10 +2095,10 @@ try {
     $exeC10 = Join-Path $outDir "kilnctl_host_tests_persist_campaign10.exe"
     $c10ObjDir = Join-Path $outDir "persistcampaign10"
     New-Item -ItemType Directory -Force -Path $c10ObjDir | Out-Null
-    $cmdC10 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
+    $cmdC10 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PERSIST_SCRATCH_SHARED_COUNTER " +
             "/Fo:`"$c10ObjDir\\`" /Fe:`"$exeC10`" " +
             "`"$(Join-Path $testDir 'test_persist_campaign10.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/backup_json.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/backup_json.c')`" `"$(Join-Path $driversDir 'persist/persist_scratch.c')`" " +
             "`"$(Join-Path $driversDir 'persist/touch_cal_store.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ct_verify_store.c')`" " +

@@ -3578,3 +3578,10 @@ Final state: idle, Pico armed, no trip, relays off, Kiln config 1 active, ramp a
 - Web auth: /api/auth/session reports auth_enabled=false, bootstrap_needed=false (admin record present, enforcement off). Not changed.
 - Firing: profiles_start(1) ('B1_THROWAWAY', 1 segment, target 30 C, board at ~30 C). Relays R1-R3 stayed off throughout (target equals ambient, no heat demand). Within about a minute the executor showed state=2 paused, pause_reason pico_fatal_reboot ("safety processor rebooted after a fatal fault") and zone actual=0.0C invalid; no trip latched, link up, Pico armed afterwards. Not investigated (out of scope); worth a follow-up on why the Pico reported a fatal reboot at start.
 - profiles_stop(): ok. Executor state=0 idle, relays off, no trip, TC 29.9-30.1 C. Result: stop path PASS; heating firing NOT exercised (profile target = ambient, paused by pico_fatal_reboot).
+
+## benchmain4 (2026-10-17): main acad4d9f2 dual reflash, PF-01..03 / PQ-01 confirmed
+- Backup taken first to logs/benchmain4_backup_pre.json. Main acad4d9f2 flashed to the ESP and the Pico.
+- After the dual reflash: link up, Pico armed, no trip.
+- Profile #0 M18C_TEST (40 C, 900 C/hr, 2 min dwell, then 30 C) started immediately after the ESP restart with pause_reason none. This confirms the PF-01..03 / PQ-01 fix (no pico_fatal_reboot pause as in benchmain3 step 5).
+- Zones rose from 32 C to about 45.9 C (about 6 C overshoot on the 4 W fixture); Pico TC read 42.8 C. The run completed.
+- profiles_stop and ack followed; K4 dropped.

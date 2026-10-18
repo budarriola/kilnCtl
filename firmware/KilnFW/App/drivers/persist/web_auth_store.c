@@ -856,7 +856,15 @@ static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere)
                     (hal_kv_partition_was_auto_erased(NULL) && setup_evidence_elsewhere);
     if (evidence) {
         s_storage_reset_latched = true;
-        return true;
+        // F2-02: an admin password record already exists, so a previous recovery
+        // was cut or failed between the password and the policy write. Finish it
+        // (policy, then sentinel) instead of staying latched; failure stays latched.
+        // AF-01/AF-02: heal only when the admin record loads cleanly and is
+        // configured; a gesture (unconfigured) or corrupt blob stays latched.
+        if (web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR)) {
+            storage_reset_resolve();
+        }
+        return s_storage_reset_latched;
     }
     // Truly factory-fresh: record it in both places.
     (void)seen_write(NULL);
