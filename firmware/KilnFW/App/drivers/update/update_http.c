@@ -31,6 +31,7 @@
 #include "update_http_internal.h"
 #include "update_policy.h"
 #include "update_stage.h"
+#include "stage_image_verify.h"
 #include "update_stale_stage.h"
 #include "wifi_provision_http.h"
 
@@ -51,16 +52,52 @@ static bool s_sha_active;
 // boot, never reset by a later upload or clear, so GET reports it as boot_auto_clear. One enum, a few bytes of .bss.
 static update_stale_result_t s_last_auto_clear;
 
-// OP-01: esp_image_verify over the staged image (runs in upload_finish, before the VERIFIED header).
+// OP-01 / RX-11: verify the staged image (runs in upload_finish, before the VERIFIED header).
+// Not esp_image_verify(): it checks mapped-segment alignment against the ABSOLUTE flash offset,
+// and the stage image at stage+4 KB is never 64 KB aligned (stage_image_verify.h).
+typedef struct {
+    psa_hash_operation_t op;
+    bool active;
+} iv_sha_t;
+static int iv_read(void *c, uint32_t off, void *buf, uint32_t len)
+{
+    (void)c;
+    return esp_partition_read(s_part, STAGE_IMAGE_OFFSET + off, buf, len) == ESP_OK ? 0 : -1;
+}
+static int iv_sha_begin(void *c)
+{
+    iv_sha_t *h = c;
+    h->op = psa_hash_operation_init();
+    h->active = psa_hash_setup(&h->op, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    return h->active ? 0 : -1;
+}
+static int iv_sha_update(void *c, const void *d, uint32_t n)
+{
+    iv_sha_t *h = c;
+    return (h->active && psa_hash_update(&h->op, d, n) == PSA_SUCCESS) ? 0 : -1;
+}
+static int iv_sha_finish(void *c, uint8_t out[32])
+{
+    iv_sha_t *h = c;
+    if (!h->active) {
+        return -1;
+    }
+    size_t n = 0;
+    psa_status_t st = psa_hash_finish(&h->op, out, 32, &n);
+    if (st != PSA_SUCCESS) {
+        psa_hash_abort(&h->op);
+    }
+    h->active = false;
+    return (st == PSA_SUCCESS && n == 32) ? 0 : -1;
+}
 static int io_image_verify(void *ctx, uint32_t image_len)
 {
     (void)ctx;
-    const esp_partition_pos_t pos = {.offset = s_part->address + STAGE_IMAGE_OFFSET, .size = image_len};
-    esp_image_metadata_t meta;
-    flash_xip_reader_enter(); /* bootloader_mmap */
-    bool ok = esp_image_verify(ESP_IMAGE_VERIFY, &pos, &meta) == ESP_OK && meta.image_len <= image_len;
-    flash_xip_reader_exit();
-    return ok ? 0 : -1;
+    iv_sha_t h = {0};
+    const stage_image_io_t io = {.ctx = &h, .read = iv_read, .sha_begin = iv_sha_begin,
+                                 .sha_update = iv_sha_update, .sha_finish = iv_sha_finish};
+    uint32_t len = 0;
+    return (stage_image_verify(&io, image_len, &len) == STAGE_IMG_OK && len <= image_len) ? 0 : -1;
 }
 
 static int io_erase(void *ctx, uint32_t off, uint32_t len)

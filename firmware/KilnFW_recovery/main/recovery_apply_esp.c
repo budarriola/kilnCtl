@@ -14,6 +14,8 @@
 #include "psa/crypto.h"
 
 #include "recovery_boot_verify.h"
+#include "stage_header.h"
+#include "stage_image_verify.h"
 
 static const char *TAG = "recovery_apply";
 
@@ -113,17 +115,61 @@ static void cb_sha_abort(void *c)
     }
 }
 
-// OP-01: esp_image_verify over the STAGED image (at STAGE_IMAGE_OFFSET), run before app is
-// erased, so a truncated or corrupt staged image is refused with app untouched.
+// OP-01 / RX-11: verify the STAGED image (at STAGE_IMAGE_OFFSET), run before app is erased, so a
+// truncated or corrupt staged image is refused with app untouched. Not esp_image_verify(): its
+// mapped-segment alignment check uses the absolute flash offset, and stage+4 KB is never 64 KB
+// aligned, so every good image failed (stage_image_verify.h). cb_app_verify below still runs the
+// full esp_image_verify over the aligned copy.
+typedef struct {
+    const esp_partition_t *stage;
+    psa_hash_operation_t op;
+    bool active;
+} sv_ctx_t;
+static int sv_read(void *c, uint32_t off, void *buf, uint32_t len)
+{
+    return esp_partition_read(((sv_ctx_t *)c)->stage, STAGE_IMAGE_OFFSET + off, buf, len) == ESP_OK ? 0 : -1;
+}
+static int sv_sha_begin(void *c)
+{
+    sv_ctx_t *h = c;
+    h->op = psa_hash_operation_init();
+    h->active = psa_hash_setup(&h->op, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    return h->active ? 0 : -1;
+}
+static int sv_sha_update(void *c, const void *d, uint32_t n)
+{
+    sv_ctx_t *h = c;
+    return (h->active && psa_hash_update(&h->op, d, n) == PSA_SUCCESS) ? 0 : -1;
+}
+static int sv_sha_finish(void *c, uint8_t out[32])
+{
+    sv_ctx_t *h = c;
+    if (!h->active) {
+        return -1;
+    }
+    size_t n = 0;
+    psa_status_t st = psa_hash_finish(&h->op, out, 32, &n);
+    if (st != PSA_SUCCESS) {
+        psa_hash_abort(&h->op);
+    }
+    h->active = false;
+    return (st == PSA_SUCCESS && n == 32) ? 0 : -1;
+}
 static int cb_stage_verify(void *c, uint32_t image_len)
 {
     apply_ctx_t *a = c;
-    const esp_partition_pos_t pos = {.offset = a->stage->address + STAGE_IMAGE_OFFSET, .size = image_len};
-    esp_image_metadata_t meta;
-    if (esp_image_verify(ESP_IMAGE_VERIFY, &pos, &meta) != ESP_OK) {
+    static sv_ctx_t h; // apply task only; static keeps the PSA op off the task stack
+    memset(&h, 0, sizeof(h));
+    h.stage = a->stage;
+    const stage_image_io_t io = {.ctx = &h, .read = sv_read, .sha_begin = sv_sha_begin,
+                                 .sha_update = sv_sha_update, .sha_finish = sv_sha_finish};
+    uint32_t len = 0;
+    stage_image_result_t r = stage_image_verify(&io, image_len, &len);
+    if (r != STAGE_IMG_OK) {
+        ESP_LOGE(TAG, "staged image invalid (stage_image_verify %d)", (int)r);
         return -1;
     }
-    return meta.image_len <= image_len ? 0 : -1;
+    return len <= image_len ? 0 : -1;
 }
 
 // esp_image_verify over the copy: image header, every segment, the appended

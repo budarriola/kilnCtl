@@ -1079,19 +1079,19 @@ uint64_t hal_time_now_us(void)
     return 0; /* update_http.c upload deadline: frozen clock never trips it */
 }
 
-/* OP-01: update_http.c's io_image_verify calls esp_image_verify over the stage; the fetch/refusal
- * tests never reach upload_finish with it, so a fixed answer is enough here. */
-#include "esp_image_format.h"
-esp_err_t esp_image_verify(esp_image_load_mode_t mode, const esp_partition_pos_t *part, esp_image_metadata_t *data)
+/* OP-01 / RX-11: update_http.c's io_image_verify calls stage_image_verify over the stage (the real
+ * walker has its own test, test_stage_image_verify.c); the fetch/refusal tests never reach
+ * upload_finish with a real image, so a fixed answer is enough here. */
+#include "stage_image_verify.h"
+stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len)
 {
-    (void)mode;
+    (void)io;
     g_fr_image_verify_n++;
     if (g_fr_image_verify_fail) {
-        return ESP_FAIL;
+        return STAGE_IMG_BAD_HASH;
     }
-    if (data != NULL) {
-        data->start_addr = part != NULL ? part->offset : 0;
-        data->image_len = part != NULL ? part->size : 0;
+    if (out_len != NULL) {
+        *out_len = avail;
     }
-    return ESP_OK;
+    return STAGE_IMG_OK;
 }

@@ -349,6 +349,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # logic; later WPs append their update_*.c here).
                        "update/update_semver.c"
                        "update/stage_header.c"
+                       "update/stage_image_verify.c" # RX-11: stage image verify (pure, host-tested)
                        "update/update_policy.c"
                        # WP4: the stager core (pure, host-tested) and its ESP/HTTP wiring.
                        "update/update_stage.c"
