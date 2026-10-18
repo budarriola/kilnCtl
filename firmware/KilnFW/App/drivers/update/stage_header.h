@@ -11,7 +11,7 @@
 //     0     4  magic            0x4754534B ("KSTG" as bytes K,S,T,G)
 //     4     2  header_version   1
 //     6     2  header_size      256
-//     8     4  state            1 WRITING, 2 VERIFIED, 3 APPLYING
+//     8     4  state            1 WRITING, 2 VERIFIED (3 was APPLYING, removed: OA-01)
 //    12     4  image_length     bytes of image at STAGE_IMAGE_OFFSET
 //    16    32  sha256           of exactly image_length image bytes
 //    48    32  semver           NUL-padded "MAJOR.MINOR.PATCH[-pre]" (no v)
@@ -51,7 +51,8 @@ extern "C" {
 typedef enum {
     STAGE_STATE_WRITING = 1,  // image bytes being written; not installable
     STAGE_STATE_VERIFIED = 2, // sha256 re-read from flash and matched; installable
-    STAGE_STATE_APPLYING = 3, // recovery has started copying stage -> app
+    // 3 (APPLYING) was never written: flash cannot move the state byte without erasing the header
+    // sector, so recovery copies under VERIFIED. Removed (OA-01); a stored 3 decodes as BAD_STATE.
 } stage_state_t;
 
 typedef enum {
@@ -106,7 +107,7 @@ stage_hdr_status_t stage_header_decode(const uint8_t *buf, size_t len, uint32_t 
 // True only for state VERIFIED (the one installable state).
 bool stage_header_is_installable(const stage_header_t *h);
 
-// Legal forward transitions: WRITING->VERIFIED, VERIFIED->APPLYING.
+// Legal forward transitions: WRITING->VERIFIED.
 bool stage_header_transition_allowed(stage_state_t from, stage_state_t to);
 
 // Constant-time compare of the header's sha256 against a freshly computed one.
