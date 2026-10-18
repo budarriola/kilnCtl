@@ -813,9 +813,17 @@ bool ota_http_update_in_progress(ota_http_context_t *out)
     (void)out;
     return g_fr_claim_held;
 }
+static bool (*s_busy_probe_fwd)(void);
 ota_interlock_result_t ota_http_check_interlocks(bool ack, char *reason, size_t cap)
 {
     (void)ack;
+    // Mirrors ota_http.c RW-02: a running update fetch counts as an update in progress.
+    if (g_fr_interlock_result == 0 && s_busy_probe_fwd != NULL && s_busy_probe_fwd()) {
+        if (reason != NULL && cap > 0) {
+            snprintf(reason, cap, "update_in_progress");
+        }
+        return (ota_interlock_result_t)1;
+    }
     if (g_fr_interlock_result != 0 && reason != NULL && cap > 0) {
         snprintf(reason, cap, "fake interlock");
     }
@@ -827,7 +835,7 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
     return false;
 }
 static bool (*s_busy_probe)(void);
-void ota_http_set_fetch_busy_probe(bool (*probe)(void)) { s_busy_probe = probe; }
+void ota_http_set_fetch_busy_probe(bool (*probe)(void)) { s_busy_probe = probe; s_busy_probe_fwd = probe; }
 void http_async_job_set_admission_busy_probe(bool (*probe)(void)) { (void)probe; }
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t n)
 {

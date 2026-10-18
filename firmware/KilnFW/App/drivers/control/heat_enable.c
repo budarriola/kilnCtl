@@ -117,6 +117,7 @@ typedef struct {
     bool              latch_tripped_seen;
     uint32_t          latch_seq;
     bool              hold_lost_trip_only;
+    bool              hold_repeated_benign; /* BT-02: current reboot_hold is a second benign reboot inside the window */
     /* PR-02: trip bits (trip_mask | 1<<(reason-1)) of the last TRIPPED DIAG, the bits of the trip lost across
      * the reboot being classified, whether a claim was held (or taken) while that verdict was pending, and the
      * expiry state of a standing claimless latch: it may expire only when the trips an operator cleared on the
@@ -249,6 +250,7 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.latch_tripped_seen = false;
     s_he.latch_seq = 0u;
     s_he.hold_lost_trip_only = false;
+    s_he.hold_repeated_benign = false;
     s_he.trip_bits_now = 0u;
     s_he.last_pico_trip_bits = 0u;
     s_he.reboot_lost_bits = 0u;
@@ -626,6 +628,7 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
         s_he.hold_lost_trip_only = false;
+        s_he.hold_repeated_benign = false;
         /* reboot_verdict_pending / reboot_fatal_latched / reboot_was_tripped deliberately
          * survive (MED-5, review saftyfx6 F8). */
         if (had_request) {
@@ -908,6 +911,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
             if ((boot_reason & fatal) != 0u || lost_trip || repeated_benign) {
                 s_he.reboot_hold = true;
                 s_he.hold_lost_trip_only = false; /* real reboot during a claim keeps the fatal text */
+                s_he.hold_repeated_benign = repeated_benign && (boot_reason & fatal) == 0u && !lost_trip;
                 log_lost_trip = lost_trip;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
                 if (s_he.granted || s_he.pending) {
@@ -1016,6 +1020,14 @@ void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask)
         s_he.trip_bits_now |= 1u << (trip_reason - 1u);
     }
     he_unlock(taken);
+}
+
+bool heat_enable_reboot_hold_repeated_benign(void)
+{
+    bool taken = he_lock();
+    bool h = s_he.reboot_hold && s_he.held_mask != 0u && s_he.hold_repeated_benign;
+    he_unlock(taken);
+    return h;
 }
 
 bool heat_enable_reboot_hold_lost_trip_only(void)

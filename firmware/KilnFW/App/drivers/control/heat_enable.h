@@ -289,6 +289,8 @@ bool heat_enable_reboot_hold(void);
 void heat_enable_note_boot_id_seen(bool seen);
 // PF-03: true when the current reboot hold came from a claimless lost-trip latch, not a fatal reboot.
 bool heat_enable_reboot_hold_lost_trip_only(void);
+// BT-02: true when the current reboot hold is a second benign Pico reboot inside the repeat window (not fatal).
+bool heat_enable_reboot_hold_repeated_benign(void);
 // PR-04: true while a claim is held but no Pico boot id has arrived (heat withheld, fail closed); the executor
 // pauses with reason "pico_boot_id_unseen" so the run shows why.
 bool heat_enable_boot_id_unseen_blocked(void);

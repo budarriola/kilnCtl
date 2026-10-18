@@ -8,6 +8,7 @@ from __future__ import annotations
 _KNOWN = {
     "pico_reboot_undecided": "Heat withheld: the safety processor rebooted and the cause is not yet known",
     "pico_fatal_reboot": "Paused: the safety processor rebooted after a fatal fault",
+    "pico_repeated_reboot": "Paused: the safety processor rebooted twice within 15 min",
     "heat_grant_unconfirmed": "Paused: heat grant not confirmed by the safety processor",
 }
 

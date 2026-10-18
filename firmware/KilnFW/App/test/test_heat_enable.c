@@ -1137,6 +1137,15 @@ static void test_pico_repeated_benign_reboot_holds(void)
     TEST_CHECK(!heat_enable_reboot_hold(), "SR-11: the first POWERON reboot stays benign (owner rule)");
     heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 60000u);
     TEST_CHECK(heat_enable_reboot_hold(), "SR-11: a second POWERON reboot within the window holds");
+    TEST_CHECK(heat_enable_reboot_hold_repeated_benign(), "BT-02: the repeated-benign hold is flagged distinctly");
+    TEST_CHECK(!heat_enable_reboot_hold_lost_trip_only(), "BT-02: repeated-benign is not the lost-trip hold");
+
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_reboot_hold_repeated_benign(),
+               "BT-02: a fatal-cause hold is not flagged repeated-benign");
 
     reset_all(true);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
@@ -1529,6 +1538,8 @@ static void test_executor_wires_k4_and_reboot_state(void){
     const char *boot = strstr(text, "heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason,");
     const char *state = strstr(text, "heat_enable_note_pico_state(safety_diag_valid,");
     const char *hold = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
+    TEST_CHECK(strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_repeated_reboot\")") != NULL,
+               "BT-02: executor pauses a repeated-benign hold as pico_repeated_reboot");
     const char *unc = strstr(text, "profile_executor_pause_with_reason_bounded(\"heat_grant_unconfirmed\")");
     const char *rec = strstr(text, "heat_enable_reconcile();");
     TEST_CHECK(boot && state && boot < state, "note_pico_boot runs before note_pico_state");
