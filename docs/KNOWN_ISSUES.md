@@ -564,3 +564,10 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **UW-03** FIXED: stack_margin slot stays registered, no task_exit on idle (8e3ba4a15). LOW. With a persistent writer keep the stack_margin slot registered (no task_exit on idle).
 - **UW-04** LOW. 1024 B former heap scratch still inside MEASURED_DRAW (conservative); fold out at the bench re-measure.
 - **UW-05..UW-08** INFO. No double-start race; static scratch not shared; TLS block gate sufficient; updated tests can fail.
+
+## REVIEW_OTA_RAM_RESERVE_2026_10_18 (OR)
+- **OR-01** MED. GitHub fetch still gated by IDF-owned internal draws (esp_http_client buffers, esp-tls ctx, lwIP; under ALWAYSINTERNAL 8192); not statically reservable, keep gates, consider smaller client buffers.
+- **OR-02** LOW. pico_auto_update 8192 B internal heap stack at boot; static costs 8 KB DRAM, not worth it without a bench NO_MEM.
+- **OR-03** LOW. ota_rollback_reboot / ota_pico_rollback 4096 B on-demand tasks (500 on failure); reboot task can be an esp_timer.
+- **OR-04** LOW. Recovery image apply/recover/relay/poll tasks are dynamic internal; low fragmentation risk there.
+- **OR-05..OR-07** INFO. Stage upload/verify/install/browser OTA use no runtime heap; RF-03 gate not on update paths; mbedTLS already PSRAM.
