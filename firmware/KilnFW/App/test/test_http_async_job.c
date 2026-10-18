@@ -360,7 +360,7 @@ static void test_lcd_ui_jobs_use_shared_worker(void)
         size_t n = fread(src, 1, sizeof(src) - 1, fp);
         src[n] = '\0';
         fclose(fp);
-        TEST_CHECK(strstr(src, "ui_worker_submit(") != NULL, "UI jobs go through ui_worker_submit()");
+        TEST_CHECK((strstr(src, "ui_worker_submit(") != NULL || strstr(src, "ui_worker_submit_front(") != NULL), "UI jobs go through ui_worker_submit()");
         TEST_CHECK(strstr(src, "xTaskCreate(") == NULL, "UI file creates no per-tap internal-stack task");
     }
 }

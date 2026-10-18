@@ -147,6 +147,9 @@ typedef struct {
     // Staged image as the stage header describes it. Returns true only when the
     // header decodes and its state is VERIFIED.
     bool (*stage_verified)(void *ctx, uint32_t *image_length, uint8_t sha256[UPD_INST_SHA_LEN]);
+    // OPTIONAL (NULL = unused). Reads the result blob: 0 = read into buf/len; 1 = none; <0 = unavailable.
+    // update_install_drop_stale_recorded uses it to keep recovery's specific FAIL result (OF-01).
+    int (*res_read)(void *ctx, uint8_t *buf, size_t cap, size_t *len);
     // Starts the (asynchronous) apply; 0 = started, else the refusal as a UPD_INST_DETAIL_START_* code
     // (any other nonzero value is recorded as START_FAILED). The app is untouched on a refusal.
     int (*apply_start)(void *ctx);

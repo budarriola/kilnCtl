@@ -244,6 +244,9 @@ size_t update_semver_format(const update_semver_t *v, char *buf, size_t buf_len)
 //  - base is a release: the base (a numeric build counter cannot be expressed above a release), so a
 //    candidate equal to it still needs force and a lower one is still a downgrade.
 // Returns false (out = "") when the base is not a valid semver, so such a build stays unknown.
+// RB-02: esp_app_desc_t.version is a fixed 32-byte field in the IDF image ABI (UPDATE_STAGE_APP_DESC_VERSION_OFFSET
+// and the bootloader read it), so it cannot be widened; a describe longer than 31 chars arrives truncated and
+// parses as unknown (fail-safe: an update then needs force, never a silent downgrade).
 bool update_semver_from_describe(const char *desc, char *out, size_t cap)
 {
     if (out == NULL || cap == 0) {

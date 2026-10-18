@@ -289,7 +289,18 @@ int update_install_drop_stale_recorded(bool claimed, const update_install_ops_t 
     if (rr == 0) {
         update_install_req_t req;
         if (update_install_req_decode(blob, len, &req)) {
-            bool match = running_matches != NULL && running_matches(match_ctx, &req);
+            // OF-01: recovery already left a specific FAIL result for this image (e.g. BAD_CHIP_REV, app
+            // untouched): keep it, only clear the request.
+            bool keep = false;
+            if (ops->res_read) {
+                uint8_t rb[UPD_INST_RES_SIZE];
+                size_t rl = sizeof(rb);
+                update_install_res_t old;
+                keep = ops->res_read(ops->ctx, rb, sizeof(rb), &rl) == 0 && update_install_res_decode(rb, rl, &old) &&
+                       old.code == UPD_INST_RES_FAIL && memcmp(old.id, req.sha256, UPD_INST_ID_LEN) == 0;
+            }
+            bool match = !keep && running_matches != NULL && running_matches(match_ctx, &req);
+            if (!keep)
             (void)update_install_record_result(ops, match ? UPD_INST_RES_OK : UPD_INST_RES_FAIL,
                                                match ? UPD_INST_REASON_NONE : UPD_INST_REASON_OUTCOME_UNKNOWN,
                                                req.semver, req.sha256);

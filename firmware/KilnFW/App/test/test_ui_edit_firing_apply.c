@@ -684,7 +684,8 @@ static void test_lu03_lu04_source_pins(void)
         /* LU-01: the PBKDF2 verify must run on a worker, never inline on the LVGL task. */
         TEST_CHECK(strstr(k, "lcd_keypad_state_submit(") == NULL, "keypad never calls the inline submit");
         TEST_CHECK(strstr(k, "lcd_keypad_state_submit_begin(") != NULL, "keypad runs the begin half");
-        TEST_CHECK(strstr(k, "ui_worker_submit(pin_verify_worker_task") != NULL, "verify runs on a worker task");
+        TEST_CHECK(strstr(k, "ui_worker_submit_front(pin_verify_worker_task") != NULL,
+                   "RB-01: verify runs on a worker task at the queue front");
         TEST_CHECK(strstr(k, "lv_async_call(pin_verify_done_async") != NULL, "result posted back to the LVGL task");
         char *w = strstr(k, "static void pin_verify_worker_task");
         char *v = w ? strstr(w, "lcd_keypad_state_verify(") : NULL;
