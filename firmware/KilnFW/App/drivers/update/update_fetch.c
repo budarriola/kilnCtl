@@ -1034,12 +1034,18 @@ static const char *run_job(work_t *w)
     st_set_stage("release");
     w->mem_cap = FETCH_API_BODY_CAP;
     e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
-    if (e != NULL) {
+    // GF-02: a list page that overflows the body cap (long release notes) is treated like "no eligible release
+    // on the page" on the stable channel, so the /releases/latest fallback below still runs.
+    const bool list_overflow = (e != NULL) && strcmp(e, "too_large") == 0 && !w->p.allow_prerelease;
+    if (e != NULL && !list_overflow) {
         return e;
     }
     const uint32_t max_app = update_stage_capacity(update_http_stage());
-    update_rel_err_t re = update_release_pick_from_list((const char *)w->body, w->body_len, w->repo, max_app,
-                                                        w->p.allow_prerelease, &w->info);
+    update_rel_err_t re = UPDATE_REL_E_NO_RELEASE;
+    if (!list_overflow) {
+        re = update_release_pick_from_list((const char *)w->body, w->body_len, w->repo, max_app,
+                                           w->p.allow_prerelease, &w->info);
+    }
     if (re == UPDATE_REL_E_NO_RELEASE && !w->p.allow_prerelease) {
         // FA-01: 15 or more pre-releases can push the newest stable release off the first list page. Ask
         // /releases/latest (GitHub never returns a pre-release there). A 404 means no stable release exists.

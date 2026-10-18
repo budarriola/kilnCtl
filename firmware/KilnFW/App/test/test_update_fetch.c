@@ -795,6 +795,23 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0,
           "15 pre-releases on the list page: stable found through /releases/latest");
+    // GF-02: a list body over the 256 KiB cap fails too_large on the list; the stable channel still falls back to /latest.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char single2[sizeof(g_api)];
+        size_t n2 = strlen(g_api);
+        memcpy(single2, g_api + 1, n2 - 2);
+        single2[n2 - 2] = '\0';
+        static char big[300u * 1024u];
+        memset(big, ' ', sizeof(big) - 1);
+        big[sizeof(big) - 1] = '\0';
+        g_fr_routes[0].body = big;
+        g_fr_routes[0].body_len = strlen(big);
+        add_route(LATEST_URL, single2, strlen(single2));
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "too_large") != 0 && strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0,
+          "oversized list page: stable found through /releases/latest (GF-02)");
     // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;
