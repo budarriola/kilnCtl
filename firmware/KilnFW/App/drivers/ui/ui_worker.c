@@ -7,6 +7,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "stack_margin.h"
+
 static const char *TAG = "ui_worker";
 
 /* Largest of the former per-tap stacks (lcd_pin_ui). */
@@ -19,10 +21,12 @@ typedef struct {
 } ui_worker_job_t;
 
 static StaticTask_t s_tcb;
-static StackType_t s_stack[UI_WORKER_STACK_BYTES / sizeof(StackType_t)];
+/* ESP-IDF: StackType_t is a byte, stack depth is in bytes. */
+static StackType_t s_stack[UI_WORKER_STACK_BYTES];
 static StaticQueue_t s_queue_storage;
 static uint8_t s_queue_area[UI_WORKER_QUEUE_LEN * sizeof(ui_worker_job_t)];
 static QueueHandle_t s_queue;
+static TaskHandle_t s_task;
 
 static void ui_worker_task(void *unused)
 {
@@ -42,13 +46,15 @@ static bool ensure_started(void)
     QueueHandle_t q = xQueueCreateStatic(UI_WORKER_QUEUE_LEN, sizeof(ui_worker_job_t), s_queue_area, &s_queue_storage);
     if (q == NULL) return false;
     s_queue = q;
-    TaskHandle_t t = xTaskCreateStatic(ui_worker_task, "ui_worker", UI_WORKER_STACK_BYTES / sizeof(StackType_t), NULL, 5,
+    TaskHandle_t t = xTaskCreateStatic(ui_worker_task, "ui_worker", UI_WORKER_STACK_BYTES, NULL, 5,
                                        s_stack, &s_tcb);
     if (t == NULL) {
         ESP_LOGE(TAG, "worker task create failed");
         s_queue = NULL;
         return false;
     }
+    s_task = t;
+    (void)stack_margin_register("ui_worker", &s_task, UI_WORKER_STACK_BYTES);
     return true;
 }
 

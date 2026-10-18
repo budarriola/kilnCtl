@@ -48,9 +48,6 @@ $allow = [ordered]@{
 'drivers/persist/live_profile.c' = @(1, 'explicit MALLOC_CAP_INTERNAL heap (status-struct-sized) on a path that reads NVS/flash or runs beside cache-disabled windows; heap not stack, so independent of task-stack placement; follow-up candidate for persist_scratch_alloc (AUDIT_INTERNAL_RAM_XIP.md section 4)')
 'drivers/persist/log_store.c' = @(1, 'log reader ctx, tiny, flash-read path; transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md)')
 'drivers/persist/persist_scratch.h' = @(1, 'the sanctioned PSRAM-first helper''''s internal fallback')
-'drivers/ui/ui_page_network.c' = @(2, 'UI worker tasks call wifi_prov (NVS writes); task stack stays internal: task writes NVS/flash (cache-disabled windows)')
-'drivers/ui/ui_page_network_manage.c' = @(3, 'UI worker tasks call wifi_prov (NVS writes); task stack stays internal: task writes NVS/flash (cache-disabled windows)')
-'drivers/ui/ui_lcd_keypad.c' = @(1, 'lcd_pin_ui PIN-verify worker runs the login KDF and records lockout counters (NVS writes via web_auth_store); task stack stays internal: task writes NVS/flash (cache-disabled windows), LU-01 ebcc7c340')
 'drivers/update/update_fetch.c' = @(2, 'fetch writer task writes flash; task stack stays internal: task writes NVS/flash (cache-disabled windows); plus an explicit MALLOC_CAP_INTERNAL buffer (flash write path)')
 'main_network_http.c' = @(2, 'ota_confirm ctx/task at early boot; task stack stays internal: early boot or reboot-path task, PSRAM may not be up/safe')
 }
