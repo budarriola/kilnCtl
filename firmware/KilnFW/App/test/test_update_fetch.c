@@ -826,8 +826,7 @@ static void test_heap_admission_updfx3(void)
         add_route(API_URL5, g_api, strlen(g_api));
     }
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "too_large") != 0 && strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0 &&
-              strcmp(g_error, "http_status") != 0,
+    CHECK(strcmp(g_state, "done") == 0 && g_error[0] == 0,
           "oversized 15-release list: per_page=5 retry supplies the release without /releases/latest (GP-02)");
     // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
