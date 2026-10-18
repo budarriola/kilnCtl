@@ -468,6 +468,16 @@ static esp_err_t auth_bootstrap_password_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // RT-01 (coordinator fail-closed choice, owner may revise): after a login-storage
+    // reset the web stays dashboards only; no first-LAN-client bootstrap. Recover via the
+    // physical reset gesture or the LCD admin PIN.
+    if (!web_auth_store_storage_reset_bootstrap_allowed()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_send(req, "login storage was reset: do the physical reset gesture or set the admin PIN on the LCD",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
     if (req->content_len <= 0 || req->content_len >= AUTH_BOOTSTRAP_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;

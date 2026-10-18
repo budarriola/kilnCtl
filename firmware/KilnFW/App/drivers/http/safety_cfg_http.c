@@ -55,6 +55,7 @@
 // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler()'s
 // preconditions (no profile/autotune running).
 #include "autotune_engine.h"
+#include "backup_restore_state.h" /* RT-04: backup_import_restore_in_flight() */
 #include "profile_executor.h"
 
 static const char *TAG = "safety_cfg_http";
@@ -1762,6 +1763,15 @@ static void ct_auto_zero_job(httpd_req_t *async_req, void *arg)
 
 static esp_err_t ct_auto_zero_post_handler(httpd_req_t *req)
 {
+    /* RT-04: 409 system_mode_gate (running / autotune) and a restore fence, like the other safety writes. */
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
+    if (backup_import_restore_in_flight()) {
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
+    }
     char body[SAFETY_CT_AUTO_ZERO_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -2048,6 +2058,11 @@ static void bench_preset_job(httpd_req_t *async_req, void *arg)
 
 static esp_err_t bench_preset_post_handler(httpd_req_t *req)
 {
+    /* RT-03: HR-02 409 gate while a firing or autotune is active. */
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
     // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement, or
     // this same route's own job) is running: this handler stages 32 params
     // then commits, and a second interleaved SET_PARAM/COMMIT_CONFIG
@@ -2326,6 +2341,11 @@ static esp_err_t rate_guard_auto_get_handler(httpd_req_t *req)
 static esp_err_t rate_guard_auto_post_locked(httpd_req_t *req);
 static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
 {
+    /* RT-02: HR-02 409 gate while a firing or autotune is active. */
+    esp_err_t gate_err;
+    if (safety_cfg_mode_gate_refuse(req, &gate_err)) {
+        return gate_err;
+    }
     return cfg_writer_guarded(req, rate_guard_auto_post_locked);
 }
 
