@@ -100,6 +100,7 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
 static uint32_t g_base_enable_sends;
 static uint32_t g_base_release_sends;
 
+static bool g_fixture_unseen;
 static void reset_all(bool link_up)
 {
     g_link_up = link_up;
@@ -114,6 +115,9 @@ static void reset_all(bool link_up)
     g_classify_during_enable = false;
     g_classify_during_enable_ran = false;
     heat_enable_init((SafetyLinkClass *)0x1);
+    if (!g_fixture_unseen) {
+        heat_enable_assume_boot_id_seen_for_host_tests();
+    }
     g_base_enable_sends = heat_enable_enable_send_count();
     g_base_release_sends = heat_enable_release_send_count();
 }
@@ -1500,6 +1504,24 @@ static void test_executor_autotune_and_stale_diag_wiring(void)
     free(text);
 }
 
+static void test_pr03_default_unseen(void)
+{
+    TEST_SECTION("heat_enable -- PR-03/PQ-02: boot id unseen by default after init");
+    g_fixture_unseen = true;
+    reset_all(true);
+    g_fixture_unseen = false;
+    TEST_CHECK(!heat_enable_boot_id_unseen_blocked(), "PR-03: no claim, nothing blocked");
+    /* PQ-02: a claim taken before any guard tick is withheld, not granted. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_boot_id_unseen_blocked(), "PR-03: claim before the first boot id reports blocked");
+    TEST_CHECK(enable_sends() == 0 && !heat_enable_is_granted(), "PQ-02: no enable sent, not granted, before a boot id");
+    /* Boot id arrives (first sight): the held claim is classified before heat is granted. */
+    heat_enable_note_boot_id_seen(true);
+    TEST_CHECK(!heat_enable_boot_id_unseen_blocked(), "PR-03: unblocked once the boot id arrives");
+    TEST_CHECK(!heat_enable_is_granted(), "PQ-02: still not granted until the new boot's DIAG classifies");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+}
+
 static void test_pf_first_boot_id_and_lost_trip_expiry(void)
 {
     TEST_SECTION("heat_enable -- PF-01/02/03: no baseline before a boot id, ESP boot with Pico TRIPPED, expiry");
@@ -1605,7 +1627,9 @@ static void test_pr_fixes(void)
     bool lost_only = false;
 
     /* PR-01: Pico watchdog + ESP reboot: the first boot id still applies the fatal-boot-bit rule. */
+    g_fixture_unseen = true;
     reset_all(true);
+    g_fixture_unseen = false;
     heat_enable_note_boot_id_seen(false);
     heat_enable_note_pico_boot(0u, false, 0u, 1000u);
     heat_enable_note_boot_id_seen(true);
@@ -1617,7 +1641,9 @@ static void test_pr_fixes(void)
     heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
 
     /* PQ-01: the boot id arrived before the guard's first tick (no unseen tick ever ran, seq never bumped). */
+    g_fixture_unseen = true;
     reset_all(true);
+    g_fixture_unseen = false;
     heat_enable_note_boot_id_seen(true);
     heat_enable_note_pico_boot(0u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
     heat_enable_get_reboot_state(&seq, &latched, &lost_only);
@@ -1696,6 +1722,7 @@ static void test_pr_fixes(void)
 void run_test_heat_enable(void)
 {
     test_pr_fixes();
+    test_pr03_default_unseen();
     test_pf_first_boot_id_and_lost_trip_expiry();
     test_reboot_resets_k4_episode_and_undecided_is_visible();
     test_executor_autotune_and_stale_diag_wiring();

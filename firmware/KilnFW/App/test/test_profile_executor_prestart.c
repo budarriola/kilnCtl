@@ -782,6 +782,7 @@ static void arm_heat_enable_as_if_running(void)
 {
     g_request_enable_link_up = true;
     heat_enable_init((SafetyLinkClass *)0x1);
+    heat_enable_assume_boot_id_seen_for_host_tests();
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     g_request_enable_true_calls = 0;
     g_request_enable_false_calls = 0;

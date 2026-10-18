@@ -479,6 +479,7 @@ static void reset_heat_enable_recorder(bool link_up)
 {
     s_req_enable_link_up = link_up;
     heat_enable_init((SafetyLinkClass *)0x1);
+    heat_enable_assume_boot_id_seen_for_host_tests();
     s_req_enable_true_calls = 0;
     s_req_enable_false_calls = 0;
 }

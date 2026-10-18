@@ -244,7 +244,7 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.reboot_verdict_pending = false;
     s_he.reboot_fatal_latched = false;
     s_he.boot_id_first_sight_done = false;
-    s_he.boot_id_unseen = false; /* production sets it from the guard tick before any claim matters */
+    s_he.boot_id_unseen = true; /* PR-03/PQ-02: fail closed until the guard reports a boot id */
     s_he.latch_lost_trip_only = false;
     s_he.latch_tripped_seen = false;
     s_he.latch_seq = 0u;
@@ -965,6 +965,15 @@ void heat_enable_note_boot_id_seen(bool seen)
         }
     }
     s_he.boot_id_unseen = !seen;
+    he_unlock(taken);
+}
+
+void heat_enable_assume_boot_id_seen_for_host_tests(void)
+{
+    /* Host fixtures only: the pre-PR-03 starting point (boot id known, first sight already consumed). */
+    bool taken = he_lock();
+    s_he.boot_id_unseen = false;
+    s_he.boot_id_first_sight_done = true;
     he_unlock(taken);
 }
 
