@@ -434,6 +434,18 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RT-07** INFO, `http_origin_check.h`. Origin compare ignores scheme, default port 80, no Origin/Referer allowed; SameSite=Strict mitigates. Status: info.
 - **RT-08** INFO, `route_tier_table.h`. SAFETY_REDUCE tier unused. Status: info.
 
+## Review 2026-10-18: RT/OP fixes (docs/audits/REVIEW_RTOP_FIX_2026_10_18.md)
+- **RX-01** LOW, `security_backend_web_auth.c` bootstrap 403, `web_auth_store.h`. They say an LCD admin PIN recovers the FS-02 latch, but set_pin is reachable only through the web admin dispatch (no admin can log in while latched) and no UI path sets a PIN, so the gesture is the only recovery. Fix: correct the text. Status open.
+- **RX-02** LOW, `safety_cfg_http.c` bench_preset, rate_guard/auto. The restore fence was added to ct_auto_zero only. Backup import does not claim the safety_cfg writer guard, so these handlers can stage and commit Pico params while a restore is doing the same. Status open.
+- **RX-03** INFO. The RT-02/03/04 mode gates are entry checks; a firing that starts during a ct_auto_zero or bench_preset job is handled by the existing preconditions.
+- **RX-04** INFO. If the gesture's LCD blob write fails after the web blob write, the marker is still left and bootstrap is allowed (physical presence was still shown).
+- **RX-05** INFO. The RT-01 marker cannot be written from the network while latched; first boot and post-gesture bootstrap work; no permanent latch.
+- **RX-06** LOW, `update_http.c` io_image_verify, `recovery_apply_esp.c` cb_stage_verify. No target run shows that a real good image passes the new verify, or how long it takes. Bench: upload a release .bin, then do a recovery apply. Status open.
+- **RX-07** INFO. The app holds the flash_xip bracket for the full ~2 MB verify, which blocks all SPI1 ops (estimated under 1 s, unmeasured).
+- **RX-08** INFO. The update_stage image_verify NULL-skip is not reachable on target: the only constructor wires it. No check pins the wiring.
+- **RX-09** INFO. OP-02 release is correct: it releases once, only on the failure path, after the bracket exit.
+- **RX-10** INFO. OP-01/OP-02 tests map to the intended mutants.
+
 ## Bench 2026-10-18 benchmain7 (docs/BENCH_TEST_LOG.md)
 - **BT-01** FIXED (sha 37d6b9674) HIGH, `firmware/KilnFW/App/drivers/update/update_fetch.c` download handler (`job_try_begin()` sets `busy` at ~line 1366, then `update_http_gate_refuses()` runs `ota_interlock_check`), `firmware/KilnFW/App/drivers/http/ota_http.c:469`. RW-02 (f3762bb08) made the interlock count `fetch_busy_probe()` (`s_c->busy`) as `other_update_in_progress`. POST /api/update/download takes `busy` first and then runs the interlock, so it refuses itself: every GitHub stage download answers 409 "an update is already in progress" (stage blank or full, after fetch_cancel, after an ESP reset; `update_status` shows busy=false). The GitHub auto-update (update_stage_release) is dead on main d47a9c64f; stage upload and update_check are unaffected. Fix: run the gates before `job_try_begin()`, or exclude the caller's own busy flag from the interlock for the download handler. Needs a host test that drives the download route and expects 202. Status open.
 - **BT-02** FIXED (sha 37d6b9674) LOW, `firmware/KilnFW/App/drivers/control/heat_enable.c:895-905`. A repeated benign Pico reboot inside the 15 min window holds heat (correct) but the executor pause reason is `pico_fatal_reboot` ("rebooted after a fatal fault") while the DIAG boot reason is power-on, so the operator is told of a fatal fault that did not happen. Measured benchmain7: reboot 2, 85 s after reboot 1. Wording only; heat behaviour is as the owner rule requires. Status open.
