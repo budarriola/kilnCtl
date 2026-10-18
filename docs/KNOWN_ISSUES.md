@@ -514,3 +514,10 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RB-01** LOW: LCD PIN verify queues FIFO behind Wi-Fi jobs on the shared ui_worker (each up to 12 s); delayed unlock, never lost. Status open.
 - **RB-02** LOW: esp_app_desc version is 31 chars; long git-describe truncates (e.g. "-dirt"), running version falls back to unknown (fail-safe). Status open.
 - **RB-03..RB-06** INFO: passphrase modulo bias (~61.0 bits, still >=60); ui_worker queue 6 == six single-flight job kinds, full fails closed; RE-01 fence cannot latch without restart; release-base describe maps equal (by design). Status INFO.
+- **OF-01** MED, open. `update_install_drop_stale_recorded` overwrites recovery's retained FAIL result (APPLY_FAILED+detail, e.g. RY-01 BAD_CHIP_REV, app untouched, EXIT_APP) with FAIL/OUTCOME_UNKNOWN, detail 0, when the old app boots. Fix: keep an existing FAIL result for the same id; only clear the request. docs/REVIEW_OAFIX_2026_10_18.md.
+- **OF-02** LOW, open. `KILNCTL_STAGE_CHIP_REV_CHECK` is defined separately in the app and recovery Kconfig, and nothing checks that they match (app off + recovery on: VERIFIED stage refused at apply).
+- **OF-03** LOW, open. `stage_image_verify` hashes the full image with no yield, unlike the recovery copy loop's cb_yield. Estimated under the TWDT limit. Optional yield callback.
+- **OF-04** INFO. OA-02 wait cannot deadlock on the safety link; JTAG UNDEFINED otadata becomes VALID; the task is compiled off. Accepted.
+- **OF-05** INFO. OA-01: app and recovery share stage_header.c and agree on state 3. Accepted.
+- **OF-06** INFO. RX-11 walk matches IDF image_load: bounds, alignment, checksum, hash release. Accepted.
+- **OF-07** INFO. OA-03 hash runs under the update claim; a failed claim keeps the request (pre-existing LOW-4). Accepted.
