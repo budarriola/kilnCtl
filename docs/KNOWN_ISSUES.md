@@ -379,3 +379,9 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **F2-04** LOW. An NVS format change erases `nvs` and `wifi_nvs` together, so no evidence survives and the board boots fresh with auth off. Status accepted: with no surviving evidence the board is indistinguishable from a factory-fresh one; closing it needs a third storage location or physical access, beyond modest hardening.
 - **F2-05** LOW, `firmware/KilnFW/App/test/test_web_auth_store.c`. No coverage for the readiness and LCD wiring, mirror backfill, the power-cut windows, set_policy failure, or the gesture path; no negtest recorded. Status fixed: gesture unlock and F2-01/F2-03 (a380ef60e) and the F2-02 cut-recovery window (57abd7d4f) are covered and negtested; mirror backfill and the remaining readiness wiring are accepted as thin glue over covered primitives.
 - **F2-06..F2-09** INFO: the upgrade heuristics are sound; RAM +128 B .bss; the boot order is correct; no FS-01 interaction.
+
+## Review 2026-10-18: FA fix (docs/audits/REVIEW_OTAFX_2026_10_18.md)
+- **OF-01** LOW, `http_session_iface.c` `last_access_load()/last_access_store()`. The hi/lo retry loop still tears on a hi carry (once per ~49.7 days): one false "no AP session" poll; stations still keep the AP up. Fix: seqlock or 32-bit epoch. Status open.
+- **OF-02** INFO, `session_table_gap_wrapped()`. Loads the timestamp twice; harmless. Status open.
+- **OF-03** INFO. FA-03 atomics correct on ESP32-S3 dual core (aligned 32-bit, single writers).
+- **OF-04** INFO. FA-02 fail-safe (station OR kept, auth-off path untouched); FX-01 and FA-05 tests catch removal.
