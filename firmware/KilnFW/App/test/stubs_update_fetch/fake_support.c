@@ -125,7 +125,7 @@ void fr_reset(void)
     g_fr_flash_write_fail = false;
     g_fr_flash_write_block = false;
     g_fr_wr_wait_after_wedge = 0;
-    g_fr_sem_idle_waiters = 0;
+    // g_fr_sem_idle_waiters is NOT reset: the persistent writer (UW-01) stays parked in its idle wait across tests
     g_fr_flash_erase_n = g_fr_flash_write_n = 0;
     g_fr_image_verify_n = 0;
     g_fr_image_verify_fail = false;
@@ -245,6 +245,7 @@ size_t strlcpy(char *dst, const char *src, size_t size)
 typedef struct {
     TaskFunction_t fn;
     void *arg;
+    int counted; // 0 for the persistent update_fetch_wr task (UW-01): it never exits, so it is not a "live" job task
 } thr_t;
 
 static unsigned __stdcall thr_main(void *p)
@@ -252,7 +253,9 @@ static unsigned __stdcall thr_main(void *p)
     thr_t t = *(thr_t *)p;
     free(p);
     t.fn(t.arg);
-    InterlockedDecrement(&g_fr_live_tasks);
+    if (t.counted) {
+        InterlockedDecrement(&g_fr_live_tasks);
+    }
     return 0;
 }
 
@@ -267,7 +270,10 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
     thr_t *t = malloc(sizeof(*t));
     t->fn = fn;
     t->arg = arg;
-    InterlockedIncrement(&g_fr_live_tasks);
+    t->counted = !(name != NULL && strcmp(name, "update_fetch_wr") == 0);
+    if (t->counted) {
+        InterlockedIncrement(&g_fr_live_tasks);
+    }
     unsigned tid = 0;
     uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, &tid);
     if (h != 0 && name != NULL && strcmp(name, "update_fetch_wr") == 0) {
@@ -275,7 +281,9 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
         s_wr_done_h = s_last_binary; // wr_start() creates wr_req, then wr_done, then this task
     }
     if (h == 0) {
-        InterlockedDecrement(&g_fr_live_tasks);
+        if (t->counted) {
+            InterlockedDecrement(&g_fr_live_tasks);
+        }
         free(t);
         return pdFAIL;
     }

@@ -106,11 +106,12 @@ static const char *TAG = "update_fetch";
 static StaticTask_t s_wr_tcb;
 static StackType_t s_wr_stack[FETCH_WR_STACK_BYTES] __attribute__((aligned(16)));
 static uint8_t s_scratch[FETCH_HEAP_SCRATCH_BYTES] __attribute__((aligned(16)));
-// Tick of the last writer self-delete: FreeRTOS reclaims a deleted task's TCB on the idle task, so the static
-// TCB/stack is not reused until a short grace has passed.
-static TickType_t s_wr_exit_tick;
-static bool s_wr_used;
-#define FETCH_WR_REUSE_GRACE_MS 100
+// UW-01: the writer is ONE persistent static task, created on first need and never deleted (a self-deleted task's
+// TCB stays on the kernel termination list until IDLE reclaims it, so re-creating over it is not safe). WR_EXIT only
+// means "go idle". The two semaphores live as long as the module.
+static TaskHandle_t s_wr_handle;
+static SemaphoreHandle_t s_wr_req;
+static SemaphoreHandle_t s_wr_done;
 #define FETCH_TASK_PRIO 2
 #define FETCH_TASK_CORE 1                    // never core 0: spike gate (b), IDLE0 starvation
 
@@ -191,8 +192,6 @@ typedef struct {
     job_status_t st;
     TaskHandle_t tls_task;    // stack-margin slot
     TaskHandle_t wr_task;     // stack-margin slot
-    SemaphoreHandle_t wr_req;
-    SemaphoreHandle_t wr_done;
     volatile update_wr_arb_t wr_arb; // guarded by s_wr_mux; see update_wr_arb.h
     // LOW-5: buffers of the job that wedged the writer. Exactly one side frees them, decided under
     // s_wr_mux: the writer once its late op finally returns (wr_late_exited), or the job if the writer
@@ -613,7 +612,7 @@ static void wr_task(void *arg)
     (void)arg;
     update_stage_t *st = update_http_stage();
     for (;;) {
-        xSemaphoreTake(s_c->wr_req, portMAX_DELAY);
+        xSemaphoreTake(s_wr_req, portMAX_DELAY);
         wr_cmd_t *c = &s_c->wr;
         c->res = UPDATE_STAGE_OK;
         switch (c->cmd) {
@@ -632,11 +631,9 @@ static void wr_task(void *arg)
         case WR_EXIT:
             (void)stack_margin_retain_exit("update_fetch_wr",
                                            stack_margin_words_to_bytes((uint32_t)uxTaskGetStackHighWaterMark(NULL)));
-            stack_margin_task_exit(&s_c->wr_task); /* UB-01 */
-            s_wr_exit_tick = xTaskGetTickCount();
-            xSemaphoreGive(s_c->wr_done);
-            vTaskDelete(NULL);
-            return;
+            /* UW-03: go idle; the stack_margin slot stays registered (no task_exit), only the high-water updates. */
+            xSemaphoreGive(s_wr_done);
+            continue;
         }
         // Review 5 L1: one critical section decides whether the caller already timed out, so a finish in
         // the same tick as the timeout is either collected by the caller or undone here, never both
@@ -668,7 +665,7 @@ static void wr_task(void *arg)
                 update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB);
             }
         }
-        xSemaphoreGive(s_c->wr_done);
+        xSemaphoreGive(s_wr_done);
     }
 }
 
@@ -682,37 +679,27 @@ static bool wr_start(void)
     if (s_c->wr_wedged) {
         return false; // a previous writer op never returned; reboot to recover
     }
-    s_c->wr_req = xSemaphoreCreateBinary();
-    s_c->wr_done = xSemaphoreCreateBinary();
-    if (s_c->wr_req == NULL || s_c->wr_done == NULL) {
-        goto fail;
+    if (s_wr_handle != NULL) {
+        return true; // persistent writer already parked on wr_req
     }
-    if (s_wr_used) {
-        // UR-01: reusing the static TCB/stack; let the idle task finish reclaiming the previous (self-deleted) writer.
-        const uint32_t since = (uint32_t)(xTaskGetTickCount() - s_wr_exit_tick);
-        if (since < pdMS_TO_TICKS(FETCH_WR_REUSE_GRACE_MS)) {
-            vTaskDelay(pdMS_TO_TICKS(FETCH_WR_REUSE_GRACE_MS) - since);
-        }
+    if (s_wr_req == NULL) {
+        s_wr_req = xSemaphoreCreateBinary();
+    }
+    if (s_wr_done == NULL) {
+        s_wr_done = xSemaphoreCreateBinary();
+    }
+    if (s_wr_req == NULL || s_wr_done == NULL) {
+        return false; // retried on the next job; the semaphores are kept for the module lifetime
     }
     dram_watch_log_task("update_fetch_wr", "before-create");
-    // Static task: no heap for the stack or TCB (UR-01).
-    s_c->wr_task = xTaskCreateStaticPinnedToCore(wr_task, "update_fetch_wr", FETCH_WR_STACK_BYTES, NULL,
-                                                 FETCH_TASK_PRIO, s_wr_stack, &s_wr_tcb, FETCH_TASK_CORE);
-    if (s_c->wr_task == NULL) {
-        goto fail;
+    // Static task: no heap for the stack or TCB (UR-01). Created once, never deleted (UW-01).
+    s_wr_handle = xTaskCreateStaticPinnedToCore(wr_task, "update_fetch_wr", FETCH_WR_STACK_BYTES, NULL,
+                                                FETCH_TASK_PRIO, s_wr_stack, &s_wr_tcb, FETCH_TASK_CORE);
+    if (s_wr_handle == NULL) {
+        return false;
     }
-    s_wr_used = true;
+    s_c->wr_task = s_wr_handle;
     return true;
-fail:
-    if (s_c->wr_req) {
-        vSemaphoreDelete(s_c->wr_req);
-        s_c->wr_req = NULL;
-    }
-    if (s_c->wr_done) {
-        vSemaphoreDelete(s_c->wr_done);
-        s_c->wr_done = NULL;
-    }
-    return false;
 }
 
 static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t len, uint32_t total,
@@ -733,8 +720,8 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
     portENTER_CRITICAL(&s_wr_mux);
     update_wr_arb_issue(&s_c->wr_arb);
     portEXIT_CRITICAL(&s_wr_mux);
-    xSemaphoreGive(s_c->wr_req);
-    if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
+    xSemaphoreGive(s_wr_req);
+    if (xSemaphoreTake(s_wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
         portENTER_CRITICAL(&s_wr_mux);
         const bool wedged = update_wr_arb_caller_timeout(&s_c->wr_arb);
         portEXIT_CRITICAL(&s_wr_mux);
@@ -746,7 +733,7 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
             return UPDATE_STAGE_ERR_FLASH;
         }
         // Review 5 L1: the writer finished in the same instant; its give is (about to be) posted.
-        if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        if (xSemaphoreTake(s_wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
             // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
             s_c->wr_wedged = true;
             // LOW-1: the writer already finished this op (arb said so), so it will never hand off again:
@@ -768,14 +755,10 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
 
 static void wr_stop(void)
 {
-    if (s_c->wr_req == NULL || s_c->wr_wedged) {
+    if (s_wr_handle == NULL || s_c->wr_wedged) {
         return;
     }
-    (void)wr_call(WR_EXIT, NULL, 0, 0, NULL, NULL);
-    vSemaphoreDelete(s_c->wr_req);
-    vSemaphoreDelete(s_c->wr_done);
-    s_c->wr_req = NULL;
-    s_c->wr_done = NULL;
+    (void)wr_call(WR_EXIT, NULL, 0, 0, NULL, NULL); // UW-01: the writer goes idle, it is not deleted
 }
 
 // ---- HTTP GET with allowlisted, bounded manual redirects --------------------------------------

@@ -563,9 +563,21 @@ static void test_heap_admission_updfx3(void)
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fr_internal_mallocs = 0;
-    const long static_before = g_fr_static_task_creates;
     run_job_and_result("/api/update/download");
-    CHECK(g_fr_internal_mallocs == 0 && g_fr_static_task_creates > static_before, "UR-01: a download job allocates no internal heap for the scratch");
+    CHECK(g_fr_internal_mallocs == 0 && g_fr_static_task_creates >= 1, "UR-01: a download job allocates no internal heap for the scratch");
+
+    // UW-01/UW-02: the writer is one persistent static task; consecutive downloads reuse it (create exactly once).
+    {
+        const long creates_before = g_fr_static_task_creates;
+        for (int i = 0; i < 2; i++) {
+            fixture(g_sha_hex, IMG_LEN);
+            heap_idle_pair(BENCH_IDLE_FREE);
+            run_job_and_result("/api/update/download");
+            CHECK(strcmp(g_state, "done") == 0, "UW-02: consecutive download completes");
+        }
+        CHECK(g_fr_static_task_creates == creates_before, "UW-02: two consecutive downloads create no further writer task");
+        CHECK(g_fr_static_task_creates == 1, "UW-01: the writer was created exactly once for the module lifetime");
+    }
 
     // LOW-5 M12: DMA low at the redirect hop refuses
     fixture(g_sha_hex, IMG_LEN);
