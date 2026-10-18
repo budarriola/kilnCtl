@@ -20,6 +20,7 @@
 #include "backup_json.h"
 #include "touch_cal_store.h"
 #include "ct_verify_store.h"
+#include "persist_scratch.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -49,6 +50,23 @@ static void disarm_oom(void)
 {
     persist_scratch_test_fail_nth = 0;
     persist_scratch_test_seen = 0;
+}
+
+/* FA-05: the shared fallback counter round-trips through a forced PSRAM-fail
+ * fallback (host heap_caps_malloc stub succeeds, so the hook injects the NULL). */
+static void test_persist_scratch_fallback_counter(void)
+{
+    TEST_SECTION("persist_scratch FA-05 fallback counter increments per fallback");
+    uint32_t base = persist_scratch_fallback_count();
+    void *a = persist_scratch_alloc(4321);
+    TEST_CHECK(a != NULL && persist_scratch_fallback_count() == base, "normal alloc does not count");
+    free(a);
+    heap_caps_malloc_test_set_fail_spiram(true);
+    void *b = persist_scratch_alloc(4321);
+    heap_caps_malloc_test_set_fail_spiram(false);
+    TEST_CHECK(b != NULL, "fallback still returns memory");
+    TEST_CHECK(persist_scratch_fallback_count() == base + 1u, "one fallback counted");
+    free(b);
 }
 
 /* ======================= backup_json ======================= */
@@ -754,6 +772,7 @@ static void test_med1_rejected_file_never_overwritten(void)
 
 int main(void)
 {
+    test_persist_scratch_fallback_counter();
     test_backup_json();
     test_touch_cal();
     test_pref_cfg_fs();

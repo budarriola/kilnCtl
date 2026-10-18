@@ -600,7 +600,8 @@ static void test_fx01_wifi_read_does_not_apply_destroy_all(void)
     make_session("tok-fx01", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
     http_auth_session_touch("tok-fx01", "10.0.0.5", /*via_ap=*/true);
     http_session_destroy_all_request_post();
-    TEST_CHECK(http_auth_any_ap_session_active(false), "Wi-Fi-path read still sees the session (destroy not applied)");
+    TEST_CHECK(!http_auth_any_ap_session_active(false), "FA-02 Wi-Fi-path read sees no session once a destroy-all is posted");
+    TEST_CHECK(!http_auth_any_ap_session_active(true), "FA-02 same with a station associated");
     web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
     TEST_CHECK(!http_auth_session_status("tok-fx01", "10.0.0.5", &role, NULL, NULL),
                "httpd-side access applies the destroy-all");
