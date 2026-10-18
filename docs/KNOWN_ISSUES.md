@@ -385,8 +385,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **F2-06..F2-09** INFO: the upgrade heuristics are sound; RAM +128 B .bss; the boot order is correct; no FS-01 interaction.
 
 ## Review 2026-10-18: FA fix (docs/audits/REVIEW_OTAFX_2026_10_18.md)
-- **OF-01** LOW, `http_session_iface.c` `last_access_load()/last_access_store()`. The hi/lo retry loop still tears on a hi carry (once per ~49.7 days): one false "no AP session" poll; stations still keep the AP up. Fix: seqlock or 32-bit epoch. Status open.
-- **OF-02** INFO, `session_table_gap_wrapped()`. Loads the timestamp twice; harmless. Status open.
+- **OF-01** LOW, `http_session_iface.c` `last_access_load()/last_access_store()`. The hi/lo retry loop still tears on a hi carry (once per ~49.7 days): one false "no AP session" poll; stations still keep the AP up. Fix: seqlock or 32-bit epoch. Status fixed (c0db521bb): one uint32 atomic (hal_time_now_ms is a 32-bit tick).
+- **OF-02** INFO, `session_table_gap_wrapped()`. Loads the timestamp twice; harmless. Status fixed (c0db521bb): loaded once.
 - **OF-03** INFO. FA-03 atomics correct on ESP32-S3 dual core (aligned 32-bit, single writers).
 - **OF-04** INFO. FA-02 fail-safe (station OR kept, auth-off path untouched); FX-01 and FA-05 tests catch removal.
 
