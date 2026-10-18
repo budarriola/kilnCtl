@@ -1361,7 +1361,7 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
     BaseType_t created_ok = pdFAIL;
     for (int attempt = 0; attempt < 5 && created_ok != pdPASS; attempt++) {
         created_ok = xTaskCreatePinnedToCoreWithCaps(
-            lvgl_port_task, "lvgl", 10240, NULL, 4, &s_lvgl_task_handle, tskNO_AFFINITY,
+            lvgl_port_task, "lvgl", 14336, NULL, 4, &s_lvgl_task_handle, tskNO_AFFINITY,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (created_ok != pdPASS && attempt < 4) {
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -1378,9 +1378,9 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
      * returned. Static creation returns the handle directly rather than
      * filling an out-param, so it's copied into a static slot for
      * stack_margin_register() to read through, same as every other call
-     * site's &task_handle. 10240 must match the WithCaps literal above. */
+     * site's &task_handle. 14336 must match the WithCaps literal above. */
     s_ui_walk_owner_task = created_handle;
-    stack_margin_register("lvgl", &s_lvgl_task_handle, 10240);
+    stack_margin_register("lvgl", &s_lvgl_task_handle, 14336);
 
     ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
              height, (unsigned)LVGL_BUF_ROWS, s_port.touch_dev.read ? "on" : "off", idle ? "on" : "off");

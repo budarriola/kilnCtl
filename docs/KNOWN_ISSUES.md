@@ -529,3 +529,5 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **SL-04** INFO. LA-01 worker flag and failure-path count are sound. The LCD ladder survives cancel and reopen.
 - **SL-05** INFO. Ladders are RAM-only and reset on reboot, same as before the fixes. There is no unauthenticated reboot route.
 - **SL-06** INFO. `web_auth_lcd_session_*` is unused, with no lifetime. Dead code.
+- **SL-07** FIXED (LOW), `web_auth_login_http.c`. A USER login refused because every session slot holds an ADMIN session answered 500 internal error; now 503 "all sessions in use by admins, try later" (login page shows the response text).
+- **SL-08** FIXED (LOW), `lvgl_port.c`. benchmain10 measured the lvgl task at 2976 B free of 10240 B (29%). Stack raised to 14336 B (PSRAM stack, no internal RAM cost).

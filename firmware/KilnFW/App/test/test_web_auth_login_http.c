@@ -783,6 +783,26 @@ static void test_user_success_does_not_reset_admin_ladder(void)
                "the USER success left the ADMIN ladder at its 3rd step (30s)");
 }
 
+static void test_user_login_refused_503_when_table_full_of_admins(void)
+{
+    TEST_SECTION("login -- USER login with every slot held by ADMIN answers 503, not 500 (SL-07)");
+    reset_all();
+    set_user_credential("operator", "user-password-123456");
+    strncpy(s_stub_client_ip, "10.9.0.8", sizeof(s_stub_client_ip) - 1);
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        uint8_t h[32];
+        memset(h, (int)(i + 1), sizeof(h));
+        TEST_CHECK(web_auth_table_create_session(http_session_table(), h, "10.0.0.5",
+                                                 WEB_AUTH_SESSION_ROLE_ADMIN, 1000u) < WEB_AUTH_WEB_SLOT_COUNT,
+                   "test setup: ADMIN session fills a slot");
+    }
+    s_last_err_status = 0;
+    s_last_set_cookie[0] = '\0';
+    do_login("operator", "user-password-123456");
+    TEST_CHECK(s_last_err_status == 503, "refused with 503 service unavailable");
+    TEST_CHECK(s_last_set_cookie[0] == '\0', "no session cookie minted");
+}
+
 static void test_remote_success_does_not_reset_remote_ladder(void)
 {
     TEST_SECTION("login backoff -- a success from the shared off-subnet slot does not reset it (SS-01)");
@@ -1393,6 +1413,7 @@ void run_test_web_auth_login_http(void)
     test_mapped_ipv6_dotted_quad_tail_classifies_local();
     test_429_response_is_logged();
     test_logout_with_valid_cookie_clears_session();
+    test_user_login_refused_503_when_table_full_of_admins();
     test_logout_with_no_cookie_leaves_session_untouched();
     test_fuzz_login_hostile_bodies();
 }

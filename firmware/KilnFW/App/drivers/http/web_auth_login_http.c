@@ -636,7 +636,8 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     if (session_idx >= WEB_AUTH_WEB_SLOT_COUNT) {
         // SL-01: table full of ADMIN sessions; a USER login never evicts one.
         ESP_LOGW(TAG, "login refused: session table full of ADMIN sessions");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
+        // SL-07: temporary condition, not a server fault; the login page shows this text.
+        httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE, "all sessions in use by admins, try later");
         return ESP_OK;
     }
     // 2026-09-29 owner decision: tag the session's initial AP-origin state at
