@@ -549,3 +549,12 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **GP-05** INFO. A partial download cannot leave a VERIFIED stage (finish only after full length and SHA match; aborts and late-finish clear).
 - **GP-06** INFO. Update claim and writer semaphores are released on every error path checked.
 - **GP-07** INFO. No new internal-RAM draw from the RX-11 verify; update_fetch_heap.h BENCH-PENDING re-measure still stands.
+
+## Review 2026-10-18: GP/DF fixes (docs/REVIEW_GPDF_FIX_2026_10_18.md)
+- **GD-01** LOW, `update_fetch_heap.h:112`. GP-01's +1024 B writer stack uses up DRAW_MARGIN (the spread allowance). The floor is breached only if a run exceeds the measured draw by more than ~2 KB. Fix: bench re-measure, or add the 1024 B to MEASURED_DRAW.
+- **GD-02** LOW, `update_fetch_heap.h:191`. LARGEST_BLOCK_MIN 6144 B vs a 5120 B writer stack + TCB (~1.1x), probed before TLS allocs. Failure is a clean failed update. Fix: 7168 B after a bench check, or create the writer earlier.
+- **GD-03** LOW, `test_update_fetch.c`. No test that an oversized list with allow_prerelease=1 stays too_large (no retry, no /latest).
+- **GD-04** LOW, `web_auth_login_http.c:627`. token_hash is not wiped on the success or 500 paths; the 500 path leaves an orphan session.
+- **GD-05** INFO. DF-02 locking is correct (boot-only registration).
+- **GD-06** INFO. DF tests are source scans; the GP-02 test can fail (negative case confirmed by reasoning).
+- **GD-07** INFO. GP-02 retry fails closed and leaks nothing.
