@@ -416,3 +416,15 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **OP-03** INFO. The recovery direct ESP push erases app as it streams, before esp_ota_end verifies it; inherent to the design, and a retry is possible.
 - **OP-04** INFO. When the fetch writer wedges, heat is allowed again while a late stage-only flash op may run; deliberate, covered earlier.
 - **OP-05** INFO. A 50 ms lock timeout in ota_http_update_end leaves the claim held (fail safe).
+
+
+## Review 2026-10-18: route tiers (docs/audits/REVIEW_ROUTE_TIERS_2026_10_18.md)
+
+- **RT-01** MED, `persist/web_auth_store.c:519`. While the FS-02 storage-reset latch is held with the admin key NOT_FOUND, `web_auth_store_admin_configured_or_unreadable` ignores the latch, so bootstrap is needed and the OPEN POST /api/auth/bootstrap_password lets any LAN client set the admin password, against the FS-02 "dashboards only until admin re-setup" decision. Status: open, owner to confirm.
+- **RT-02** LOW, `safety_cfg_http.c:2333`. POST /api/safety/rate_guard/auto has no 409 mode gate while running; it writes Pico 0x0204 (can loosen with confirm=1). Pico ARMED refusal is the backstop. Status: open.
+- **RT-03** LOW, `safety_cfg_http.c:2049`. POST /api/safety/commissioning/bench_preset has no 409 mode gate; it commits 32 Pico params. Status: open.
+- **RT-04** LOW, `safety_cfg_http.c:1763`. CT auto-zero refuses while running with 200 ok:false, not 409, and does not cover a restore in flight. Status: open.
+- **RT-05** INFO, `net/web_auth_session.c`. No absolute session lifetime (idle-only expiry, `issued_ms` unused, "never" timeout accepted). Status: info.
+- **RT-06** INFO, `security_backend_web_auth.c`. TOTP reset destroys web sessions directly without `ui_lcd_lock_force_lock`. Status: info.
+- **RT-07** INFO, `http_origin_check.h`. Origin compare ignores scheme, default port 80, no Origin/Referer allowed; SameSite=Strict mitigates. Status: info.
+- **RT-08** INFO, `route_tier_table.h`. SAFETY_REDUCE tier unused. Status: info.
