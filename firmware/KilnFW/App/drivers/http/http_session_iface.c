@@ -97,29 +97,11 @@ static const web_auth_table_t *http_session_table_peek(void) {
 // more with a finite timeout means every session has long expired and the
 // table is cleared instead of trusting the wrapped 32-bit difference.
 #define SESSION_WRAP_GAP_MS 0x80000000ULL
-/* FA-03: the Wi-Fi task reads these while httpd writes them. Keep the timestamp
- * as two 32-bit atomics (hi, lo) read until stable, and the flag atomic. */
-static volatile uint32_t s_last_access_hi;
-static volatile uint32_t s_last_access_lo;
+/* FA-03/OF-01: the Wi-Fi task reads the timestamp while httpd writes it.
+ * hal_time_now_ms() is a uint32 ms tick, so the timestamp is ONE 32-bit atomic
+ * (tear-free by construction; the old hi/lo pair tore on a hi carry). */
+static volatile uint32_t s_last_access_ms;
 static volatile bool s_have_last_access;
-
-static uint64_t last_access_load(void)
-{
-    uint32_t hi, lo, hi2;
-    do {
-        hi = SESSION_LOAD(s_last_access_hi);
-        lo = SESSION_LOAD(s_last_access_lo);
-        hi2 = SESSION_LOAD(s_last_access_hi);
-    } while (hi != hi2);
-    return ((uint64_t)hi << 32) | lo;
-}
-
-static void last_access_store(uint64_t v)
-{
-    /* single writer (httpd): lo first would tear; write hi last, readers retry on hi change */
-    SESSION_STORE(s_last_access_lo, (uint32_t)v);
-    SESSION_STORE(s_last_access_hi, (uint32_t)(v >> 32));
-}
 
 static bool session_table_gap_wrapped(uint32_t timeout_s)
 {
@@ -127,7 +109,8 @@ static bool session_table_gap_wrapped(uint32_t timeout_s)
         return false;
     }
     uint64_t now64 = (uint64_t)hal_time_now_ms();
-    return now64 >= last_access_load() && (now64 - last_access_load()) >= SESSION_WRAP_GAP_MS;
+    uint64_t last = (uint64_t)SESSION_LOAD(s_last_access_ms); /* OF-02: load once */
+    return now64 >= last && (now64 - last) >= SESSION_WRAP_GAP_MS;
 }
 
 static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
@@ -135,7 +118,7 @@ static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
     if (session_table_gap_wrapped(timeout_s)) {
         web_auth_table_init(t);
     }
-    last_access_store((uint64_t)hal_time_now_ms());
+    SESSION_STORE(s_last_access_ms, hal_time_now_ms());
     SESSION_STORE(s_have_last_access, true);
 }
 
