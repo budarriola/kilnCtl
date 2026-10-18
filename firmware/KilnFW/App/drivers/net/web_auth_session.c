@@ -82,6 +82,13 @@ size_t web_auth_table_create_session(web_auth_table_t *t, const uint8_t token_ha
         // Table full -- evict the least-recently-seen slot rather than
         // refusing the new login (WEB_AUTH_PLAN.md section 4: "a stale
         // session can never lock out a real operator").
+        // SL-01: a USER login never evicts an ADMIN session. With no USER
+        // victim, refuse (returns WEB_AUTH_WEB_SLOT_COUNT; the caller must
+        // check). ADMIN logins keep the SS-02 order.
+        if (role != WEB_AUTH_SESSION_ROLE_ADMIN &&
+            find_lru_slot_of_role(t, WEB_AUTH_SESSION_ROLE_USER, now_ms) == WEB_AUTH_WEB_SLOT_COUNT) {
+            return WEB_AUTH_WEB_SLOT_COUNT;
+        }
         idx = find_lru_slot(t, now_ms);
     }
 

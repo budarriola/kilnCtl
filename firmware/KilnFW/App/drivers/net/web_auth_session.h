@@ -178,7 +178,7 @@ bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, si
 // (Note "unknown" is itself shared by every client that hits that failure
 // path -- a pre-existing, separate property, not something this fix
 // touches.) Fails closed instead of silently colliding. Returns the index
-// of the slot used. Two distinct calls
+// of the slot used; WEB_AUTH_WEB_SLOT_COUNT (SL-01) when the table is full of ADMIN sessions and role is not ADMIN: refused, nothing evicted. Two distinct calls
 // with distinct `token_hash` values always occupy distinct slots (this
 // module performs no dedup); the caller is responsible for minting a fresh
 // random token per login, same as UI_PLAN.md's original design.
