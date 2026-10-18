@@ -368,7 +368,9 @@ static bool send_enable(const char *why)
          * Review-2 LOW-1: a fatal-reboot hold was set while this send was in flight; the Pico now holds
          * an enable we must not keep. Record nothing as granted and owe the wire a release. */
         s_he.granted = false;
-        s_he.pending = false;
+        /* HF-01: with only an undecided classification (no fatal hold) the claim still stands; keep
+         * pending so reconcile re-requests heat once, after a benign verdict. */
+        s_he.pending = !s_he.reboot_hold;
         s_he.warned_pending = false;
         s_he.release_pending = true;
         s_he.enable_sends++;

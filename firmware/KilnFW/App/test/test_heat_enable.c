@@ -1480,6 +1480,15 @@ static void test_enable_in_flight_under_classify_pending_queues_release(void)
     uint32_t rel0 = release_sends();
     heat_enable_service_pending_release();
     TEST_CHECK(release_sends() == rel0 + 1, "the standing enable is released on the wire");
+    /* HF-01: benign verdict, then reconcile re-requests heat exactly once. */
+    heat_enable_note_pico_boot(6u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 1100u);
+    uint32_t s0 = enable_sends();
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == s0 + 1 && heat_enable_is_granted(),
+               "HF-01: MUST GO RED if pending is cleared by a request landing while undecided (no re-request)");
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == s0 + 1, "HF-01: re-requested exactly once");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
 }
 
 static void test_enable_in_flight_under_reboot_hold_queues_release(void)
@@ -1579,6 +1588,9 @@ static void test_executor_autotune_and_stale_diag_wiring(void)
     const char *at2 = strstr(text, "autotune_engine_abort_bounded(\"heat_grant_unconfirmed\"");
     TEST_CHECK(hold && at1 && at1 > hold && at1 < unc, "fatal-reboot hold also aborts autotune");
     TEST_CHECK(unc && at2 && at2 > unc, "unconfirmed grant also aborts autotune");
+    const char *unseen = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_boot_id_unseen\")");
+    const char *at3 = strstr(text, "autotune_engine_abort_bounded(\"pico_boot_id_unseen\"");
+    TEST_CHECK(unseen && at3 && at3 > unseen, "HF-02: unseen boot id pause also aborts autotune");
     TEST_CHECK(strstr(text, "safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT") != NULL,
                "an old-boot DIAG is fed as INIT so its ARMED cannot satisfy the new boot's K4 check");
     free(text);
