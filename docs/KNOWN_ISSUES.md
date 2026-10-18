@@ -495,3 +495,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **GF-04** INFO. TLS uses the full crt bundle, no pinning, SNTP-gated; consistent with the no-signing decision. Accepted.
 - **GF-05** INFO. Size/timeout bounds and the length-bounded, depth-capped JSON walker are clean. Accepted.
 - **GF-06** INFO. No resume by design; header written last after SHA, re-read and image verify, WR_ABORT on every failure: an aborted download never reads as staged. Semver pick and downgrade typed confirm clean. Accepted.
+
+## Review 2026-10-18: RAM allocation and fragmentation (docs/audits/REVIEW_RAM_FRAG_2026_10_18.md)
+- **RF-01** LOW, `drivers/ui/ui_lcd_keypad.c:278`, `ui_page_network.c:273,668`, `ui_page_network_manage.c:406,459,528`. LCD PIN/Wi-Fi worker tasks take 4-6 KB internal stacks per tap (~26.6 KB together), not gated by the RW-02 fetch-busy admission; create/delete churn fragments the largest block. Failures handled. Status: open.
+- **RF-02** LOW, `drivers/ui/ui_page_network.c:272-278`. Wi-Fi mode worker create failure is silent (no log, no status). Status: open.
+- **RF-03..RF-06** INFO: async-job admission has no largest-block check (fail-closed); core-dump chunk 4 KB internal malloc; panel_spi_draw uncapped printf buffer (NULL handled); HTTP buffers, TLS, scan records PSRAM-first with NULL paths. Status INFO.
