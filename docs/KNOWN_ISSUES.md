@@ -509,3 +509,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RE-03** FIXED (7542aa3fc) INFO. Passphrase: 60 bits from the HW RNG with entropy enabled, wiped, LCD/QR only, never logged/NVS/HTTP. Optional: drop look-alike 5/S, 2/Z, 8/B.
 - **RE-04** INFO. Upload bounds, deadlines, claims and busy checks are sound (apart from RE-01).
 - **RE-05** FIXED (7542aa3fc) INFO. Exit path sound; `rpp_pack_begin` mirrors protocol_version 16 (CommonFW 17), harmless, stale mirror.
+
+## Review 2026-10-18: RF/RE/BM fixes (docs/audits/REVIEW_RFREBM_2026_10_18.md)
+- **RB-01** LOW: LCD PIN verify queues FIFO behind Wi-Fi jobs on the shared ui_worker (each up to 12 s); delayed unlock, never lost. Status open.
+- **RB-02** LOW: esp_app_desc version is 31 chars; long git-describe truncates (e.g. "-dirt"), running version falls back to unknown (fail-safe). Status open.
+- **RB-03..RB-06** INFO: passphrase modulo bias (~61.0 bits, still >=60); ui_worker queue 6 == six single-flight job kinds, full fails closed; RE-01 fence cannot latch without restart; release-base describe maps equal (by design). Status INFO.
