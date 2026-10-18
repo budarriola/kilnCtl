@@ -500,3 +500,10 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RF-01** LOW, `drivers/ui/ui_lcd_keypad.c:278`, `ui_page_network.c:273,668`, `ui_page_network_manage.c:406,459,528`. LCD PIN/Wi-Fi worker tasks take 4-6 KB internal stacks per tap (~26.6 KB together), not gated by the RW-02 fetch-busy admission; create/delete churn fragments the largest block. Failures handled. Status: open.
 - **RF-02** LOW, `drivers/ui/ui_page_network.c:272-278`. Wi-Fi mode worker create failure is silent (no log, no status). Status: open.
 - **RF-03..RF-06** INFO: async-job admission has no largest-block check (fail-closed); core-dump chunk 4 KB internal malloc; panel_spi_draw uncapped printf buffer (NULL handled); HTTP buffers, TLS, scan records PSRAM-first with NULL paths. Status INFO.
+
+## Review 2026-10-18: recovery end to end (docs/audits/REVIEW_RECOVERY_E2E_2026_10_18.md)
+- **RE-01** LOW, `firmware/KilnFW_recovery/main/recovery_http.c` restart_soon(). No restart fence: in the 500 ms after exit/upload/wifi_reset/sw_reset schedules a reboot, a second AP client's POST /api/ota/esp or apply_staged can claim and start writing `app`, and the restart lands mid-write (boot target already `app`, falls back to recovery). Fix: restart-pending flag checked by every mutating route and the install/apply task. Status open.
+- **RE-02** INFO, `recovery_keepalive.c`. RX-12 S6b during recovery: frame, addressing, pins, polarity, baud and the 15 min window all check out against SaftyFW link_task. Evidence (STA ping, JTAG needed) points to recovery app_main never running. Bench: capture serial on next recovery entry. Suggest keepalive_sent/last error in /api/recovery/status. Status open (bench).
+- **RE-03** INFO. Passphrase: 60 bits from the HW RNG with entropy enabled, wiped, LCD/QR only, never logged/NVS/HTTP. Optional: drop look-alike 5/S, 2/Z, 8/B.
+- **RE-04** INFO. Upload bounds, deadlines, claims and busy checks are sound (apart from RE-01).
+- **RE-05** INFO. Exit path sound; `rpp_pack_begin` mirrors protocol_version 16 (CommonFW 17), harmless, stale mirror.
