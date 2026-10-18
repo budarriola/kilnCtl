@@ -247,7 +247,6 @@ static void test_ub01_read_lock_and_exit_sites(void)
         const char *call;
         const char *bare;
     } sites[] = {
-        {"../drivers/http/ota_http_esp.c", "stack_margin_task_exit(&s_ota_rollback_reboot_task)", "s_ota_rollback_reboot_task = NULL;"},
         {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_exit_reboot_task)", "s_recovery_exit_reboot_task = NULL;"},
         {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_boot_reboot_task)", "s_recovery_boot_reboot_task = NULL;"},
         {"../drivers/http/ota_http_pico.c", "stack_margin_task_exit(&s_ota_pico_rollback_task)", "s_ota_pico_rollback_task = NULL;"},

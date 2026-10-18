@@ -568,6 +568,6 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 ## REVIEW_OTA_RAM_RESERVE_2026_10_18 (OR)
 - **OR-01** MED. GitHub fetch still gated by IDF-owned internal draws (esp_http_client buffers, esp-tls ctx, lwIP; under ALWAYSINTERNAL 8192); not statically reservable, keep gates, consider smaller client buffers.
 - **OR-02** LOW. pico_auto_update 8192 B internal heap stack at boot; static costs 8 KB DRAM, not worth it without a bench NO_MEM.
-- **OR-03** LOW. ota_rollback_reboot / ota_pico_rollback 4096 B on-demand tasks (500 on failure); reboot task can be an esp_timer.
+- **OR-03** LOW. ota_rollback_reboot / ota_pico_rollback 4096 B on-demand tasks (500 on failure); reboot task can be an esp_timer. PARTLY FIXED: ota_rollback_reboot is now a one-shot esp_timer (static handle, no task or heap stack, timer-arm failure still answers 500 and releases the claim); host test negtested. ota_pico_rollback stays a task (relays to the Pico).
 - **OR-04** LOW. Recovery image apply/recover/relay/poll tasks are dynamic internal; low fragmentation risk there.
 - **OR-05..OR-07** INFO. Stage upload/verify/install/browser OTA use no runtime heap; RF-03 gate not on update paths; mbedTLS already PSRAM.

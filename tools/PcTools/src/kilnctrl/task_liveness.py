@@ -35,7 +35,7 @@ long-lived-service one:
   or a runtime hardware probe (config-conditional) -- DEAD or ABSENT is
   informational, not a fault, on a board/build that doesn't have that
   config/hardware.
-- ``ota_pico_rollback``/``recovery_exit``/``ota_rollback_reboot`` are
+- ``ota_pico_rollback``/``recovery_exit`` are
   transient tasks an HTTP handler creates on demand -- DEAD or ABSENT
   between requests is normal, informational only.
 

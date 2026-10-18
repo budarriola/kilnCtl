@@ -1105,21 +1105,26 @@ static void test_reboot_handlers_reply_only_after_task_created(void)
     ota_http_safety = &s_rollback_test_safety;
     s_fake_rollback_possible = true;
     set_pico_rollback_headers_for(g_stub_ap_password);
-    g_test_stub_xtaskcreate_result = 0; /* pdFAIL */
+    s_stub_timer_start_once_result = ESP_FAIL; /* OR-03: timer arm fails */
     s_last_resp_status[0] = '\0';
     s_last_resp_body[0] = '\0';
     s_last_sendstr_body[0] = '\0';
     (void)ota_esp_rollback_post_handler(&req);
-    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "rollback with a failed task create answers 500");
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "rollback with a failed timer arm answers 500");
     TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL && strstr(s_last_sendstr_body, "\"ok\":true") == NULL,
-               "rollback never claims ok:true when no reboot task was created");
-    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "rollback releases the update claim when the task cannot start");
+               "rollback never claims ok:true when no reboot timer was armed");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "rollback releases the update claim when the timer cannot be armed");
 
     /* --- rollback: success path still replies ok:true rebooting --- */
-    g_test_stub_xtaskcreate_result = 1;
+    s_stub_timer_start_once_result = ESP_OK;
+    int timer_calls_before = s_stub_timer_start_once_calls;
+    int task_calls_before = g_test_stub_xtaskcreate_calls;
     s_last_resp_status[0] = '\0';
     s_last_resp_body[0] = '\0';
     (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(s_stub_timer_start_once_calls == timer_calls_before + 1, "OR-03: rollback arms exactly one one-shot timer");
+    TEST_CHECK(s_stub_timer_last_timeout_us == 500000u, "OR-03: rollback reboot delay stays 500 ms");
+    TEST_CHECK(g_test_stub_xtaskcreate_calls == task_calls_before, "OR-03: rollback creates no task");
     TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "rollback success replies rebooting");
     TEST_CHECK(s_last_resp_status[0] == '\0', "rollback success keeps the default 200 status");
     s_update_claim = OTA_UPDATE_NONE;
@@ -3175,11 +3180,11 @@ static void test_upload_deadline_helpers(void)
 
 static void test_rollback_reboot_failure_releases_claim_op02(void)
 {
-    TEST_SECTION("ota_rollback_reboot_task -- OP-02: a failed reboot call releases the OTA claim");
+    TEST_SECTION("ota_rollback_reboot_timer_cb -- OP-02: a failed reboot call releases the OTA claim");
     ota_http_update_end();
     TEST_CHECK(ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP), "claim taken (as the rollback handler does)");
     TEST_CHECK(ota_http_update_in_progress(NULL), "claim held before the task runs");
-    ota_rollback_reboot_task(NULL); /* stub esp_ota_mark_app_invalid_rollback_and_reboot returns ESP_FAIL */
+    ota_rollback_reboot_timer_cb(NULL); /* stub esp_ota_mark_app_invalid_rollback_and_reboot returns ESP_FAIL */
     TEST_CHECK(!ota_http_update_in_progress(NULL), "claim released after the reboot call failed");
 }
 
