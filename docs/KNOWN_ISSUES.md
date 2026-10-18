@@ -479,10 +479,10 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **BM-02** FIXED (sha 054d8dbea) MED, `update_fetch.c` running_identity(). benchmain9: the update_stage_upload downgrade gate said the running version was unknown on a dev build. Cause: FW_RELEASE_VERSION is empty for any build not made by make_release.ps1 (by design), and the policy had no other source; the `git describe` string (1.0.0-pre.1-201-g2071348) was only the candidate side. Fix: when FW_RELEASE_VERSION is empty, running_identity() takes esp_app_desc version and maps it with `update_semver_from_describe()`: `-N-g<hex>` over a prerelease becomes `.N` (1.0.0-pre.1.201: above its tag, below the next prerelease and the release), over a release it stays the base (equal candidate still needs force, lower still a downgrade); `-dirty` stripped; an unparseable base stays unknown (force plus typed confirm as before). Candidates older than the dev build are now refused as downgrades. Status: fixed.
 
 ## REVIEW_SESSIONS_2026_10_18 (docs/audits/REVIEW_SESSIONS_2026_10_18.md)
-- **SS-01** MED, `web_auth_login_http.c:496-498`, `login_backoff.c:44`. Any successful login clears the slot's whole backoff ladder; slots are per-address or one shared REMOTE bucket, not per role, so a USER password holder keeps admin guesses at the 5 s step, and any remote success resets an attacker's remote ladder. Status: open.
-- **SS-02** LOW, `web_auth_session.c:47-54`. Full session table evicts LRU of any role; a USER holder can evict a live ADMIN session with 8 logins. Status: open.
-- **SS-03** LOW, `web_auth_session.c:73`. Idle-only expiry; `issued_ms` unused, no absolute session lifetime. Status: open.
-- **SS-04** INFO, `web_auth_login_http.c:541-547`. Raw token/hex/cookie buffers not wiped from httpd stack. Status: open.
+- **SS-01** MED, `web_auth_login_http.c:496-498`, `login_backoff.c:44`. Any successful login clears the slot's whole backoff ladder; slots are per-address or one shared REMOTE bucket, not per role, so a USER password holder keeps admin guesses at the 5 s step, and any remote success resets an attacker's remote ladder. Status: fixed (8cb192ed8).
+- **SS-02** LOW, `web_auth_session.c:47-54`. Full session table evicts LRU of any role; a USER holder can evict a live ADMIN session with 8 logins. Status: fixed (8cb192ed8).
+- **SS-03** LOW, `web_auth_session.c:73`. Idle-only expiry; `issued_ms` unused, no absolute session lifetime. Status: fixed (8cb192ed8).
+- **SS-04** INFO, `web_auth_login_http.c:541-547`. Raw token/hex/cookie buffers not wiped from httpd stack. Status: fixed (8cb192ed8).
 - **SS-05** INFO, `web_auth_login_http.c:173-220`. AZ-04 evict-oldest lets 17+ addresses rotate fresh ladders; owner-accepted. Status: info.
 - **SS-06** INFO. Entropy, cookie flags, hashing, IP binding, expiry, invalidation paths, CSRF guard and constant-time compares verified correct. Status: info.
 
