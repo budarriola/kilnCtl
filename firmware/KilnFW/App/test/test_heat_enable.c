@@ -1146,6 +1146,24 @@ static void test_pico_repeated_benign_reboot_holds(void)
     TEST_CHECK(!heat_enable_reboot_hold(), "SR-11: a second reboot outside the window is benign again");
 }
 
+static void test_ap01_first_sight_not_repeated_benign(void)
+{
+    TEST_SECTION("heat_enable -- AP-01: first-sight classification does not seed the repeated-benign window");
+    g_fixture_unseen = true;
+    reset_all(true);
+    g_fixture_unseen = false;
+    heat_enable_note_boot_id_seen(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(0u, true, 0u, 3000u); /* benign DIAG of the first-sight boot */
+    TEST_CHECK(!heat_enable_reboot_hold(), "AP-01: first-sight benign DIAG does not hold");
+    heat_enable_reconcile();
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 120000u); /* first real reboot, < 15 min */
+    TEST_CHECK(!heat_enable_reboot_hold(), "AP-01: first real benign reboot after first sight is not repeated");
+    heat_enable_reconcile();
+    TEST_CHECK(heat_enable_is_granted(), "AP-01: heat auto-resumes after the real benign reboot");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+}
+
 static void test_pico_reboot_after_tripped_holds(void)
 {
     TEST_SECTION("heat_enable -- T3: a reboot that followed a TRIPPED DIAG is fatal even if benign-looking");
@@ -1729,6 +1747,7 @@ void run_test_heat_enable(void)
 {
     test_pr_fixes();
     test_pr03_default_unseen();
+    test_ap01_first_sight_not_repeated_benign();
     test_pf_first_boot_id_and_lost_trip_expiry();
     test_reboot_resets_k4_episode_and_undecided_is_visible();
     test_executor_autotune_and_stale_diag_wiring();
