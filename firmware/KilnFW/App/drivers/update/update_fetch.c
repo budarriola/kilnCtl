@@ -63,6 +63,9 @@ static const char *TAG = "update_fetch";
 // drafts/prereleases; 15 pages deeper. The list JSON (~1-3 KB per release, assets included) is read into
 // the 256 KB PSRAM body buffer, so this adds no internal RAM; update_url_build_list allows 1..30.
 #define FETCH_LIST_PER_PAGE 15u
+// GP-02: page size of the one retry when the 15-release list overflows the body cap (long release notes). Reading a
+// short list keeps the highest-semver pick; /releases/latest (newest CREATED, not highest version) is the last resort.
+#define FETCH_LIST_PER_PAGE_RETRY 5u
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
@@ -95,7 +98,7 @@ static const char *TAG = "update_fetch";
 // high-water marks (stack_margin reports "update_fetch" and "update_fetch_wr") over a full
 // download that includes the redirect hop with a JWT-sized URL, and adjust. Not measured here.
 #define FETCH_TLS_STACK_BYTES 12288          // WP7 spike high-water 7952 B (spike, not production)
-#define FETCH_WR_STACK_BYTES 4096
+#define FETCH_WR_STACK_BYTES 5120
 #define FETCH_TASK_PRIO 2
 #define FETCH_TASK_CORE 1                    // never core 0: spike gate (b), IDLE0 starvation
 
@@ -1051,7 +1054,16 @@ static const char *run_job(work_t *w)
     e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
     // GF-02: a list page that overflows the body cap (long release notes) is treated like "no eligible release
     // on the page" on the stable channel, so the /releases/latest fallback below still runs.
-    const bool list_overflow = (e != NULL) && strcmp(e, "too_large") == 0 && !w->p.allow_prerelease;
+    bool list_overflow = (e != NULL) && strcmp(e, "too_large") == 0 && !w->p.allow_prerelease;
+    if (list_overflow) {
+        // GP-02: retry the list with a smaller page before the /releases/latest fallback, which would mask a newer
+        // release behind a later-created lower one. Any other failure of the retry is returned as is (fail closed).
+        if (!update_url_build_list(w->repo, FETCH_LIST_PER_PAGE_RETRY, w->url, sizeof(w->url))) {
+            return "bad_repo";
+        }
+        e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
+        list_overflow = (e != NULL) && strcmp(e, "too_large") == 0;
+    }
     if (e != NULL && !list_overflow) {
         return e;
     }
