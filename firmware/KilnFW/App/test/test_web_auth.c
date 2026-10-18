@@ -117,8 +117,15 @@ static void test_eviction_prefers_user_over_admin(void)
         make_hash(h[i], (uint8_t)(10 + i));
         web_auth_table_create_session(&t, h[i], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, (uint32_t)(1000 + i));
     }
-    web_auth_table_create_session(&t, h[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 5000);
-    TEST_CHECK(web_auth_table_find_by_token(&t, h[0]) == -1, "with no USER session, the LRU ADMIN is evicted");
+    size_t r = web_auth_table_create_session(&t, h[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 5000);
+    TEST_CHECK(r == WEB_AUTH_WEB_SLOT_COUNT, "SL-01: a USER login into an all-ADMIN table is refused");
+    for (int i = 0; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        TEST_CHECK(web_auth_table_find_by_token(&t, h[i]) == i, "SL-01: no ADMIN session was evicted");
+    }
+    make_hash(h[WEB_AUTH_WEB_SLOT_COUNT + 1], 201);
+    r = web_auth_table_create_session(&t, h[WEB_AUTH_WEB_SLOT_COUNT + 1], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 5001);
+    TEST_CHECK(r < WEB_AUTH_WEB_SLOT_COUNT && web_auth_table_find_by_token(&t, h[0]) == -1,
+               "an ADMIN login into an all-ADMIN table still evicts the LRU ADMIN");
 }
 
 // SS-03: absolute lifetime from issued_ms, touches do not extend it.

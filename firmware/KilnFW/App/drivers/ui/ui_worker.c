@@ -58,16 +58,27 @@ static bool ensure_started(void)
     return true;
 }
 
-bool ui_worker_submit(ui_worker_fn_t fn, void *arg)
+static bool submit_ex(ui_worker_fn_t fn, void *arg, bool front)
 {
     if (fn == NULL || !ensure_started()) {
         ESP_LOGW(TAG, "submit refused (fn=%p)", (void *)fn);
         return false;
     }
     ui_worker_job_t job = {.fn = fn, .arg = arg};
-    if (xQueueSend(s_queue, &job, 0) != pdTRUE) {
+    BaseType_t ok = front ? xQueueSendToFront(s_queue, &job, 0) : xQueueSend(s_queue, &job, 0);
+    if (ok != pdTRUE) {
         ESP_LOGW(TAG, "queue full");
         return false;
     }
     return true;
+}
+
+bool ui_worker_submit(ui_worker_fn_t fn, void *arg)
+{
+    return submit_ex(fn, arg, false);
+}
+
+bool ui_worker_submit_front(ui_worker_fn_t fn, void *arg)
+{
+    return submit_ex(fn, arg, true);
 }

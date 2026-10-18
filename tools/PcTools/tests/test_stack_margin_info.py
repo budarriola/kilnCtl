@@ -153,6 +153,24 @@ class ParseStackMarginPageTests(unittest.TestCase):
         self.assertEqual(next_start_index, 7)
 
 
+class ExitedRetainedTests(unittest.TestCase):
+    def test_bit3_marks_exited_retained(self):
+        flags = (StackMarginLevel.OK << 1) | 0x08
+        name_b = b"update_fetch_wr"
+        payload = _page_header(1) + struct.pack("<B", len(name_b)) + name_b + struct.pack("<IIB", 4096, 1234, flags)
+        entries, _t, _n = devices.parse_stack_margin_page(payload)
+        self.assertFalse(entries[0].alive)
+        self.assertTrue(entries[0].exited_retained)
+        self.assertEqual(entries[0].hwm_bytes, 1234)
+        self.assertIn("exited", entries[0].describe())
+
+    def test_bit3_ignored_when_alive(self):
+        flags = 0x01 | 0x08
+        payload = _page_header(1) + struct.pack("<B", 1) + b"x" + struct.pack("<IIB", 4096, 10, flags)
+        entries, _t, _n = devices.parse_stack_margin_page(payload)
+        self.assertFalse(entries[0].exited_retained)
+
+
 class StackMarginEntryHelpersTests(unittest.TestCase):
     def test_headroom_pct_matches_manual_division(self):
         e = devices.StackMarginEntry(

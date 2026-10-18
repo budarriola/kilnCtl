@@ -125,6 +125,17 @@ static void fake_init(fake_t *f)
     memcpy(f->stage_sha, r.sha256, UPD_INST_SHA_LEN);
 }
 
+static int f_res_read(void *c, uint8_t *buf, size_t cap, size_t *len)
+{
+    fake_t *f = c;
+    if (!f->res_writes) {
+        return 1;
+    }
+    memcpy(buf, f->res_blob, cap < UPD_INST_RES_SIZE ? cap : UPD_INST_RES_SIZE);
+    *len = UPD_INST_RES_SIZE;
+    return 0;
+}
+
 static update_install_ops_t ops_for(fake_t *f)
 {
     update_install_ops_t o;
@@ -133,6 +144,7 @@ static update_install_ops_t ops_for(fake_t *f)
     o.req_clear = f_clear;
     o.req_write = f_write;
     o.res_write = f_res;
+    o.res_read = f_res_read;
     o.stage_verified = f_stage;
     o.apply_start = f_apply;
     return o;
@@ -495,6 +507,26 @@ static void test_drop_stale_recorded(void)
     TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_FAIL &&
                    d.reason == UPD_INST_REASON_OUTCOME_UNKNOWN,
                "OA-03: mismatch records FAIL outcome_unknown, not OK");
+
+    // OF-01: recovery's specific FAIL result for the same image survives; only the request is cleared.
+    fake_init(&f);
+    o = ops_for(&f);
+    g_match_ret = false;
+    {
+        update_install_req_t rq;
+        update_install_res_t pre;
+        memset(&pre, 0, sizeof(pre));
+        TEST_CHECK(update_install_req_decode(f.req, f.req_len, &rq), "OF-01: setup decode");
+        TEST_CHECK(update_install_record_result_ex(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, 3, false,
+                                                   rq.semver, rq.sha256) == 0,
+                   "OF-01: setup FAIL result");
+    }
+    int w0 = f.res_writes;
+    TEST_CHECK(update_install_drop_stale_recorded(true, &o, match_fn, NULL) == 0 && f.have_req == 0 &&
+                   f.res_writes == w0,
+               "OF-01: existing FAIL for the same id is kept, request cleared");
+    TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.reason == UPD_INST_REASON_APPLY_FAILED,
+               "OF-01: specific reason not overwritten with outcome_unknown");
 
     // Claim busy: nothing read, nothing written.
     fake_init(&f);

@@ -303,7 +303,7 @@ static void main_ota_rollback_confirm_task(void *arg)
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
             }
-            s_ota_confirm_task = NULL;
+            stack_margin_task_exit(&s_ota_confirm_task); /* UB-01 */
             vTaskDelete(NULL);
             return;
         }

@@ -633,6 +633,15 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
     size_t session_idx =
         web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
+    if (session_idx >= WEB_AUTH_WEB_SLOT_COUNT) {
+        // SL-01: table full of ADMIN sessions; a USER login never evicts one.
+        ESP_LOGW(TAG, "login refused: session table full of ADMIN sessions");
+        // SL-07: temporary condition, not a server fault; the login page shows this text.
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "all sessions in use by admins, try later");
+        return ESP_OK;
+    }
     // 2026-09-29 owner decision: tag the session's initial AP-origin state at
     // login time. Necessary here specifically because POST /api/auth/login
     // is ROUTE_TIER_OPEN (http_auth_http.c's activity-touch path never runs

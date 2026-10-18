@@ -1103,6 +1103,11 @@ web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_pol
     if (requested->web_enabled && !current->web_enabled) {
         clear_web = true;
     }
+    // SL-02: the 12 h absolute cap is not applied under idle timeout NEVER, so
+    // a session's 32-bit age may have wrapped; clear on NEVER -> finite.
+    if (current->web_timeout_s < 0 && requested->web_timeout_s >= 0) {
+        clear_web = true;
+    }
     if (requested->lcd_enabled && !current->lcd_enabled) {
         clear_lcd = true;
     }

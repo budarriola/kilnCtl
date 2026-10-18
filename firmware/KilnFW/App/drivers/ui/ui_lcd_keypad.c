@@ -295,7 +295,7 @@ static void try_submit(void)
     s_job.gen = s_job_gen;
     s_worker_running = true;
     set_status("Checking PIN...");
-    if (!ui_worker_submit(pin_verify_worker_task, NULL) /* RF-01 */) {
+    if (!ui_worker_submit_front(pin_verify_worker_task, NULL) /* RF-01, RB-01 */) {
         s_worker_running = false;
         memset(s_job.digits, 0, sizeof(s_job.digits));
         set_status("Busy, try again");

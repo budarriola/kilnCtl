@@ -633,7 +633,7 @@ static void pico_auto_update_task(void *arg)
     }
 
 done:
-    s_task = NULL;
+    stack_margin_task_exit(&s_task); /* UB-01 */
     vTaskDelete(NULL);
 }
 

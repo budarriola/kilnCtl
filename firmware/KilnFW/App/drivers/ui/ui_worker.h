@@ -21,6 +21,10 @@ typedef void (*ui_worker_fn_t)(void *arg);
  * worker cannot start, or the queue is full (caller shows its "could not start" status). */
 bool ui_worker_submit(ui_worker_fn_t fn, void *arg);
 
+/* Same, but the job goes to the FRONT of the queue (runs next, after the job now running). Used for the
+ * LCD PIN check so it is not delayed behind queued Wi-Fi jobs (RB-01). */
+bool ui_worker_submit_front(ui_worker_fn_t fn, void *arg);
+
 #ifdef __cplusplus
 }
 #endif

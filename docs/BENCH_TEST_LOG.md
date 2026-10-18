@@ -3637,3 +3637,17 @@ Task 3, GitHub OTA: PASS (staging). update_check(allow_prerelease): v1.0.0-pre.4
 Task 4, recovery apply: skipped, AP-only (RX-12).
 
 End state: board on main 207134862, link up, armed, backup unchanged. Result: RX-11 fix confirmed on target; RX-06 timing, RX-07, BX-03, RY-02 numbers still open.
+
+## benchmain10 (2026-10-18, main 179cb0058, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain10_backup_pre.json (mid and post exports byte-identical to pre where compared). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Step 1-2, build and flash: PASS. build_kilnfw ok (263 s), flash_firmware(confirm) verified (elf 002d2ba6cf58), boot_guard cleared. get_fw_version commit 179cb0058 clean; link up, SaftyFW armed. Before the flash get_stack_margin still failed (INFO 0x04 no reply, BM-01 on 207134862); the board holds an unacknowledged crash report from that old boot (info_uart_bridg LoadProhibited, uptime 13 s, fw 07:11:45), not from the new image.
+
+Step 3, stack margin (BM-01): PASS, get_stack_margin answers; uart_proto_rx 3956-3988 B free of 8192 (48%). update_fetch_wr and update_fetch read "not running" before, during-after and after the stage upload, so their high-water cannot be read after the task exits (BX-03/RY-02 high-water still unmeasured; needs a read while the task is alive).
+
+Step 4, stage upload (RX-06, BM-02): update_stage_upload of the local build (2995632 B) with NO force and NO downgrade ack staged and verified by read-back (source=upload, semver 1.0.0-pre.1-202-g179cb00): BM-02 gate now knows the running identity. Verify wall time not exposed by the tool, not measured. Heap after stage (uptime 62 s): internal min_free 96463 B (floor 8192), largest free block 31744 B (low-water, unchanged since uptime 5 s), DMA min_free 88675 B. RX-07: display_flush_us max went 41865 -> 276396 us across the upload/verify, i.e. the flash_xip bracket stalled the LCD flush by about 0.28 s at most. Stage cleared, nothing applied.
+
+Step 5, LCD: ui_run_script home_start_stop_zone0_lcd failed at its first wait_for 'home' (target not on the home page; Start was visible), tooling-side. Navigated settings -> Network / Wi-Fi -> Manage networks -> Scan. ui_worker (lazy start on first job) then appeared: 4152 B free of 6144 (67.6%). lvgl worst 2976 B free of 10240 (29.1%, LOW) after those pages.
+
+End state: main 179cb0058, link up, armed, stage blank, LCD back on home, backup unchanged.

@@ -652,6 +652,17 @@ static void test_policy_check_transition(void)
     web_auth_policy_t lcd_on = {.web_enabled = false, .lcd_enabled = true};
     bool clear_web, clear_lcd;
 
+    // SL-02: NEVER (-1) -> finite timeout clears web sessions; finite -> finite does not.
+    {
+        web_auth_policy_t nev = {.web_enabled = true, .web_timeout_s = -1};
+        web_auth_policy_t fin = {.web_enabled = true, .web_timeout_s = 600};
+        web_auth_policy_t fin2 = {.web_enabled = true, .web_timeout_s = 300};
+        (void)web_auth_policy_check_transition(&nev, &fin, true, true, &clear_web, &clear_lcd);
+        TEST_CHECK(clear_web, "SL-02: NEVER -> finite timeout clears web sessions");
+        (void)web_auth_policy_check_transition(&fin, &fin2, true, true, &clear_web, &clear_lcd);
+        TEST_CHECK(!clear_web, "SL-02: finite -> finite timeout keeps web sessions");
+    }
+
     // Refused: turning web on with no administrator password configured.
     web_auth_policy_transition_t r = web_auth_policy_check_transition(
         &off, &web_on, /*admin_password_configured=*/false, /*admin_pin_configured=*/false,

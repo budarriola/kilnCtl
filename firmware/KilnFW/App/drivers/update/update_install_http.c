@@ -186,6 +186,26 @@ static int stale_res_write(void *ctx, const uint8_t *buf, size_t len)
     return kv_write_verified(UPD_INST_KEY_RES, buf, len);
 }
 
+static int stale_res_read(void *ctx, uint8_t *buf, size_t cap, size_t *len)
+{
+    (void)ctx;
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, UPD_INST_NS, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION_NAME) != HAL_OK) {
+        return 1;
+    }
+    size_t n = cap;
+    hal_status_t e = hal_kv_get_blob(&h, UPD_INST_KEY_RES, buf, &n);
+    hal_kv_close(&h);
+    if (e == HAL_NOT_FOUND) {
+        return 1;
+    }
+    if (e != HAL_OK) {
+        return -1;
+    }
+    *len = n;
+    return 0;
+}
+
 // True only when the first req->image_length bytes of the RUNNING app partition hash to req->sha256
 // (the same bytes recovery copied and re-hashed). Called under the update claim, so the shared chunk
 // buffer is free. Any read/hash trouble answers false (recorded as outcome_unknown).
@@ -227,6 +247,7 @@ int update_install_http_drop_stale_request(void)
     ops.req_read = stale_req_read;
     ops.req_clear = stale_req_clear;
     ops.res_write = stale_res_write;
+    ops.res_read = stale_res_read;
     int rc = update_install_drop_stale_recorded(claimed, &ops, stale_running_matches, NULL);
     if (claimed) {
         ota_http_update_end();

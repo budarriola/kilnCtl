@@ -1037,7 +1037,7 @@ CEILING_BYTES = {
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
     "bx_flash_worker": 6464,  # 2026-10-15 re-measured; honest free 33.9%. Prev:  # 2026-10-12: re-measured 6352 B (was 6336 B) after 44289aa41 uart_proto_message_t.rx_ms; honest free 3588 B (35.0%), so only the regression ceiling moves
-    "info_uart_bridge": 3200,
+    "info_uart_bridge": 3216,  # 2026-10-18: re-measured 3216 B (was 3200 B) after the UB-02 stack_margin spinlock and BX-03 retained-exit flag in build_stack_margin_reply; honest free 880 B (21.5%) of the 4096 B PSRAM stack, stack unchanged
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3328,
     "thermo_uart_bridge": 3168,

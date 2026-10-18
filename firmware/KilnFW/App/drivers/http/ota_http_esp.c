@@ -759,7 +759,7 @@ static void ota_rollback_reboot_task(void *arg)
     // OP-02: the client was already told "rebooting"; release the OTA claim taken by the handler so
     // a failed reboot does not leave heat and updates refused until a manual reboot.
     ota_http_update_end();
-    s_ota_rollback_reboot_task = NULL;
+    stack_margin_task_exit(&s_ota_rollback_reboot_task); /* UB-01 */
     vTaskDelete(NULL);
 }
 esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
