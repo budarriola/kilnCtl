@@ -2655,6 +2655,8 @@ void watchdog_task_entry(void *arg)
         } else if (heat_enable_boot_id_unseen_blocked()) {
             /* PR-04: no Pico boot id yet -> heat withheld; say so instead of running cold silently. */
             (void)profile_executor_pause_with_reason_bounded("pico_boot_id_unseen");
+            /* HH-03: autotune has no pause state; abort so it does not run cold without a reason. */
+            (void)autotune_engine_abort_bounded("pico_boot_id_unseen", 100u);
         } else if (hold_unconfirmed) {
             (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
             (void)autotune_engine_abort_bounded("heat_grant_unconfirmed", 100u);

@@ -1146,6 +1146,68 @@ static void test_pico_repeated_benign_reboot_holds(void)
     TEST_CHECK(!heat_enable_reboot_hold(), "SR-11: a second reboot outside the window is benign again");
 }
 
+static void test_hh_fixes(void)
+{
+    TEST_SECTION("heat_enable -- HH-01/HH-02/HH-07: claimless benign reboots count, grant voided while undecided, "
+                 "latch consumed with a pending re-arm");
+    /* HH-01 sequence 1: idle benign reboot, then a firing, then a benign reboot inside 15 min holds. */
+    reset_all(true);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 60000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "HH-01: idle benign reboot seeds the window; the claim reboot holds");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* HH-01 sequence 2: claim released before the DIAG; the claimless verdict counts. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 60000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "HH-01: claim released before DIAG still counts; the next benign reboot holds");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* HH-01 + AP-01: a claimless first-sight-only classification must not count. */
+    g_fixture_unseen = true;
+    reset_all(true);
+    g_fixture_unseen = false;
+    heat_enable_note_boot_id_seen(true);
+    heat_enable_note_pico_boot(0u, true, 0u, 3000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 120000u);
+    TEST_CHECK(!heat_enable_reboot_hold(), "HH-01/AP-01: claimless first-sight classification does not seed the window");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* HH-02: standing grant is void while the verdict is undecided; a second claimant is refused. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    TEST_CHECK(heat_enable_is_granted(), "HH-02: granted before the reboot");
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    TEST_CHECK(!heat_enable_is_granted(), "HH-02: not granted while the new boot is undecided");
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE), "HH-02: second acquire refused while undecided");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* HH-07: fatal latch consumed by an acquire together with a pending re-arm. */
+    reset_all(true);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2100u);
+    heat_enable_note_pico_boot(3u, false, 0u, 3000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "HH-07: latch consumed into reboot_hold at acquire");
+    TEST_CHECK(heat_enable_reboot_undecided(), "HH-07: pending re-arm also armed at acquire");
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 3100u);
+    TEST_CHECK(heat_enable_reboot_hold(), "HH-07: benign DIAG does not clear the consumed latch");
+    TEST_CHECK(!heat_enable_is_granted(), "HH-07: heat stays withheld");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+}
+
 static void test_ap01_first_sight_not_repeated_benign(void)
 {
     TEST_SECTION("heat_enable -- AP-01: first-sight classification does not seed the repeated-benign window");
@@ -1748,6 +1810,7 @@ void run_test_heat_enable(void)
     test_pr_fixes();
     test_pr03_default_unseen();
     test_ap01_first_sight_not_repeated_benign();
+    test_hh_fixes();
     test_pf_first_boot_id_and_lost_trip_expiry();
     test_reboot_resets_k4_episode_and_undecided_is_visible();
     test_executor_autotune_and_stale_diag_wiring();

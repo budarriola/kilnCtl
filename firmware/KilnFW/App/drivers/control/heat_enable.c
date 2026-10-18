@@ -828,6 +828,12 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
         if (s_he.held_mask != 0u) {
             s_he.reboot_classify_pending = true;
+            /* HH-02: the old boot's grant is void; do not report it (is_granted / second acquire)
+             * before this boot's DIAG verdict. Reconcile re-requests once the verdict is benign. */
+            if (s_he.granted) {
+                s_he.granted = false;
+                s_he.pending = true;
+            }
         }
     }
     if (s_he.held_mask == 0u) {
@@ -860,6 +866,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                 }
                 s_he.reboot_lost_bits = 0u;
                 s_he.reboot_had_claim = false;
+            }
+            /* HH-01: a benign reboot with no claim still enters the SR-11 window (AP-01: not the
+             * since_ms == 1 first-sight sentinel). The next benign reboot inside it, with a claim, holds. */
+            if ((boot_reason & fatal_u) == 0u && !s_he.reboot_was_tripped && s_he.reboot_classify_since_ms > 1u) {
+                s_he.last_benign_reboot_ms = s_he.reboot_classify_since_ms;
             }
             s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
                                           s_he.reboot_fatal_latched;
