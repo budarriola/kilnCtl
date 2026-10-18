@@ -65,7 +65,7 @@ static void test_admit(void)
     TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_CHECK_BLOCK_MIN, false) == FETCH_HEAP_OK,
                "check admitted with a 3072 B block");
     TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_LARGEST_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
-               "download needs the 6144 B block a check does not");
+               "download needs the 7168 B block a check does not");
     TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_CHECK_BLOCK_MIN - 1u, false) == FETCH_HEAP_LOW_BLOCK,
                "check small block refused");
     // Free is judged before the block: both short reports free.

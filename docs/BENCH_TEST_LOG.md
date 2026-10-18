@@ -3665,3 +3665,17 @@ Stack margin, free of configured: lvgl 8160/14336 (SL-08 ok), uart_proto_rx 3964
 Crash: pre-flash record info_uart_bridg LoadProhibited (BM-01/UB-01) acknowledged. Web login as USER: skipped, no USER credential in the environment.
 
 End state: main 293985c24, link up, armed, stage blank, backup unchanged. Result: RX-06, SL-08, UB-01 closed; BX-03, RY-02 still open (need an allowed GitHub stage).
+
+## benchmain12 (2026-10-18, main c7bf7761d, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain12_backup_pre.json (post export byte-identical). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Build and flash: PASS. build_kilnfw ok, flash_firmware(confirm) verified (elf a2f28f50bdbe), boot_guard cleared. get_fw_version commit c7bf7761d clean; link up, SaftyFW armed.
+
+Heap (uptime 126 s): internal free 118255, min_free 96171, largest block 31744; after stage upload/clear and the refused release (uptime 167 s) free 118019, min_free 96171, largest 31744 (SK-04 alarm 7168 B).
+
+Stack margin (free of configured): lvgl 8740/14336, uart_proto_rx 3952/8192, info_uart_bridge 1548/4096, httpd_worker 3024/8192. update_fetch_wr (configured 5120 B, GP-01) "not running" before, after upload and after the release attempt: high-water unread.
+
+Stage: update_stage_upload of the local build (2996656 B), no force, staged and verified by read-back. last_verify_us=881765 (read via GET /api/update/stage after the clear; field persists). update_stage_clear ok. update_stage_release (default channel): FAILED, error=no_stable_release, http_status=404 (no stable release in budarriola/kilnCtl, not a downgrade refusal); heap low-water during the check free=108415, largest_block=31744. The fetch writer therefore did not run.
+
+End state: main c7bf7761d, link up, armed, stage blank, backup unchanged. Result: GP-01 5120 B stack and BX-03 high-water still unmeasured (need an allowed GitHub stage).

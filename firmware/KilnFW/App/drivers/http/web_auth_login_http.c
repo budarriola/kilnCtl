@@ -633,6 +633,8 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
     size_t session_idx =
         web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
+    // GD-04: the lookup key is in the table now; its stack copy is no longer needed on any path below.
+    login_wipe(token_hash, sizeof(token_hash));
     if (session_idx >= WEB_AUTH_WEB_SLOT_COUNT) {
         // SL-01: table full of ADMIN sessions; a USER login never evicts one.
         ESP_LOGW(TAG, "login refused: session table full of ADMIN sessions");
@@ -672,6 +674,8 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     login_wipe(token_hex, sizeof(token_hex));
     if (cookie_len < 0 || (size_t)cookie_len >= sizeof(cookie)) {
         login_wipe(cookie, sizeof(cookie));
+        // GD-04: no client holds this session; remove the orphan from the table.
+        web_auth_table_destroy_session(http_session_table(), session_idx);
         ESP_LOGE(TAG, "Set-Cookie formatting failed");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
         return ESP_OK;

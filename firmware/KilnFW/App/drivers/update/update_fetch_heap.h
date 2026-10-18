@@ -118,7 +118,7 @@
 // BENCH-PENDING re-measure covers it.
 //
 // Largest free block: the biggest single internal allocation at start is the 5120 B update_fetch_wr stack
-// (+ overhead); 6144 B = 1.2x passes the idle largest block (9728 B, sk04 log; 11776 B in benchupd5, low-water
+// (+ TCB/overhead, ~5.5 KB); 7168 B = 1.3x passes the idle largest block (9728 B, sk04 log; 11776 B in benchupd5, low-water
 // 7680 B in the TLS handshake). A check needs only the 2 KB client buffers (3072 B).
 //
 // Limits (review 2026-10-07, REVIEW_UPDFX4/5/6/7).
@@ -188,7 +188,10 @@ _Static_assert(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - FETCH_HEAP_MEASURED_DRAW_
 _Static_assert(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES == FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH,
                "the pre-scratch level is the admission level plus exactly the scratch");
 
-#define FETCH_LARGEST_BLOCK_MIN 6144u
+// GD-02: the writer task (5120 B stack + ~400 B TCB/overhead = ~5.5 KB) is created after this probe, so the block
+// must cover it with >= 1.2x headroom: 7168 B is ~1.3x of 5.5 KB (idle largest block measured 9728 B).
+#define FETCH_LARGEST_BLOCK_MIN 7168u
+_Static_assert(FETCH_LARGEST_BLOCK_MIN * 10u >= (5120u + 400u) * 12u, "largest-block floor is >= 1.2x writer stack + TCB");
 // Check job: TLS handshake only, no writer task. Needs the 2 KB client buffers as the biggest block.
 #define FETCH_CHECK_DRAW_BYTES (11044u + 1024u)
 #define FETCH_CHECK_BLOCK_MIN 3072u
