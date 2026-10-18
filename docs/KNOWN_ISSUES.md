@@ -446,6 +446,15 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RX-09** INFO. OP-02 release is correct: it releases once, only on the failure path, after the bracket exit.
 - **RX-10** INFO. OP-01/OP-02 tests map to the intended mutants.
 
+## Review 2026-10-18: HF/BT/RX/OP fixes (docs/audits/REVIEW_BTHFRX_2026_10_18.md)
+- **BX-01** LOW, `backup_import.c:2430,3161`. Import's Pico ceiling raise/lower (COMMIT_CONFIG) still runs outside the safety_cfg writer guard; zones_http_post wraps the same raise. A running bench_preset job or sweep can interleave. Status: open.
+- **BX-02** LOW, `heat_enable.c:914`. A benign reboot inside the window relabels a standing fatal hold as pico_repeated_reboot (hold stays, cause text lost). Status: open.
+- **BX-03** LOW, `update_fetch.c` FETCH_WR_STACK_BYTES 4096. OP-01 esp_image_verify now runs on the update_fetch_wr stack; high-water unmeasured. Status: open (bench, with RX-06).
+- **BX-04** INFO. BT-01 post-gate fetch_busy branch is unreachable (single httpd task); its claim release is untested.
+- **BX-05** INFO, `ota_http_esp.c` rollback handler. Comment says the claim is never released; OP-02 releases it on reboot failure.
+- **BX-06** INFO. HF-02/BT-02 executor wiring are string scans; dropping the pico_repeated_reboot autotune abort survives.
+- **BX-07** INFO, `update_stage.c:508`. App image_verify hook is skipped when NULL (recovery makes it mandatory); unwiring it survives host tests.
+
 ## Bench 2026-10-18 benchmain7 (docs/BENCH_TEST_LOG.md)
 - **BT-01** FIXED (sha 37d6b9674) HIGH, `firmware/KilnFW/App/drivers/update/update_fetch.c` download handler (`job_try_begin()` sets `busy` at ~line 1366, then `update_http_gate_refuses()` runs `ota_interlock_check`), `firmware/KilnFW/App/drivers/http/ota_http.c:469`. RW-02 (f3762bb08) made the interlock count `fetch_busy_probe()` (`s_c->busy`) as `other_update_in_progress`. POST /api/update/download takes `busy` first and then runs the interlock, so it refuses itself: every GitHub stage download answers 409 "an update is already in progress" (stage blank or full, after fetch_cancel, after an ESP reset; `update_status` shows busy=false). The GitHub auto-update (update_stage_release) is dead on main d47a9c64f; stage upload and update_check are unaffected. Fix: run the gates before `job_try_begin()`, or exclude the caller's own busy flag from the interlock for the download handler. Needs a host test that drives the download route and expects 202. Status open.
 - **BT-02** FIXED (sha 37d6b9674) LOW, `firmware/KilnFW/App/drivers/control/heat_enable.c:895-905`. A repeated benign Pico reboot inside the 15 min window holds heat (correct) but the executor pause reason is `pico_fatal_reboot` ("rebooted after a fatal fault") while the DIAG boot reason is power-on, so the operator is told of a fatal fault that did not happen. Measured benchmain7: reboot 2, 85 s after reboot 1. Wording only; heat behaviour is as the owner rule requires. Status open.
