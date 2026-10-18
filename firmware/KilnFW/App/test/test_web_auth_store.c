@@ -1297,6 +1297,7 @@ static void test_fs02_storage_reset(void)
         web_auth_web_blob_t wb;
         memset(&wb, 0, sizeof(wb));
         wb.version = WEB_AUTH_STORE_VERSION;
+        wb.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured = true;
         wb.crc32 = web_blob_crc(&wb);
         TEST_CHECK(set_blob_verified(WEB_AUTH_KEY_WEB, &wb, sizeof(wb)) == HAL_OK, "f2-02: password without policy");
     }
@@ -1308,6 +1309,29 @@ static void test_fs02_storage_reset(void)
                    "f2-02: policy enabled after self-heal");
     }
     TEST_CHECK(!web_auth_store_storage_reset_evaluate(false), "f2-02: stays healthy next boot");
+
+    // AF-01: gesture blob (valid, admin unconfigured) must stay latched.
+    // AF-02: corrupt blob and wrong-size blob must stay latched.
+    for (int k = 0; k < 3; k++) {
+        fs02_boot();
+        TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "af: initial fresh boot");
+        TEST_CHECK(hal_kv_erase_partition(NULL) == HAL_OK, "af: erase nvs");
+        TEST_CHECK(web_auth_store_storage_reset_evaluate(false), "af: reset latched");
+        web_auth_web_blob_t wb;
+        memset(&wb, 0, sizeof(wb));
+        wb.version = WEB_AUTH_STORE_VERSION;
+        wb.crc32 = web_blob_crc(&wb);
+        if (k == 1) {
+            wb.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured = true; // configured but CRC now stale
+        }
+        size_t n = sizeof(wb);
+        if (k == 2) {
+            n = sizeof(wb) - 4;
+        }
+        TEST_CHECK(set_blob_verified(WEB_AUTH_KEY_WEB, &wb, n) == HAL_OK, "af: plant blob");
+        TEST_CHECK(web_auth_store_storage_reset_evaluate(false), "af: unconfigured/corrupt blob stays latched");
+        TEST_CHECK(web_auth_store_storage_reset_latched(), "af: latch held");
+    }
 
     // Pre-FS-02 board with real auth data but no sentinel: healthy, not a reset.
     fs02_boot();

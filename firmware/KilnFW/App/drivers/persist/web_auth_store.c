@@ -859,8 +859,9 @@ static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere)
         // F2-02: an admin password record already exists, so a previous recovery
         // was cut or failed between the password and the policy write. Finish it
         // (policy, then sentinel) instead of staying latched; failure stays latched.
-        web_auth_web_blob_t wb;
-        if (load_blob(WEB_AUTH_KEY_WEB, &wb, sizeof(wb)) != HAL_NOT_FOUND) {
+        // AF-01/AF-02: heal only when the admin record loads cleanly and is
+        // configured; a gesture (unconfigured) or corrupt blob stays latched.
+        if (web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR)) {
             storage_reset_resolve();
         }
         return s_storage_reset_latched;
