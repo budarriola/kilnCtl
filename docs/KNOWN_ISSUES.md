@@ -456,9 +456,9 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **RY-07** INFO. Checksum and hash are checked even with JTAG attached (IDF skips them). Stricter. Accepted.
 
 ## Review 2026-10-18: OTA apply path (docs/audits/REVIEW_OTA_APPLY_2026_10_18.md)
-- **OA-01** LOW, `stage_header.h` / `recovery_apply.c`. STAGE_STATE_APPLYING is never written; recovery copies under a VERIFIED header, so with kiln NVS unreadable a cut mid-copy leaves no stage evidence that app was touched (fail safe, stays in recovery). Fix: write APPLYING before the first erase, or remove the dead state.
-- **OA-02** LOW (latent), `pico_auto_update_boot.c`. Auto Pico update does not wait for ESP mark-valid / soak; compiled off today. Gate it on a VALID read-back before enabling.
-- **OA-03** LOW, `update_install_record.c` post_boot / drop_stale. A cut or req_clear failure between set_boot and post_boot boots the new image, the stale request is dropped and no result is recorded (status "none" after a good install). Fix: record OK when the dropped request's sha matches the running app.
+- **OA-01** LOW, FIXED (this commit's sha in the landing report). The never-written STAGE_STATE_APPLYING was removed (flash cannot change the state byte without erasing the header sector, which would destroy the stage; recovery copies under VERIFIED by design). A stored state 3 now decodes as BAD_STATE; host tests updated.
+- **OA-02** LOW, FIXED. `pico_auto_update_task` now polls `esp_ota_get_state_partition` until the running image is VALID (factory counts as confirmed) after the compiled-off gate and before any image/decision work; source-scan test in `test_lowlink_wiring.c` (negtested).
+- **OA-03** LOW, FIXED. `update_install_drop_stale_recorded` writes the install result before clearing a stale request: OK when the first image_length bytes of the running partition hash to the request sha256, else FAIL outcome_unknown. Host tests in `test_update_install_record.c` (negtested).
 - **OA-04** INFO. Verify-to-copy TOCTOU closed: no recovery writer during apply (CAS claim, httpd serialization); readback hash catches flash faults. Accepted.
 - **OA-05** INFO. Failed post-apply header erase leaves a VERIFIED header; update_stale_stage drops it by hash proof. Accepted.
 - **OA-06** INFO. No OTA claim leak in ota_recovery_boot_run or recovery apply_task. Accepted.
