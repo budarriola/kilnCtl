@@ -3651,3 +3651,17 @@ Step 4, stage upload (RX-06, BM-02): update_stage_upload of the local build (299
 Step 5, LCD: ui_run_script home_start_stop_zone0_lcd failed at its first wait_for 'home' (target not on the home page; Start was visible), tooling-side. Navigated settings -> Network / Wi-Fi -> Manage networks -> Scan. ui_worker (lazy start on first job) then appeared: 4152 B free of 6144 (67.6%). lvgl worst 2976 B free of 10240 (29.1%, LOW) after those pages.
 
 End state: main 179cb0058, link up, armed, stage blank, LCD back on home, backup unchanged.
+
+## benchmain11 (2026-10-18, main 293985c24, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain11_backup_pre.json (post export and a mid-flash export byte-identical to pre). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Build and flash: PASS. build_kilnfw ok, flash_firmware(confirm) verified (elf 02a2193e6e56), boot_guard cleared. get_fw_version commit 293985c24 clean; link up, SaftyFW armed.
+
+Stage (RX-06): update_stage_upload of the local build (2996528 B) staged and verified, no force. last_verify_us=883151. Staged semver reads 1.0.0-pre.1-202-g179cb00 (git-describe stale at configure, not a failure). update_fetch_wr: "not running" (upload does not use it; update_stage_release was refused refuse_downgrade, v1.0.0-pre.4 lower schema, so no fetch writer ran). BX-03/RY-02 stack minimum NOT measured. ui_worker is not listed by get_stack_margin. Stage cleared, not applied.
+
+Stack margin, free of configured: lvgl 8160/14336 (SL-08 ok), uart_proto_rx 3964/8192, info_uart_bridge 1608/4096, httpd_worker 3200/8192. Heap internal (uptime 112 s): free 117975, min_free 96159, largest block 31744; during refused GitHub stage low-water free=107555 largest=31744.
+
+Crash: pre-flash record info_uart_bridg LoadProhibited (BM-01/UB-01) acknowledged. Web login as USER: skipped, no USER credential in the environment.
+
+End state: main 293985c24, link up, armed, stage blank, backup unchanged. Result: RX-06, SL-08, UB-01 closed; BX-03, RY-02 still open (need an allowed GitHub stage).

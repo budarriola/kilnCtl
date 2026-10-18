@@ -35,6 +35,7 @@ static int g_fail = 0, g_checks = 0;
 #define REPO "budarriola/kilnCtl"
 #define BASE "https://github.com/budarriola/kilnCtl/releases/download/"
 #define API_URL "https://api.github.com/repos/" REPO "/releases?per_page=15"
+#define API_URL5 "https://api.github.com/repos/" REPO "/releases?per_page=5"
 #define LATEST_URL "https://api.github.com/repos/" REPO "/releases/latest"
 #define MAN_URL BASE "v1.2.3/release.json"
 #define APP_URL BASE "v1.2.3/KilnCtrl-v1.2.3.bin"
@@ -807,11 +808,26 @@ static void test_heap_admission_updfx3(void)
         big[sizeof(big) - 1] = '\0';
         g_fr_routes[0].body = big;
         g_fr_routes[0].body_len = strlen(big);
+        add_route(API_URL5, big, strlen(big));
         add_route(LATEST_URL, single2, strlen(single2));
     }
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "too_large") != 0 && strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0,
-          "oversized list page: stable found through /releases/latest (GF-02)");
+          "oversized list page (also at per_page=5): stable found through /releases/latest (GF-02)");
+    // GP-02: the 15-release list overflows but a per_page=5 retry fits: the release comes from the retried list
+    // (highest semver), /releases/latest is never read (no route registered for it, so reading it would fail).
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char big2[300u * 1024u];
+        memset(big2, ' ', sizeof(big2) - 1);
+        big2[sizeof(big2) - 1] = '\0';
+        g_fr_routes[0].body = big2;
+        g_fr_routes[0].body_len = strlen(big2);
+        add_route(API_URL5, g_api, strlen(g_api));
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_state, "done") == 0 && g_error[0] == 0,
+          "oversized 15-release list: per_page=5 retry supplies the release without /releases/latest (GP-02)");
     // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;

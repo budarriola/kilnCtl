@@ -640,6 +640,9 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_sendstr(req, "all sessions in use by admins, try later");
+        // DF-01: this refusal path also owes the SS-04 wipe of the token copies.
+        login_wipe(token_hex, sizeof(token_hex));
+        login_wipe(token_hash, sizeof(token_hash));
         return ESP_OK;
     }
     // 2026-09-29 owner decision: tag the session's initial AP-origin state at

@@ -756,6 +756,16 @@ TASKS = [
          stack=lambda: extract_local_macro("drivers/net/pico_auto_update_boot.c",
              r'#define PICO_AUTO_UPDATE_TASK_STACK\s+(\d+)',
              r'xTaskCreate\(pico_auto_update_task,\s*"pico_auto_update",\s*PICO_AUTO_UPDATE_TASK_STACK')),
+    dict(name="update_fetch_wr", root="wr_task",
+         # GP-01/BX-03: writer task of update_fetch.c; runs every stager call, including the OP-01/RX-11
+         # esp_image_verify walk whose io callbacks (io_image_verify -> iv_* in update_http.c) are reached through
+         # a function-pointer table the walk cannot follow, so they are extra roots. IDF-internal indirect dispatch
+         # (esp_flash chip ops, PSA driver dispatch) stays unresolved: lower bound, INDETERMINATE.
+         stack=lambda: extract_local_macro("drivers/update/update_fetch.c",
+             r'#define FETCH_WR_STACK_BYTES\s+(\d+)',
+             r'xTaskCreatePinnedToCore\(wr_task,\s*"update_fetch_wr",\s*FETCH_WR_STACK_BYTES'),
+         extra_roots=[("io_image_verify", "update_http.c"), ("iv_sha_finish", "update_http.c"),
+                      ("iv_read", "update_http.c"), ("iv_sha_update", "update_http.c")]),
     dict(name="info_uart_bridge", root="info_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_info.c",
              r'xTaskCreatePinnedToCoreWithCaps\(info_bridge_task,\s*"info_uart_bridge",\s*(\d+)')),
@@ -1016,6 +1026,7 @@ CEILING_BYTES = {
     # budget; reported here per the standing instruction not to bump a
     # stack size just because a checker was newly wired up.
     "pico_auto_update": 3104,
+    "update_fetch_wr": 3216,  # 2026-10-18 GP-01: measured against checkbuild_origin_kilnfw (wr_task + deepest io extra root); honest free 1904 B of 5120 B (declared raised 4096 -> 5120) before ~300 B unmodelled overhead and unresolved IDF dispatch
     "gpio_probe": 3376,
     "link_watchdog": 1200,  # 2026-10-10: re-measured 1200 B (was 1168 B); honest free 1572 B of 3072 B, stack unchanged
     # 3792 = 48 (bx_worker_task's own dispatch loop) + 3744 (the deepest of

@@ -230,6 +230,16 @@ static void test_ub01_read_lock_and_exit_sites(void)
         const char *exs = exl ? strstr(exl, "= NULL;") : NULL;
         const char *exu = exs ? strstr(exs, "taskEXIT_CRITICAL(&s_read_lock)") : NULL;
         TEST_CHECK(ex && exl && exs && exu, "stack_margin_task_exit(): slot cleared under s_read_lock");
+        const char *re = strstr(c, "bool stack_margin_retain_exit(");
+        const char *rel = re ? strstr(re, "taskENTER_CRITICAL(&s_read_lock)") : NULL;
+        const char *rew = rel ? strstr(rel, "e->retained_valid = true;") : NULL;
+        const char *reu = rew ? strstr(rew, "taskEXIT_CRITICAL(&s_read_lock)") : NULL;
+        TEST_CHECK(re && rel && rew && reu, "stack_margin_retain_exit(): writes under s_read_lock (DF-02)");
+        const char *rd2 = strstr(c, "bool stack_margin_retained(");
+        const char *rdl = rd2 ? strstr(rd2, "taskENTER_CRITICAL(&s_read_lock)") : NULL;
+        const char *rdv = rdl ? strstr(rdl, "retained_bytes") : NULL;
+        const char *rdu = rdv ? strstr(rdv, "taskEXIT_CRITICAL(&s_read_lock)") : NULL;
+        TEST_CHECK(rd2 && rdl && rdv && rdu, "stack_margin_retained(): reads under s_read_lock (DF-02)");
         free(c);
     }
     static const struct {

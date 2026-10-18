@@ -89,10 +89,12 @@ bool stack_margin_retain_exit(const char *name, uint32_t free_bytes)
     for (size_t i = 0; i < s_count; i++) {
         if (name && strncmp(s_entries[i].name, name, STACK_MARGIN_NAME_MAX - 1) == 0) {
             stack_margin_entry_t *e = &s_entries[i];
+            taskENTER_CRITICAL(&s_read_lock); /* DF-02 */
             if (!e->retained_valid || free_bytes < e->retained_bytes) {
                 e->retained_bytes = free_bytes;
             }
             e->retained_valid = true;
+            taskEXIT_CRITICAL(&s_read_lock);
             return true;
         }
     }
@@ -101,13 +103,16 @@ bool stack_margin_retain_exit(const char *name, uint32_t free_bytes)
 
 bool stack_margin_retained(size_t index, uint32_t *free_bytes)
 {
-    if (index >= s_count || !s_entries[index].retained_valid) {
+    if (index >= s_count) {
         return false;
     }
-    if (free_bytes) {
+    taskENTER_CRITICAL(&s_read_lock); /* DF-02 */
+    bool valid = s_entries[index].retained_valid;
+    if (valid && free_bytes) {
         *free_bytes = s_entries[index].retained_bytes;
     }
-    return true;
+    taskEXIT_CRITICAL(&s_read_lock);
+    return valid;
 }
 
 size_t stack_margin_count(void)

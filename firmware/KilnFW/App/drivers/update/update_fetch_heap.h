@@ -112,8 +112,13 @@
 // rule and the hard minimum. Predicted on the benchupd5 idle board: DMA free 26995 - 1024 = 25971 B against a
 // need of 23940 B, +2031 B.
 //
-// Largest free block: the biggest single internal allocation at start is the 4096 B update_fetch_wr stack
-// (+ overhead); 6144 B = 1.5x passes the idle largest block (9728 B, sk04 log; 11776 B in benchupd5, low-water
+// GP-01: update_fetch_wr's stack was raised 4096 -> 5120 B. The table above was measured with 4096 B; the extra
+// 1024 B of internal RAM is NOT added to MEASURED_DRAW (that would move every pinned number and host test). It
+// consumes DRAW_MARGIN (1024 B) in full; idle bench min_free is far above the 8192 B floor (about 96 KB). The
+// BENCH-PENDING re-measure covers it.
+//
+// Largest free block: the biggest single internal allocation at start is the 5120 B update_fetch_wr stack
+// (+ overhead); 6144 B = 1.2x passes the idle largest block (9728 B, sk04 log; 11776 B in benchupd5, low-water
 // 7680 B in the TLS handshake). A check needs only the 2 KB client buffers (3072 B).
 //
 // Limits (review 2026-10-07, REVIEW_UPDFX4/5/6/7).
