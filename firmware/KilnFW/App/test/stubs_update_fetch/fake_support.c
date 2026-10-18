@@ -292,6 +292,21 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t task, const char *name, unsign
     (void)stack; (void)prio; (void)core;
     return task_create(task, name, arg, out);
 }
+volatile long g_fr_static_task_creates; // xTaskCreateStaticPinnedToCore() calls that succeeded (UR-01)
+TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t task, const char *name, unsigned long stack, void *arg,
+                                           UBaseType_t prio, StackType_t *stack_buf, StaticTask_t *tcb, BaseType_t core)
+{
+    (void)stack; (void)prio; (void)core;
+    if (stack_buf == NULL || tcb == NULL) {
+        return NULL; // a static task needs caller-owned memory, exactly like FreeRTOS
+    }
+    TaskHandle_t h = NULL;
+    if (task_create(task, name, arg, &h) != pdPASS) {
+        return NULL;
+    }
+    InterlockedIncrement(&g_fr_static_task_creates);
+    return h;
+}
 BaseType_t xTaskCreatePinnedToCoreWithCaps(TaskFunction_t task, const char *name, unsigned long stack, void *arg,
                                            UBaseType_t prio, TaskHandle_t *out, BaseType_t core, uint32_t caps)
 {

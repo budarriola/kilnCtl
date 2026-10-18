@@ -4,6 +4,10 @@
 // is the abort level (floor + 1024 B).
 #include "test_common.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "../drivers/update/update_fetch_heap.h"
 
 #define BENCH_RTC_FREE 7788u  // internal free - DMA free on the bench, every measured pair
@@ -13,13 +17,13 @@ static void test_admit(void)
     TEST_SECTION("update_fetch_heap -- admission (UPDFX7 model, scratch held)");
     TEST_CHECK(FETCH_HEAP_FLOOR_BYTES == 8192u && FETCH_HEAP_MAX_STEP_BYTES == 1024u && FETCH_HEAP_SCRATCH_BYTES == 1024u,
                "floor 8192, step margin 1024, scratch 1024 pinned");
-    TEST_CHECK(FETCH_HEAP_MEASURED_DRAW_BYTES == 21488u && FETCH_HEAP_DRAW_MARGIN_BYTES == 1024u &&
-                   FETCH_HEAP_MODEL_DRAW_BYTES == 22512u,
-               "largest measured draw (benchupd4, scratch held) 21488 + margin 1024 = model draw 22512");
-    TEST_CHECK(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH == 31728u, "admission with the scratch held is 31728 B");
-    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 32752u, "the same level before the scratch is taken is 32752 B");
-    TEST_CHECK(update_fetch_heap_admit(31728u, 9728u, true) == FETCH_HEAP_OK, "31728 B admitted");
-    TEST_CHECK(update_fetch_heap_admit(31727u, 9728u, true) == FETCH_HEAP_LOW_FREE, "31727 B refused");
+    TEST_CHECK(FETCH_HEAP_MEASURED_DRAW_BYTES == 16992u && FETCH_HEAP_DRAW_MARGIN_BYTES == 1024u &&
+                   FETCH_HEAP_MODEL_DRAW_BYTES == 18016u,
+               "UR-01: largest measured draw 21488 less the 4496 B writer share = 16992 + margin 1024 = model draw 18016");
+    TEST_CHECK(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH == 27232u, "admission is 27232 B (UR-01: no writer share)");
+    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 28256u, "the same level before the scratch is taken is 28256 B");
+    TEST_CHECK(update_fetch_heap_admit(27232u, 9728u, true) == FETCH_HEAP_OK, "27232 B admitted");
+    TEST_CHECK(update_fetch_heap_admit(27231u, 9728u, true) == FETCH_HEAP_LOW_FREE, "27231 B refused");
     // Admitted at the edge: the model draw ends exactly at the abort level; the worst MEASURED draw ends 1024 above it.
     TEST_CHECK(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - FETCH_HEAP_MODEL_DRAW_BYTES == FETCH_HEAP_ABORT_BELOW,
                "an admitted fetch at the model draw bottoms out exactly at the abort level (9216 B)");
@@ -37,20 +41,21 @@ static void test_admit(void)
             max_draw = draw;
         }
     }
-    TEST_CHECK(max_draw == FETCH_HEAP_MEASURED_DRAW_BYTES, "MEASURED_DRAW is exactly the largest of the four bench runs (benchupd2..5)");
+    TEST_CHECK(max_draw - FETCH_HEAP_WRITER_SHARE_BYTES == FETCH_HEAP_MEASURED_DRAW_BYTES, "MEASURED_DRAW is the largest of the four bench runs (benchupd2..5) less the writer share");
     // The benchupd5 idle board (34783 B, UART ISR in IRAM) has the stated +2 KB margin.
     TEST_CHECK(update_fetch_heap_admit(34783u - FETCH_HEAP_SCRATCH_BYTES, 11776u, true) == FETCH_HEAP_OK,
                "benchupd5 idle 34783 B admitted");
     TEST_CHECK(34783u - FETCH_HEAP_PRECHECK_MIN >= 2000u, "benchupd5 idle clears the pre-scratch need by at least 2 KB");
     TEST_CHECK(update_fetch_heap_admit(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES - 1u, 11776u, true) == FETCH_HEAP_LOW_FREE,
                "one byte under the pre-scratch need is refused");
-    // Older-firmware idle levels (scratch held = idle - 1024) are refused instead of being admitted into the floor.
-    TEST_CHECK(update_fetch_heap_admit(29647u - FETCH_HEAP_SCRATCH_BYTES, 9728u, true) == FETCH_HEAP_LOW_FREE,
-               "older idle minimum 29647 B refused");
-    TEST_CHECK(update_fetch_heap_admit(29815u - FETCH_HEAP_SCRATCH_BYTES, 9728u, true) == FETCH_HEAP_LOW_FREE,
-               "older idle 29815 B refused");
-    TEST_CHECK(29647u - FETCH_HEAP_SCRATCH_BYTES - FETCH_HEAP_MEASURED_DRAW_BYTES == 7135u,
-               "the refusal avoids ending at 7135 B, 1057 B under the floor");
+    // UR-01: with the writer off the heap the older idle levels (idle - 1024) clear the need, and the draw model
+    // still ends them above the owner floor.
+    TEST_CHECK(update_fetch_heap_admit(29647u - FETCH_HEAP_SCRATCH_BYTES, 9728u, true) == FETCH_HEAP_OK,
+               "older idle minimum 29647 B admitted (no writer share)");
+    TEST_CHECK(update_fetch_heap_admit(26000u - FETCH_HEAP_SCRATCH_BYTES, 9728u, true) == FETCH_HEAP_LOW_FREE,
+               "a 26000 B idle board is still refused");
+    TEST_CHECK(29647u - FETCH_HEAP_SCRATCH_BYTES - FETCH_HEAP_MEASURED_DRAW_BYTES == 11631u,
+               "the older idle minimum ends at 11631 B under the measured draw, above the abort level");
     // Pre-UART-change idle (47191 B): admitted with room.
     TEST_CHECK(update_fetch_heap_admit(47191u - FETCH_HEAP_SCRATCH_BYTES, 18432u, true) == FETCH_HEAP_OK,
                "benchupd4 idle 47191 B admitted");
@@ -64,27 +69,73 @@ static void test_admit(void)
     TEST_CHECK(update_fetch_heap_admit(26000u, 10752u, false) == FETCH_HEAP_LOW_FREE, "26000 B refuses a check");
     TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_CHECK_BLOCK_MIN, false) == FETCH_HEAP_OK,
                "check admitted with a 3072 B block");
-    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_LARGEST_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
-               "download needs the 7168 B block a check does not");
+    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_CHECK_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
+               "UR-01: a download needs only the TLS block a check needs (no writer-stack block)");
     TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_CHECK_BLOCK_MIN - 1u, false) == FETCH_HEAP_LOW_BLOCK,
                "check small block refused");
     // Free is judged before the block: both short reports free.
     TEST_CHECK(update_fetch_heap_admit(1000u, 100u, true) == FETCH_HEAP_LOW_FREE, "free shortfall reported before block");
-    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_LARGEST_BLOCK_MIN, true) == FETCH_HEAP_OK,
+    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_CHECK_BLOCK_MIN, true) == FETCH_HEAP_OK,
                "exact thresholds admitted");
-    TEST_CHECK(update_fetch_heap_admit(60000u, FETCH_LARGEST_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
+    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, 7167u, true) == FETCH_HEAP_OK,
+               "UR-01: the old 7168 B writer-stack block floor is gone (7167 B admitted)");
+    TEST_CHECK(update_fetch_heap_admit(60000u, FETCH_CHECK_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
                "largest block one byte short refused");
     TEST_CHECK(update_fetch_heap_admit(8295u, 4096u, true) == FETCH_HEAP_LOW_FREE, "post-stage dip refused");
     TEST_CHECK(update_fetch_heap_admit(0u, 0u, true) == FETCH_HEAP_LOW_FREE, "zero refused");
-    TEST_CHECK(update_fetch_heap_need(true, false) == 31728u && update_fetch_heap_need(false, false) == 31728u,
+    TEST_CHECK(update_fetch_heap_need(true, false) == 27232u && update_fetch_heap_need(false, false) == 27232u,
                "the start need is the download need for both kinds");
+}
+
+static char *ur01_read(const char *rel_from_test)
+{
+    char alt1[160], alt2[200];
+    snprintf(alt1, sizeof(alt1), "App/%s", rel_from_test + 3);
+    snprintf(alt2, sizeof(alt2), "firmware/KilnFW/App/%s", rel_from_test + 3);
+    const char *const candidates[] = {rel_from_test, alt1, alt2};
+    char *t = test_read_source_anchored(__FILE__, rel_from_test, candidates, 3);
+    if (t) { /* normalise CRLF */
+        char *w = t;
+        for (char *r = t; *r; r++) {
+            if (*r != '\r') {
+                *w++ = *r;
+            }
+        }
+        *w = '\0';
+    }
+    return t;
+}
+
+// UR-01: the writer path takes no heap for its stack, TCB or scratch (source scan; the runtime counter is in
+// test_update_fetch.c). A heap-created writer or a heap scratch brings the largest-block gate back.
+static void test_writer_is_static(void)
+{
+    TEST_SECTION("update_fetch -- UR-01 writer stack/TCB/scratch are static, no heap");
+    char *c = ur01_read("../drivers/update/update_fetch.c");
+    TEST_CHECK(c != NULL, "update_fetch.c readable");
+    if (!c) {
+        return;
+    }
+    TEST_CHECK(strstr(c, "xTaskCreateStaticPinnedToCore(wr_task, \"update_fetch_wr\", FETCH_WR_STACK_BYTES") != NULL,
+               "the writer is created with xTaskCreateStaticPinnedToCore");
+    TEST_CHECK(strstr(c, "xTaskCreatePinnedToCore(wr_task") == NULL && strstr(c, "xTaskCreatePinnedToCoreWithCaps(wr_task") == NULL,
+               "the writer is not created from the heap");
+    TEST_CHECK(strstr(c, "static StackType_t s_wr_stack[FETCH_WR_STACK_BYTES]") != NULL &&
+                   strstr(c, "static StaticTask_t s_wr_tcb;") != NULL &&
+                   strstr(c, "static uint8_t s_scratch[FETCH_HEAP_SCRATCH_BYTES]") != NULL,
+               "static stack, TCB and scratch arrays exist");
+    TEST_CHECK(strstr(c, "heap_caps_malloc(FETCH_SCRATCH_LEN") == NULL && strstr(c, "heap_caps_free(scratch)") == NULL &&
+                   strstr(c, "heap_caps_free(reclaim_scratch)") == NULL,
+               "the stager scratch is neither allocated nor freed on the heap");
+    TEST_CHECK(strstr(c, "FETCH_LARGEST_BLOCK_MIN") == NULL, "no writer largest-block gate left in update_fetch.c");
+    free(c);
 }
 
 static void test_hop(void)
 {
     TEST_SECTION("update_fetch_heap -- redirect hop admission (UPDFX7: measured dip, not the start need)");
     TEST_CHECK(FETCH_HOP_DIP_BYTES == 1536u && FETCH_HOP_DIP_BYTES >= 1420u, "hop dip 1536 B covers the measured 1420 B (29275 -> 27855)");
-    TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN == 30192u, "download hop need is the start need less the dip (31728 - 1536)");
+    TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN == 25696u, "download hop need is the start need less the dip (27232 - 1536)");
     TEST_CHECK(FETCH_HOP_CHECK_HEAP_MIN == 21284u, "check hop need is the abort level + the check draw (9216 + 12068)");
     TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN < FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, "hop need is below the start need");
     // MED-2: a board admitted exactly at the start edge sees the measured 1420 B hop dip and must still be admitted.
@@ -93,8 +144,8 @@ static void test_hop(void)
     // The benchupd5 hop reading: 34783 - 1024 scratch - 1420 dip.
     TEST_CHECK(update_fetch_heap_admit_hop(34783u - 1024u - 1420u, 7680u, true) == FETCH_HEAP_OK,
                "benchupd5 idle board at the hop is admitted with no settle wait");
-    TEST_CHECK(update_fetch_heap_admit_hop(27855u, 7680u, true) == FETCH_HEAP_LOW_FREE, "bench 27855 B hop reading (30299 idle board) refused");
-    TEST_CHECK(update_fetch_heap_admit_hop(30000u, 9000u, true) == FETCH_HEAP_LOW_FREE, "30000 B download hop refused");
+    TEST_CHECK(update_fetch_heap_admit_hop(25000u, 7680u, true) == FETCH_HEAP_LOW_FREE, "UR-01: 25000 B hop reading refused");
+    TEST_CHECK(update_fetch_heap_admit_hop(25695u, 9000u, true) == FETCH_HEAP_LOW_FREE, "25695 B download hop refused (one under the need)");
     TEST_CHECK(update_fetch_heap_admit_hop(25000u, 9000u, false) == FETCH_HEAP_OK, "25000 B check hop admitted");
     TEST_CHECK(update_fetch_heap_admit(25000u, 9000u, false) == FETCH_HEAP_LOW_FREE, "25000 B check refused as a start");
     TEST_CHECK(update_fetch_heap_admit_hop(FETCH_HOP_DOWNLOAD_HEAP_MIN - 1u, 9000u, true) == FETCH_HEAP_LOW_FREE,
@@ -103,7 +154,7 @@ static void test_hop(void)
     TEST_CHECK(update_fetch_heap_admit_hop(FETCH_HOP_CHECK_HEAP_MIN - 1u, 9000u, false) == FETCH_HEAP_LOW_FREE,
                "check hop one byte short refused");
     TEST_CHECK(update_fetch_heap_admit_hop(FETCH_HOP_CHECK_HEAP_MIN, 9000u, false) == FETCH_HEAP_OK, "check hop exact admitted");
-    TEST_CHECK(update_fetch_heap_admit_hop(40000u, FETCH_LARGEST_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
+    TEST_CHECK(update_fetch_heap_admit_hop(40000u, FETCH_CHECK_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
                "hop block short refused");
     // Floor arithmetic at the hop: the dip is already part of the draw, so the draw left is model draw less the dip.
     TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN - (FETCH_HEAP_MODEL_DRAW_BYTES - FETCH_HOP_DIP_BYTES) == FETCH_HEAP_ABORT_BELOW,
@@ -124,15 +175,15 @@ static void test_dma(void)
     TEST_CHECK(update_fetch_heap_dma_offset(1000u, 5000u) == 0u, "DMA above internal saturates the offset at 0");
 
     // With the bench offset the numbers are the previous constants' successors.
-    TEST_CHECK(update_fetch_heap_dma_need(true, false, BENCH_RTC_FREE) == 23940u, "DMA download admission is 31728 - 7788 = 23940 B");
-    TEST_CHECK(update_fetch_heap_dma_need(false, false, BENCH_RTC_FREE) == 23940u, "DMA check start uses the download need");
-    TEST_CHECK(update_fetch_heap_dma_need(true, true, BENCH_RTC_FREE) == 22404u, "DMA download hop need is 30192 - 7788 = 22404 B");
+    TEST_CHECK(update_fetch_heap_dma_need(true, false, BENCH_RTC_FREE) == 19444u, "DMA download admission is 27232 - 7788 = 19444 B");
+    TEST_CHECK(update_fetch_heap_dma_need(false, false, BENCH_RTC_FREE) == 19444u, "DMA check start uses the download need");
+    TEST_CHECK(update_fetch_heap_dma_need(true, true, BENCH_RTC_FREE) == 17908u, "DMA download hop need is 25696 - 7788 = 17908 B");
     TEST_CHECK(update_fetch_heap_dma_need(false, true, BENCH_RTC_FREE) == 13496u, "DMA check hop need is 21284 - 7788 = 13496 B");
     TEST_CHECK(update_fetch_heap_dma_floor(BENCH_RTC_FREE) == 1428u, "DMA sustained-low floor is 9216 - 7788 = 1428 B");
     TEST_CHECK(update_fetch_heap_dma_hard_min(BENCH_RTC_FREE) == 404u, "DMA hard minimum is the owner floor less the offset (404 B)");
     // Different RTC heap: every DMA number moves with it (a hard-coded 7788 would not).
     TEST_CHECK(update_fetch_heap_dma_need(true, false, 0u) == FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, "no RTC heap: DMA need equals the internal need");
-    TEST_CHECK(update_fetch_heap_dma_need(true, false, 4096u) == 31728u - 4096u, "a 4096 B RTC heap lowers the DMA need by 4096");
+    TEST_CHECK(update_fetch_heap_dma_need(true, false, 4096u) == 27232u - 4096u, "a 4096 B RTC heap lowers the DMA need by 4096");
     TEST_CHECK(update_fetch_heap_dma_floor(4096u) == 9216u - 4096u && update_fetch_heap_dma_hard_min(4096u) == 8192u - 4096u,
                "the DMA floors follow the offset");
     TEST_CHECK(update_fetch_heap_dma_need(true, false, 100000u) == 0u && update_fetch_heap_dma_floor(100000u) == 0u &&
@@ -147,9 +198,9 @@ static void test_dma(void)
         TEST_CHECK(update_fetch_heap_dma_admit(d, rtc, true, false), "first admission at the internal edge passes the derived DMA check");
         TEST_CHECK(!update_fetch_heap_dma_admit(d - 1u, rtc, true, false), "a DMA reading one byte under the derived need is refused");
     }
-    // The benchupd5 idle board: DMA 26995 - 1024 = 25971 against 23940.
+    // The benchupd5 idle board: DMA 26995 - 1024 = 25971 against 19444.
     TEST_CHECK(update_fetch_heap_dma_admit(26995u - 1024u, BENCH_RTC_FREE, true, false), "benchupd5 idle DMA admitted");
-    TEST_CHECK(26995u - 1024u - update_fetch_heap_dma_need(true, false, BENCH_RTC_FREE) == 2031u, "... with a 2031 B DMA margin");
+    TEST_CHECK(26995u - 1024u - update_fetch_heap_dma_need(true, false, BENCH_RTC_FREE) == 6527u, "... with a 6527 B DMA margin (UR-01)");
 
     // DMA admission edge: exactly the need admits, one under refuses.
     const uint32_t need_dl = update_fetch_heap_dma_need(true, false, BENCH_RTC_FREE);
@@ -263,6 +314,7 @@ void run_test_update_fetch_heap(void)
 {
     test_admit();
     test_hop();
+    test_writer_is_static();
     test_dma();
     test_pick_pair();
     test_abort();
