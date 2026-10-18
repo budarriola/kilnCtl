@@ -30,12 +30,16 @@ static inline esp_err_t esp_timer_create(const esp_timer_create_args_t *args, es
 /* Per-TU counter, AUDIT_WIFI LOW-3 test: how many times a one-shot was armed. */
 static int s_stub_timer_start_once_calls = 0;
 
+/* OR-03: last one-shot timeout and a forced start result (ESP_OK default). */
+static uint64_t s_stub_timer_last_timeout_us = 0;
+static esp_err_t s_stub_timer_start_once_result = ESP_OK;
+
 static inline esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us)
 {
     (void)timer;
-    (void)timeout_us;
+    s_stub_timer_last_timeout_us = timeout_us;
     s_stub_timer_start_once_calls++;
-    return ESP_OK;
+    return s_stub_timer_start_once_result;
 }
 
 static inline esp_err_t esp_timer_delete(esp_timer_handle_t timer)

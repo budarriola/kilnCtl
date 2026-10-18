@@ -132,8 +132,8 @@ extern "C" {
  * Idempotent by (name, handle_slot): calling this again with the same name
  * AND the same slot pointer is a no-op that returns true without appending
  * a second row. This matters because not every call site fires once per
- * boot -- the four repeat-call launchers (the three OTA background tasks
- * ota_rollback_reboot, ota_pico_rollback, recovery_exit, plus zone_sweep)
+ * boot -- the three repeat-call launchers (the OTA background tasks
+ * ota_pico_rollback, recovery_exit, plus zone_sweep)
  * register from inside a short-lived task that a POST handler can (re)start
  * any number of times in one boot, always with the same literal name and
  * the same file-scope TaskHandle_t* slot.

@@ -247,12 +247,10 @@ static void test_ub01_read_lock_and_exit_sites(void)
         const char *call;
         const char *bare;
     } sites[] = {
-        {"../drivers/http/ota_http_esp.c", "stack_margin_task_exit(&s_ota_rollback_reboot_task)", "s_ota_rollback_reboot_task = NULL;"},
         {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_exit_reboot_task)", "s_recovery_exit_reboot_task = NULL;"},
         {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_boot_reboot_task)", "s_recovery_boot_reboot_task = NULL;"},
         {"../drivers/http/ota_http_pico.c", "stack_margin_task_exit(&s_ota_pico_rollback_task)", "s_ota_pico_rollback_task = NULL;"},
         {"../drivers/net/pico_auto_update_boot.c", "stack_margin_task_exit(&s_task)", "done:\n    s_task = NULL;"},
-        {"../drivers/update/update_fetch.c", "stack_margin_task_exit(&s_c->wr_task)", "s_c->wr_task = NULL;\n            xSemaphoreGive"},
         {"../drivers/update/update_fetch.c", "stack_margin_task_exit(&s_c->tls_task)", "s_c->tls_task = NULL;\n    s_c->busy = 0;"},
         {"../main_network_http.c", "stack_margin_task_exit(&s_ota_confirm_task)", "s_ota_confirm_task = NULL;\n            vTaskDelete"},
         {"../drivers/control/zones_current_sweep_task.c", "stack_margin_task_exit(&s_sweep.task)", "s_sweep.task = NULL;\n    /* Release"},
@@ -266,6 +264,13 @@ static void test_ub01_read_lock_and_exit_sites(void)
         }
         TEST_CHECK(strstr(t, sites[i].call) != NULL, sites[i].call);
         TEST_CHECK(strstr(t, sites[i].bare) == NULL, sites[i].bare);
+        free(t);
+    }
+    {
+        // UW-03: the writer is persistent; "go idle" must not unregister its stack_margin slot.
+        char *t = ub01_read("../drivers/update/update_fetch.c");
+        TEST_CHECK(t != NULL && strstr(t, "stack_margin_task_exit(&s_c->wr_task)") == NULL,
+                   "UW-03: update_fetch_wr never calls stack_margin_task_exit (persistent writer)");
         free(t);
     }
 }

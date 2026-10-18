@@ -31,7 +31,7 @@
 //                        (ota_esp_do_transfer/_post_handler,
 //                        ota_esp_status_get_handler,
 //                        ota_esp_rollback_post_handler,
-//                        ota_rollback_reboot_task)
+//                        ota_rollback_reboot_timer_cb)
 //   ota_http_pico.c  -- POST /api/ota/pico stage/relay + status + rollback
 //                        (ota_pico_do_stage/_post_handler,
 //                        ota_pico_status_get_handler,

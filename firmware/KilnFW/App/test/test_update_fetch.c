@@ -377,7 +377,7 @@ static void hop_dma_at_need(void)
 static void drop_heap_low(void) { g_fake_heap_free_internal = 8000; }
 static void drop_heap_one_under_abort(void) { g_fake_heap_free_internal = FETCH_HEAP_ABORT_BELOW - 1; }
 static void set_heap_hop_ok(void) { heap_idle_pair(FETCH_HOP_DOWNLOAD_HEAP_MIN); g_fake_heap_largest_internal = 7680; }
-static void set_heap_hop_low(void) { heap_idle_pair(27855); }
+static void set_heap_hop_low(void) { heap_idle_pair(25000); }
 
 static void run_job_and_result(const char *uri)
 {
@@ -395,7 +395,7 @@ static void test_heap_admission_updfx2(void)
     CHECK(strcmp(g_error, "low_heap_free") == 0, "22910 B refuses a check");
     expect_claim_balanced("check low free");
 
-    // check admitted with a 4096 B block; download refused LOW_BLOCK
+    // UR-01: both kinds need only the TLS block (FETCH_CHECK_BLOCK_MIN); the writer-stack block gate is gone.
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fake_heap_largest_internal = 4096;
@@ -405,7 +405,12 @@ static void test_heap_admission_updfx2(void)
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fake_heap_largest_internal = 4096;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_error, "low_heap_block") == 0, "download refused on 4096 B block");
+    CHECK(strcmp(g_error, "low_heap_block") != 0, "UR-01: download admitted on a 4096 B block (no writer-stack gate)");
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_fake_heap_largest_internal = FETCH_CHECK_BLOCK_MIN - 1u;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_block") == 0, "download refused below the TLS block floor");
     expect_claim_balanced("download low block");
 
     // bench idle reading admits a full download
@@ -430,10 +435,10 @@ static void test_heap_admission_updfx2(void)
     expect_claim_balanced("midrun edge");
 
     // UPDFX7 LOW-2: the DMA need is derived, not a literal: hop need minus the RTC heap measured at the start
-    // (30192 - 7788 = 22404 B). Judged at the hop, where DMA can move independently of the start reading.
+    // (25696 - 7788 = 17908 B). Judged at the hop, where DMA can move independently of the start reading.
     // (At the first admission both readings are one sample, so the DMA gate cannot disagree with the internal one.)
     const uint32_t dma_hop_need = update_fetch_heap_dma_need(true, true, T_RTC);
-    CHECK(dma_hop_need == 22404u, "derived DMA hop need is 22404 B on the bench");
+    CHECK(dma_hop_need == 17908u, "derived DMA hop need is 17908 B on the bench");
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_app_route->status = 302;
@@ -460,7 +465,7 @@ static void test_heap_admission_updfx2(void)
     expect_claim_balanced("admission edge refused");
 
     // per-hop admission: asset URL redirects to a second URL; heap low at the hop refuses it,
-    // the hop need (30192 B) admits it, 27855 B does not.
+    // the hop need (25696 B) admits it, 25000 B does not.
     fixture(g_sha_hex, IMG_LEN);
     g_app_route->status = 302;
     g_app_route->location = "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin";
@@ -549,7 +554,7 @@ static void test_heap_admission_updfx3(void)
     CHECK(strcmp(g_error, "low_heap_free") != 0, "start admitted once the previous call's residual clears");
     CHECK(g_fake_heap_recover_reads == 0, "the settle loop re-sampled the heap");
 
-    // LOW-5 M8: a check allocates no internal scratch; a download allocates one.
+    // LOW-5 M8 / UR-01: neither a check nor a download allocates internal heap (writer stack/TCB and scratch are static).
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fr_internal_mallocs = 0;
@@ -559,7 +564,20 @@ static void test_heap_admission_updfx3(void)
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fr_internal_mallocs = 0;
     run_job_and_result("/api/update/download");
-    CHECK(g_fr_internal_mallocs >= 1, "a download job allocates the internal stager scratch");
+    CHECK(g_fr_internal_mallocs == 0 && g_fr_static_task_creates >= 1, "UR-01: a download job allocates no internal heap for the scratch");
+
+    // UW-01/UW-02: the writer is one persistent static task; consecutive downloads reuse it (create exactly once).
+    {
+        const long creates_before = g_fr_static_task_creates;
+        for (int i = 0; i < 2; i++) {
+            fixture(g_sha_hex, IMG_LEN);
+            heap_idle_pair(BENCH_IDLE_FREE);
+            run_job_and_result("/api/update/download");
+            CHECK(strcmp(g_state, "done") == 0, "UW-02: consecutive download completes");
+        }
+        CHECK(g_fr_static_task_creates == creates_before, "UW-02: two consecutive downloads create no further writer task");
+        CHECK(g_fr_static_task_creates == 1, "UW-01: the writer was created exactly once for the module lifetime");
+    }
 
     // LOW-5 M12: DMA low at the redirect hop refuses
     fixture(g_sha_hex, IMG_LEN);

@@ -78,9 +78,13 @@ static inline void vTaskDelay(TickType_t ticks) { (void)ticks; }
  * one .c file in the same test executable. */
 __declspec(selectany) BaseType_t g_test_stub_xtaskcreate_result = 1; /* pdPASS */
 
+/* OR-03: counts xTaskCreate() calls so a test can assert a path creates no task. */
+__declspec(selectany) int g_test_stub_xtaskcreate_calls = 0;
+
 static inline BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint32_t stack_depth,
                                       void *arg, UBaseType_t priority, TaskHandle_t *out_handle)
 {
+    g_test_stub_xtaskcreate_calls++;
     (void)task;
     (void)name;
     (void)stack_depth;

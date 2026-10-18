@@ -27,7 +27,6 @@ $allow = [ordered]@{
 'drivers/http/backup_import.c' = @(1, 'import job ctx and pass-1 scratch; job task writes NVS; transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md)')
 'drivers/http/diagnostics_http.c' = @(1, 'coredump read buffer (flash read path); transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md); plus cfgfs file body buffer (explicit MALLOC_CAP_INTERNAL, flash read)')
 'drivers/http/http_async_job.c' = @(1, 'async job task writes NVS/flash; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
-'drivers/http/ota_http_esp.c' = @(1, 'OTA task writes flash; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/ota_http_pico.c' = @(1, 'OTA task; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/ota_http_recovery.c' = @(2, 'recovery OTA/apply tasks write flash; task stack stays internal: task writes NVS/flash (cache-disabled windows)')
 'drivers/http/profiles_edit_http.c' = @(1, 'profile_t scratch in save path; transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md)')
@@ -48,7 +47,6 @@ $allow = [ordered]@{
 'drivers/persist/live_profile.c' = @(1, 'explicit MALLOC_CAP_INTERNAL heap (status-struct-sized) on a path that reads NVS/flash or runs beside cache-disabled windows; heap not stack, so independent of task-stack placement; follow-up candidate for persist_scratch_alloc (AUDIT_INTERNAL_RAM_XIP.md section 4)')
 'drivers/persist/log_store.c' = @(1, 'log reader ctx, tiny, flash-read path; transient request/boot-time buffer, freed on exit; follow-up candidate for persist_scratch_alloc (see INTERNAL_RAM_DRIFT_2026-10-13.md)')
 'drivers/persist/persist_scratch.h' = @(1, 'the sanctioned PSRAM-first helper''''s internal fallback')
-'drivers/update/update_fetch.c' = @(2, 'fetch writer task writes flash; task stack stays internal: task writes NVS/flash (cache-disabled windows); plus an explicit MALLOC_CAP_INTERNAL buffer (flash write path)')
 'main_network_http.c' = @(2, 'ota_confirm ctx/task at early boot; task stack stays internal: early boot or reboot-path task, PSRAM may not be up/safe')
 }
 

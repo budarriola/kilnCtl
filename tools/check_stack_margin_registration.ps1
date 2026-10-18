@@ -116,7 +116,6 @@ $requiredNames = @(
     "gpio_probe",  # liveness: config -- only created when CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y (Kconfig)
     "backlight_pwm",  # liveness: config -- only created when CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE=y (Kconfig, defaults y); found missing from this list by check_stack_task_table_consistency.ps1 (2026-09-24) despite having a real stack_margin_register() call site and a check_all_task_stack_budgets.py TASKS/CEILING_BYTES row all along
     "recovery_exit",  # liveness: on-demand -- transient task an HTTP handler (ota_http_recovery.c) creates per POST /api/ota/esp/recovery_exit call
-    "ota_rollback_reboot",  # liveness: on-demand -- transient task ota_http_esp.c's rollback handler creates on demand
     "recovery_boot",  # liveness: on-demand -- transient task ota_http_recovery.c's POST /api/ota/esp/recovery_boot handler creates on demand
     "ota_pico_rollback",  # liveness: on-demand -- transient task ota_http_pico.c's rollback handler creates on demand
     "update_fetch",  # liveness: on-demand -- transient TLS/HTTP task update_fetch.c creates per POST /api/update/check or /download (GitHub release fetch, GITHUB_RELEASE_UPDATE_PLAN.md WP8)
@@ -557,7 +556,6 @@ $exemptCreatedNames = @{
     # margin to track past the moment it was created.
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
     "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
-    "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"
     "recovery_exit_reboot" = "ota_http_recovery.c ota_recovery_exit_reboot_task: registered under the shortened name 'recovery_exit' (see that file's comment), not this FreeRTOS task-name string"
     "sw_reset_reboot"      = "sw_reset_http.c sw_reset_reboot_task: one-shot reboot-after-delay (send ANNOUNCE_REBOOT, then hal_wdt_reboot()), never returns to measure -- same shape as factory_reset_reboot/ota_rollback_reboot above"
@@ -577,7 +575,6 @@ $exemptCreatedNames = @{
 $exemptCreatePin = @{
     "cfg_autofmt"          = "cfg_fs_mount.c|cfg_fs_auto_format_task"
     "factory_reset_reboot" = "factory_reset.c|reboot_task"
-    "ota_rollback_reboot"  = "ota_http_esp.c|ota_rollback_reboot_task"
     "ota_pico_rollback"    = "ota_http_pico.c|ota_pico_rollback_task"
     "recovery_exit_reboot" = "ota_http_recovery.c|ota_recovery_exit_reboot_task"
     "sw_reset_reboot"      = "sw_reset_http.c|sw_reset_reboot_task"

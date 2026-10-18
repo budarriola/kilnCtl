@@ -28,14 +28,14 @@ uint32_t update_fetch_heap_need(bool is_download, bool hop)
 fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block, bool is_download)
 {
     return verdict(free_internal, largest_internal_block, update_fetch_heap_need(is_download, false),
-                   is_download ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN);
+                   FETCH_CHECK_BLOCK_MIN);
 }
 
 fetch_heap_verdict_t update_fetch_heap_admit_hop(uint32_t free_internal, uint32_t largest_internal_block,
                                                  bool is_download)
 {
     return verdict(free_internal, largest_internal_block, update_fetch_heap_need(is_download, true),
-                   is_download ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN);
+                   FETCH_CHECK_BLOCK_MIN);
 }
 
 uint32_t update_fetch_heap_dma_offset(uint32_t free_internal, uint32_t dma_free)

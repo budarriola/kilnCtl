@@ -763,7 +763,7 @@ TASKS = [
          # (esp_flash chip ops, PSA driver dispatch) stays unresolved: lower bound, INDETERMINATE.
          stack=lambda: extract_local_macro("drivers/update/update_fetch.c",
              r'#define FETCH_WR_STACK_BYTES\s+(\d+)',
-             r'xTaskCreatePinnedToCore\(wr_task,\s*"update_fetch_wr",\s*FETCH_WR_STACK_BYTES'),
+             r'xTaskCreateStaticPinnedToCore\(wr_task,\s*"update_fetch_wr",\s*FETCH_WR_STACK_BYTES'),
          extra_roots=[("io_image_verify", "update_http.c"), ("iv_sha_finish", "update_http.c"),
                       ("iv_read", "update_http.c"), ("iv_sha_update", "update_http.c")]),
     dict(name="info_uart_bridge", root="info_bridge_task",
@@ -791,9 +791,6 @@ TASKS = [
     dict(name="profile_exec_wdt", root="watchdog_task_entry",
          stack=lambda: extract_int_literal("drivers/control/profile_executor_start.c",
              r'xTaskCreatePinnedToCoreWithCaps\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
-    dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task",
-         stack=lambda: extract_int_literal("drivers/http/ota_http_esp.c",
-             r'xTaskCreate\(ota_rollback_reboot_task,\s*"ota_rollback_reboot",\s*(\d+)')),
     dict(name="recovery_boot", root="ota_recovery_boot_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_boot_reboot_task,\s*"recovery_boot",\s*(\d+)')),
@@ -1113,8 +1110,7 @@ CEILING_BYTES = {
     # and the guard 9 pending-verdict merge. Honest free at 6144 B stays above 3000 B.
     # 2026-10-10 review R2ACE I7: +64 B margin over the 2752 B measurement (6144 B stack).
     "profile_exec_wdt": 2816,
-    "ota_rollback_reboot": 2464,
-    # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
+    # recovery_boot: same shape as the removed ota_rollback_reboot task (announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
     "ota_pico_rollback": 2912,
     "ota_confirm": 3808,  # 2026-10-15 re-measured  # measured 2026-10-12 against a fresh target build (lower bound: indirect call)

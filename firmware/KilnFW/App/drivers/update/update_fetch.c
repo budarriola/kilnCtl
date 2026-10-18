@@ -7,7 +7,9 @@
 // stacks). Nothing large is static: the status block and the job's work area (buffers, parsed
 // release, hash context) are allocated from PSRAM. The TLS task's stack is PSRAM too; mbedTLS is
 // configured for external allocation (sdkconfig.defaults). The only internal allocations this file
-// adds are the 4 KB stack of the lazily created flash-writer task and two binary semaphores.
+// adds are two binary semaphores. UR-01: the flash-writer task's stack (5120 B) and TCB, and the 1024 B stager
+// scratch, are STATIC internal DRAM (s_wr_stack, s_wr_tcb, s_scratch below), reserved at boot: an update never
+// depends on heap fragmentation for them.
 #include "update_fetch.h"
 
 #include <stdio.h>
@@ -78,7 +80,7 @@ static const char *TAG = "update_fetch";
 // on a fetch allocation (the flash write uses a 32 B stack buffer, the read chunk and TLS records are PSRAM), so
 // no assert ties the chunk or client buffers to it.
 // Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
-// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 9216 B)
+// internal heap, FETCH_CHECK_BLOCK_MIN (TLS buffers) on the largest internal block, FETCH_HEAP_ABORT_BELOW 9216 B)
 // live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
 // admission rule, redirect hops after the first the hop rule (same need as a start, UPDFX4), and the
 // read loop only the abort floor plus the consecutive-sample DMA check.
@@ -99,6 +101,17 @@ static const char *TAG = "update_fetch";
 // download that includes the redirect hop with a JWT-sized URL, and adjust. Not measured here.
 #define FETCH_TLS_STACK_BYTES 12288          // WP7 spike high-water 7952 B (spike, not production)
 #define FETCH_WR_STACK_BYTES 5120
+// UR-01: static writer stack/TCB and stager scratch (internal DRAM .bss, not heap, not PSRAM). ESP-IDF stack depth is
+// in bytes. One job runs at a time (s_c->busy), so one set is enough.
+static StaticTask_t s_wr_tcb;
+static StackType_t s_wr_stack[FETCH_WR_STACK_BYTES] __attribute__((aligned(16)));
+static uint8_t s_scratch[FETCH_HEAP_SCRATCH_BYTES] __attribute__((aligned(16)));
+// UW-01: the writer is ONE persistent static task, created on first need and never deleted (a self-deleted task's
+// TCB stays on the kernel termination list until IDLE reclaims it, so re-creating over it is not safe). WR_EXIT only
+// means "go idle". The two semaphores live as long as the module.
+static TaskHandle_t s_wr_handle;
+static SemaphoreHandle_t s_wr_req;
+static SemaphoreHandle_t s_wr_done;
 #define FETCH_TASK_PRIO 2
 #define FETCH_TASK_CORE 1                    // never core 0: spike gate (b), IDLE0 starvation
 
@@ -179,15 +192,12 @@ typedef struct {
     job_status_t st;
     TaskHandle_t tls_task;    // stack-margin slot
     TaskHandle_t wr_task;     // stack-margin slot
-    SemaphoreHandle_t wr_req;
-    SemaphoreHandle_t wr_done;
     volatile update_wr_arb_t wr_arb; // guarded by s_wr_mux; see update_wr_arb.h
     // LOW-5: buffers of the job that wedged the writer. Exactly one side frees them, decided under
     // s_wr_mux: the writer once its late op finally returns (wr_late_exited), or the job if the writer
     // already returned first. At most one set is ever held (wr_wedged blocks every later job's writer).
     void *leak_w;
     void *leak_body;
-    void *leak_scratch;
     volatile bool wr_late_exited;
     volatile bool wr_wedged;  // a writer op timed out: its task/buffers are abandoned until reboot
     wr_cmd_t wr;
@@ -221,7 +231,7 @@ struct work {
     bool stage_begun;
     bool stage_done;
     uint8_t chunk[FETCH_CHUNK_LEN];
-    uint8_t *scratch;                 // FETCH_SCRATCH_LEN bytes, MALLOC_CAP_INTERNAL, freed with the job
+    uint8_t *scratch;                 // s_scratch (static internal DRAM, UR-01), never freed
 };
 
 // ---- small helpers ---------------------------------------------------------------------------
@@ -396,7 +406,7 @@ static const char *heap_admit(const work_t *w, bool hop)
     }
     const unsigned need_free = update_fetch_heap_need(dl, hop);
     ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s%s", (unsigned)f, need_free,
-             (unsigned)l, (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check",
+             (unsigned)l, (unsigned)FETCH_CHECK_BLOCK_MIN, dl ? "download" : "check",
              hop ? " (redirect hop)" : "");
     // Distinct strings per cause (UPDFX1): free-heap shortfall, fragmentation, and mid-body abort differ.
     return hv == FETCH_HEAP_LOW_BLOCK ? "low_heap_block" : "low_heap_free";
@@ -602,7 +612,7 @@ static void wr_task(void *arg)
     (void)arg;
     update_stage_t *st = update_http_stage();
     for (;;) {
-        xSemaphoreTake(s_c->wr_req, portMAX_DELAY);
+        xSemaphoreTake(s_wr_req, portMAX_DELAY);
         wr_cmd_t *c = &s_c->wr;
         c->res = UPDATE_STAGE_OK;
         switch (c->cmd) {
@@ -621,15 +631,14 @@ static void wr_task(void *arg)
         case WR_EXIT:
             (void)stack_margin_retain_exit("update_fetch_wr",
                                            stack_margin_words_to_bytes((uint32_t)uxTaskGetStackHighWaterMark(NULL)));
-            stack_margin_task_exit(&s_c->wr_task); /* UB-01 */
-            xSemaphoreGive(s_c->wr_done);
-            vTaskDelete(NULL);
-            return;
+            /* UW-03: go idle; the stack_margin slot stays registered (no task_exit), only the high-water updates. */
+            xSemaphoreGive(s_wr_done);
+            continue;
         }
         // Review 5 L1: one critical section decides whether the caller already timed out, so a finish in
         // the same tick as the timeout is either collected by the caller or undone here, never both
         // skipped.
-        void *reclaim_w = NULL, *reclaim_body = NULL, *reclaim_scratch = NULL;
+        void *reclaim_w = NULL, *reclaim_body = NULL;
         portENTER_CRITICAL(&s_wr_mux);
         const bool abandoned = update_wr_arb_writer_done(&s_c->wr_arb);
         if (abandoned) {
@@ -638,12 +647,10 @@ static void wr_task(void *arg)
             s_c->wr_late_exited = true;
             reclaim_w = s_c->leak_w;
             reclaim_body = s_c->leak_body;
-            reclaim_scratch = s_c->leak_scratch;
-            s_c->leak_w = s_c->leak_body = s_c->leak_scratch = NULL;
+            s_c->leak_w = s_c->leak_body = NULL;
         }
         portEXIT_CRITICAL(&s_wr_mux);
         if (abandoned) {
-            heap_caps_free(reclaim_scratch);
             heap_caps_free(reclaim_body);
             heap_caps_free(reclaim_w);
             // Review 3 LOW-1: this op was abandoned (the job already reported FAILED). Never let it leave
@@ -658,7 +665,7 @@ static void wr_task(void *arg)
                 update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB);
             }
         }
-        xSemaphoreGive(s_c->wr_done);
+        xSemaphoreGive(s_wr_done);
     }
 }
 
@@ -672,29 +679,27 @@ static bool wr_start(void)
     if (s_c->wr_wedged) {
         return false; // a previous writer op never returned; reboot to recover
     }
-    s_c->wr_req = xSemaphoreCreateBinary();
-    s_c->wr_done = xSemaphoreCreateBinary();
-    if (s_c->wr_req == NULL || s_c->wr_done == NULL) {
-        goto fail;
+    if (s_wr_handle != NULL) {
+        return true; // persistent writer already parked on wr_req
+    }
+    if (s_wr_req == NULL) {
+        s_wr_req = xSemaphoreCreateBinary();
+    }
+    if (s_wr_done == NULL) {
+        s_wr_done = xSemaphoreCreateBinary();
+    }
+    if (s_wr_req == NULL || s_wr_done == NULL) {
+        return false; // retried on the next job; the semaphores are kept for the module lifetime
     }
     dram_watch_log_task("update_fetch_wr", "before-create");
-    if (dram_watch_task_after("update_fetch_wr",
-                              xTaskCreatePinnedToCore(wr_task, "update_fetch_wr", FETCH_WR_STACK_BYTES, NULL,
-                                                      FETCH_TASK_PRIO, &s_c->wr_task, FETCH_TASK_CORE)) != pdPASS) {
-        s_c->wr_task = NULL;
-        goto fail;
+    // Static task: no heap for the stack or TCB (UR-01). Created once, never deleted (UW-01).
+    s_wr_handle = xTaskCreateStaticPinnedToCore(wr_task, "update_fetch_wr", FETCH_WR_STACK_BYTES, NULL,
+                                                FETCH_TASK_PRIO, s_wr_stack, &s_wr_tcb, FETCH_TASK_CORE);
+    if (s_wr_handle == NULL) {
+        return false;
     }
+    s_c->wr_task = s_wr_handle;
     return true;
-fail:
-    if (s_c->wr_req) {
-        vSemaphoreDelete(s_c->wr_req);
-        s_c->wr_req = NULL;
-    }
-    if (s_c->wr_done) {
-        vSemaphoreDelete(s_c->wr_done);
-        s_c->wr_done = NULL;
-    }
-    return false;
 }
 
 static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t len, uint32_t total,
@@ -715,8 +720,8 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
     portENTER_CRITICAL(&s_wr_mux);
     update_wr_arb_issue(&s_c->wr_arb);
     portEXIT_CRITICAL(&s_wr_mux);
-    xSemaphoreGive(s_c->wr_req);
-    if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
+    xSemaphoreGive(s_wr_req);
+    if (xSemaphoreTake(s_wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
         portENTER_CRITICAL(&s_wr_mux);
         const bool wedged = update_wr_arb_caller_timeout(&s_c->wr_arb);
         portEXIT_CRITICAL(&s_wr_mux);
@@ -728,7 +733,7 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
             return UPDATE_STAGE_ERR_FLASH;
         }
         // Review 5 L1: the writer finished in the same instant; its give is (about to be) posted.
-        if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        if (xSemaphoreTake(s_wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
             // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
             s_c->wr_wedged = true;
             // LOW-1: the writer already finished this op (arb said so), so it will never hand off again:
@@ -750,14 +755,10 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
 
 static void wr_stop(void)
 {
-    if (s_c->wr_req == NULL || s_c->wr_wedged) {
+    if (s_wr_handle == NULL || s_c->wr_wedged) {
         return;
     }
-    (void)wr_call(WR_EXIT, NULL, 0, 0, NULL, NULL);
-    vSemaphoreDelete(s_c->wr_req);
-    vSemaphoreDelete(s_c->wr_done);
-    s_c->wr_req = NULL;
-    s_c->wr_done = NULL;
+    (void)wr_call(WR_EXIT, NULL, 0, 0, NULL, NULL); // UW-01: the writer goes idle, it is not deleted
 }
 
 // ---- HTTP GET with allowlisted, bounded manual redirects --------------------------------------
@@ -1191,11 +1192,9 @@ static void fetch_task(void *arg)
     const bool wedged_at_start = s_c->wr_wedged;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    // The stager scratch is internal on purpose (MED-1); one block per DOWNLOAD job, in the admission budget.
+    // The stager scratch is internal on purpose (MED-1) and, since UR-01, a static array (no heap) used by DOWNLOAD jobs.
     // A check has no stager (memory sink), so it allocates none (UPDFX1 LOW-3).
-    uint8_t *scratch = p.kind == KIND_DOWNLOAD
-                           ? heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-                           : NULL;
+    uint8_t *scratch = p.kind == KIND_DOWNLOAD ? s_scratch : NULL;  // UR-01: static, never freed
     const char *err = NULL;
     if (w == NULL || body == NULL || (p.kind == KIND_DOWNLOAD && scratch == NULL)) {
         err = "no_memory";
@@ -1224,11 +1223,9 @@ static void fetch_task(void *arg)
         if (!writer_gone) {
             s_c->leak_w = w;
             s_c->leak_body = body;
-            s_c->leak_scratch = scratch;
         }
         portEXIT_CRITICAL(&s_wr_mux);
         if (writer_gone) {
-            heap_caps_free(scratch);
             heap_caps_free(body);
             heap_caps_free(w);
             ESP_LOGE(TAG, "flash writer wedged earlier, already returned: job buffers freed, update claim released");
@@ -1236,7 +1233,6 @@ static void fetch_task(void *arg)
             ESP_LOGE(TAG, "flash writer wedged: job buffers handed to the writer, update claim released");
         }
     } else {
-        heap_caps_free(scratch);
         heap_caps_free(body);
         heap_caps_free(w);
     }

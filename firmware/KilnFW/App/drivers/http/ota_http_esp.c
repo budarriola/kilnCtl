@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
@@ -701,21 +702,19 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// File-scope (not handler-local) so ota_rollback_reboot_task() below can
-// null it itself on its (never-taken-in-practice) failure fallthrough --
-// see that task's own comment on why. DRAM_PSRAM_PLAN.md Phase 0 (4.2):
-// stack_margin_register() target.
-static TaskHandle_t s_ota_rollback_reboot_task;
+// OR-03: the rollback reboot runs from a one-shot esp_timer (static handle,
+// created on first use) instead of an on-demand 4096 B task, so the reboot needs
+// no task stack from the scarce internal heap. The 500 ms timeout keeps the
+// JSON reply ahead of the reboot (factory_reset.c reboot_task() pattern).
+// Timer callbacks run on the esp_timer service task and must stay short: this
+// one sends one best-effort ANNOUNCE_REBOOT frame, then calls the IDF rollback
+// (which does not return on success); it never waits on a lock or queue.
+static esp_timer_handle_t s_ota_rollback_reboot_timer;
+#define OTA_ROLLBACK_REBOOT_DELAY_US (500 * 1000)
 
-// --- POST /api/ota/esp/rollback -- see ota_http.h's doc comment above this
-// section for the full contract. Runs on its own short-lived task (same
-// factory_reset.c reboot_task() pattern) so the JSON response already
-// queued by the handler has a chance to reach the client before the
-// connection is torn down by the reboot.
-static void ota_rollback_reboot_task(void *arg)
+static void ota_rollback_reboot_timer_cb(void *arg)
 {
     (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(500));
 
     // KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
     // reboots" line: this call to esp_ota_mark_app_invalid_rollback_and_
@@ -744,23 +743,27 @@ static void ota_rollback_reboot_task(void *arg)
     ESP_LOGE(OTA_HTTP_TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
                   "board NOT rebooted, still running the current image",
              esp_err_to_name(err));
-    // This fallback (the call itself failing to even start the reboot) is
-    // the only path in this task that falls off the end of the function --
-    // on success esp_restart() never returns and this line is unreached.
-    // With CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y, a task function that
-    // returns is NOT quietly torn down: vPortTaskWrapper (IDF
-    // components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c) logs
-    // "FreeRTOS Task ... should not return, Aborting now!" and calls
-    // abort(), which panics the board. Null the handle first so
-    // stack_margin_read() (stack_margin.c), which treats a non-NULL handle
-    // as alive and calls uxTaskGetStackHighWaterMark() on it, does not read
-    // back "alive" for a task that is about to be deleted, then delete the
-    // task explicitly so the function never actually returns.
     // OP-02: the client was already told "rebooting"; release the OTA claim taken by the handler so
     // a failed reboot does not leave heat and updates refused until a manual reboot.
     ota_http_update_end();
-    stack_margin_task_exit(&s_ota_rollback_reboot_task); /* UB-01 */
-    vTaskDelete(NULL);
+}
+
+/* Arm the one-shot rollback reboot timer (created once). Returns ESP_OK when armed. */
+static esp_err_t ota_rollback_reboot_schedule(void)
+{
+    if (s_ota_rollback_reboot_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = ota_rollback_reboot_timer_cb,
+            .arg = NULL,
+            .name = "ota_rollback_reboot",
+        };
+        esp_err_t err = esp_timer_create(&args, &s_ota_rollback_reboot_timer);
+        if (err != ESP_OK) {
+            s_ota_rollback_reboot_timer = NULL;
+            return err;
+        }
+    }
+    return esp_timer_start_once(s_ota_rollback_reboot_timer, OTA_ROLLBACK_REBOOT_DELAY_US);
 }
 esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 {
@@ -836,29 +839,21 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // transfer()'s cleanup path has, because the board is about to reboot
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
-    // is nothing left to release. On the failure path (reboot task not
-    // created, below) it IS released (OP-02) so the board is not wedged.
+    // is nothing left to release. On the failure path (reboot timer not
+    // armed, below) it IS released (OP-02) so the board is not wedged.
     //
-    // The reply is sent only AFTER the reboot task exists (campaign 9b LOW):
-    // the task waits 500 ms before rebooting, so the response still goes out
+    // The reply is sent only AFTER the reboot timer is armed (campaign 9b LOW):
+    // the timer fires after 500 ms before rebooting, so the response still goes out
     // first, but a creation failure is now reported as 500 instead of an
     // "ok / rebooting" the board will never act on.
-    dram_watch_log_task("ota_rollback_reboot", "before-create");
-    bool task_started = dram_watch_task_after("ota_rollback_reboot",
-                                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 4096, NULL,
-                                                          tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task)) == pdPASS;
-    /* Registered unconditionally, success or not -- stack_margin_register()
-     * reads *task_handle_slot fresh at report time, so a creation failure
-     * just reads back alive=false rather than needing a second branch here.
-     * 4096 must match the xTaskCreate() literal above. */
-    stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 4096);
+    bool task_started = ota_rollback_reboot_schedule() == ESP_OK;
     if (!task_started) {
-        ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
+        ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to arm the reboot timer -- "
                       "board will NOT reboot, still running the current image", ip);
         ota_http_update_end();
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to start the reboot task; the board was not rebooted\"}");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to arm the reboot timer; the board was not rebooted\"}");
         return ESP_OK;
     }
     httpd_resp_set_type(req, "application/json");
