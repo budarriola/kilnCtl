@@ -410,6 +410,11 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **HH-05** INFO. An undecided verdict with no DIAG never times out (by design, fail safe, not a deadlock).
 - **HH-06** INFO. since_ms is never cleared after a verdict; the `== 0` re-arm guards rely on note_pico_boot's early return while unseen.
 - **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm. Status fixed, tests added (00d7eec68).
+- **HF-01** MED, `heat_enable.c:366-373`. An enable that lands while classify_pending is set clears `pending`. After a benign verdict reconcile never re-requests heat, and the firing runs cold with no pause reason. Predates 00d7eec68 (SL3-R2 A3). Fix: keep pending when there is no hold. Status open.
+- **HF-02** LOW. The HH-03 `pico_boot_id_unseen` autotune abort has no test; the source scan at test_heat_enable.c:1574 covers only the other two reasons. Status open.
+- **HF-03** INFO. The per-tick autotune abort while unseen is idempotent; only the lock-busy warning can repeat, as in the existing branches.
+- **HF-04** INFO. HH-01 lets an idle benign reboot seed the 15 min window (by design); no permanent hold, single benign reboots auto-resume.
+- **HF-05** INFO. The HH-07 latch-plus-re-arm assertions each map to a distinct mutant, but no negtest has been run on test_hh_fixes.
 ## Review 2026-10-18: OTA failure paths (docs/audits/REVIEW_OTA_FAILPATHS_2026_10_18.md)
 - **OP-01** MED, `recovery_apply.c` step 3, `update_stage.c` upload_finish. Only the first chunk of the image is structurally checked before app is erased. A corrupt or truncated hand-staged .bin is staged VERIFIED, because its SHA covers only the bytes received. It then fails esp_image_verify only after app is rewritten, which leaves the board in recovery until a good image is pushed. Fix: run esp_image_verify over the stage region before the first app erase. Status open.
 - **OP-02** LOW, `ota_http_esp.c:715-761`. If mark_app_invalid_rollback_and_reboot fails, the rollback task exits without ota_http_update_end, so the claim is held until reboot (fail safe). Unreachable on single-slot (route answers 409). Status open.
