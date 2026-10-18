@@ -1051,7 +1051,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
              * internal-only, plain xTaskCreatePinnedToCore() stack, same
              * "PC-link instance only, not the safety-link one" caveat as
              * uart_owner above. */
-            stack_margin_register("uart_proto_rx", ctx->uart_proto->rx_task_handle, UART_PROTOCOL_STACK_SIZE);
+            stack_margin_register("uart_proto_rx", &ctx->uart_proto->rx_task_handle, UART_PROTOCOL_STACK_SIZE);
         }
     }
 

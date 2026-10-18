@@ -16,6 +16,7 @@
 #include <strings.h>
 
 #include "build_info.h"
+#include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -40,6 +41,7 @@
 #include "update_policy.h"
 #include "update_fetch_heap.h"
 #include "update_release.h"
+#include "update_semver.h"
 #include "update_settings.h"
 #include "update_stage.h"
 #include "update_wr_arb.h"
@@ -554,6 +556,17 @@ static void running_identity(update_identity_t *r, const update_identity_t *cand
 {
     memset(r, 0, sizeof(*r));
     strlcpy(r->version, FW_RELEASE_VERSION, sizeof(r->version));
+    if (r->version[0] == '\0') {
+        // BM-02: a dev build bakes no release tag; take its `git describe` firmware version so the
+        // policy can still order it against a candidate instead of treating it as unknown.
+        const esp_app_desc_t *d = esp_app_get_description();
+        if (d != NULL) {
+            char dv[sizeof(d->version) + 1];
+            memcpy(dv, d->version, sizeof(d->version));
+            dv[sizeof(d->version)] = '\0';
+            (void)update_semver_from_describe(dv, r->version, sizeof(r->version));
+        }
+    }
     strlcpy(r->partitions_sha256, FW_PARTITIONS_SHA256, sizeof(r->partitions_sha256));
     r->zones_cfg_version = ZONES_CFG_VERSION;
     r->kilnlink_version = KILNLINK_PROTOCOL_VERSION;

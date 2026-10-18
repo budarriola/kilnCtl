@@ -21,6 +21,9 @@
 // relying on every call site being effectively single-threaded with it --
 // this test exercises that documented contract's OTHER half, the de-dup
 // itself, which needs no threading to reach.
+#include <stdlib.h>
+#include <string.h>
+
 #include "test_common.h"
 
 #include "../drivers/common/stack_margin.h"
@@ -95,10 +98,52 @@ static void test_registry_reads_back_the_dedup_row(void)
     TEST_CHECK(found, "registry_test_task must be readable back after the repeat and collision registrations above");
 }
 
+// BM-01: stack_margin_register() takes the ADDRESS of a TaskHandle_t slot and reads through it on every
+// get_stack_margin. main_network_http.c passed uart_proto->rx_task_handle by value after RAM-03 turned the
+// protocol struct into a pointer, so the registry read the TCB's first word as a task handle and the INFO
+// 0x04 reply never came. Every call in the boot file must pass an address.
+static void test_main_network_http_registrations_pass_slot_addresses(void)
+{
+    TEST_SECTION("stack_margin: main_network_http.c registers slot addresses, not handle values (BM-01)");
+    static const char *const candidates[] = {
+        "../main_network_http.c",
+        "App/main_network_http.c",
+        "firmware/KilnFW/App/main_network_http.c",
+    };
+    char *text = test_read_source_anchored(__FILE__, "../main_network_http.c", candidates,
+                                           sizeof(candidates) / sizeof(candidates[0]));
+    if (!text) {
+        TEST_CHECK(false, "could not locate App/main_network_http.c");
+        return;
+    }
+    int calls = 0, bad = 0;
+    const char *p = text;
+    while ((p = strstr(p, "stack_margin_register(\"")) != NULL) {
+        const char *q = strchr(p + strlen("stack_margin_register(\""), '"');
+        p += strlen("stack_margin_register(\"");
+        if (!q) {
+            break;
+        }
+        q++; /* past the closing quote */
+        while (*q == ',' || *q == ' ' || *q == '\n' || *q == '\r' || *q == '\t') {
+            q++;
+        }
+        calls++;
+        if (*q != '&') {
+            bad++;
+        }
+    }
+    TEST_CHECK(calls >= 3, "main_network_http.c still has its stack_margin_register() calls");
+    TEST_CHECK(bad == 0, "every stack_margin_register() slot argument is an address (&...), never a handle value");
+    TEST_CHECK(strstr(text, "&ctx->uart_proto->rx_task_handle") != NULL, "uart_proto_rx registers the rx_task_handle address");
+    free(text);
+}
+
 void run_test_stack_margin_registry(void)
 {
     TEST_SECTION("stack_margin registry: register() de-dup by (name, slot)");
     test_repeat_register_same_name_and_slot_is_a_noop();
     test_same_name_different_slot_is_refused_not_appended();
     test_registry_reads_back_the_dedup_row();
+    test_main_network_http_registrations_pass_slot_addresses();
 }
