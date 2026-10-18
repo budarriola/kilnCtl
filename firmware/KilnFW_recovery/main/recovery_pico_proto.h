@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_version.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,8 +33,8 @@ extern "C" {
 // --- commands / addressing -------------------------------------------------
 #define RPP_CMD_GET_STATUS 0x01u
 #define RPP_CMD_ANNOUNCE_VERSION 0x0Fu
-#define RPP_ANNOUNCE_PROTOCOL 16u
-#define RPP_ANNOUNCE_MIN_COMPATIBLE 7u
+#define RPP_ANNOUNCE_PROTOCOL ((unsigned)KILNLINK_PROTOCOL_VERSION)
+#define RPP_ANNOUNCE_MIN_COMPATIBLE ((unsigned)KILNLINK_MIN_COMPATIBLE)
 #define RPP_CMD_UPDATE_BEGIN 0x10u
 #define RPP_CMD_UPDATE_DATA 0x11u
 #define RPP_CMD_UPDATE_END 0x12u

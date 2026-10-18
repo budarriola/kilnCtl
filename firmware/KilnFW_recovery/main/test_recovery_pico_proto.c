@@ -153,7 +153,9 @@ static void test_frames(void)
     CHECK(p[0] == 0x10, "begin command");
     CHECK(get_u32(p + 1) == 0x53414655u, "begin magic SAFU");
     CHECK(p[5] == 1 && p[6] == 1, "begin target RP2040, header v1");
-    CHECK(p[7] == 16 && p[8] == 0 && p[9] == 7 && p[10] == 0, "begin protocol 16 / min 7");
+    CHECK(p[7] == (KILNLINK_PROTOCOL_VERSION & 0xFF) && p[8] == (KILNLINK_PROTOCOL_VERSION >> 8) &&
+              p[9] == KILNLINK_MIN_COMPATIBLE && p[10] == 0,
+          "begin protocol/min come from CommonFW kilnlink_version.h");
     CHECK(p[11] == 0 && p[12] == 0, "begin requested_slot and flags 0");
     CHECK(get_u32(p + 13) == 0xD0000u && get_u32(p + 17) == 0x11223344u, "begin length and crc");
     CHECK(memcmp(p + 21, "recovery        ", 16) == 0, "begin version space padded");
@@ -420,9 +422,10 @@ static void test_image_and_slots(void)
 
     // ANNOUNCE_VERSION packer: 0x0F, protocol 16, min 7, empty strings.
     uint8_t ap[KILNLINK_FRAME_MAX_PAYLOAD];
-    CHECK(rpp_pack_announce(ap) == 9 && ap[0] == 0x0F && ap[1] == 16 && ap[2] == 0 && ap[3] == 7 &&
+    CHECK(rpp_pack_announce(ap) == 9 && ap[0] == 0x0F && ap[1] == (KILNLINK_PROTOCOL_VERSION & 0xFF) &&
+              ap[2] == (KILNLINK_PROTOCOL_VERSION >> 8) && ap[3] == KILNLINK_MIN_COMPATIBLE &&
               ap[4] == 0 && ap[6] == 0 && ap[7] == 0,
-          "announce payload layout (protocol 16, min 7, no strings)");
+          "announce payload layout (shared protocol/min, no strings)");
 
     CHECK(rpp_chunk_count(0) == 0 && rpp_chunk_count(1) == 1 && rpp_chunk_count(248) == 1 &&
               rpp_chunk_count(249) == 2 && rpp_chunk_count(RPP_SLOT_SIZE) == 3436,

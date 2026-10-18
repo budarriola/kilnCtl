@@ -15,6 +15,7 @@
 #include "psa/crypto.h"
 
 #include "recovery_boot_verify.h"
+#include "recovery_http.h"
 #include "stage_header.h"
 #include "stage_image_verify.h"
 
@@ -268,6 +269,9 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     const esp_partition_t *stage = find_stage();
     if (!stage) {
         return ESP_ERR_NOT_FOUND;
+    }
+    if (recovery_http_restart_pending()) { // RE-01: a restart is scheduled; never start an app write
+        return ESP_ERR_INVALID_STATE;
     }
     // Atomic claim: the main task (unattended install) and an httpd handler can race here.
     bool expected = false;

@@ -8,9 +8,10 @@
 // (recovery_wifi.c), lives only in RAM, and is never put in an HTTP response,
 // a log line, the serial port or NVS.
 //
-// Alphabet: 32 unambiguous symbols (digits 2-9 and uppercase letters minus
-// I and O -- no 0/O/1/l/I). 32 symbols means each random byte maps with
-// `& 31` and no modulo bias. 12 symbols = 60 bits, inside WPA2's 8..63 range.
+// Alphabet: 26 unambiguous symbols (RE-03): no 0/O, 1/I/l, 5/S, 2/Z, 8/B.
+// Each random byte maps with `% 26` (bytes 0..21 hit 10 times, 22..25 nine
+// times: min-entropy 4.68 bits/symbol). 13 symbols >= 60 bits (60.8), inside
+// WPA2's 8..63 range.
 #ifndef RECOVERY_PASSPHRASE_H
 #define RECOVERY_PASSPHRASE_H
 
@@ -21,9 +22,9 @@
 extern "C" {
 #endif
 
-#define RPASS_LEN 12u
-#define RPASS_ALPHABET "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-#define RPASS_ALPHABET_LEN 32u
+#define RPASS_LEN 13u
+#define RPASS_ALPHABET "34679ACDEFGHJKLMNPQRTUVWXY"
+#define RPASS_ALPHABET_LEN 26u
 
 // Maps RPASS_LEN random bytes to RPASS_LEN alphabet symbols plus a NUL.
 void rpass_format(const uint8_t rnd[RPASS_LEN], char out[RPASS_LEN + 1]);

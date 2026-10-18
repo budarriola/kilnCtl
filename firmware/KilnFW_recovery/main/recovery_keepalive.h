@@ -11,6 +11,7 @@
 #define RECOVERY_KEEPALIVE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,17 @@ extern "C" {
 // installs UART1 and starts the keepalive task. Never blocks boot; failures
 // are logged (the Pico then trips S6b as before, which is the safe outcome).
 void recovery_keepalive_start(void);
+
+// RE-02: observable proof the keepalive is transmitting (the Pico never replies
+// to it, so this is the only on-target evidence). Surfaced in /api/recovery/status.
+typedef struct {
+    uint32_t sent;         // frames fully accepted by uart_write_bytes()
+    uint32_t send_errors;  // writes that returned an error or a short count
+    int32_t last_err;      // 0 = last write ok; -1 = driver error; -2 = short write; -3 = frame build failed
+    uint32_t last_send_ms; // uptime (ms) of the last attempted send; 0 = none yet
+    bool task_running;     // the keepalive task exists (false after its window ended or on setup failure)
+} recovery_keepalive_stats_t;
+void recovery_keepalive_get_stats(recovery_keepalive_stats_t *out);
 
 // Borrow UART1 for a Pico transfer. False if the UART cannot be set up.
 bool recovery_keepalive_acquire(void);

@@ -146,7 +146,13 @@ try {
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "ESP_LOGE(TAG, RLCD_NOT_READY_MSG); ESP_LOGI(TAG, `"pw %s`", s_net_pass);" -Tag "passleak"
     Test-Mutant -File "recovery_lcd.c" -Needle "if (a > 0 && rlcd_rereset_allowed(s_expander_err, s_rereset_count)) {" -Replacement "if (a > 0) {" -Tag "burst_ungated"
     Test-Mutant -File "recovery_lcd.c" -Needle "s_bg_state = rlcd_classify_boot_guard(rc, decoded);" -Replacement "s_bg_state = RLCD_BG_NONE;" -Tag "noclassify"
-    Test-Mutant -File "recovery_http.c" -Needle "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (recovery_pico_busy()) {" -Replacement "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (recovery_apply_busy()) {`n        return refuse_while_applying(req);`n    }`n    if (false) {" -Tag "wifi_reset_no_pico_busy"
+    # RE-01 restart fence.
+    Test-Mutant -File "recovery_http.c" -Needle "    __atomic_store_n(&s_restart_pending, true, __ATOMIC_SEQ_CST);" -Replacement "" -Tag "re01_flag_never_set"
+    Test-Mutant -File "recovery_http.c" -Needle "return recovery_apply_busy() || recovery_http_restart_pending();" -Replacement "return recovery_apply_busy();" -Tag "re01_route_ignores_flag"
+    Test-Mutant -File "recovery_http.c" -Needle "if (recovery_http_restart_pending() || !recovery_app_write_claim()) {" -Replacement "if (!recovery_app_write_claim()) {" -Tag "re01_ota_esp_unfenced"
+    Test-Mutant -File "recovery_apply_esp.c" -Needle "if (recovery_http_restart_pending()) { // RE-01" -Replacement "if (0) { // RE-01" -Tag "re01_apply_start_unfenced"
+    Test-Mutant -File "recovery_http.c" -Needle "\`"keepalive_sent\`":%u," -Replacement "\`"ka_x\`":%u," -Tag "re02_status_missing"
+    Test-Mutant -File "recovery_http.c" -Needle "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (route_blocked()) {`n        return refuse_while_applying(req);`n    }`n    if (recovery_pico_busy()) {" -Replacement "static esp_err_t wifi_reset_post(httpd_req_t *req)`n{`n    if (route_blocked()) {`n        return refuse_while_applying(req);`n    }`n    if (false) {" -Tag "wifi_reset_no_pico_busy"
     Test-Mutant -File "recovery_http.c" -Needle "\`"lcd_ready\`"" -Replacement "\`"lcd_rdy\`"" -Tag "nolcdready"
 
     Test-Mutant -File "recovery_http.c" -Needle "gen == s_verify_gen" -Replacement "true" -Tag "verify_publish_ungated"
