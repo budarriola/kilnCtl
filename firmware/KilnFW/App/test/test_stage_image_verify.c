@@ -15,6 +15,7 @@ typedef struct {
     uint8_t acc[32];  // stand-in digest state
     int begins, finishes;
     int fail_read_at; // -1 = never
+    int chip_calls;
 } fx_t;
 
 static void h_mix(uint8_t acc[32], uint32_t pos, uint8_t b)
@@ -53,6 +54,16 @@ static int fx_finish(void *c, uint8_t out[32])
     memcpy(out, f->acc, 32);
     return 0;
 }
+static int fx_chip(void *c, const uint8_t h[24])
+{
+    fx_t *f = c;
+    f->chip_calls++;
+    // Mirrors bootloader_common_check_chip_validity: this chip is full rev 1; header
+    // min_chip_rev_full at 15..16, max_chip_rev_full at 17..18 (0xFFFF = no limit).
+    uint32_t mn = (uint32_t)h[15] | ((uint32_t)h[16] << 8);
+    uint32_t mx = (uint32_t)h[17] | ((uint32_t)h[18] << 8);
+    return (1u >= mn && 1u <= mx) ? 0 : -1;
+}
 static void put32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)v;
@@ -74,6 +85,8 @@ static uint32_t build(fx_t *f, uint32_t irom_load)
     p[1] = 3;
     put32(p + 4, 0x40375000u);
     p[12] = 9; // ESP32-S3
+    p[17] = 0xFF; // max_chip_rev_full = 0xFFFF (no limit)
+    p[18] = 0xFF;
     p[23] = 1; // hash appended
     uint32_t off = 24;
     const uint32_t loads[3] = {0x3C000020u, 0x3FC88000u, irom_load};
@@ -103,7 +116,7 @@ static uint32_t build(fx_t *f, uint32_t irom_load)
 
 static stage_image_result_t run(fx_t *f, uint32_t avail, uint32_t *len)
 {
-    const stage_image_io_t io = {.ctx = f, .read = fx_read, .sha_begin = fx_begin, .sha_update = fx_update, .sha_finish = fx_finish};
+    const stage_image_io_t io = {.ctx = f, .read = fx_read, .sha_begin = fx_begin, .sha_update = fx_update, .sha_finish = fx_finish, .chip_ok = fx_chip};
     return stage_image_verify(&io, avail, len);
 }
 
@@ -144,9 +157,9 @@ static void test_corrupt(void)
     TEST_CHECK(run(&f, IMG_CAP, NULL) == STAGE_IMG_BAD_HASH, "corrupt header field -> bad hash");
 
     build(&f, 0x420000D4u);
-    TEST_CHECK(run(&f, n - 1, NULL) == STAGE_IMG_TOO_LONG, "truncated by one byte -> too long");
+    TEST_CHECK(run(&f, n - 1, NULL) == STAGE_IMG_TOO_SHORT, "truncated by one byte -> too short");
     TEST_CHECK(f.begins == f.finishes, "hash released on truncation");
-    TEST_CHECK(run(&f, 100, NULL) == STAGE_IMG_TOO_LONG, "truncated mid-segment -> too long");
+    TEST_CHECK(run(&f, 100, NULL) == STAGE_IMG_TOO_SHORT, "truncated mid-segment -> too short");
 
     build(&f, 0x420000D4u);
     f.img[0] = 0xEA;
@@ -170,6 +183,29 @@ static void test_corrupt(void)
     TEST_CHECK(f.begins == f.finishes, "hash released on io error");
 }
 
+static void test_chip_rev_and_padding(void)
+{
+    TEST_SECTION("stage_image_verify -- chip revision (RY-01) and truncation in padding/digest (RY-03)");
+    fx_t f;
+    uint32_t n = build(&f, 0x420000D4u);
+    TEST_CHECK(run(&f, IMG_CAP, NULL) == STAGE_IMG_OK && f.chip_calls == 1, "in-range chip rev passes, callback ran once");
+    build(&f, 0x420000D4u);
+    f.img[15] = 2; // min_chip_rev_full 2 > chip rev 1
+    TEST_CHECK(run(&f, IMG_CAP, NULL) == STAGE_IMG_BAD_CHIP_REV, "min chip rev above this chip refused");
+    TEST_CHECK(f.hashed == 0 && f.begins == f.finishes, "chip refusal hashes no body, hash released");
+    build(&f, 0x420000D4u);
+    f.img[17] = 0;
+    f.img[18] = 0; // max_chip_rev_full 0 < chip rev 1
+    TEST_CHECK(run(&f, IMG_CAP, NULL) == STAGE_IMG_BAD_CHIP_REV, "max chip rev below this chip refused");
+    // Segments end at 24+3*8+204 = 252; padding 252..255 (checksum at 255), digest 256..288.
+    build(&f, 0x420000D4u);
+    TEST_CHECK(n == 288, "fixture layout as assumed");
+    TEST_CHECK(run(&f, 254, NULL) == STAGE_IMG_TOO_SHORT, "truncated inside checksum padding -> too short");
+    TEST_CHECK(run(&f, 256, NULL) == STAGE_IMG_TOO_SHORT, "truncated before digest -> too short");
+    TEST_CHECK(run(&f, 270, NULL) == STAGE_IMG_TOO_SHORT, "truncated inside digest -> too short");
+    TEST_CHECK(f.begins == f.finishes, "hash released on every truncation");
+}
+
 static void test_alignment(void)
 {
     TEST_SECTION("stage_image_verify -- mapped segment alignment is image-relative (RX-11)");
@@ -190,4 +226,5 @@ void run_test_stage_image_verify(void)
     test_good();
     test_corrupt();
     test_alignment();
+    test_chip_rev_and_padding();
 }

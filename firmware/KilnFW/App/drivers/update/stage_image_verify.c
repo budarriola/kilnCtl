@@ -50,7 +50,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
 {
     uint8_t hdr[IMG_HDR_LEN];
     if (avail < IMG_HDR_LEN + HASH_LEN + 16u) {
-        return STAGE_IMG_TOO_LONG;
+        return STAGE_IMG_TOO_SHORT;
     }
     if (io->read(io->ctx, 0, hdr, IMG_HDR_LEN) != 0) {
         return STAGE_IMG_IO;
@@ -59,6 +59,9 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
     const uint32_t chip = (uint32_t)hdr[12] | ((uint32_t)hdr[13] << 8);
     if (hdr[0] != IMAGE_MAGIC || nseg == 0 || nseg > STAGE_IMG_MAX_SEGMENTS || chip != STAGE_IMG_CHIP_ID_ESP32S3) {
         return STAGE_IMG_BAD_HEADER;
+    }
+    if (io->chip_ok(io->ctx, hdr) != 0) {
+        return STAGE_IMG_BAD_CHIP_REV; // before any erase: bootloader and cb_app_verify only run after it
     }
     if (hdr[23] != 1u) {
         return STAGE_IMG_NO_HASH; // IDF app builds always append it; require it for corruption detection
@@ -71,7 +74,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
     for (uint32_t i = 0; i < nseg; i++) {
         uint8_t sh[SEG_HDR_LEN];
         if (off > avail - SEG_HDR_LEN) {
-            return STAGE_IMG_TOO_LONG;
+            return STAGE_IMG_TOO_SHORT;
         }
         if (io->read(io->ctx, off, sh, SEG_HDR_LEN) != 0 || io->sha_update(io->ctx, sh, SEG_HDR_LEN) != 0) {
             return STAGE_IMG_IO;
@@ -88,7 +91,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
             return STAGE_IMG_MISALIGNED;
         }
         if (dlen > avail - off) {
-            return STAGE_IMG_TOO_LONG;
+            return STAGE_IMG_TOO_SHORT;
         }
         if (feed(io, off, dlen, &x, NULL) != 0) {
             return STAGE_IMG_IO;
@@ -98,7 +101,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
     // IDF process_checksum(): pad so the checksum byte ends a 16-byte block.
     const uint32_t pad = ((off + 1u + 15u) & ~15u) - off;
     if (pad > avail - off) {
-        return STAGE_IMG_TOO_LONG;
+        return STAGE_IMG_TOO_SHORT;
     }
     uint8_t ck = 0;
     if (feed(io, off, pad, NULL, &ck) != 0) {
@@ -109,7 +112,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
         return STAGE_IMG_BAD_CHECKSUM;
     }
     if (HASH_LEN > avail - off) {
-        return STAGE_IMG_TOO_LONG;
+        return STAGE_IMG_TOO_SHORT;
     }
     uint8_t want[HASH_LEN];
     uint8_t got[HASH_LEN];
@@ -131,7 +134,7 @@ static stage_image_result_t walk(const stage_image_io_t *io, uint32_t avail, uin
 
 stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len)
 {
-    if (io == NULL || io->read == NULL || io->sha_begin == NULL || io->sha_update == NULL || io->sha_finish == NULL) {
+    if (io == NULL || io->read == NULL || io->sha_begin == NULL || io->sha_update == NULL || io->sha_finish == NULL || io->chip_ok == NULL) {
         return STAGE_IMG_IO;
     }
     if (io->sha_begin(io->ctx) != 0) {

@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "bootloader_common.h"
 #include "esp_image_format.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -155,6 +156,11 @@ static int sv_sha_finish(void *c, uint8_t out[32])
     h->active = false;
     return (st == PSA_SUCCESS && n == 32) ? 0 : -1;
 }
+static int sv_chip_ok(void *c, const uint8_t hdr[24])
+{
+    (void)c;
+    return bootloader_common_check_chip_validity((const esp_image_header_t *)hdr, ESP_IMAGE_APPLICATION) == ESP_OK ? 0 : -1;
+}
 static int cb_stage_verify(void *c, uint32_t image_len)
 {
     apply_ctx_t *a = c;
@@ -162,7 +168,7 @@ static int cb_stage_verify(void *c, uint32_t image_len)
     memset(&h, 0, sizeof(h));
     h.stage = a->stage;
     const stage_image_io_t io = {.ctx = &h, .read = sv_read, .sha_begin = sv_sha_begin,
-                                 .sha_update = sv_sha_update, .sha_finish = sv_sha_finish};
+                                 .sha_update = sv_sha_update, .sha_finish = sv_sha_finish, .chip_ok = sv_chip_ok};
     uint32_t len = 0;
     stage_image_result_t r = stage_image_verify(&io, image_len, &len);
     if (r != STAGE_IMG_OK) {
