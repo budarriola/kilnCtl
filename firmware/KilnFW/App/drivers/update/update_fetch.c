@@ -1499,6 +1499,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return rc;
 }
 
+static size_t internal_largest_block_probe(void)
+{
+    return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
 static bool fetch_busy_probe(void)
 {
     return s_c != NULL && s_c->busy != 0;
@@ -1523,6 +1528,7 @@ esp_err_t update_fetch_start(httpd_handle_t server)
     s_c->st.reason = "";
     ota_http_set_fetch_busy_probe(fetch_busy_probe);
     http_async_job_set_admission_busy_probe(fetch_busy_probe); // RW-02
+    http_async_job_set_largest_block_probe(internal_largest_block_probe); // RF-03
     (void)stack_margin_register("update_fetch", &s_c->tls_task, FETCH_TLS_STACK_BYTES);
     (void)stack_margin_register("update_fetch_wr", &s_c->wr_task, FETCH_WR_STACK_BYTES);
 

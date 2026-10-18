@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 
 #include "ui_theme.h"
+#include "ui_worker.h"
 
 #define UI_LCD_KEYPAD_WIDTH_PX 400
 
@@ -263,7 +264,6 @@ static void pin_verify_worker_task(void *arg)
         atomic_store(&s_post_failed, true);
         atomic_store(&s_worker_running, false);
     }
-    vTaskDelete(NULL);
 }
 
 static void try_submit(void)
@@ -295,7 +295,7 @@ static void try_submit(void)
     s_job.gen = s_job_gen;
     s_worker_running = true;
     set_status("Checking PIN...");
-    if (xTaskCreate(pin_verify_worker_task, "lcd_pin_ui", 6144, NULL, 5, NULL) != pdPASS) {
+    if (!ui_worker_submit(pin_verify_worker_task, NULL) /* RF-01 */) {
         s_worker_running = false;
         memset(s_job.digits, 0, sizeof(s_job.digits));
         set_status("Busy, try again");
