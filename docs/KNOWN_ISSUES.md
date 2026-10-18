@@ -521,3 +521,11 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **OF-05** INFO. OA-01: app and recovery share stage_header.c and agree on state 3. Accepted.
 - **OF-06** INFO. RX-11 walk matches IDF image_load: bounds, alignment, checksum, hash release. Accepted.
 - **OF-07** INFO. OA-03 hash runs under the update claim; a failed claim keeps the request (pre-existing LOW-4). Accepted.
+
+## Review 2026-10-18: SS/LA fixes (docs/REVIEW_SSLAFIX_2026_10_18.md)
+- **SL-01** LOW, `web_auth_session.c` find_lru_slot(). With an all-ADMIN session table, a USER login evicts an ADMIN session (SS-02 keys on the victim's role, not the new one). See docs/REVIEW_SSLAFIX_2026_10_18.md.
+- **SL-02** LOW, `web_auth_session.c` slot_lifetime_exceeded(). A session older than 2^32 ms under timeout NEVER, followed by a change to a finite timeout, aliases its age and can miss the 12 h cap. Reap on the NEVER-to-finite change.
+- **SL-03** INFO. SS-01 per-role ladders: no bypass found (role from username, KDF gated, recorded under lock).
+- **SL-04** INFO. LA-01 worker flag and failure-path count are sound. The LCD ladder survives cancel and reopen.
+- **SL-05** INFO. Ladders are RAM-only and reset on reboot, same as before the fixes. There is no unauthenticated reboot route.
+- **SL-06** INFO. `web_auth_lcd_session_*` is unused, with no lifetime. Dead code.
