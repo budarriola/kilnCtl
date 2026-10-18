@@ -402,3 +402,11 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AP-03** INFO. PZ-02 test asserts no send before the DIAG and one send after a benign DIAG (no deadlock). Sound.
 - **AP-04** INFO. First sight sets `reboot_had_claim`, so the lost-trip latch is not expirable (conservative).
 - **AP-05** INFO. `KILNCTL_HEAT_ENABLE_TEST_HOOK` is defined only in build_host_tests.ps1; no target CMake defines it.
+## Review 2026-10-18: heat_enable holistic (docs/audits/REVIEW_HEATENABLE_HOLISTIC_2026_10_18.md)
+- **HH-01** MED, `heat_enable.c:833-867`. A benign Pico reboot classified with no claim held never enters the SR-11 window. This covers an idle reboot and also a reboot during a firing whose claim was released before the DIAG. A second benign reboot within 15 min then auto-resumes heat. Fix: apply the window in the claimless benign branch. Status open.
+- **HH-02** LOW, `heat_enable.c:823-831, 534-561`. A grant standing when a reboot is noted stays `granted` until the DIAG: is_granted reports true and a second claimant's acquire returns true before a verdict. No send, and K4 stays open. Status open.
+- **HH-03** LOW, `profile_executor.c:2655`. boot_id_unseen pauses the firing but does not abort autotune; the autotune claim runs cold with no reason shown. Status open.
+- **HH-04** INFO. since_ms 0/1 and last_benign 0 sentinels collide with tick 0/1 or a 49.7-day wrap; negligible.
+- **HH-05** INFO. An undecided verdict with no DIAG never times out (by design, fail safe, not a deadlock).
+- **HH-06** INFO. since_ms is never cleared after a verdict; the `== 0` re-arm guards rely on note_pico_boot's early return while unseen.
+- **HH-07** INFO. Test gaps: HH-01 sequences, HH-02, and a fatal latch consumed together with a pending re-arm.
