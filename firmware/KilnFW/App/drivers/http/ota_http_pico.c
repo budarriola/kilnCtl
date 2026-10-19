@@ -448,7 +448,11 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
 // registered for the boot (like update_fetch_wr, UW-01/UW-03). Static internal DRAM: 4096 B stack + one TCB.
 #define OTA_PICO_ROLLBACK_STACK_BYTES 4096
 static StaticTask_t s_ota_pico_rollback_tcb;
+#ifdef _MSC_VER
+__declspec(align(16)) static StackType_t s_ota_pico_rollback_stack[OTA_PICO_ROLLBACK_STACK_BYTES]; /* host build */
+#else
 static StackType_t s_ota_pico_rollback_stack[OTA_PICO_ROLLBACK_STACK_BYTES] __attribute__((aligned(16)));
+#endif
 static TaskHandle_t s_ota_pico_rollback_task;
 
 // Background task for POST /api/ota/pico/rollback -- see that handler's own
