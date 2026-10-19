@@ -507,6 +507,8 @@ static esp_err_t auth_bootstrap_password_post_handler(httpd_req_t *req)
     auth_bootstrap_wipe(password, sizeof(password));
     switch (result) {
         case SECURITY_OK:
+            /* AX-02: no session minted before the owner bootstrapped may outlive it. */
+            http_session_destroy_all_request_post();
             httpd_resp_set_type(req, "application/json");
             return httpd_resp_sendstr(req, "{\"ok\":true}");
         case SECURITY_ERR_WEAK:

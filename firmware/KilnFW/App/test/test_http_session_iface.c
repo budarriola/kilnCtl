@@ -11,6 +11,7 @@
 
 #include "test_common.h"
 
+#include "psa/crypto.h" /* AX-04 psa_stub_hash_fail */
 #include "../drivers/http/http_session_iface.h"
 #include "../drivers/net/web_auth_session.h"
 #include "../drivers/persist/web_auth_store.h"
@@ -653,6 +654,47 @@ static void test_session_expired_after_idle_longer_than_tick_wrap(void)
 
 // OF-01/OF-02: the last-access timestamp is one 32-bit atomic (no hi/lo pair
 // that can tear on a carry) and the wrap check loads it exactly once.
+static void test_ax01_session_survives_past_2_pow_32_ms(void)
+{
+    TEST_SECTION("AX-01 a session resolves repeatedly after uptime > 2^32 ms");
+    reset_all();
+    set_policy_timeout(3600);
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL); /* record an access */
+    fake_time_advance_ms(0x7FFFFFFFu);
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL);
+    fake_time_advance_ms(0x7FFFFFFFu);
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL);
+    fake_time_advance_ms(10002u); /* uptime now 2^32 + 10 s */
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL);
+    make_session("tok-ax01", WEB_AUTH_SESSION_ROLE_ADMIN, (uint32_t)hal_time_now_ms());
+    TEST_CHECK(http_auth_session_resolve("tok-ax01", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN, "first resolve ADMIN");
+    fake_time_advance_ms(1000u);
+    TEST_CHECK(http_auth_session_resolve("tok-ax01", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN,
+               "second resolve still ADMIN (table not wiped by a truncated-timestamp gap)");
+    TEST_CHECK(http_auth_session_status("tok-ax01", "10.0.0.5", &role, NULL, NULL), "status still valid");
+}
+
+// AX-04: a failed SHA-256 yields no key: hash_token reports failure, resolve answers NONE.
+static void test_ax04_hash_failure_refuses(void)
+{
+    TEST_SECTION("AX-04 SHA-256 failure is reported and never becomes a zero key");
+    reset_all();
+    set_policy_timeout(3600);
+    make_session("tok-ax04", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    uint8_t h[32];
+    psa_stub_hash_fail = true;
+    TEST_CHECK(!http_session_hash_token("x", 1, h), "hash_token reports failure");
+    TEST_CHECK(http_auth_session_resolve("tok-ax04", "10.0.0.5") == HTTP_AUTH_ROLE_NONE, "resolve answers NONE");
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_ADMIN;
+    TEST_CHECK(!http_auth_session_status("tok-ax04", "10.0.0.5", &role, NULL, NULL) &&
+                   role == WEB_AUTH_SESSION_ROLE_NONE,
+               "status refuses");
+    psa_stub_hash_fail = false;
+    TEST_CHECK(http_session_hash_token("x", 1, h), "hash_token succeeds again");
+    TEST_CHECK(http_auth_session_resolve("tok-ax04", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN, "session intact afterwards");
+}
+
 static void test_of01_last_access_single_atomic_loaded_once(void)
 {
     TEST_SECTION("OF-01/02 last-access timestamp is a single 32-bit atomic, loaded once");
@@ -667,16 +709,15 @@ static void test_of01_last_access_single_atomic_loaded_once(void)
     if (text == NULL) {
         return;
     }
-    TEST_CHECK(strstr(text, "s_last_access_hi") == NULL && strstr(text, "s_last_access_lo") == NULL,
-               "no split hi/lo timestamp halves");
-    TEST_CHECK(strstr(text, "static volatile uint32_t s_last_access_ms;") != NULL,
-               "timestamp is one uint32 atomic");
+    TEST_CHECK(strstr(text, "static volatile uint32_t s_last_access_ms;") == NULL &&
+                   strstr(text, "s_last_access_hi") != NULL && strstr(text, "s_last_access_seq") != NULL,
+               "AX-01: timestamp is 64-bit (hi/lo under a sequence counter), not a truncated uint32");
     const char *fn = strstr(text, "static bool session_table_gap_wrapped");
     const char *end = fn ? strstr(fn, "static void session_wrap_guard") : NULL;
     TEST_CHECK(fn != NULL && end != NULL, "wrap check located");
     if (fn != NULL && end != NULL) {
         int loads = 0;
-        for (const char *p = fn; (p = strstr(p, "s_last_access_ms")) != NULL && p < end; p++) {
+        for (const char *p = fn; (p = strstr(p, "session_last_access_load()")) != NULL && p < end; p++) {
             loads++;
         }
         TEST_CHECK(loads == 1, "wrap check loads the timestamp exactly once");
@@ -686,6 +727,8 @@ static void test_of01_last_access_single_atomic_loaded_once(void)
 
 void run_test_http_session_iface(void) {
     test_of01_last_access_single_atomic_loaded_once();
+    test_ax01_session_survives_past_2_pow_32_ms();
+    test_ax04_hash_failure_refuses();
     test_session_expired_after_idle_longer_than_tick_wrap();
     test_destroy_all_request_applied_by_httpd();
     test_fx01_wifi_read_does_not_apply_destroy_all();

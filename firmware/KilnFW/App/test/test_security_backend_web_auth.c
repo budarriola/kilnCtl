@@ -33,6 +33,8 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 // ---- fakes ---------------------------------------------------------------------
 static web_auth_table_t s_table;
 web_auth_table_t *http_session_table(void) { return &s_table; }
+static int s_destroy_all_posts = 0; /* AX-02 */
+void http_session_destroy_all_request_post(void) { s_destroy_all_posts++; }
 
 static int f_force_lock_calls;
 void ui_lcd_lock_force_lock(void) { f_force_lock_calls++; }
@@ -445,6 +447,7 @@ static void test_bootstrap_handler(void)
 
     TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 200, "valid body (split over several recv calls): 200");
     TEST_CHECK(strcmp(s_reply, "{\"ok\":true}") == 0, "ok reply");
+    TEST_CHECK(s_destroy_all_posts == 1, "AX-02: a successful bootstrap posts destroy-all (no pre-bootstrap session survives)");
     web_auth_password_record_t rec;
     TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec) == WEB_AUTH_LOAD_OK && strcmp(rec.username, "admin") == 0 && !rec.must_change,
                "admin record written, must_change false");
