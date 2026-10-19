@@ -133,6 +133,10 @@ int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
 static httpd_uri_t s_registered; // last route kiln_http_register() handed to httpd (the auth wrapper)
 static char s_resp_status[48];
 static char s_resp_body[96];
+static char s_resp_location[96];
+static char s_resp_cache[48];
+static int s_resp_send_calls;
+static long long s_resp_send_len;
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
 {
     (void)handle;
@@ -141,7 +145,9 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *u
 }
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
-    (void)r; (void)buf_len;
+    (void)r;
+    s_resp_send_calls++;
+    s_resp_send_len = buf_len;
     snprintf(s_resp_body, sizeof(s_resp_body), "%s", buf ? buf : "");
     return ESP_OK;
 }
@@ -151,7 +157,13 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     return ESP_OK;
 }
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; snprintf(s_resp_status, sizeof(s_resp_status), "%s", status); return ESP_OK; }
-esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value) { (void)r; (void)field; (void)value; return ESP_OK; }
+esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
+{
+    (void)r;
+    if (field && value && strcmp(field, "Location") == 0) snprintf(s_resp_location, sizeof(s_resp_location), "%s", value);
+    if (field && value && strcmp(field, "Cache-Control") == 0) snprintf(s_resp_cache, sizeof(s_resp_cache), "%s", value);
+    return ESP_OK;
+}
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 
 // ota_http_get_client_ip() -- http_auth_http.c's resolve_role_for_request()
@@ -364,6 +376,10 @@ static void run_prehandler(const char *uri, httpd_method_t m, const char *origin
     s_handler_calls = 0;
     s_resp_status[0] = '\0';
     s_resp_body[0] = '\0';
+    s_resp_location[0] = '\0';
+    s_resp_cache[0] = '\0';
+    s_resp_send_calls = 0;
+    s_resp_send_len = -1;
     (void)s_registered.handler(&req);
 }
 
@@ -390,6 +406,27 @@ static void test_csrf_prehandler_wiring(void)
     TEST_CHECK(s_handler_calls == 1 && s_resp_status[0] == '\0', "GET with a foreign Origin: passes");
 }
 
+static void test_kh03_page_gate_redirect(void)
+{
+    TEST_SECTION("kiln_http_prehandler deny branch (KH-03) -- logged-out page-shell GET is a 302 to /?next=<page>, "
+                 "no-store, empty body; a non-page route still gets 401");
+    web_auth_policy_t policy = { .web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: auth on");
+
+    run_prehandler("/settings", HTTP_GET, NULL, "192.168.1.50");
+    TEST_CHECK(s_handler_calls == 0, "page shell, no session: handler NOT called");
+    TEST_CHECK(strcmp(s_resp_status, "302 Found") == 0, "page shell, no session: 302 Found");
+    TEST_CHECK(strcmp(s_resp_location, "/?next=/settings") == 0, "page shell: Location is /?next=/settings");
+    TEST_CHECK(strcmp(s_resp_cache, "no-store") == 0, "page shell: Cache-Control no-store");
+    TEST_CHECK(s_resp_send_calls == 1 && s_resp_send_len == 0 && s_resp_body[0] == '\0', "page shell: empty body");
+
+    run_prehandler("/api/backup/export", HTTP_GET, NULL, "192.168.1.50");
+    TEST_CHECK(s_handler_calls == 0, "API route, no session: handler NOT called");
+    TEST_CHECK(strcmp(s_resp_status, "401 Unauthorized") == 0, "API route, no session: 401, not a redirect");
+    TEST_CHECK(s_resp_location[0] == '\0', "API route: no Location header");
+}
+
 int main(void)
 {
     test_detail_no_record();
@@ -402,6 +439,7 @@ int main(void)
     test_gate_auth_on_user_session();
     test_gate_auth_on_admin_session();
     test_csrf_prehandler_wiring();
+    test_kh03_page_gate_redirect();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -3678,7 +3678,8 @@ try {
     # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
     # 101 -> 103: sx1509_reset_first (boot audit MED-2) plus one executable already unaccounted for on dev (built count was 102)
     # 103 -> 104: flash_xip_lock (REVIEW_FLASH_MMAP_SERIALIZATION MED-1)
-    $totalExpected = 104
+    # 104 -> 105: web_encoding_cache (KH-09)
+    $totalExpected = 105
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
