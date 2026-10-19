@@ -555,6 +555,8 @@ static void test_page_gate_location_and_open_set(void) {
         TEST_CHECK(!http_auth_page_shell_needs_no_store(kPageShellUris[i], HTTP_GET, false, t),
                    "KH-01: auth off leaves caching alone");
     }
+    TEST_CHECK(!http_auth_page_shell_needs_no_store("/settings", HTTP_GET, true, ROUTE_TIER_OPEN),
+               "KH-01: an OPEN-tier response is never forced to no-store");
     TEST_CHECK(!http_auth_page_shell_needs_no_store("/app.js", HTTP_GET, true, ROUTE_TIER_OPEN),
                "KH-01: static assets keep their caching");
     TEST_CHECK(!http_auth_page_shell_needs_no_store("/api/zones", HTTP_GET, true, ROUTE_TIER_ADMIN),
