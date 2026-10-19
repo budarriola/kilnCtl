@@ -196,6 +196,11 @@ bool http_auth_page_gate_location(const char *uri, char *out, size_t cap) {
     return true;
 }
 
+bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method, bool web_enabled,
+                                         route_tier_t tier) {
+    return web_enabled && tier != ROUTE_TIER_OPEN && http_auth_is_page_shell_get(uri, method);
+}
+
 bool http_auth_refusal_should_close(size_t content_len) {
     return content_len > HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES;
 }

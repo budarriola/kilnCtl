@@ -2418,8 +2418,11 @@
         // for this very target once this tab session, do not navigate again.
         var tried = false;
         try {
-          tried = window.sessionStorage.getItem('kcNextTried') === target;
-          window.sessionStorage.setItem('kcNextTried', target);
+          // KH-02: the guard is "target|time" and only holds for a short window, so a
+          // later /?next=<same page> in this tab (bookmark) is not swallowed.
+          var prev = String(window.sessionStorage.getItem('kcNextTried') || '').split('|');
+          tried = prev[0] === target && (Date.now() - Number(prev[1] || 0)) < 15000;
+          window.sessionStorage.setItem('kcNextTried', target + '|' + Date.now());
         } catch (e) { /* storage blocked: fall through and navigate once */ }
         if (!tried) { go(); return; }
       } else {

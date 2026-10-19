@@ -546,6 +546,19 @@ static void test_page_gate_location_and_open_set(void) {
         TEST_CHECK(http_auth_page_gate_location(uri, loc, sizeof(loc)) && strcmp(loc, want) == 0,
                    "gate location is /?next=<page>");
     }
+    for (size_t i = 0; i < PAGE_SHELL_URI_COUNT; i++) {
+        route_tier_t t = ROUTE_TIER_OPEN;
+        (void)http_auth_lookup_tier(kPageShellUris[i], HTTP_GET, &t);
+        bool want = t != ROUTE_TIER_OPEN;
+        TEST_CHECK(http_auth_page_shell_needs_no_store(kPageShellUris[i], HTTP_GET, true, t) == want,
+                   "KH-01: protected page shells get no-store when auth is on");
+        TEST_CHECK(!http_auth_page_shell_needs_no_store(kPageShellUris[i], HTTP_GET, false, t),
+                   "KH-01: auth off leaves caching alone");
+    }
+    TEST_CHECK(!http_auth_page_shell_needs_no_store("/app.js", HTTP_GET, true, ROUTE_TIER_OPEN),
+               "KH-01: static assets keep their caching");
+    TEST_CHECK(!http_auth_page_shell_needs_no_store("/api/zones", HTTP_GET, true, ROUTE_TIER_ADMIN),
+               "KH-01: API routes are not page shells");
     TEST_CHECK(!http_auth_page_gate_location("/", loc, sizeof(loc)) && loc[0] == '\0',
                "the dashboard is not a gated page (no redirect loop)");
     TEST_CHECK(!http_auth_page_gate_location("/login", loc, sizeof(loc)), "/login is not gated");

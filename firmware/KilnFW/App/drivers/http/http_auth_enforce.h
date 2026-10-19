@@ -213,6 +213,13 @@ bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method);
 // (nothing to percent-encode), or `cap` is too small. Pure, host-tested.
 bool http_auth_page_gate_location(const char *uri, char *out, size_t cap);
 
+// KH-01: true when an ALLOWED response for this request is a protected page shell that
+// must carry Cache-Control: no-store (web auth on, tier not OPEN, GET of a page shell), so
+// Back/Forward after logout cannot show it from cache. The dashboard (OPEN) and static
+// assets keep their own caching.
+bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method, bool web_enabled,
+                                         route_tier_t tier);
+
 // Largest unread request body (Content-Length) a refused request may leave
 // for esp_http_server to purge. The purge runs at CONFIG_HTTPD_PURGE_BUF_LEN
 // (32 B) per read on the single CPU0 httpd task, so a multi-MB unauthenticated

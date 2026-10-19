@@ -131,9 +131,14 @@ function makeContext(opts) {
     t.ctx.__next('admin');
     assert(rel(t.loc.href) === '/settings' && t.opens.length === 0, 'next: signed-in admin navigates without a dialog');
     const t2 = makeContext({ search: '?next=%2Fsettings', role: 'admin' });
-    t2.store.kcNextTried = '/settings';
+    t2.store.kcNextTried = '/settings|' + Date.now();
     t2.ctx.__next('admin');
     assert(rel(t2.loc.href) === '/?next=%2Fsettings' && t2.opens.length === 0, 'next: loop guard stops an admin bounce');
+    // KH-02: a stale guard (earlier visit) must not strand the admin on the dashboard
+    const t3 = makeContext({ search: '?next=%2Fsettings', role: 'admin' });
+    t3.store.kcNextTried = '/settings|' + (Date.now() - 60000);
+    t3.ctx.__next('admin');
+    assert(rel(t3.loc.href) === '/settings', 'next: KH-02 stale guard does not block a later ?next=');
   }
   // bootstrap needed: the dialog cannot succeed -> /login?return=...
   {

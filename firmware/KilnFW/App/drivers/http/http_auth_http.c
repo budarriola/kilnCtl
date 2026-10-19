@@ -455,6 +455,10 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // dispatch time, and the real handler has no idea this wrapper
             // exists; it still expects whatever it was registered with.
             req->user_ctx = ctx->real_user_ctx;
+            // KH-01: a signed-in page shell must not be restored from history/bfcache after logout.
+            if (http_auth_page_shell_needs_no_store(ctx->uri, ctx->method, web_enabled, ctx->tier)) {
+                httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+            }
             return ctx->real_handler(req);
         case HTTP_AUTH_DECISION_DENY_NO_SESSION:
             // Owner report, 2026-09-24 (see is_page_shell_get() above):
