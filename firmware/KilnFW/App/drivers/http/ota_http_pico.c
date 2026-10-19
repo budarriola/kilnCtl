@@ -443,9 +443,16 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// File-scope (not handler-local) so ota_pico_rollback_task() below can null
-// it itself right before deleting -- see that task's own comment on why.
-// DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target.
+// OR-08: the rollback worker is ONE persistent static task (no heap for its stack or TCB at rollback time),
+// created on the first accepted POST, parked on a task notification, never deleted. Its stack_margin slot stays
+// registered for the boot (like update_fetch_wr, UW-01/UW-03). Static internal DRAM: 4096 B stack + one TCB.
+#define OTA_PICO_ROLLBACK_STACK_BYTES 4096
+static StaticTask_t s_ota_pico_rollback_tcb;
+#ifdef _MSC_VER
+__declspec(align(16)) static StackType_t s_ota_pico_rollback_stack[OTA_PICO_ROLLBACK_STACK_BYTES]; /* host build */
+#else
+static StackType_t s_ota_pico_rollback_stack[OTA_PICO_ROLLBACK_STACK_BYTES] __attribute__((aligned(16)));
+#endif
 static TaskHandle_t s_ota_pico_rollback_task;
 
 // Background task for POST /api/ota/pico/rollback -- see that handler's own
@@ -457,9 +464,19 @@ static TaskHandle_t s_ota_pico_rollback_task;
 // ota_http_pico_rollback_async for ota_pico_rollback_status_get_handler() to read
 // back. No arg: reads the same ota_http_safety this whole file already treats as
 // fixed for the boot (set once by ota_http_start()).
+static void ota_pico_rollback_run(void);
+
 static void ota_pico_rollback_task(void *arg)
 {
     (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // parked until a POST hands off one attempt
+        ota_pico_rollback_run();
+    }
+}
+
+static void ota_pico_rollback_run(void)
+{
 
     safety_link_rollback_outcome_t outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
     uint8_t reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
@@ -475,18 +492,8 @@ static void ota_pico_rollback_task(void *arg)
     ESP_LOGW(OTA_HTTP_TAG, "OTA pico rollback: safety_link_send_rollback_ex outcome=%d reason=%u",
              (int)outcome, (unsigned)reason_code);
 
-    // Null the handle BEFORE releasing the update-claim mutex below: once
-    // ota_http_update_end() releases the claim, a second POST can win it and
-    // start a fresh ota_pico_rollback_task() with its own handle -- nulling
-    // after that release would race clobbering that fresh handle back to
-    // NULL. stack_margin_read() (stack_margin.c) reads this handle fresh on
-    // every report and treats non-NULL as "alive", calling
-    // uxTaskGetStackHighWaterMark() on it -- left non-NULL past this point it
-    // would dangle onto a deleted task the instant the scheduler reclaims
-    // this TCB. (A reader racing this line and seeing the handle just before
-    // it's cleared is benign: uxTaskGetStackHighWaterMark() on a task that is
-    // about to be deleted but not yet reclaimed is still a valid read.)
-    stack_margin_task_exit(&s_ota_pico_rollback_task); /* UB-01 */
+    // OR-08: the task is persistent, so the handle stays valid and the stack_margin slot stays registered
+    // (no stack_margin_task_exit, no vTaskDelete). A second POST can only notify after the claim is released.
 
     // Released here, on EVERY outcome, now that the WHOLE rollback attempt
     // (send-burst/reply-window leg AND the boot_id-reconnect watch) has run
@@ -494,7 +501,6 @@ static void ota_pico_rollback_task(void *arg)
     // own doc comment for why the claim must stay held for that entire
     // span, not just until the handler returns.
     ota_http_update_end();
-    vTaskDelete(NULL);
 }
 
 // --- POST /api/ota/pico/rollback -------------------------------------------
@@ -621,11 +627,23 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         xSemaphoreGive(ota_http_pico_rollback_async_lock);
     }
 
-    dram_watch_log_task("ota_pico_rollback", "before-create");
-    if (dram_watch_task_after("ota_pico_rollback",
-                              xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL,
-                                          tskIDLE_PRIORITY + 1, &s_ota_pico_rollback_task)) !=
-        pdPASS) {
+    bool started = true;
+    if (s_ota_pico_rollback_task == NULL) {
+        dram_watch_log_task("ota_pico_rollback", "before-create");
+        // Static task (OR-08): created once, no heap; a failed create leaves the handle NULL so the next POST retries.
+        s_ota_pico_rollback_task = xTaskCreateStaticPinnedToCore(
+            ota_pico_rollback_task, "ota_pico_rollback", OTA_PICO_ROLLBACK_STACK_BYTES, NULL, tskIDLE_PRIORITY + 1,
+            s_ota_pico_rollback_stack, &s_ota_pico_rollback_tcb, tskNO_AFFINITY);
+        if (s_ota_pico_rollback_task == NULL) {
+            started = false;
+        } else {
+            stack_margin_register("ota_pico_rollback", &s_ota_pico_rollback_task, OTA_PICO_ROLLBACK_STACK_BYTES);
+        }
+    }
+    if (started) {
+        xTaskNotifyGive(s_ota_pico_rollback_task);
+    }
+    if (!started) {
         ESP_LOGE(OTA_HTTP_TAG, "OTA pico rollback from %s: failed to start the rollback task -- "
                       "the update claim was never released, this OTA layer is now wedged", ip);
         // Failed before the task could ever run, so nothing else will
@@ -642,11 +660,6 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         httpd_resp_send(req, "failed to start the rollback task", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
-    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
-     * only reached with a real handle since the failure branch above already
-     * returned. 4096 must match the xTaskCreate() literal above. */
-    stack_margin_register("ota_pico_rollback", &s_ota_pico_rollback_task, 4096);
-
     // 202, not 200: the request has been accepted and IS being acted on,
     // but the outcome is not known yet -- the page is expected to poll GET
     // /api/ota/pico/rollback/status (ota_pico_rollback_status_get_handler()

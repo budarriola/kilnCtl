@@ -249,7 +249,6 @@ static void test_ub01_read_lock_and_exit_sites(void)
     } sites[] = {
         {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_exit_reboot_task)", "s_recovery_exit_reboot_task = NULL;"},
         {"../drivers/http/ota_http_recovery.c", "stack_margin_task_exit(&s_recovery_boot_reboot_task)", "s_recovery_boot_reboot_task = NULL;"},
-        {"../drivers/http/ota_http_pico.c", "stack_margin_task_exit(&s_ota_pico_rollback_task)", "s_ota_pico_rollback_task = NULL;"},
         {"../drivers/net/pico_auto_update_boot.c", "stack_margin_task_exit(&s_task)", "done:\n    s_task = NULL;"},
         {"../drivers/update/update_fetch.c", "stack_margin_task_exit(&s_c->tls_task)", "s_c->tls_task = NULL;\n    s_c->busy = 0;"},
         {"../main_network_http.c", "stack_margin_task_exit(&s_ota_confirm_task)", "s_ota_confirm_task = NULL;\n            vTaskDelete"},
@@ -271,6 +270,14 @@ static void test_ub01_read_lock_and_exit_sites(void)
         char *t = ub01_read("../drivers/update/update_fetch.c");
         TEST_CHECK(t != NULL && strstr(t, "stack_margin_task_exit(&s_c->wr_task)") == NULL,
                    "UW-03: update_fetch_wr never calls stack_margin_task_exit (persistent writer)");
+        free(t);
+    }
+    {
+        // OR-08: the Pico rollback worker is persistent and static; it never exits or deletes itself.
+        char *t = ub01_read("../drivers/http/ota_http_pico.c");
+        TEST_CHECK(t != NULL && strstr(t, "stack_margin_task_exit(&s_ota_pico_rollback_task)") == NULL &&
+                       strstr(t, "vTaskDelete(NULL)") == NULL && strstr(t, "xTaskCreateStaticPinnedToCore(") != NULL,
+                   "OR-08: ota_pico_rollback is a static persistent task (no exit, no vTaskDelete)");
         free(t);
     }
 }

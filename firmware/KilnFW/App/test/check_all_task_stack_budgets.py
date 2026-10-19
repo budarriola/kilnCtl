@@ -795,8 +795,9 @@ TASKS = [
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_boot_reboot_task,\s*"recovery_boot",\s*(\d+)')),
     dict(name="ota_pico_rollback", root="ota_pico_rollback_task",
-         stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
-             r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
+         stack=lambda: extract_local_macro("drivers/http/ota_http_pico.c",
+             r'#define OTA_PICO_ROLLBACK_STACK_BYTES\s+(\d+)',
+             r'xTaskCreateStaticPinnedToCore\(\s*ota_pico_rollback_task,\s*"ota_pico_rollback",\s*OTA_PICO_ROLLBACK_STACK_BYTES')),
     dict(name="ota_confirm", root="main_ota_rollback_confirm_task",
          # REVIEW_LCD19FX6 LOW-2: loops for(;;) until boot_guard's clear verifies and, after it, runs
          # update_http_stale_stage_check() (PSA SHA-256, 1 KB work buffer) on a 5120 B stack.

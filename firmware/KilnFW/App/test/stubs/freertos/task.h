@@ -96,6 +96,27 @@ static inline BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint
     return g_test_stub_xtaskcreate_result;
 }
 
+/* OR-08: static task create + notifications for the persistent Pico rollback worker. Never runs the task. */
+typedef struct { long opaque[16]; } StaticTask_t;
+typedef uint8_t StackType_t;
+__declspec(selectany) int g_test_stub_static_task_creates = 0;
+__declspec(selectany) int g_test_stub_static_task_fail = 0; /* nonzero: create returns NULL */
+__declspec(selectany) int g_test_stub_notify_gives = 0;
+__declspec(selectany) TaskHandle_t g_test_stub_notify_last = 0; /* OW-02: handle the last xTaskNotifyGive targeted */
+static inline TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t task, const char *name, unsigned long stack,
+                                                          void *arg, UBaseType_t prio, StackType_t *stack_buf,
+                                                          StaticTask_t *tcb, BaseType_t core)
+{
+    (void)task; (void)name; (void)stack; (void)arg; (void)prio; (void)stack_buf; (void)tcb; (void)core;
+    if (g_test_stub_static_task_fail) {
+        return NULL;
+    }
+    g_test_stub_static_task_creates++;
+    return (TaskHandle_t)2;
+}
+static inline BaseType_t xTaskNotifyGive(TaskHandle_t t) { g_test_stub_notify_last = t; g_test_stub_notify_gives++; return 1; }
+static inline uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) { (void)clear; (void)ticks; return 0; }
+
 /* 2026-08-24: added for stack_margin.c's host build (linked into
  * test_rules_task_prestart.c's executable, which #includes rules_task.c
  * directly and so needs stack_margin_register()/etc. to resolve). Every

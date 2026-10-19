@@ -568,8 +568,9 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 ## REVIEW_OTA_RAM_RESERVE_2026_10_18 (OR)
 - **OR-01** MED. GitHub fetch still gated by IDF-owned internal draws (esp_http_client buffers, esp-tls ctx, lwIP; under ALWAYSINTERNAL 8192); not statically reservable, keep gates, consider smaller client buffers.
 - **OR-02** LOW. pico_auto_update 8192 B internal heap stack at boot; static costs 8 KB DRAM, not worth it without a bench NO_MEM.
-- **OR-03** LOW. ota_rollback_reboot / ota_pico_rollback 4096 B on-demand tasks (500 on failure); reboot task can be an esp_timer. PARTLY FIXED: ota_rollback_reboot is now a one-shot esp_timer (static handle, no task or heap stack, timer-arm failure still answers 500 and releases the claim); host test negtested. ota_pico_rollback stays a task (relays to the Pico). BENCH benchmain13: rollback timer path not exercised (BENCH-PENDING with ET-02).
+- **OR-03** LOW. ota_rollback_reboot / ota_pico_rollback 4096 B on-demand tasks (500 on failure); reboot task can be an esp_timer. PARTLY FIXED: ota_rollback_reboot is now a one-shot esp_timer (static handle, no task or heap stack, timer-arm failure still answers 500 and releases the claim); host test negtested. ota_pico_rollback stays a task (relays to the Pico): see OR-08, now static. BENCH benchmain13: rollback timer path not exercised (BENCH-PENDING with ET-02).
 - **OR-04** LOW. Recovery image apply/recover/relay/poll tasks are dynamic internal; low fragmentation risk there.
+- **OR-08** LOW. ota_pico_rollback was a 4096 B on-demand heap-stack task (create could fail with NO_MEM after fragmentation; 500, rollback unavailable). FIXED (e13f290c8): one persistent static task (xTaskCreateStaticPinnedToCore, 4096 B stack + TCB = ~4.4 KB static internal DRAM), created on the first accepted POST, parked on a task notification, never deleted, stack_margin slot registered once; behavior unchanged (202 pending, claim released by the worker, 500 on create failure with claim released and retry on the next POST). Host test for create-once/re-arm negtested; stack budget extractor and registration exemption follow. BENCH-PENDING (static DRAM not yet measured on target).
 - **OR-05..OR-07** INFO. Stage upload/verify/install/browser OTA use no runtime heap; RF-03 gate not on update paths; mbedTLS already PSRAM.
 
 ## REVIEW_OR03_TIMER_2026_10_18 (ET)
@@ -606,3 +607,13 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AR-04** INFO: same-NAT-IP attacker with a stolen cookie can revoke it at login; already possible via logout with that cookie; role never inherited. Accepted.
 - **AR-05** INFO: AY-02 lockout ordering and SL-01 USER/ADMIN eviction unchanged; failed/refused logins never revoke. Accepted.
 - **AR-06** INFO: token_hex wiped twice on the 503 path; harmless. No action.
+
+## REVIEW_OR08_2026_10_19 (OW)
+HIGH 0, MED 0, LOW 2, INFO 5.
+- **OW-01** LOW: `.dram0.bss` CEILING_BYTES 81500 is stale (dev ELF with OR-08 measures 65184 B); check honest but ~16 KB slack. Re-baseline to measured + ~500 B. FIXED 3817fcd87 (2026-10-19): ceiling 65700 (measured 65184 + ~500 B).
+- **OW-02** LOW: host tests never run the rollback worker body (take stub returns 0, notify stub does not record the handle); claim release after run and outcome-before-release ordering unpinned. Record notified handle, test or span-scan the run; negtest. FIXED 3817fcd87 (2026-10-19): stub records the notified handle; test runs the worker body once and pins claim-held-during, outcome-before-release, release-after (3 mutants CAUGHT).
+- **OW-03** INFO: no notify/claim race; notify latches if the worker has not yet re-parked; notify-while-busy blocked by the claim. Accepted.
+- **OW-04** INFO: handle publication, registration once, NULL-on-failure retry sound. Accepted.
+- **OW-05** INFO: no update-claim leak on any path. Accepted.
+- **OW-06** INFO: about 4.2 KB permanent internal DRAM; expected min_free about 84.6 K vs 8192 floor. BENCH-PENDING with OR-08.
+- **OW-07** INFO: stubs faithful (StackType_t uint8_t = IDF bytes); registration-check comment and UB-01 scan updated correctly. Accepted.
