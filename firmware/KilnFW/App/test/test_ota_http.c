@@ -1254,6 +1254,33 @@ static void test_reboot_handlers_reply_only_after_task_created(void)
     s_stub_recovery_mode = false;
 }
 
+/* ET-02: source scan. The esp_timer task is registered with stack_margin once at boot (main_network_http.c),
+ * never at rollback time (the rollback reboots 500 ms later so the row would never be readable). */
+static void test_esp_timer_stack_margin_registered_at_boot_et02(void)
+{
+    TEST_SECTION("ET-02: esp_timer task stack_margin registration happens at boot, not in the rollback path");
+    const char *c1[] = {"../main_network_http.c", "App/main_network_http.c", "firmware/KilnFW/App/main_network_http.c"};
+    char *boot = test_read_source_anchored(__FILE__, "../main_network_http.c", c1, 3);
+    TEST_CHECK(boot != NULL, "ET-02: main_network_http.c readable");
+    if (boot) {
+        const char *h = strstr(boot, "xTaskGetHandle(\"esp_timer\")");
+        const char *r = strstr(boot, "stack_margin_register(\"esp_timer\"");
+        TEST_CHECK(h != NULL && r != NULL && h < r, "ET-02: boot code resolves then registers the esp_timer task");
+        TEST_CHECK(r != NULL && strstr(r, "4608") != NULL && strstr(r, "4608") < r + 80,
+                   "ET-02: registered with the 4608 B configured stack");
+        free(boot);
+    }
+    const char *c2[] = {"../drivers/http/ota_http_esp.c", "App/drivers/http/ota_http_esp.c",
+                        "firmware/KilnFW/App/drivers/http/ota_http_esp.c"};
+    char *esp = test_read_source_anchored(__FILE__, "../drivers/http/ota_http_esp.c", c2, 3);
+    TEST_CHECK(esp != NULL, "ET-02: ota_http_esp.c readable");
+    if (esp) {
+        TEST_CHECK(strstr(esp, "stack_margin_register(") == NULL && strstr(esp, "xTaskGetHandle(") == NULL,
+                   "ET-02: no rollback-time esp_timer registration remains");
+        free(esp);
+    }
+}
+
 static void test_rollback_timer_create_failure_and_rearm_et03(void)
 {
     TEST_SECTION("ota_esp_rollback_post_handler -- ET-03: esp_timer_create failure answers 500 and releases "
@@ -3394,6 +3421,7 @@ void run_test_ota_http(void)
     test_reboot_handlers_reply_only_after_task_created();
     test_rollback_reboot_failure_releases_claim_op02();
     test_rollback_timer_create_failure_and_rearm_et03();
+    test_esp_timer_stack_margin_registered_at_boot_et02();
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();
