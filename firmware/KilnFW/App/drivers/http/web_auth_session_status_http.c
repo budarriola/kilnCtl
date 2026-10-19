@@ -72,6 +72,10 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
     uint32_t last_seen_ms = 0;
     uint32_t timeout_s = 0;
     bool valid = http_auth_session_status(have_token ? token : NULL, ip, &role, &last_seen_ms, &timeout_s);
+    /* AY-01: the session token is not needed past the lookup. */
+    for (volatile char *q = token; q < token + sizeof(token); q++) {
+        *q = 0;
+    }
 
     bool prompt = false;
     long seconds_left = -1; // -1 means "never" or "no session" -- no countdown to show
@@ -79,8 +83,8 @@ static esp_err_t session_status_get_handler(httpd_req_t *req)
         uint32_t now = (uint32_t)hal_time_now_ms();
         prompt = web_auth_session_in_prompt_window(last_seen_ms, timeout_s, now);
         uint32_t elapsed_ms = now - last_seen_ms; // both from the same monotonic clock
-        uint32_t timeout_ms = timeout_s * 1000u;
-        seconds_left = (elapsed_ms >= timeout_ms) ? 0 : (long)((timeout_ms - elapsed_ms) / 1000u);
+        uint64_t timeout_ms = (uint64_t)timeout_s * 1000u; /* AY-05: 64-bit, no wrap */
+        seconds_left = ((uint64_t)elapsed_ms >= timeout_ms) ? 0 : (long)((timeout_ms - elapsed_ms) / 1000u);
     }
 
     // Surfaces the same predicate POST /api/auth/bootstrap_password's own

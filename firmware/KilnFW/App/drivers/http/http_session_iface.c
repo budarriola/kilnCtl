@@ -57,6 +57,10 @@ void http_session_destroy_all_request_post(void) {
 #endif
 }
 
+uint32_t http_session_destroy_gen(void) {
+    return session_posted_gen_load();
+}
+
 web_auth_table_t *http_session_table(void) {
     if (!session_flag_load()) {
         web_auth_table_init(&s_web_auth_table);
@@ -97,19 +101,47 @@ static const web_auth_table_t *http_session_table_peek(void) {
 // more with a finite timeout means every session has long expired and the
 // table is cleared instead of trusting the wrapped 32-bit difference.
 #define SESSION_WRAP_GAP_MS 0x80000000ULL
-/* FA-03/OF-01: the Wi-Fi task reads the timestamp while httpd writes it.
- * hal_time_now_ms() is a uint32 ms tick, so the timestamp is ONE 32-bit atomic
- * (tear-free by construction; the old hi/lo pair tore on a hi carry). */
-static volatile uint32_t s_last_access_ms;
+/* FA-03/OF-01/AX-01: the Wi-Fi task reads the timestamp while httpd writes it.
+ * hal_time_now_ms() is a uint64 ms tick, so the timestamp is stored as a full 64-bit
+ * value (AX-01: a 32-bit store compared against the 64-bit clock wiped the table on
+ * every access after 2^32 ms uptime). A single httpd writer publishes it under a
+ * sequence counter (odd = write in progress); readers retry until they see one even,
+ * unchanged counter. No 64-bit atomics needed on the 32-bit target. */
+static volatile uint32_t s_last_access_seq;
+static volatile uint32_t s_last_access_hi;
+static volatile uint32_t s_last_access_lo;
 static volatile bool s_have_last_access;
+
+static void session_last_access_store(uint64_t now)
+{
+    uint32_t seq = SESSION_LOAD(s_last_access_seq);
+    SESSION_STORE(s_last_access_seq, seq + 1u);
+    SESSION_STORE(s_last_access_hi, (uint32_t)(now >> 32));
+    SESSION_STORE(s_last_access_lo, (uint32_t)now);
+    SESSION_STORE(s_last_access_seq, seq + 2u);
+}
+
+static uint64_t session_last_access_load(void)
+{
+    for (;;) {
+        uint32_t s1 = SESSION_LOAD(s_last_access_seq);
+        if ((s1 & 1u) != 0u) {
+            continue;
+        }
+        uint64_t v = ((uint64_t)SESSION_LOAD(s_last_access_hi) << 32) | SESSION_LOAD(s_last_access_lo);
+        if (SESSION_LOAD(s_last_access_seq) == s1) {
+            return v;
+        }
+    }
+}
 
 static bool session_table_gap_wrapped(uint32_t timeout_s)
 {
     if (!SESSION_LOAD(s_have_last_access) || timeout_s == 0u) {
         return false;
     }
-    uint64_t now64 = (uint64_t)hal_time_now_ms();
-    uint64_t last = (uint64_t)SESSION_LOAD(s_last_access_ms); /* OF-02: load once */
+    uint64_t now64 = hal_time_now_ms();
+    uint64_t last = session_last_access_load(); /* OF-02: load once */
     return now64 >= last && (now64 - last) >= SESSION_WRAP_GAP_MS;
 }
 
@@ -118,7 +150,7 @@ static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
     if (session_table_gap_wrapped(timeout_s)) {
         web_auth_table_init(t);
     }
-    SESSION_STORE(s_last_access_ms, hal_time_now_ms());
+    session_last_access_store(hal_time_now_ms());
     SESSION_STORE(s_have_last_access, true);
 }
 
@@ -129,7 +161,7 @@ static void session_wrap_guard(web_auth_table_t *t, uint32_t timeout_s)
 // duplicated locally for the same reason those two are duplicated rather
 // than shared: this file must not pull in either module's larger
 // dependency set just for one hash call.
-static void sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]) {
+static bool sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]) {
     size_t hash_len = 0;
     psa_status_t status = psa_hash_compute(PSA_ALG_SHA_256, msg, msg_len, out, 32, &hash_len);
     if (status != PSA_SUCCESS) {
@@ -139,14 +171,25 @@ static void sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]) {
         // so a hash failure here degrades to "no session found", never to
         // treating the token as valid.
         memset(out, 0, 32);
+        return false; /* AX-04: callers refuse; a zero key is never used */
+    }
+    return true;
+}
+
+/* AX-03: volatile wipe so the compiler cannot elide it. */
+static void session_wipe(void *p, size_t n)
+{
+    volatile uint8_t *q = (volatile uint8_t *)p;
+    while (n-- > 0u) {
+        *q++ = 0u;
     }
 }
 
 // Exposed wrapper over the same sha256() above -- see http_session_iface.h's
 // declaration comment: section 6's login handler must hash the token it
 // mints with this SAME function, not a second independent implementation.
-void http_session_hash_token(const char *token, size_t token_len, uint8_t out[32]) {
-    sha256((const uint8_t *)token, token_len, out);
+bool http_session_hash_token(const char *token, size_t token_len, uint8_t out[32]) {
+    return sha256((const uint8_t *)token, token_len, out);
 }
 
 // timeout_s: web_auth_policy_t.web_timeout_s is -1 for "never" (item 8);
@@ -216,7 +259,7 @@ static http_auth_role_t to_enforce_role(web_auth_session_role_t role) {
     }
 }
 
-http_auth_role_t http_auth_session_resolve(const char *token, const char *client_ip) {
+static http_auth_role_t session_resolve_impl(const char *token, const uint8_t *token_hash, const char *client_ip) {
     // Finding 1 fix (2026-09-17 review / prior defect 5): client_ip used to
     // be discarded here (`(void)client_ip;`) even though the slot's binding
     // is captured at login (web_auth_login_http.c) -- the header's stated
@@ -230,8 +273,6 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
         return HTTP_AUTH_ROLE_NONE;
     }
 
-    uint8_t token_hash[32];
-    sha256((const uint8_t *)token, strlen(token), token_hash);
 
     resolved_timeout_t timeout = resolve_timeout_s();
     if (timeout.unreadable) {
@@ -259,8 +300,20 @@ http_auth_role_t http_auth_session_resolve(const char *token, const char *client
     return to_enforce_role(role);
 }
 
-bool http_auth_session_status(const char *token, const char *client_ip, web_auth_session_role_t *role_out,
-                               uint32_t *last_seen_ms_out, uint32_t *timeout_s_out) {
+http_auth_role_t http_auth_session_resolve(const char *token, const char *client_ip) {
+    uint8_t h[32] = {0};
+    bool hv = (token != NULL && token[0] != '\0');
+    if (hv && !sha256((const uint8_t *)token, strlen(token), h)) { /* AX-04: no zero key */
+        session_wipe(h, sizeof(h));
+        return HTTP_AUTH_ROLE_NONE;
+    }
+    http_auth_role_t r = session_resolve_impl(token, h, client_ip);
+    session_wipe(h, sizeof(h)); /* AX-03 */
+    return r;
+}
+
+static bool session_status_impl(const char *token, const uint8_t *token_hash, const char *client_ip,
+                                web_auth_session_role_t *role_out, uint32_t *last_seen_ms_out, uint32_t *timeout_s_out) {
     if (role_out) {
         *role_out = WEB_AUTH_SESSION_ROLE_NONE;
     }
@@ -281,8 +334,6 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
         return false;
     }
 
-    uint8_t token_hash[32];
-    sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
@@ -316,13 +367,27 @@ bool http_auth_session_status(const char *token, const char *client_ip, web_auth
     return true;
 }
 
-void http_auth_session_touch(const char *token, const char *client_ip, bool via_ap) {
+bool http_auth_session_status(const char *token, const char *client_ip, web_auth_session_role_t *role_out,
+                               uint32_t *last_seen_ms_out, uint32_t *timeout_s_out) {
+    uint8_t h[32] = {0};
+    bool hv = (token != NULL && token[0] != '\0');
+    if (hv && !sha256((const uint8_t *)token, strlen(token), h)) { /* AX-04: no zero key */
+        session_wipe(h, sizeof(h));
+        if (role_out) { *role_out = WEB_AUTH_SESSION_ROLE_NONE; }
+        if (last_seen_ms_out) { *last_seen_ms_out = 0; }
+        if (timeout_s_out) { *timeout_s_out = 0; }
+        return false;
+    }
+    bool r = session_status_impl(token, h, client_ip, role_out, last_seen_ms_out, timeout_s_out);
+    session_wipe(h, sizeof(h)); /* AX-03 */
+    return r;
+}
+
+static void session_touch_impl(const char *token, const uint8_t *token_hash, const char *client_ip, bool via_ap) {
     if (!token || token[0] == '\0') {
         return;
     }
 
-    uint8_t token_hash[32];
-    sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
     uint32_t now = (uint32_t)hal_time_now_ms();
@@ -357,6 +422,17 @@ void http_auth_session_touch(const char *token, const char *client_ip, bool via_
     // login -- "last used", not "origin only" (see web_auth_session.h's
     // via_ap field comment).
     web_auth_table_set_via_ap(t, (size_t)idx, via_ap);
+}
+
+void http_auth_session_touch(const char *token, const char *client_ip, bool via_ap) {
+    uint8_t h[32] = {0};
+    bool hv = (token != NULL && token[0] != '\0');
+    if (hv && !sha256((const uint8_t *)token, strlen(token), h)) { /* AX-04: no zero key */
+        session_wipe(h, sizeof(h));
+        return;
+    }
+    session_touch_impl(token, h, client_ip, via_ap);
+    session_wipe(h, sizeof(h)); /* AX-03 */
 }
 
 bool http_auth_any_session_active(void) {
@@ -416,13 +492,11 @@ bool http_auth_any_ap_session_active(bool ap_station_present) {
     return true;
 }
 
-void http_auth_session_logout(const char *token) {
+static void session_logout_impl(const char *token, const uint8_t *token_hash) {
     if (!token || token[0] == '\0') {
         return;
     }
 
-    uint8_t token_hash[32];
-    sha256((const uint8_t *)token, strlen(token), token_hash);
 
     web_auth_table_t *t = http_session_table();
     int idx = web_auth_table_find_by_token(t, token_hash);
@@ -430,4 +504,15 @@ void http_auth_session_logout(const char *token) {
         return;
     }
     web_auth_table_destroy_session(t, (size_t)idx);
+}
+
+void http_auth_session_logout(const char *token) {
+    uint8_t h[32] = {0};
+    bool hv = (token != NULL && token[0] != '\0');
+    if (hv && !sha256((const uint8_t *)token, strlen(token), h)) { /* AX-04: no zero key */
+        session_wipe(h, sizeof(h));
+        return;
+    }
+    session_logout_impl(token, h);
+    session_wipe(h, sizeof(h)); /* AX-03 */
 }

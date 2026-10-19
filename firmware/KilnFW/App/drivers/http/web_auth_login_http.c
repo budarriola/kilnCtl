@@ -538,6 +538,9 @@ static esp_err_t login_post_handler(httpd_req_t *req)
                               role_retry_ms[ladder_for_role(candidate_role)]);
     }
 
+    /* AX-02: a four-corner reset (destroy-all) posted while this verify runs must not be
+     * outlived by the session this login is about to mint. */
+    uint32_t destroy_gen_before_verify = http_session_destroy_gen();
     bool ok = web_auth_store_verify_password(store_role, password);
 
     // Wipe the plaintext password from this stack frame the moment it is no
@@ -545,6 +548,12 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // own callers ("never logged, never stored, discarded ... immediately
     // after this call").
     login_wipe(password, sizeof(password));
+
+    /* AY-02: decide the AX-02 generation check BEFORE recording the attempt, so a refused
+     * success never resets the backoff ladder (that would show the password was correct).
+     * http_session_table() applies any posted destroy-all first. */
+    (void)http_session_table();
+    bool reset_during_verify = ok && (http_session_destroy_gen() != destroy_gen_before_verify);
 
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
         // Fail closed: an attempt whose outcome cannot be recorded must not
@@ -567,7 +576,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // recording a failure/success here is exactly one ladder step, per
         // this file's header comment -- a refused attempt never reaches
         // this line at all, and therefore never counts or extends the wait.
-        if (slot != NULL) {
+        if (slot != NULL && !reset_during_verify) {
             login_backoff_state_t *ladder = &slot->backoff[ladder_for_role(candidate_role)];
             if (ok) {
                 // SS-01: success resets only the ladder of the role that logged
@@ -581,6 +590,12 @@ static esp_err_t login_post_handler(httpd_req_t *req)
             }
         }
         xSemaphoreGive(s_login_lock);
+    }
+
+    if (reset_during_verify) {
+        ESP_LOGW(TAG, "login from %s: credentials reset during verify, refused", ip);
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "invalid username or password");
+        return ESP_OK;
     }
 
     if (!ok) {
@@ -625,14 +640,32 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     ota_http_hex_encode(token_raw, sizeof(token_raw), token_hex);
 
     uint8_t token_hash[32];
-    http_session_hash_token(token_hex, strlen(token_hex), token_hash);
+    bool hash_ok = http_session_hash_token(token_hex, strlen(token_hex), token_hash);
     // SS-04: the raw bytes are only needed for the hex form; wipe them now.
     login_wipe(token_raw, sizeof(token_raw));
+    /* AX-04: a failed hash must never become a (zero) session key. */
+    if (!hash_ok) {
+        login_wipe(token_hex, sizeof(token_hex));
+        login_wipe(token_hash, sizeof(token_hash));
+        ESP_LOGE(TAG, "login: token hash failed, refused");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
+        return ESP_OK;
+    }
+    /* AX-02: http_session_table() applies any posted destroy-all first; refuse if the generation
+     * moved during the verify (same body as a wrong password, no oracle). */
+    web_auth_table_t *login_table = http_session_table();
+    if (http_session_destroy_gen() != destroy_gen_before_verify) {
+        login_wipe(token_hex, sizeof(token_hex));
+        login_wipe(token_hash, sizeof(token_hash));
+        ESP_LOGW(TAG, "login from %s: credentials reset during verify, refused", ip);
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "invalid username or password");
+        return ESP_OK;
+    }
 
     web_auth_session_role_t session_role =
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
     size_t session_idx =
-        web_auth_table_create_session(http_session_table(), token_hash, ip, session_role, now_ms());
+        web_auth_table_create_session(login_table, token_hash, ip, session_role, now_ms());
     // GD-04: the lookup key is in the table now; its stack copy is no longer needed on any path below.
     login_wipe(token_hash, sizeof(token_hash));
     if (session_idx >= WEB_AUTH_WEB_SLOT_COUNT) {
@@ -682,6 +715,22 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     }
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
 
+    /* AY-03 (was AX-05): a re-login from a client presenting its previous valid cookie revokes that
+     * one session, but only now that the new session and Set-Cookie succeeded, and only if the old
+     * session is bound to this requester's IP (status is valid only for the bound address). */
+    {
+        char old_token[128] = { 0 };
+        if (http_auth_extract_session_token(req, old_token, sizeof(old_token)) && old_token[0] != '\0') {
+            web_auth_session_role_t old_role = WEB_AUTH_SESSION_ROLE_NONE;
+            uint32_t old_seen = 0;
+            uint32_t old_timeout = 0;
+            if (http_auth_session_status(old_token, ip, &old_role, &old_seen, &old_timeout)) {
+                http_auth_session_logout(old_token);
+            }
+        }
+        login_wipe(old_token, sizeof(old_token));
+    }
+
     ESP_LOGI(TAG, "login succeeded from %s (role=%d)", ip, (int)session_role);
     httpd_resp_set_type(req, "application/json");
     esp_err_t send_err = httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -716,6 +765,7 @@ static esp_err_t logout_post_handler(httpd_req_t *req)
     if (token[0] != '\0') {
         http_auth_session_logout(token);
     }
+    login_wipe(token, sizeof(token)); /* AY-01 */
 
     char cookie[128];
     int cookie_len = snprintf(cookie, sizeof(cookie),

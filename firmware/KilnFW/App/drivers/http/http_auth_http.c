@@ -191,6 +191,15 @@ bool http_auth_extract_session_token(httpd_req_t *req, char *out, size_t out_len
     return matched;
 }
 
+/* AX-03: volatile wipe of bearer-token stack copies so the compiler cannot elide it. */
+static void auth_wipe(void *p, size_t n)
+{
+    volatile uint8_t *q = (volatile uint8_t *)p;
+    while (n-- > 0u) {
+        *q++ = 0u;
+    }
+}
+
 static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_role, char *out_token,
                                       size_t out_token_len) {
     char token[128];
@@ -209,6 +218,7 @@ static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_rol
             out_token[0] = '\0';
         }
     }
+    auth_wipe(token, sizeof(token)); /* AY-01 */
 }
 
 // Fix for the OPEN-tier build-identity leak on GET /api/ota/esp/status
@@ -412,6 +422,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
         http_auth_session_touch(token, ip, on_ap);
     }
+    auth_wipe(token, sizeof(token)); /* AX-03 */
     switch (decision) {
         case HTTP_AUTH_DECISION_ALLOW:
             // Restore the ORIGINAL user_ctx before calling into the real

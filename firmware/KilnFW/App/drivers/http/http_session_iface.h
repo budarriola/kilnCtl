@@ -54,7 +54,12 @@ void http_session_destroy_all_request_post(void);
 // not a second, independently-written hash -- otherwise a login-minted
 // token would never resolve here (same reset-one-side-of-a-pair hazard as
 // http_session_table() above).
-void http_session_hash_token(const char *token, size_t token_len, uint8_t out[32]);
+// AX-04: returns false (out zeroed) when the hash primitive fails; callers must refuse, never use out.
+bool http_session_hash_token(const char *token, size_t token_len, uint8_t out[32]);
+
+// AX-02: the posted destroy-all generation. A login snapshots it before the password verify and
+// refuses to mint a session if it changed.
+uint32_t http_session_destroy_gen(void);
 
 // Resolves the caller's role from whatever the real session mechanism uses
 // to identify a session -- a bearer token pulled from a cookie header, in
