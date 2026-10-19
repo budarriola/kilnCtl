@@ -3679,3 +3679,21 @@ Stack margin (free of configured): lvgl 8740/14336, uart_proto_rx 3952/8192, inf
 Stage: update_stage_upload of the local build (2996656 B), no force, staged and verified by read-back. last_verify_us=881765 (read via GET /api/update/stage after the clear; field persists). update_stage_clear ok. update_stage_release (default channel): FAILED, error=no_stable_release, http_status=404 (no stable release in budarriola/kilnCtl, not a downgrade refusal); heap low-water during the check free=108415, largest_block=31744. The fetch writer therefore did not run.
 
 End state: main c7bf7761d, link up, armed, stage blank, backup unchanged. Result: GP-01 5120 B stack and BX-03 high-water still unmeasured (need an allowed GitHub stage).
+
+## benchmain13 (2026-10-18, main 285e798cb, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain13_backup_pre.json (post export byte-identical, mid-flash export identical). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Build and flash: PASS. build_kilnfw ok; firmware/KilnFW/build/sdkconfig has CONFIG_ESP_TIMER_TASK_STACK_SIZE=4608. flash_firmware(confirm) verified (elf d66dbc5750dd), boot_guard cleared. get_fw_version commit 285e798cb clean; link up, SaftyFW armed.
+
+Heap internal (uptime 128 s): free 110819, min_free 88871, largest 31744. benchmain12 (126 s): free 118255, min_free 96171, largest 31744. Static cost of UR-01 + ET-02: -7436 B free, -7300 B min_free, largest block unchanged (SK-04 alarm 7168 B not near; owner floor 8192 B far below).
+
+Stack margin (free of configured): lvgl 8616/14336, uart_proto_rx 3988/8192, info_uart_bridge 1600/4096, httpd_worker 3072/8192. update_fetch_wr (5120 B) "not running" throughout; esp_timer row absent (registers on first rollback request, ET-02).
+
+Release stage: update_stage_release(allow_prerelease) found v1.0.0-pre.4 and refused it as downgrade (lower schema version; zones_cfg_lower warning); no force, no downgrade override. Writer high-water not measured.
+
+Local stage: update_stage_upload of the local build (2996624 B) staged and verified, no force. last_verify_us=894912 (GET /api/update/stage after clear). Heap after stage and after clear: free 110563, min_free 88871, largest 31744. Stage cleared, no apply.
+
+Rollback (ET-02/OR-03): not triggered, BENCH-PENDING (a rollback would land on a previous image, not 285e798cb).
+
+End state: main 285e798cb, link up, armed, stage blank, backup unchanged. Result: UR-01 static cost measured; UW-04, ET-02 stack row, OR-03 timer path still open.
