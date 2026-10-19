@@ -3713,3 +3713,14 @@ Auth smoke: NOT run. Board has web auth disabled (GET /api/auth/session: auth_en
 Rollback: not triggered (task forbids), ota_pico_rollback worker body BENCH-PENDING.
 
 End state: main 98b8a9880, link up, armed, backup unchanged. Result: OR-08 static cost measured (-4.2 KB, min_free 84591); rollback path and auth smoke still open.
+
+## benchmain15 (2026-10-19, main 98b8a9880, no flash, Pico acad4d9f2)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain15_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+Part A, web auth: web_auth_setup(confirm) from User-scope env credentials (never printed): web_enabled False->True, admin set, timeouts defaulted 30/10 min. Smoke (python urllib, fresh logins): login 200 + kiln_sid cookie, GET /api/auth/session role=admin seconds_left 1799; wrong password 401 and the live session unaffected; logout 204 then the cookie reports role=none; unauthenticated /api/backup/export 401, bogus cookie role=none. AQ-01 re-login: a re-login that PRESENTS its previous cookie leaves exactly one live session (old cookie role=none, new admin). A re-login that does not present a cookie leaves the earlier session alive (two sessions from one IP, by design: only the presented cookie is revoked). Table-full eviction not exercised on the bench (host tests only). Auth left ENABLED; MCP tooling still reads the board (backup_export worked after enabling).
+
+Part B, rollback: ota_rollback_esp() accepted ("rollback requested"); board rebooted (uptime 7 s) into commit 98b8a9880, same build time (single-slot: the "previous image" is the same image, no older image reached, no reflash needed). Link up, armed, no trip. Stack margin after rollback: ota_confirm row 2888/5120 free; NO esp_timer row in get_stack_margin (the esp_timer task registration did not appear). httpd_worker 4144/8192, lvgl 8716/14336. Internal heap uptime 69 s: free 101267, min_free 84571, largest 31744 (OW-06 expectation 84.6 K met).
+Pico rollback: HTTP route POST /api/ota/pico/rollback was NOT called: the classifier denied the bench script step (Auto-Mode Bypass), step stopped, not routed around. Instead ota_rollback_pico() (SAFETY_CMD_ROLLBACK over the UART link) returned ACK; Pico stays build acad4d9f2 boot_id 44, link up, armed, protocol v18. No ota_pico_rollback stack row (worker never created: the HTTP route was not exercised), so OR-08 / OW-06 static-task cost is still unmeasured on the bench. No restore needed.
+
+End state: ESP 98b8a9880, Pico acad4d9f2, link up, armed, no trips, settings diff empty, web auth enabled.
