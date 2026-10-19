@@ -3724,3 +3724,15 @@ Part B, rollback: ota_rollback_esp() accepted ("rollback requested"); board rebo
 Pico rollback: HTTP route POST /api/ota/pico/rollback was NOT called: the classifier denied the bench script step (Auto-Mode Bypass), step stopped, not routed around. Instead ota_rollback_pico() (SAFETY_CMD_ROLLBACK over the UART link) returned ACK; Pico stays build acad4d9f2 boot_id 44, link up, armed, protocol v18. No ota_pico_rollback stack row (worker never created: the HTTP route was not exercised), so OR-08 / OW-06 static-task cost is still unmeasured on the bench. No restore needed.
 
 End state: ESP 98b8a9880, Pico acad4d9f2, link up, armed, no trips, settings diff empty, web auth enabled.
+
+## benchmain16 (2026-10-19, main c86ef946c, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain16_backup_pre.json; post export byte-identical (same SHA-256), 22548 B. build_kilnfw from a clean worktree at c86ef946c, flash_firmware(confirm) via OpenOCD, verified OK, boot_guard counter cleared.
+
+After boot: get_fw_version commit c86ef946c, tree clean, board running HEAD, UART protocol 13 compatible. safety_get_status: link up, armed, not tripped, no trip cleared. reset_reason software (esp_restart) as expected after flash.
+
+ET-02 measured: esp_timer row now present at boot, 4216 B free at worst of 4608 B (91.5% headroom) at uptime ~18 s. Other rows: lvgl 8128/14336, uart_proto_rx 3624/8192, httpd_worker 3136/8192, ota_confirm 2888/5120.
+
+Heap internal (uptime 18 s): free 101251 B, largest_free_block 31744 B, min_free 84579 B (total 330347 B). PSRAM free 4853044 B.
+
+End state: ESP c86ef946c, Pico unchanged, link up, armed, no trips, settings diff empty. Result: ET-02 boot registration confirmed on target.
