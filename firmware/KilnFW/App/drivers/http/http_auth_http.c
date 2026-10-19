@@ -249,6 +249,14 @@ bool http_auth_caller_is_admin(httpd_req_t *req) {
     return role == HTTP_AUTH_ROLE_ADMIN;
 }
 
+// SUPERSEDED by KG-01 (owner 2026-10-19): the paragraphs below record the
+// 2026-09-24/09-28 lazy-login design, which served the static shell of a denied
+// page-shell GET and let app.js pop the login over it. That leaked the page
+// content and rendered the page before the login. A denied page-shell GET now
+// gets a 302 to "/?next=<uri>" (send_page_gate_redirect()) and the dashboard
+// shows the sign-in dialog first; the list, the tiers and the /api/ gate are
+// unchanged.
+//
 // Owner report, 2026-09-24 (verbatim): "When I open the webpage, don't show
 // the login until I do something that would require it ... a pop-up ... that
 // allows me to cancel the action." The previous behaviour (see the removed
@@ -317,6 +325,22 @@ static bool request_host_refused(httpd_req_t *req) {
         name = mdns_host;
     }
     return http_origin_request_host_refused(req, origin_hdr_len, origin_hdr_str, name);
+}
+
+// KG-01 (owner 2026-10-19): the ONE page gate. A page-shell GET that http_auth_check()
+// denied is never served: 302 to the dashboard carrying the wanted page, where app.js
+// shows the sign-in dialog first and navigates on success. Both DENY branches below call
+// this, so a new page route (a kPageShellUris row) is gated without per-handler code.
+static esp_err_t send_page_gate_redirect(httpd_req_t *req, const kiln_http_route_ctx_t *ctx) {
+    char loc[64];
+    if (!http_auth_page_gate_location(ctx->uri, loc, sizeof(loc))) {
+        strcpy(loc, "/");
+    }
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", loc);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, NULL, 0);
+    return refusal_result(req);
 }
 
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
@@ -450,8 +474,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // still never a separate "authentication required" page, and
             // Cancel still returns to the dashboard.
             if (is_page_shell_get(ctx)) {
-                req->user_ctx = ctx->real_user_ctx;
-                return ctx->real_handler(req);
+                return send_page_gate_redirect(req, ctx); /* KG-01: never serve the shell */
             }
             httpd_resp_set_status(req, "401 Unauthorized");
             httpd_resp_send(req, "authentication required", HTTPD_RESP_USE_STRLEN);
@@ -463,8 +486,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // dashboard with admin_required=<uri> -- the page's own fetches
             // are what raise the modal, in place, the moment one is tried.
             if (is_page_shell_get(ctx)) {
-                req->user_ctx = ctx->real_user_ctx;
-                return ctx->real_handler(req);
+                return send_page_gate_redirect(req, ctx); /* KG-01: never serve the shell */
             }
             // AJAX/API path:
             // ordinary 403, tagged with X-Kiln-Auth-Reason so a client can

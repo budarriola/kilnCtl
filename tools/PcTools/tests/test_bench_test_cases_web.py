@@ -325,18 +325,22 @@ class WebX03Test(unittest.TestCase):
             with mock.patch.object(C, "_http_get_raw", side_effect=self._fake_get(responses)):
                 return REGISTRY["WEB-X-03"].judge(ctx)
 
-    def test_page_shell_open_with_auth_enabled_passes(self):
-        self.assertEqual(self._run_shell(True, 200).verdict, Verdict.PASS)
+    def test_page_shell_302_with_auth_enabled_passes(self):
+        self.assertEqual(self._run_shell(True, 302).verdict, Verdict.PASS)
 
-    def test_page_shell_redirect_fails_with_auth_enabled(self):
-        self.assertEqual(self._run_shell(True, 302).verdict, Verdict.FAIL)
+    def test_page_shell_served_with_auth_enabled_fails(self):
+        """KG-01: a 200 shell for a logged-out caller is a content leak."""
+        self.assertEqual(self._run_shell(True, 200).verdict, Verdict.FAIL)
 
-    def test_page_shell_refused_fails_even_with_auth_disabled(self):
+    def test_page_shell_served_with_auth_disabled_passes(self):
+        self.assertEqual(self._run_shell(False, 200).verdict, Verdict.PASS)
+
+    def test_page_shell_refused_fails_with_auth_disabled(self):
         self.assertEqual(self._run_shell(False, 401, api_status=200).verdict, Verdict.FAIL)
 
     def test_page_shell_does_not_open_its_api_route(self):
         """The shell being open is never evidence for the data route."""
-        self.assertEqual(self._run_shell(True, 200, api_status=200).verdict, Verdict.FAIL)
+        self.assertEqual(self._run_shell(True, 302, api_status=200).verdict, Verdict.FAIL)
 
     def test_real_table_page_shells_are_all_tabled_gets(self):
         """Every PAGE_SHELL_URI in the real route_tier_table.h is a non-/api
