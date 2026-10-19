@@ -51,6 +51,11 @@ extern "C" {
 // allowlist gap this design exists to avoid.
 esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri_handler);
 
+// KH-09: true when the prehandler marked this request's page-shell response no-store (auth on,
+// non-OPEN page shell GET). web_set_asset_cache_headers() honors it so its Cache-Control
+// "no-cache" does not replace the prehandler's "no-store".
+bool http_auth_req_wants_no_store(const httpd_req_t *req);
+
 // For a route classified ROUTE_TIER_OPEN, kiln_http_prehandler() above never
 // resolves a caller role (see its own comment: http_auth_check() would
 // ALLOW regardless, so it isn't worth the session-table lookup on the

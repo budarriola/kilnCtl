@@ -1499,6 +1499,15 @@ try {
 
     Invoke-HostTestExe -Name "board_temps" -ExePath $exe10 -BuildCmd $cmd10
 
+    # ---- test_web_encoding_cache.c: KH-09, real web_encoding.c + real http_auth_enforce.c predicate ----
+    $exeWec = Join-Path $outDir "kilnctl_host_tests_web_encoding_cache.exe"
+    $wecObjDir = Join-Path $outDir "wec"
+    New-Item -ItemType Directory -Force -Path $wecObjDir | Out-Null
+    $cmdWec = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$wecObjDir\\`" /Fe:`"$exeWec`" `"$(Join-Path $testDir 'test_web_encoding_cache.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_enforce.c')`""
+    Invoke-HostTestExe -Name "web_encoding_cache" -ExePath $exeWec -BuildCmd $cmdWec
+
     # ---- test_kiln_io_owner.c: its own ELEVENTH, separate executable ----------
     # Audit item, TODO.md "Audit 2026-08-27 -- open items" (IO_CMD_SX_LED_DRIVER's
     # missing relay-pin gate). Same reason as test_board_temps.c above: it
