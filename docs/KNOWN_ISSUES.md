@@ -610,8 +610,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 
 ## REVIEW_OR08_2026_10_19 (OW)
 HIGH 0, MED 0, LOW 2, INFO 5.
-- **OW-01** LOW: `.dram0.bss` CEILING_BYTES 81500 is stale (dev ELF with OR-08 measures 65184 B); check honest but ~16 KB slack. Re-baseline to measured + ~500 B.
-- **OW-02** LOW: host tests never run the rollback worker body (take stub returns 0, notify stub does not record the handle); claim release after run and outcome-before-release ordering unpinned. Record notified handle, test or span-scan the run; negtest.
+- **OW-01** LOW: `.dram0.bss` CEILING_BYTES 81500 is stale (dev ELF with OR-08 measures 65184 B); check honest but ~16 KB slack. Re-baseline to measured + ~500 B. FIXED 3817fcd87 (2026-10-19): ceiling 65700 (measured 65184 + ~500 B).
+- **OW-02** LOW: host tests never run the rollback worker body (take stub returns 0, notify stub does not record the handle); claim release after run and outcome-before-release ordering unpinned. Record notified handle, test or span-scan the run; negtest. FIXED 3817fcd87 (2026-10-19): stub records the notified handle; test runs the worker body once and pins claim-held-during, outcome-before-release, release-after (3 mutants CAUGHT).
 - **OW-03** INFO: no notify/claim race; notify latches if the worker has not yet re-parked; notify-while-busy blocked by the claim. Accepted.
 - **OW-04** INFO: handle publication, registration once, NULL-on-failure retry sound. Accepted.
 - **OW-05** INFO: no update-claim leak on any path. Accepted.
