@@ -3736,3 +3736,13 @@ ET-02 measured: esp_timer row now present at boot, 4216 B free at worst of 4608 
 Heap internal (uptime 18 s): free 101251 B, largest_free_block 31744 B, min_free 84579 B (total 330347 B). PSRAM free 4853044 B.
 
 End state: ESP c86ef946c, Pico unchanged, link up, armed, no trips, settings diff empty. Result: ET-02 boot registration confirmed on target.
+
+## benchmain17 (2026-10-19, main c86ef946c, no flash)
+
+Board 192.168.1.156 over home Wi-Fi, web auth enabled, backup logs/benchmain17_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+AQ-01 / AZ-04 session table (WEB_AUTH_WEB_SLOT_COUNT 8), python urllib, admin login from User-scope env credentials (never printed): 9 logins WITHOUT cookies from one IP all returned 200 + kiln_sid. Afterwards GET /api/auth/session: login 1 role=none (oldest evicted), logins 2..9 role=admin (table holds 8, newest works). Re-login presenting the login-9 cookie: 200, old cookie role=none (revoked), new cookie role=admin, logins 2..8 still admin (no bystander evicted, since the presenter's slot was reused before create). Logout of all 8 live sessions: 204 each, then all cookies role=none.
+
+Heap internal before: uptime 520 s free 106479 B, largest 31744 B, min_free 84579 B. After: uptime 551 s, free 106479 B, largest 31744 B, min_free 84579 B (no change). Link timeouts 0.
+
+End state: ESP c86ef946c, Pico unchanged, no sessions left from this run, settings diff empty. Result: AQ-01 full-table eviction and re-login revoke confirmed on target.
