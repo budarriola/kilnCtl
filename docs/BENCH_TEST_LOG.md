@@ -3697,3 +3697,19 @@ Local stage: update_stage_upload of the local build (2996624 B) staged and verif
 Rollback (ET-02/OR-03): not triggered, BENCH-PENDING (a rollback would land on a previous image, not 285e798cb).
 
 End state: main 285e798cb, link up, armed, stage blank, backup unchanged. Result: UR-01 static cost measured; UW-04, ET-02 stack row, OR-03 timer path still open.
+
+## benchmain14 (2026-10-19, main 98b8a9880, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain14_backup_pre.json (post export byte-identical). Pico not reflashed.
+
+Build and flash: PASS. build_kilnfw from a clean worktree of origin/main (KilnCtrl.bin 2997520 B); flash_firmware(confirm, kiln_fw_root) verified (elf b276485612bf), boot_guard cleared. get_fw_version commit 98b8a9880 clean, board == HEAD; link up, SaftyFW armed, no trip.
+
+Heap internal (uptime 66 s): free 106591, min_free 84591, largest 31744. benchmain13 (128 s): free 110819, min_free 88871, largest 31744. Delta -4228 B free, -4280 B min_free (the OR-08 static task, about 4.2 KB expected), largest block unchanged; SK-04 alarm 7168 B and owner floor 8192 B not near.
+
+Stack margin (free of configured): lvgl 8748/14336, uart_proto_rx 4000/8192, info_uart_bridge 1484/4096, httpd_worker 3200/8192. update_fetch_wr (5120 B) "not running". ota_pico_rollback row absent (registers on the first accepted POST /api/update/rollback_pico, by design).
+
+Auth smoke: NOT run. Board has web auth disabled (GET /api/auth/session: auth_enabled false, role admin), so env-credential login returns 401 (one attempt through http_auth, plus one raw; no credential printed). Enabling auth was not done. AQ/AR login order stays host-test-only on target.
+
+Rollback: not triggered (task forbids), ota_pico_rollback worker body BENCH-PENDING.
+
+End state: main 98b8a9880, link up, armed, backup unchanged. Result: OR-08 static cost measured (-4.2 KB, min_free 84591); rollback path and auth smoke still open.
