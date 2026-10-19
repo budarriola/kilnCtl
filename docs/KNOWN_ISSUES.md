@@ -592,3 +592,11 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AY-05** FIXED: INFO. Session-status timeout ms is computed in 64-bit (the 2^31 ms idle wipe was already correct). Source-scan test.
 - **AY-06** INFO: The ESP target compiles by inspection (types, headers, CMake component).
 - **AY-07** INFO: AX-04: all hash callers check the bool. AX-02 ordering is correct.
+
+## REVIEW_AYFIX_2026_10_19 (AQ)
+- **AQ-01** MED: AY-03 revokes the presented session after create; with a full table create first evicts the LRU slot (often another client's), so a re-login logs out a bystander. Revoke/reuse the presenter's IP-bound slot before create. No full-table re-login test.
+- **AQ-02** LOW: AY-01/AY-05 tests are source-text matches (status wipe check matches only a comment); not behavior tests, no negtest named.
+- **AQ-03** LOW: prehandler out_token copy (http_auth_http.c ~397) relies on the caller's wipe on every path; no host test covers deny-path wipes.
+- **AQ-04** INFO: AY-02 correct; refused success records nothing, host test discriminates.
+- **AQ-05** INFO: AY-05 correct; (long) cast safe below 2^31 s timeout.
+- **AQ-06** INFO: check_csrf_origin_wiring string-aware regex correct; AY rows lack fix SHA b803bc4af.
