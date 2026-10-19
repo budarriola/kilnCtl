@@ -600,8 +600,8 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AQ-04** INFO: AY-02 correct; refused success records nothing, host test discriminates.
 - **AQ-05** INFO: AY-05 correct; (long) cast safe below 2^31 s timeout.
 - **AQ-06** INFO: check_csrf_origin_wiring string-aware regex correct; AY rows lack fix SHA b803bc4af.
-- **AR-01** LOW: AQ-01 dropped the AY-03 keep-session test; no test pins the revoke after the AX-02 gen-moved and Set-Cookie refusals, so moving it earlier (old session lost, no new one) passes. Add span scan or gen-moved behavior test; negtest. (REVIEW_AQFIX_2026_10_19)
-- **AR-02** LOW: GD-04 scan dropped; cookie-formatted-before-create ordering is unpinned (500 path could again orphan a session if moved back). Fold into AR-01 scan.
+- **AR-01** LOW (FIXED b34ef2295): AQ-01 dropped the AY-03 keep-session test; no test pins the revoke after the AX-02 gen-moved and Set-Cookie refusals, so moving it earlier (old session lost, no new one) passes. Add span scan or gen-moved behavior test; negtest. (REVIEW_AQFIX_2026_10_19)
+- **AR-02** LOW (FIXED b34ef2295): GD-04 scan dropped; cookie-formatted-before-create ordering is unpinned (500 path could again orphan a session if moved back). Fold into AR-01 scan.
 - **AR-03** INFO: refusal after revoke is unreachable (revoke frees a slot, create takes first free; single httpd task). Set-Cookie failure handled before revoke. Accepted.
 - **AR-04** INFO: same-NAT-IP attacker with a stolen cookie can revoke it at login; already possible via logout with that cookie; role never inherited. Accepted.
 - **AR-05** INFO: AY-02 lockout ordering and SL-01 USER/ADMIN eviction unchanged; failed/refused logins never revoke. Accepted.
