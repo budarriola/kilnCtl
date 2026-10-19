@@ -135,6 +135,7 @@ static char s_resp_status[48];
 static char s_resp_body[96];
 static char s_resp_location[96];
 static char s_resp_cache[48];
+static int s_resp_cache_writes;
 static int s_resp_send_calls;
 static long long s_resp_send_len;
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
@@ -161,7 +162,7 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
 {
     (void)r;
     if (field && value && strcmp(field, "Location") == 0) snprintf(s_resp_location, sizeof(s_resp_location), "%s", value);
-    if (field && value && strcmp(field, "Cache-Control") == 0) snprintf(s_resp_cache, sizeof(s_resp_cache), "%s", value);
+    if (field && value && strcmp(field, "Cache-Control") == 0) { s_resp_cache_writes++; snprintf(s_resp_cache, sizeof(s_resp_cache), "%s", value); }
     return ESP_OK;
 }
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
@@ -378,6 +379,7 @@ static void run_prehandler(const char *uri, httpd_method_t m, const char *origin
     s_resp_body[0] = '\0';
     s_resp_location[0] = '\0';
     s_resp_cache[0] = '\0';
+    s_resp_cache_writes = 0;
     s_resp_send_calls = 0;
     s_resp_send_len = -1;
     (void)s_registered.handler(&req);
@@ -419,6 +421,7 @@ static void test_kh03_page_gate_redirect(void)
     TEST_CHECK(strcmp(s_resp_status, "302 Found") == 0, "page shell, no session: 302 Found");
     TEST_CHECK(strcmp(s_resp_location, "/?next=/settings") == 0, "page shell: Location is /?next=/settings");
     TEST_CHECK(strcmp(s_resp_cache, "no-store") == 0, "page shell: Cache-Control no-store");
+    TEST_CHECK(s_resp_cache_writes == 1, "page shell: exactly one Cache-Control write (KH-10)");
     TEST_CHECK(s_resp_send_calls == 1 && s_resp_send_len == 0 && s_resp_body[0] == '\0', "page shell: empty body");
 
     run_prehandler("/api/backup/export", HTTP_GET, NULL, "192.168.1.50");

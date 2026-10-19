@@ -150,6 +150,6 @@ void web_set_asset_cache_headers(httpd_req_t *req)
      * than no-store. httpd_resp_set_hdr() does not copy the value, so the
      * string must outlive the response -- a string literal does. */
     /* KH-09: a signed-in page shell stays no-store; the prehandler decided that, this
-     * single set_hdr call applies it (a second set_hdr would replace the first). */
+     * single set_hdr call applies it (httpd_resp_set_hdr appends, so a second write would send the header twice, KH-10). */
     httpd_resp_set_hdr(req, "Cache-Control", http_auth_req_wants_no_store(req) ? "no-store" : "no-cache");
 }

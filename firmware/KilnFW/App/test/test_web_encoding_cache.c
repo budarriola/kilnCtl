@@ -17,7 +17,7 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
-/* ---- header-capturing httpd stubs: last write wins, like the real httpd table ---- */
+/* ---- header-capturing httpd stubs; every Cache-Control write is counted (the real httpd appends) ---- */
 static char s_cc[32];
 static int s_cc_writes;
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
@@ -47,8 +47,7 @@ static void fake_prehandler(httpd_req_t *req, bool web_enabled, route_tier_t tie
 {
     s_mark = NULL;
     if (http_auth_page_shell_needs_no_store(req->uri, (httpd_method_t)req->method, web_enabled, tier)) {
-        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-        s_mark = req;
+        s_mark = req; /* KH-10: mark only, no Cache-Control write here */
     }
 }
 
@@ -62,6 +61,7 @@ static const char *serve(const char *uri, bool web_enabled, route_tier_t tier)
     s_cc_writes = 0;
     fake_prehandler(&req, web_enabled, tier);
     web_set_asset_cache_headers(&req); /* the page-shell handler's call */
+    TEST_CHECK(s_cc_writes == 1, "KH-10: exactly one Cache-Control write per response");
     return s_cc;
 }
 
@@ -96,9 +96,11 @@ static void test_prehandler_source_pin(void)
     }
     *w = '\0';
     TEST_CHECK(strstr(t, "if (http_auth_page_shell_needs_no_store(ctx->uri, ctx->method, web_enabled, ctx->tier)) {\n"
-                         "                httpd_resp_set_hdr(req, \"Cache-Control\", \"no-store\");\n"
                          "                s_no_store_req = req;\n") != NULL,
                "prehandler ALLOW branch marks the request no-store (KH-09)");
+    TEST_CHECK(strstr(t, "needs_no_store(ctx->uri, ctx->method, web_enabled, ctx->tier)) {\n"
+                         "                httpd_resp_set_hdr") == NULL,
+               "prehandler ALLOW branch does not write Cache-Control itself (KH-10)");
     TEST_CHECK(strstr(t, "static esp_err_t kiln_http_prehandler(httpd_req_t *req) {\n    s_no_store_req = NULL;") != NULL,
                "prehandler clears the mark on every request (KH-09)");
     free(t);
