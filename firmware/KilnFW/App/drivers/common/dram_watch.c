@@ -22,8 +22,8 @@ static dram_watch_t s_w;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t s_timer;
 
-/* Runs on the shared esp_timer task (CONFIG_ESP_TIMER_TASK_STACK_SIZE, 3584 B
- * here). Deliberately does no logging and no heap walk-and-print: it takes one
+/* Runs on the shared esp_timer task (CONFIG_ESP_TIMER_TASK_STACK_SIZE, 4608 B
+ * here per sdkconfig.defaults). Deliberately does no logging and no heap walk-and-print: it takes one
  * sample and records it, and dram_watch_service() does the rest from a task. */
 static void sample_cb(void *arg)
 {

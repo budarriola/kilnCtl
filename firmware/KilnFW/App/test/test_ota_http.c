@@ -1266,8 +1266,8 @@ static void test_esp_timer_stack_margin_registered_at_boot_et02(void)
         const char *h = strstr(boot, "xTaskGetHandle(\"esp_timer\")");
         const char *r = strstr(boot, "stack_margin_register(\"esp_timer\"");
         TEST_CHECK(h != NULL && r != NULL && h < r, "ET-02: boot code resolves then registers the esp_timer task");
-        TEST_CHECK(r != NULL && strstr(r, "4608") != NULL && strstr(r, "4608") < r + 80,
-                   "ET-02: registered with the 4608 B configured stack");
+        TEST_CHECK(r != NULL && strstr(r, "CONFIG_ESP_TIMER_TASK_STACK_SIZE") != NULL && strstr(r, "CONFIG_ESP_TIMER_TASK_STACK_SIZE") < r + 80,
+                   "ET-02: registered with CONFIG_ESP_TIMER_TASK_STACK_SIZE");
         free(boot);
     }
     const char *c2[] = {"../drivers/http/ota_http_esp.c", "App/drivers/http/ota_http_esp.c",

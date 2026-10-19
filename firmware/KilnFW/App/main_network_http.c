@@ -1055,12 +1055,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         }
     }
 
-    /* ET-02: the IDF-owned "esp_timer" task (CONFIG_ESP_TIMER_TASK_STACK_SIZE=4608) exists since startup;
+    /* ET-02: the IDF-owned "esp_timer" task (CONFIG_ESP_TIMER_TASK_STACK_SIZE) exists since startup;
      * register it once at boot so its high-water accumulates over every timer callback. */
     static TaskHandle_t s_esp_timer_task_handle;
     s_esp_timer_task_handle = xTaskGetHandle("esp_timer");
     if (s_esp_timer_task_handle != NULL) {
-        stack_margin_register("esp_timer", &s_esp_timer_task_handle, 4608);
+        stack_margin_register("esp_timer", &s_esp_timer_task_handle, CONFIG_ESP_TIMER_TASK_STACK_SIZE);
+    } else {
+        ESP_LOGW(MAIN_TAG, "esp_timer task not found; stack_margin row not registered");
     }
 
     main_heap_stage("uart_owner+proto");
