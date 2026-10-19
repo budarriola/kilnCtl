@@ -1419,6 +1419,21 @@ static void test_ay_source_scan(void)
                "logout handler wipes its token copy (AY-01)");
     TEST_CHECK(status && strstr(status, "uint64_t timeout_ms = (uint64_t)timeout_s * 1000u;") != NULL,
                "session-status computes timeout ms in 64-bit (AY-05)");
+    /* AR-01/AR-02: ordering in the login handler: AX-02 gen refusal, then cookie format + refusal, then the
+     * presenter revoke, then create. Moving the revoke earlier loses the old session on a refusal; moving the
+     * cookie format below create orphans a session on the 500 path. */
+    {
+        const char *h = login ? strstr(login, "uint32_t destroy_gen_before_verify") : NULL;
+        const char *gen = h ? strstr(h, "credentials reset during verify, refused") : NULL;
+        const char *fmt = gen ? strstr(gen, "int cookie_len = snprintf(") : NULL;
+        const char *fmt_fail = fmt ? strstr(fmt, "Set-Cookie formatting failed") : NULL;
+        const char *rev = fmt_fail ? strstr(fmt_fail, "http_auth_session_logout(old_token)") : NULL;
+        const char *role = rev ? strstr(rev, "web_auth_session_role_t session_role") : NULL;
+        const char *cre = role ? strstr(role, "web_auth_table_create_session(login_table") : NULL;
+        TEST_CHECK(cre != NULL, "login handler order: gen refusal < cookie format < revoke < create (AR-01/AR-02)");
+        TEST_CHECK(cre != NULL && strstr(rev, "return ") >= role,
+                   "no return between the revoke and create (AR-01)");
+    }
     free(auth);
     free(status);
     free(login);
