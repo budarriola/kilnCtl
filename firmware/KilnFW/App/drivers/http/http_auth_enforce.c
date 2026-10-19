@@ -170,6 +170,37 @@ bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
     return listed && http_auth_lookup_tier(uri, HTTP_GET, NULL);
 }
 
+bool http_auth_page_gate_location(const char *uri, char *out, size_t cap) {
+    if (out != NULL && cap > 0) {
+        out[0] = '\0';
+    }
+    if (uri == NULL || out == NULL || !http_auth_is_page_shell_get(uri, HTTP_GET)) {
+        return false;
+    }
+    static const char prefix[] = "/?next=";
+    size_t plen = sizeof(prefix) - 1;
+    size_t ulen = strlen(uri);
+    if (plen + ulen + 1 > cap) {
+        return false;
+    }
+    for (size_t i = 0; i < ulen; i++) {
+        char c = uri[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
+                  c == '/';
+        if (!ok) {
+            return false;
+        }
+    }
+    memcpy(out, prefix, plen);
+    memcpy(out + plen, uri, ulen + 1);
+    return true;
+}
+
+bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method, bool web_enabled,
+                                         route_tier_t tier) {
+    return web_enabled && tier != ROUTE_TIER_OPEN && http_auth_is_page_shell_get(uri, method);
+}
+
 bool http_auth_refusal_should_close(size_t content_len) {
     return content_len > HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES;
 }

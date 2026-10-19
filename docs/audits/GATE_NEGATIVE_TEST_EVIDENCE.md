@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 211.
+Gate rows: 212.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 199 |
+| NEGATIVE-TESTED | 200 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
@@ -182,6 +182,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_nvs_key_length.ps1` | NEGATIVE-TESTED | 09-16 | 17-character NVS key literal added to adaptive_tune.h | RED, names file, line, literal; hand-restored; PASS |
 | `tools/check_nvs_write_guard_coverage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | kiln_cfg_store.c quarantine_clear: guard `if (caller_stack_is_external())` -> `if (0)` (a first try in relay_cycles.c persist_snapshot was GREEN: that function writes via cfg-fs, not NVS) | RED; check returned to PASS on restore; 10-08 hardening: relay_cycles.c persist_snapshot `if (0 && caller_stack_is_external())` PASSED, now rejected, negtest CAUGHT |
 | `tools/check_ota_esp_refuses_running_target.ps1` | NEGATIVE-TESTED | 10-07 | guard kept as text but defeated: if (0 && !...), negation dropped, goto cleanup removed | PASSED (call located by position only): WEAK, fixed by matching the whole refusing if-block; all three now RED (re-run by the opus review); Pico mutations RED as before; 10-08 hardening: ota_http_util.c `return target != NULL;` PASSED, comparison now pinned in source, negtest CAUGHT |
+| `tools/check_page_gate.ps1` | NEGATIVE-TESTED | 10-19 | 5 check-script mutations (KG-01, f39d5a9d5) via negtest.ps1 -Preset check | 5/5 CAUGHT |
 | `tools/check_page_js_tests.ps1` | NEGATIVE-TESTED | 10-02 | delete-count filter loosened in backup_page.html | RED naming test_backup_page.js (36/37); restored |
 | `tools/check_psram_task_stacks.ps1` | NEGATIVE-TESTED | 10-14 | mutations to the PSRAM task-stack allowlist/registration rules (psramstk, commits a6c671e49 / 715ffc0ea) | 5/5 CAUGHT |
 | `tools/check_zone_omit_preserved_drift.ps1` | NEGATIVE-TESTED | benchfx13 2026-10-12 (tools\negtest.ps1 -Preset check) | zones_http_client.py: ZONE_OMIT_PRESERVED_FLOAT_KEYS: dropped "debounce" | RED (drift test names the missing key); real tree unchanged |

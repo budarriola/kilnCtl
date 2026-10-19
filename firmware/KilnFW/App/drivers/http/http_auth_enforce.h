@@ -204,6 +204,22 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
 // the ordinary 401/403. Pure, host-tested in test_http_auth_enforce.c.
 bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method);
 
+// KG-01 (owner 2026-10-19): the central page gate. A DENIED page-shell GET is
+// never served; the pre-handler answers 302 with the Location this builds:
+// "/?next=<uri>", i.e. the dashboard (an OPEN page) carrying the wanted page,
+// where app.js shows the sign-in dialog first and navigates on success.
+// Returns false (out set to "" when cap > 0) when `uri` is not a page shell
+// (http_auth_is_page_shell_get), holds a character outside [A-Za-z0-9_/]
+// (nothing to percent-encode), or `cap` is too small. Pure, host-tested.
+bool http_auth_page_gate_location(const char *uri, char *out, size_t cap);
+
+// KH-01: true when an ALLOWED response for this request is a protected page shell that
+// must carry Cache-Control: no-store (web auth on, tier not OPEN, GET of a page shell), so
+// Back/Forward after logout cannot show it from cache. The dashboard (OPEN) and static
+// assets keep their own caching.
+bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method, bool web_enabled,
+                                         route_tier_t tier);
+
 // Largest unread request body (Content-Length) a refused request may leave
 // for esp_http_server to purge. The purge runs at CONFIG_HTTPD_PURGE_BUF_LEN
 // (32 B) per read on the single CPU0 httpd task, so a multi-MB unauthenticated

@@ -302,12 +302,17 @@ def _case_web_x03(ctx: dict) -> CaseResult:
             # still fails.
             row["ok"] = status is not None and status not in (401, 403, 404) and status < 500
         elif grade_tier in _ADMIN_TIERS and method == "HTTP_GET" and uri in page_shells:
-            # A page shell is served without a session by design (the lazy-
-            # login pre-handler exemption, http_auth_is_page_shell_get());
-            # anything but 200 is a defect whether auth is on or off. The
-            # page's own /api fetches are separate rows, still gated.
-            row["detail"] = "page shell: served without a session by design"
-            row["ok"] = status == 200
+            # KG-01 (owner 2026-10-19): with web auth on, a page shell is never
+            # served without a session -- the pre-handler answers 302 to
+            # /?next=<page> (200 here is a content leak). With auth off the
+            # page is served as before. The page's own /api fetches are
+            # separate rows, still gated.
+            if web_enabled:
+                row["detail"] = "page shell: 302 to the dashboard when logged out"
+                row["ok"] = status is not None and 300 <= status < 400
+            else:
+                row["detail"] = "page shell: served when web auth is off"
+                row["ok"] = status == 200
         elif grade_tier in _ADMIN_TIERS:
             if web_enabled:
                 row["ok"] = status in (401, 403) or (status is not None and 300 <= status < 400)

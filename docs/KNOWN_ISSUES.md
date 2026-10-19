@@ -595,7 +595,7 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AY-07** INFO: AX-04: all hash callers check the bool. AX-02 ordering is correct.
 
 ## REVIEW_AYFIX_2026_10_19 (AQ)
-- **AQ-01** MED: AY-03 revokes the presented session after create; with a full table create first evicts the LRU slot (often another client's), so a re-login logs out a bystander. Revoke/reuse the presenter's IP-bound slot before create. No full-table re-login test. FIXED 388b5fd6d: re-login revokes the presenter's own IP-bound session right before create (after all refusal paths); full-table host tests. BENCH benchmain15: re-login presenting the previous cookie leaves one live session (old role=none); without a cookie the earlier session stays (by design). Full-table eviction not benched.
+- **AQ-01** MED: AY-03 revokes the presented session after create; with a full table create first evicts the LRU slot (often another client's), so a re-login logs out a bystander. Revoke/reuse the presenter's IP-bound slot before create. No full-table re-login test. FIXED 388b5fd6d: re-login revokes the presenter's own IP-bound session right before create (after all refusal paths); full-table host tests. BENCH benchmain15: re-login presenting the previous cookie leaves one live session (old role=none); without a cookie the earlier session stays (by design). BENCH benchmain17: full table (8 slots) filled by 9 cookie-less logins evicts only the oldest, newest works; re-login presenting a cookie revokes it and evicts no bystander; min_free unchanged 84579 B.
 - **AQ-02** LOW: AY-01/AY-05 tests are source-text matches (status wipe check matches only a comment); not behavior tests, no negtest named. FIXED 388b5fd6d: wipe-placement scans pin the volatile loop and the auth_wipe positions; negtested.
 - **AQ-03** LOW: prehandler out_token copy (http_auth_http.c ~397) relies on the caller's wipe on every path; no host test covers deny-path wipes. FIXED 388b5fd6d: scan pins the prehandler wipe before the decision switch with no early return (prehandler not host-drivable; structural, negtested).
 - **AQ-04** INFO: AY-02 correct; refused success records nothing, host test discriminates.
@@ -627,3 +627,15 @@ HIGH 0, MED 0, LOW 3, INFO 4.
 - **ER-05** INFO: no duplicate registration (bringup once, idempotent registry); capacity 48 vs ~43 names, cap-checked. Accepted.
 - **ER-06** INFO: host test is a source scan; catches relocation/deletion, not ER-02/ER-03. Accepted.
 - **ER-07** INFO: dram_watch.h/.c comments still say esp_timer stack 3584 B. Fixed.
+
+## PAGE_GATE_2026_10_19 (KG)
+Owner request: with web auth on, no protected page content to a logged-out request; dashboard link click signs in first.
+- **KG-01** MED: a logged-out GET on a protected page shell (/settings*, /safety*, /profiles, /live_profile, /diagnostics, /readiness, /setup, /ota) was served the full HTML and app.js popped the login after render. Fixed 2026-10-19 (f39d5a9d5): kiln_http_prehandler answers a denied page-shell GET with 302 /?next=<page> (Cache-Control no-store); dashboard app.js shows the sign-in dialog for ?next= and for protected-link clicks while logged out, navigating only on success; /commissioning_shared.js now ADMIN. /wifi stays open only while unprovisioned; auth-off, bootstrap, TOTP reset, recovery image untouched. Tests: test_http_auth_enforce.c, test_dashboard_page_gate.js, tools/check_page_gate.ps1; negtest 15/15 caught. BENCH-PENDING: live 302 and browser dialog flow. Residual: app.js, nav.js, theme.css stay OPEN (shared with dashboard).
+- **KH-01** LOW (REVIEW_KG01_2026_10_19): admin-served page shells lacked Cache-Control no-store. Fixed 2026-10-19: prehandler ALLOW branch sets no-store via http_auth_page_shell_needs_no_store (auth on, non-OPEN page shell GET); dashboard/static caching untouched; host test in test_http_auth_enforce.c.
+- **KH-02** LOW: app.js kcNextTried guard stranded a signed-in admin on a repeat same-tab ?next=. Fixed 2026-10-19: guard stores target|timestamp and holds only 15 s (loop protection kept); JS test in test_dashboard_page_gate.js.
+- **KH-03** LOW: prehandler 302/Location/no-store wiring covered only by check_page_gate regex; no executing test; bench pending. Open.
+- **KH-04** INFO: page-gate Location drops the request query string (built from registered URI). Accepted.
+- **KH-05** INFO: no path-variant/HEAD/unknown-route bypass (exact match, 404 -> 302 /). No action.
+- **KH-06** INFO: no open redirect or loop via next. No action.
+- **KH-07** INFO: auth-off, /wifi, bootstrap, TOTP reset, recovery, INSUFFICIENT, API 401/403 verified. No action.
+- **KH-08** INFO: no URI-cap change; RAM 64 B stack; tests wired by globs. No action.

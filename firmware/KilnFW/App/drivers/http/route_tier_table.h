@@ -156,7 +156,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/commissioning_shared.js", HTTP_GET, ROUTE_TIER_OPEN),
+    /* KG-01: page-specific (only /safety/commissioning and /setup load it): ADMIN, not a shared asset. */
+    ROUTE_TIER("/commissioning_shared.js", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/profile_exec", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/readiness", HTTP_GET, ROUTE_TIER_OPEN),
