@@ -1091,6 +1091,51 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
     s_update_claim = OTA_UPDATE_NONE;
 }
 
+static void test_pico_rollback_worker_is_created_once_and_rearmed(void)
+{
+    TEST_SECTION("OR-08: the Pico rollback worker is one static task created once; later POSTs only re-arm it");
+    s_test_sweep_active = false;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    /* create fails: 500, claim released, handle stays NULL, nothing notified */
+    s_ota_pico_rollback_task = NULL;
+    s_update_claim = OTA_UPDATE_NONE;
+    g_test_stub_static_task_fail = 1;
+    int gives0 = g_test_stub_notify_gives;
+    int xc0 = g_test_stub_xtaskcreate_calls;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    g_test_stub_static_task_fail = 0;
+    TEST_CHECK(strstr(s_last_resp_status, "500") != NULL, "OR-08: static create failure answers 500");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "OR-08: create failure releases the update claim");
+    TEST_CHECK(s_ota_pico_rollback_task == NULL, "OR-08: failed create leaves the handle NULL for a retry");
+    TEST_CHECK(g_test_stub_notify_gives == gives0, "OR-08: nothing notified after a failed create");
+
+    /* retry creates once and notifies */
+    int c0 = g_test_stub_static_task_creates;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_status, "202") != NULL, "OR-08: retry after a failed create is accepted");
+    TEST_CHECK(g_test_stub_static_task_creates == c0 + 1, "OR-08: worker created exactly once");
+    TEST_CHECK(g_test_stub_notify_gives == gives0 + 1, "OR-08: first POST notifies the worker");
+
+    /* second POST (claim released by the worker): no new create, notified again */
+    s_update_claim = OTA_UPDATE_NONE;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_status, "202") != NULL, "OR-08: second POST accepted");
+    TEST_CHECK(g_test_stub_static_task_creates == c0 + 1, "OR-08: second POST does not create another task");
+    TEST_CHECK(g_test_stub_notify_gives == gives0 + 2, "OR-08: second POST re-arms the same worker");
+    TEST_CHECK(g_test_stub_xtaskcreate_calls == xc0, "OR-08: no heap-stack xTaskCreate on the rollback path");
+
+    s_update_claim = OTA_UPDATE_NONE;
+    ota_http_safety = NULL;
+}
+
 static void test_reboot_handlers_reply_only_after_task_created(void)
 {
     TEST_SECTION("rollback / recovery_exit -- reply ok:true 'rebooting' only after the reboot task exists and "
@@ -3293,6 +3338,7 @@ void run_test_ota_http(void)
     }
 
     test_pico_rollback_post_returns_pending_without_blocking();
+    test_pico_rollback_worker_is_created_once_and_rearmed();
     test_reboot_handlers_reply_only_after_task_created();
     test_rollback_reboot_failure_releases_claim_op02();
     test_rollback_timer_create_failure_and_rearm_et03();
