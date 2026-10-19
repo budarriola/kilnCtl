@@ -102,6 +102,7 @@ typedef uint8_t StackType_t;
 __declspec(selectany) int g_test_stub_static_task_creates = 0;
 __declspec(selectany) int g_test_stub_static_task_fail = 0; /* nonzero: create returns NULL */
 __declspec(selectany) int g_test_stub_notify_gives = 0;
+__declspec(selectany) TaskHandle_t g_test_stub_notify_last = 0; /* OW-02: handle the last xTaskNotifyGive targeted */
 static inline TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t task, const char *name, unsigned long stack,
                                                           void *arg, UBaseType_t prio, StackType_t *stack_buf,
                                                           StaticTask_t *tcb, BaseType_t core)
@@ -113,7 +114,7 @@ static inline TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t task, co
     g_test_stub_static_task_creates++;
     return (TaskHandle_t)2;
 }
-static inline BaseType_t xTaskNotifyGive(TaskHandle_t t) { (void)t; g_test_stub_notify_gives++; return 1; }
+static inline BaseType_t xTaskNotifyGive(TaskHandle_t t) { g_test_stub_notify_last = t; g_test_stub_notify_gives++; return 1; }
 static inline uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) { (void)clear; (void)ticks; return 0; }
 
 /* 2026-08-24: added for stack_margin.c's host build (linked into
