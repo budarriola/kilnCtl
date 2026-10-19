@@ -218,6 +218,7 @@ static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_rol
             out_token[0] = '\0';
         }
     }
+    auth_wipe(token, sizeof(token)); /* AY-01 */
 }
 
 // Fix for the OPEN-tier build-identity leak on GET /api/ota/esp/status

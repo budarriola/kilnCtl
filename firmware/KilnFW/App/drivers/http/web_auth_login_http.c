@@ -549,6 +549,12 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // after this call").
     login_wipe(password, sizeof(password));
 
+    /* AY-02: decide the AX-02 generation check BEFORE recording the attempt, so a refused
+     * success never resets the backoff ladder (that would show the password was correct).
+     * http_session_table() applies any posted destroy-all first. */
+    (void)http_session_table();
+    bool reset_during_verify = ok && (http_session_destroy_gen() != destroy_gen_before_verify);
+
     if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
         // Fail closed: an attempt whose outcome cannot be recorded must not
         // be answered (a success would mint nothing, a failure would go
@@ -570,7 +576,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         // recording a failure/success here is exactly one ladder step, per
         // this file's header comment -- a refused attempt never reaches
         // this line at all, and therefore never counts or extends the wait.
-        if (slot != NULL) {
+        if (slot != NULL && !reset_during_verify) {
             login_backoff_state_t *ladder = &slot->backoff[ladder_for_role(candidate_role)];
             if (ok) {
                 // SS-01: success resets only the ladder of the role that logged
@@ -584,6 +590,12 @@ static esp_err_t login_post_handler(httpd_req_t *req)
             }
         }
         xSemaphoreGive(s_login_lock);
+    }
+
+    if (reset_during_verify) {
+        ESP_LOGW(TAG, "login from %s: credentials reset during verify, refused", ip);
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "invalid username or password");
+        return ESP_OK;
     }
 
     if (!ok) {
@@ -650,17 +662,6 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* AX-05: a re-login from a client that still presents its previous (valid) cookie revokes
-     * that one session, so one browser re-logging does not fill the table. Only the presented
-     * token is touched; no other client's session is identifiable or revoked. */
-    {
-        char old_token[128] = { 0 };
-        if (http_auth_extract_session_token(req, old_token, sizeof(old_token)) && old_token[0] != '\0') {
-            http_auth_session_logout(old_token);
-        }
-        login_wipe(old_token, sizeof(old_token));
-    }
-
     web_auth_session_role_t session_role =
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
     size_t session_idx =
@@ -714,6 +715,22 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     }
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
 
+    /* AY-03 (was AX-05): a re-login from a client presenting its previous valid cookie revokes that
+     * one session, but only now that the new session and Set-Cookie succeeded, and only if the old
+     * session is bound to this requester's IP (status is valid only for the bound address). */
+    {
+        char old_token[128] = { 0 };
+        if (http_auth_extract_session_token(req, old_token, sizeof(old_token)) && old_token[0] != '\0') {
+            web_auth_session_role_t old_role = WEB_AUTH_SESSION_ROLE_NONE;
+            uint32_t old_seen = 0;
+            uint32_t old_timeout = 0;
+            if (http_auth_session_status(old_token, ip, &old_role, &old_seen, &old_timeout)) {
+                http_auth_session_logout(old_token);
+            }
+        }
+        login_wipe(old_token, sizeof(old_token));
+    }
+
     ESP_LOGI(TAG, "login succeeded from %s (role=%d)", ip, (int)session_role);
     httpd_resp_set_type(req, "application/json");
     esp_err_t send_err = httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -748,6 +765,7 @@ static esp_err_t logout_post_handler(httpd_req_t *req)
     if (token[0] != '\0') {
         http_auth_session_logout(token);
     }
+    login_wipe(token, sizeof(token)); /* AY-01 */
 
     char cookie[128];
     int cookie_len = snprintf(cookie, sizeof(cookie),

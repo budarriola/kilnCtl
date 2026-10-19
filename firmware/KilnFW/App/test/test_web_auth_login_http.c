@@ -1250,11 +1250,115 @@ static void test_ax05_relogin_revokes_presented_session_only(void)
     http_session_hash_token("other-token", 11, h_other);
     web_auth_table_create_session(http_session_table(), h_old, "10.0.0.1", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
     web_auth_table_create_session(http_session_table(), h_other, "10.0.0.9", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+    strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
     stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
     (void)do_login("admin", "correct-horse-battery-staple");
     TEST_CHECK(s_last_set_cookie[0] != '\0', "login succeeded");
     TEST_CHECK(web_auth_table_find_by_token(http_session_table(), h_old) < 0, "presented old session revoked");
     TEST_CHECK(web_auth_table_find_by_token(http_session_table(), h_other) >= 0, "another client's session untouched");
+}
+
+static void test_ay02_refused_success_does_not_reset_ladder(void)
+{
+    TEST_SECTION("login -- a success refused by the AX-02 generation check leaves the ladder alone (AY-02)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.11", sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password"); /* failure #1 -> 5s */
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+    s_verify_hook_post_destroy = true;
+    s_last_err_status = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    s_verify_hook_post_destroy = false;
+    TEST_CHECK(s_last_err_status == 401, "test setup: correct password refused by the generation check");
+    do_login("admin", "wrong-password"); /* failure #2 -> 10s only if the refused success did not reset */
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "locked after the next failure");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == LOGIN_BACKOFF_LADDER_MS[1] / 1000u,
+               "ladder kept its step (10s), the refused success did not reset it");
+}
+
+static bool ay_session_alive(const char *tok)
+{
+    uint8_t h[32];
+    http_session_hash_token(tok, strlen(tok), h);
+    return web_auth_table_find_by_token(http_session_table(), h) >= 0;
+}
+
+static void test_ay03_relogin_revoke_needs_matching_ip(void)
+{
+    TEST_SECTION("login -- re-login revokes the presented session only when bound to the requester IP (AY-03)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    uint8_t h_old[32];
+    http_session_hash_token("old-token", 9, h_old);
+    web_auth_table_create_session(http_session_table(), h_old, "10.0.0.1", WEB_AUTH_SESSION_ROLE_ADMIN, 0u);
+    strncpy(s_stub_client_ip, "10.0.0.7", sizeof(s_stub_client_ip) - 1);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    s_last_set_cookie[0] = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_set_cookie[0] != 0, "login succeeded");
+    TEST_CHECK(ay_session_alive("old-token"), "a session bound to another IP is NOT revoked");
+
+    strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(!ay_session_alive("old-token"), "a session bound to the requester IP is revoked");
+}
+
+static void test_ay03_failed_create_keeps_presented_session(void)
+{
+    TEST_SECTION("login -- a refused create (503) leaves the presented previous session alive (AY-03)");
+    reset_all();
+    set_user_credential("operator", "user-password-123456");
+    strncpy(s_stub_client_ip, "10.9.0.12", sizeof(s_stub_client_ip) - 1);
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        uint8_t h[32];
+        if (i == 0) {
+            http_session_hash_token("old-token", 9, h);
+        } else {
+            memset(h, (int)(i + 1), sizeof(h));
+        }
+        web_auth_table_create_session(http_session_table(), h, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, 0u);
+    }
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    s_last_status_line = 0;
+    (void)do_login("operator", "user-password-123456");
+    TEST_CHECK(ay_session_alive("old-token"), "the presented session survives the refused login");
+}
+
+static bool ay_file_has(const char *const *cands, const char *needle)
+{
+    char *t = test_read_source_anchored(__FILE__, cands[0], cands, 3);
+    if (!t) {
+        return false;
+    }
+    bool r = strstr(t, needle) != NULL;
+    free(t);
+    return r;
+}
+
+static void test_ay_source_scan(void)
+{
+    static const char *const AUTH_C[] = { "../drivers/http/http_auth_http.c", "App/drivers/http/http_auth_http.c",
+                                          "firmware/KilnFW/App/drivers/http/http_auth_http.c" };
+    static const char *const STATUS_C[] = { "../drivers/http/web_auth_session_status_http.c",
+                                            "App/drivers/http/web_auth_session_status_http.c",
+                                            "firmware/KilnFW/App/drivers/http/web_auth_session_status_http.c" };
+    static const char *const LOGIN_C[] = { "../drivers/http/web_auth_login_http.c",
+                                           "App/drivers/http/web_auth_login_http.c",
+                                           "firmware/KilnFW/App/drivers/http/web_auth_login_http.c" };
+    TEST_SECTION("AY-01 / AY-05 source scan");
+    TEST_CHECK(ay_file_has(AUTH_C, "auth_wipe(token, sizeof(token)); /* AY-01 */"),
+               "resolve_role_for_request wipes its token copy");
+    TEST_CHECK(ay_file_has(STATUS_C, "AY-01: the session token is not needed past the lookup"),
+               "session-status handler wipes its token copy");
+    TEST_CHECK(ay_file_has(LOGIN_C, "login_wipe(token, sizeof(token)); /* AY-01 */"),
+               "logout handler wipes its token copy");
+    TEST_CHECK(ay_file_has(STATUS_C, "uint64_t timeout_ms = (uint64_t)timeout_s * 1000u;"),
+               "session-status computes timeout ms in 64-bit (AY-05)");
 }
 
 static void test_logout_with_valid_cookie_clears_session(void)
@@ -1474,6 +1578,10 @@ void run_test_web_auth_login_http(void)
     test_ax02_login_straddling_reset_mints_no_session();
     test_ax04_login_refuses_on_hash_failure();
     test_ax05_relogin_revokes_presented_session_only();
+    test_ay02_refused_success_does_not_reset_ladder();
+    test_ay03_relogin_revoke_needs_matching_ip();
+    test_ay03_failed_create_keeps_presented_session();
+    test_ay_source_scan();
     test_lockout_is_per_ip_not_global();
     test_lockout_table_is_bounded();
     test_login_lru_wrap();
