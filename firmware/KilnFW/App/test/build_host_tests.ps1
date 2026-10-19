@@ -1499,6 +1499,15 @@ try {
 
     Invoke-HostTestExe -Name "board_temps" -ExePath $exe10 -BuildCmd $cmd10
 
+    # ---- test_web_encoding_cache.c: KH-09, real web_encoding.c + real http_auth_enforce.c predicate ----
+    $exeWec = Join-Path $outDir "kilnctl_host_tests_web_encoding_cache.exe"
+    $wecObjDir = Join-Path $outDir "wec"
+    New-Item -ItemType Directory -Force -Path $wecObjDir | Out-Null
+    $cmdWec = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$wecObjDir\\`" /Fe:`"$exeWec`" `"$(Join-Path $testDir 'test_web_encoding_cache.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_enforce.c')`""
+    Invoke-HostTestExe -Name "web_encoding_cache" -ExePath $exeWec -BuildCmd $cmdWec
+
     # ---- test_kiln_io_owner.c: its own ELEVENTH, separate executable ----------
     # Audit item, TODO.md "Audit 2026-08-27 -- open items" (IO_CMD_SX_LED_DRIVER's
     # missing relay-pin gate). Same reason as test_board_temps.c above: it
@@ -3669,7 +3678,8 @@ try {
     # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
     # 101 -> 103: sx1509_reset_first (boot audit MED-2) plus one executable already unaccounted for on dev (built count was 102)
     # 103 -> 104: flash_xip_lock (REVIEW_FLASH_MMAP_SERIALIZATION MED-1)
-    $totalExpected = 104
+    # 104 -> 105: web_encoding_cache (KH-09)
+    $totalExpected = 105
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

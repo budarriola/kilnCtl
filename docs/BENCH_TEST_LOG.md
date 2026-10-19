@@ -3746,3 +3746,15 @@ AQ-01 / AZ-04 session table (WEB_AUTH_WEB_SLOT_COUNT 8), python urllib, admin lo
 Heap internal before: uptime 520 s free 106479 B, largest 31744 B, min_free 84579 B. After: uptime 551 s, free 106479 B, largest 31744 B, min_free 84579 B (no change). Link timeouts 0.
 
 End state: ESP c86ef946c, Pico unchanged, no sessions left from this run, settings diff empty. Result: AQ-01 full-table eviction and re-login revoke confirmed on target.
+
+## benchmain18 (2026-10-19, main 3e2a95995, ESP flashed, Pico unchanged)
+
+Built in a clean worktree from origin/main, flash_firmware(confirm=True) over OpenOCD: fw commit 3e2a95995 tree clean, protocol 13. Link up, SaftyFW armed, not tripped, no trip cleared. Backup logs/benchmain18_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+KG-01 / KH-03 live (home Wi-Fi 192.168.1.156, web auth on, python http.client, no redirect following, admin login from User-scope env credentials never printed, one login per pass): logged out, all 16 page shells 302 with Location /?next=<page>, Cache-Control no-store, empty body. `/`, /login, /app.js, /nav.js, /theme.css, /status 200 (the pages need Accept-Encoding gzip; with identity they answer 406). /commissioning_shared.js 401. /api/backup/export and /api/zones 401, no 302 on any API route. Variants /settings/, /SETTINGS, /Settings, //settings, /%2Fsettings, /settings%2Fbackup, /settings%2F, /%73ettings: all 302 to / (no handler, captive 404), no page served. Admin: all 16 shells and /commissioning_shared.js 200. After POST /api/auth/logout (204): all 16 shells 302 again, commissioning_shared.js 401. Every session logged out.
+
+FAIL (KH-01, new KH-09): admin 200 page shells carry Cache-Control no-cache, not no-store. Cause: web_encoding.c:151 sets no-cache after the prehandler set no-store (httpd_resp_set_hdr replaces).
+
+Heap internal (uptime 174 s): free 106483 B, largest_free_block 31744 B, min_free 84595 B. Stack margin: httpd_worker 3200 B free of 8192 B (39.1%), esp_timer 4104/4608, lvgl 8620/14336.
+
+End state: ESP 3e2a95995, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KG-01 confirmed on target; KH-01 not effective (KH-09 open).

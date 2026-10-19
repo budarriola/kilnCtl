@@ -343,7 +343,18 @@ static esp_err_t send_page_gate_redirect(httpd_req_t *req, const kiln_http_route
     return refusal_result(req);
 }
 
+// KH-09: the request whose page-shell response must be no-store. web_set_asset_cache_headers()
+// (web_encoding.c) overwrites Cache-Control, so it asks http_auth_req_wants_no_store() instead of
+// the header set below surviving. esp_http_server runs handlers on one task; the prehandler clears
+// this on every request, so a reused req pointer never inherits a stale mark.
+static const httpd_req_t *s_no_store_req;
+
+bool http_auth_req_wants_no_store(const httpd_req_t *req) {
+    return req != NULL && req == s_no_store_req;
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
+    s_no_store_req = NULL;
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
     // registered directly instead of through kiln_http_register(), which
@@ -458,6 +469,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // KH-01: a signed-in page shell must not be restored from history/bfcache after logout.
             if (http_auth_page_shell_needs_no_store(ctx->uri, ctx->method, web_enabled, ctx->tier)) {
                 httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+                s_no_store_req = req;
             }
             return ctx->real_handler(req);
         case HTTP_AUTH_DECISION_DENY_NO_SESSION:
