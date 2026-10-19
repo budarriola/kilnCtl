@@ -3770,3 +3770,13 @@ PASS (KH-09, KH-01): signed-in page shells carry no-store. Observation: the admi
 Heap internal (uptime 179 s): free 106479 B, largest_free_block 31744 B, min_free 84359 B. Stack margin: httpd_worker 3152 B free of 8192 B (38.5%), esp_timer 4200/4608, lvgl 8584/14336.
 
 End state: ESP 49d6cc733, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KH-09 confirmed on target.
+
+## benchmain20 (2026-10-19, main e3cce4a03, ESP flashed, Pico unchanged)
+
+Built in a clean worktree from origin/main e3cce4a03, flash_firmware(confirm=True) over OpenOCD (verified on retry, known benign quirk): board matches HEAD. Link up, SaftyFW armed, not tripped, no trip cleared. Backup logs/benchmain20_backup_pre.json; post export byte-identical (hash equal), 22548 B.
+
+KH-10 live (home Wi-Fi 192.168.1.156, web auth on, python http.client, raw header count of Cache-Control per response, admin login from User-scope env credentials never printed, one login, logged out): logged out, all 16 page shells 302 with Location /?next=<page>, exactly ONE Cache-Control, no-store; `/` and /app.js 200 one no-cache. Admin: all 16 shells 200 with exactly one Cache-Control no-store; `/` and /app.js 200 one no-cache. After POST /api/auth/logout (204): all 16 shells 302 again, one no-store each.
+
+Heap internal (uptime 41 s): free 101271 B, largest_free_block 31744 B, min_free 84103 B. Stack margin: httpd_worker 3152 B free of 8192 B (38.5 B (38.5%), esp_timer 4136/4608, lvgl 8620/14336.
+
+End state: ESP e3cce4a03, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KH-10 confirmed on target (duplicate header gone).
