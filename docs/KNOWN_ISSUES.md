@@ -620,10 +620,10 @@ HIGH 0, MED 0, LOW 2, INFO 5.
 
 ## REVIEW_ET02BOOT_2026_10_19 (ER)
 HIGH 0, MED 0, LOW 3, INFO 4.
-- **ER-01** LOW: sdkconfig.defaults ET-02 comment names removed OTA_ESP_TIMER_TASK_STACK_BYTES; now a literal in main_network_http.c. Open.
-- **ER-02** LOW: registered 4608 not tied to CONFIG_ESP_TIMER_TASK_STACK_SIZE; sdkconfig-only change passes all tests/checks. Open.
-- **ER-03** LOW: NULL xTaskGetHandle("esp_timer") is silent (no log); row just missing. Open.
+- **ER-01** LOW: sdkconfig.defaults ET-02 comment names removed OTA_ESP_TIMER_TASK_STACK_BYTES; now a literal in main_network_http.c. Fixed.
+- **ER-02** LOW: registered 4608 not tied to CONFIG_ESP_TIMER_TASK_STACK_SIZE; sdkconfig-only change passes all tests/checks. Fixed.
+- **ER-03** LOW: NULL xTaskGetHandle("esp_timer") is silent (no log); row just missing. Fixed.
 - **ER-04** INFO: static slot, never-exiting task, no early return before registration. Accepted.
 - **ER-05** INFO: no duplicate registration (bringup once, idempotent registry); capacity 48 vs ~43 names, cap-checked. Accepted.
 - **ER-06** INFO: host test is a source scan; catches relocation/deletion, not ER-02/ER-03. Accepted.
-- **ER-07** INFO: dram_watch.h/.c comments still say esp_timer stack 3584 B. Open (doc-only).
+- **ER-07** INFO: dram_watch.h/.c comments still say esp_timer stack 3584 B. Fixed.

@@ -139,7 +139,8 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 # ET-02 (REVIEW_OR03_TIMER_2026_10_18): the OR-03 rollback reboot runs on the esp_timer
 # task (otadata read/CRC/erase/write, ANNOUNCE frame, esp_restart shutdown handlers).
 # The IDF default is 3584 B, below the 4096 B on-demand task it replaced. Keep equal to
-# OTA_ESP_TIMER_TASK_STACK_BYTES in ota_http_esp.c. BENCH-PENDING: read the esp_timer
+# the CONFIG_ESP_TIMER_TASK_STACK_SIZE
+# registration in main_network_http.c (it uses the macro). BENCH-PENDING: read the esp_timer
 # stack_margin row after one bench rollback and right-size.
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=4608
 
