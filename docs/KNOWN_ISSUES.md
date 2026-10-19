@@ -627,3 +627,7 @@ HIGH 0, MED 0, LOW 3, INFO 4.
 - **ER-05** INFO: no duplicate registration (bringup once, idempotent registry); capacity 48 vs ~43 names, cap-checked. Accepted.
 - **ER-06** INFO: host test is a source scan; catches relocation/deletion, not ER-02/ER-03. Accepted.
 - **ER-07** INFO: dram_watch.h/.c comments still say esp_timer stack 3584 B. Fixed.
+
+## PAGE_GATE_2026_10_19 (KG)
+Owner request: with web auth on, no protected page content to a logged-out request; dashboard link click signs in first.
+- **KG-01** MED: a logged-out GET on a protected page shell (/settings*, /safety*, /profiles, /live_profile, /diagnostics, /readiness, /setup, /ota) was served the full HTML and app.js popped the login after render. Fixed 2026-10-19 (f39d5a9d5): kiln_http_prehandler answers a denied page-shell GET with 302 /?next=<page> (Cache-Control no-store); dashboard app.js shows the sign-in dialog for ?next= and for protected-link clicks while logged out, navigating only on success; /commissioning_shared.js now ADMIN. /wifi stays open only while unprovisioned; auth-off, bootstrap, TOTP reset, recovery image untouched. Tests: test_http_auth_enforce.c, test_dashboard_page_gate.js, tools/check_page_gate.ps1; negtest 15/15 caught. BENCH-PENDING: live 302 and browser dialog flow. Residual: app.js, nav.js, theme.css stay OPEN (shared with dashboard).
