@@ -708,9 +708,19 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
 // JSON reply ahead of the reboot (factory_reset.c reboot_task() pattern).
 // Timer callbacks run on the esp_timer service task and must stay short: this
 // one sends one best-effort ANNOUNCE_REBOOT frame, then calls the IDF rollback
-// (which does not return on success); it never waits on a lock or queue.
+// (which does not return on success). ET-01: it DOES wait, with bounded waits:
+// safety_link_send_announce_reboot() takes the uart tx_lock (portMAX_DELAY) and
+// flash_xip_reader_enter() takes the flash XIP mutex (portMAX_DELAY), each bounded
+// by its holder (one UART frame; one LittleFS/NVS erase or write). While it waits,
+// other esp_timer callbacks (lv tick, dram_watch, Wi-Fi timers) stall. Accepted:
+// nothing on esp_timer is a watchdog or control loop, and the board reboots right
+// after. ET-02: the esp_timer task stack is set explicitly (sdkconfig.defaults
+// CONFIG_ESP_TIMER_TASK_STACK_SIZE) and registered with stack_margin below.
 static esp_timer_handle_t s_ota_rollback_reboot_timer;
 #define OTA_ROLLBACK_REBOOT_DELAY_US (500 * 1000)
+/* ET-02: must equal CONFIG_ESP_TIMER_TASK_STACK_SIZE in sdkconfig.defaults. */
+#define OTA_ESP_TIMER_TASK_STACK_BYTES 4608
+static TaskHandle_t s_esp_timer_task_handle;
 
 static void ota_rollback_reboot_timer_cb(void *arg)
 {
@@ -761,6 +771,13 @@ static esp_err_t ota_rollback_reboot_schedule(void)
         if (err != ESP_OK) {
             s_ota_rollback_reboot_timer = NULL;
             return err;
+        }
+    }
+    if (s_esp_timer_task_handle == NULL) {
+        /* IDF-owned task named "esp_timer" (esp_timer.c); resolved by name like "httpd". */
+        s_esp_timer_task_handle = xTaskGetHandle("esp_timer");
+        if (s_esp_timer_task_handle != NULL) {
+            stack_margin_register("esp_timer", &s_esp_timer_task_handle, OTA_ESP_TIMER_TASK_STACK_BYTES);
         }
     }
     return esp_timer_start_once(s_ota_rollback_reboot_timer, OTA_ROLLBACK_REBOOT_DELAY_US);

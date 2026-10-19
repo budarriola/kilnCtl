@@ -17,10 +17,18 @@ typedef struct {
     const char *name;
 } esp_timer_create_args_t;
 
+/* ET-03: forced esp_timer_create result (ESP_OK default) and call counter. */
+static esp_err_t s_stub_timer_create_result = ESP_OK;
+static int s_stub_timer_create_calls = 0;
+
 static inline esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out)
 {
     (void)args;
     static int dummy;
+    s_stub_timer_create_calls++;
+    if (s_stub_timer_create_result != ESP_OK) {
+        return s_stub_timer_create_result;
+    }
     if (out) {
         *out = (esp_timer_handle_t)&dummy;
     }

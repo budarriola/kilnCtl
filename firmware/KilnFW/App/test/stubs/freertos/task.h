@@ -109,4 +109,11 @@ static inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task)
     return 0;
 }
 
+/* ET-02: name lookup of an IDF-owned task ("esp_timer"); host builds have none. */
+static inline TaskHandle_t xTaskGetHandle(const char *name)
+{
+    (void)name;
+    return NULL;
+}
+
 #endif // TEST_STUB_TASK_H
