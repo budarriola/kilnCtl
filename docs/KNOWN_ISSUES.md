@@ -585,10 +585,10 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AX-04** FIXED (86e5ebfc2): LOW. sha256() failure yields an all-zero key; login does not check it, so a zero-keyed session can match any other failed hash.
 - **AX-05** FIXED (86e5ebfc2): LOW. Re-login never revokes the presented cookie's old session; repeated ADMIN logins fill 8 slots and starve USER logins with the SL-07 503 (indefinitely under NEVER).
 - **AX-06..AX-09** INFO. Constant-time hashed compare OK; single httpd worker owns all mutations (Wi-Fi peek torn read benign); cookie flags HttpOnly/SameSite=Strict, no Secure (HTTP); per-role ladders OK, AZ-04 rotation owner-accepted, timeout bounded 1-60 min.
-- **AY-01** OPEN: LOW. AX-03 incomplete: token[128] in resolve_role_for_request (http_auth_http.c), web_auth_session_status_http.c and logout_post_handler is not wiped. REVIEW_AXFIX_2026_10_19.
-- **AY-02** OPEN: LOW. A login refused by the AX-02 generation check has already recorded success (ladder reset), so the ladder shows the password was correct. Needs a four-corner reset during the verify. Check the generation before recording.
-- **AY-03** OPEN: LOW. AX-05 revokes the presented session before create; a 503/500 create leaves the client with no session. The revoke ignores the IP binding (DoS only, needs valid creds). Revoke after success, same IP.
+- **AY-01** FIXED: LOW. token[128] copies in resolve_role_for_request, the session-status handler and logout_post_handler are wiped on every path. Source-scan test.
+- **AY-02** FIXED: LOW. Login evaluates the destroy-all generation check before recording the attempt; a refused success no longer resets the ladder. Host test.
+- **AY-03** FIXED: LOW. The presented old session is revoked only after the new session and Set-Cookie succeed, and only when bound to the requester IP. Host tests.
 - **AY-04** INFO: AX-01 seqlock correct (single httpd writer, SEQ_CST memw, equal-priority readers); single-writer rule unenforced.
-- **AY-05** INFO: The 2^31 ms idle wipe is correct with 64-bit storage. Pre-existing timeout_s*1000u overflow in the session-status handler.
+- **AY-05** FIXED: INFO. Session-status timeout ms is computed in 64-bit (the 2^31 ms idle wipe was already correct). Source-scan test.
 - **AY-06** INFO: The ESP target compiles by inspection (types, headers, CMake component).
 - **AY-07** INFO: AX-04: all hash callers check the bool. AX-02 ordering is correct.
