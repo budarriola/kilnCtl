@@ -3697,3 +3697,30 @@ Local stage: update_stage_upload of the local build (2996624 B) staged and verif
 Rollback (ET-02/OR-03): not triggered, BENCH-PENDING (a rollback would land on a previous image, not 285e798cb).
 
 End state: main 285e798cb, link up, armed, stage blank, backup unchanged. Result: UR-01 static cost measured; UW-04, ET-02 stack row, OR-03 timer path still open.
+
+## benchmain14 (2026-10-19, main 98b8a9880, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain14_backup_pre.json (post export byte-identical). Pico not reflashed.
+
+Build and flash: PASS. build_kilnfw from a clean worktree of origin/main (KilnCtrl.bin 2997520 B); flash_firmware(confirm, kiln_fw_root) verified (elf b276485612bf), boot_guard cleared. get_fw_version commit 98b8a9880 clean, board == HEAD; link up, SaftyFW armed, no trip.
+
+Heap internal (uptime 66 s): free 106591, min_free 84591, largest 31744. benchmain13 (128 s): free 110819, min_free 88871, largest 31744. Delta -4228 B free, -4280 B min_free (the OR-08 static task, about 4.2 KB expected), largest block unchanged; SK-04 alarm 7168 B and owner floor 8192 B not near.
+
+Stack margin (free of configured): lvgl 8748/14336, uart_proto_rx 4000/8192, info_uart_bridge 1484/4096, httpd_worker 3200/8192. update_fetch_wr (5120 B) "not running". ota_pico_rollback row absent (registers on the first accepted POST /api/update/rollback_pico, by design).
+
+Auth smoke: NOT run. Board has web auth disabled (GET /api/auth/session: auth_enabled false, role admin), so env-credential login returns 401 (one attempt through http_auth, plus one raw; no credential printed). Enabling auth was not done. AQ/AR login order stays host-test-only on target.
+
+Rollback: not triggered (task forbids), ota_pico_rollback worker body BENCH-PENDING.
+
+End state: main 98b8a9880, link up, armed, backup unchanged. Result: OR-08 static cost measured (-4.2 KB, min_free 84591); rollback path and auth smoke still open.
+
+## benchmain15 (2026-10-19, main 98b8a9880, no flash, Pico acad4d9f2)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain15_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+Part A, web auth: web_auth_setup(confirm) from User-scope env credentials (never printed): web_enabled False->True, admin set, timeouts defaulted 30/10 min. Smoke (python urllib, fresh logins): login 200 + kiln_sid cookie, GET /api/auth/session role=admin seconds_left 1799; wrong password 401 and the live session unaffected; logout 204 then the cookie reports role=none; unauthenticated /api/backup/export 401, bogus cookie role=none. AQ-01 re-login: a re-login that PRESENTS its previous cookie leaves exactly one live session (old cookie role=none, new admin). A re-login that does not present a cookie leaves the earlier session alive (two sessions from one IP, by design: only the presented cookie is revoked). Table-full eviction not exercised on the bench (host tests only). Auth left ENABLED; MCP tooling still reads the board (backup_export worked after enabling).
+
+Part B, rollback: ota_rollback_esp() accepted ("rollback requested"); board rebooted (uptime 7 s) into commit 98b8a9880, same build time (single-slot: the "previous image" is the same image, no older image reached, no reflash needed). Link up, armed, no trip. Stack margin after rollback: ota_confirm row 2888/5120 free; NO esp_timer row in get_stack_margin (the esp_timer task registration did not appear). httpd_worker 4144/8192, lvgl 8716/14336. Internal heap uptime 69 s: free 101267, min_free 84571, largest 31744 (OW-06 expectation 84.6 K met).
+Pico rollback: HTTP route POST /api/ota/pico/rollback was NOT called: the classifier denied the bench script step (Auto-Mode Bypass), step stopped, not routed around. Instead ota_rollback_pico() (SAFETY_CMD_ROLLBACK over the UART link) returned ACK; Pico stays build acad4d9f2 boot_id 44, link up, armed, protocol v18. No ota_pico_rollback stack row (worker never created: the HTTP route was not exercised), so OR-08 / OW-06 static-task cost is still unmeasured on the bench. No restore needed.
+
+End state: ESP 98b8a9880, Pico acad4d9f2, link up, armed, no trips, settings diff empty, web auth enabled.

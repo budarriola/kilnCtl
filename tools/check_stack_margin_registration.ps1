@@ -137,7 +137,7 @@ $requiredNames = @(
     # is precisely why it is not allowed on the shared httpd worker stack --
     # so its live margin has to stay measurable.
     "kiln_cfg_swap",
-    "esp_timer",  # liveness: on-demand -- IDF-owned esp_timer task, resolved by xTaskGetHandle in ota_http_esp.c on the first rollback request (ET-02)
+    "esp_timer",  # liveness: boot-once -- IDF-owned esp_timer task, resolved by xTaskGetHandle in main_network_http.c at boot (ET-02)
 
     # Review finding at 4ddad119 (CLAUDE.md "Register every new task for
     # stack-margin reporting"): zones_current_sweep_task.c's one-shot,
