@@ -607,3 +607,13 @@ HIGH 0, MED 1, LOW 4, INFO 2.
 - **AR-04** INFO: same-NAT-IP attacker with a stolen cookie can revoke it at login; already possible via logout with that cookie; role never inherited. Accepted.
 - **AR-05** INFO: AY-02 lockout ordering and SL-01 USER/ADMIN eviction unchanged; failed/refused logins never revoke. Accepted.
 - **AR-06** INFO: token_hex wiped twice on the 503 path; harmless. No action.
+
+## REVIEW_OR08_2026_10_19 (OW)
+HIGH 0, MED 0, LOW 2, INFO 5.
+- **OW-01** LOW: `.dram0.bss` CEILING_BYTES 81500 is stale (dev ELF with OR-08 measures 65184 B); check honest but ~16 KB slack. Re-baseline to measured + ~500 B.
+- **OW-02** LOW: host tests never run the rollback worker body (take stub returns 0, notify stub does not record the handle); claim release after run and outcome-before-release ordering unpinned. Record notified handle, test or span-scan the run; negtest.
+- **OW-03** INFO: no notify/claim race; notify latches if the worker has not yet re-parked; notify-while-busy blocked by the claim. Accepted.
+- **OW-04** INFO: handle publication, registration once, NULL-on-failure retry sound. Accepted.
+- **OW-05** INFO: no update-claim leak on any path. Accepted.
+- **OW-06** INFO: about 4.2 KB permanent internal DRAM; expected min_free about 84.6 K vs 8192 floor. BENCH-PENDING with OR-08.
+- **OW-07** INFO: stubs faithful (StackType_t uint8_t = IDF bytes); registration-check comment and UB-01 scan updated correctly. Accepted.
