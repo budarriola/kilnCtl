@@ -825,9 +825,6 @@ static void test_user_login_refused_503_when_table_full_of_admins(void)
             const char *wh = cs ? strstr(cs, "login_wipe(token_hash") : NULL;
             const char *r503 = cs ? strstr(cs, "all sessions in use by admins") : NULL;
             TEST_CHECK(wh && r503 && wh < r503, "token_hash wiped right after create_session, before any branch (GD-04)");
-            const char *sc = strstr(src, "Set-Cookie formatting failed");
-            const char *ds = sc ? strstr(sc - 300, "web_auth_table_destroy_session(http_session_table(), session_idx)") : NULL;
-            TEST_CHECK(sc && ds && ds < sc, "Set-Cookie 500 path destroys the orphan session (GD-04)");
             free(src);
         }
     }
@@ -1308,9 +1305,36 @@ static void test_ay03_relogin_revoke_needs_matching_ip(void)
     TEST_CHECK(!ay_session_alive("old-token"), "a session bound to the requester IP is revoked");
 }
 
-static void test_ay03_failed_create_keeps_presented_session(void)
+static void test_aq01_full_table_relogin_keeps_bystander(void)
 {
-    TEST_SECTION("login -- a refused create (503) leaves the presented previous session alive (AY-03)");
+    TEST_SECTION("login -- full table re-login frees the presenter's own slot, never evicts a bystander (AQ-01)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.12", sizeof(s_stub_client_ip) - 1);
+    uint8_t h_by[32];
+    http_session_hash_token("bystander-token", 15, h_by);
+    /* Bystanders are the oldest (LRU) slots; the presenter's slot is the newest. */
+    web_auth_table_create_session(http_session_table(), h_by, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN, 100u);
+    for (size_t i = 1; i + 1 < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        uint8_t h[32];
+        memset(h, (int)(i + 1), sizeof(h));
+        web_auth_table_create_session(http_session_table(), h, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN,
+                                      100u + (uint32_t)i);
+    }
+    uint8_t h_old[32];
+    http_session_hash_token("old-token", 9, h_old);
+    web_auth_table_create_session(http_session_table(), h_old, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, 900u);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    s_last_set_cookie[0] = '\0';
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "re-login succeeded with a full table");
+    TEST_CHECK(!ay_session_alive("old-token"), "the presenter's old session is revoked");
+    TEST_CHECK(ay_session_alive("bystander-token"), "the oldest bystander session survives the re-login");
+}
+
+static void test_aq01_full_admin_table_user_relogin_replaces_own_slot(void)
+{
+    TEST_SECTION("login -- USER re-login into an all-ADMIN table reuses its own freed slot (AQ-01)");
     reset_all();
     set_user_credential("operator", "user-password-123456");
     strncpy(s_stub_client_ip, "10.9.0.12", sizeof(s_stub_client_ip) - 1);
@@ -1324,20 +1348,46 @@ static void test_ay03_failed_create_keeps_presented_session(void)
         web_auth_table_create_session(http_session_table(), h, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, 0u);
     }
     stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
-    s_last_status_line = 0;
+    s_last_set_cookie[0] = '\0';
     (void)do_login("operator", "user-password-123456");
-    TEST_CHECK(ay_session_alive("old-token"), "the presented session survives the refused login");
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "login succeeds in the slot the old session freed");
+    TEST_CHECK(!ay_session_alive("old-token"), "old session revoked");
 }
 
-static bool ay_file_has(const char *const *cands, const char *needle)
+static char *ay_src(const char *const *cands)
 {
     char *t = test_read_source_anchored(__FILE__, cands[0], cands, 3);
-    if (!t) {
+    if (t) { /* sources may be CRLF; the span anchors use LF */
+        char *w = t;
+        for (const char *r = t; *r; r++) {
+            if (*r != '\r') {
+                *w++ = *r;
+            }
+        }
+        *w = '\0';
+    }
+    return t;
+}
+
+/* AQ-02/AQ-03: the wipes cannot be observed (dead stack), so pin their position structurally:
+ * the code span between two anchors must contain the wipe and (AQ-03) no early return. */
+static bool ay_span_has(const char *src, const char *from, const char *to, const char *needle, const char *forbid)
+{
+    const char *a = src ? strstr(src, from) : NULL;
+    const char *b = a ? strstr(a, to) : NULL;
+    if (!a || !b) {
         return false;
     }
-    bool r = strstr(t, needle) != NULL;
-    free(t);
-    return r;
+    size_t n = (size_t)(b - a);
+    char *span = malloc(n + 1);
+    if (!span) {
+        return false;
+    }
+    memcpy(span, a, n);
+    span[n] = '\0';
+    bool ok = strstr(span, needle) != NULL && (forbid == NULL || strstr(span, forbid) == NULL);
+    free(span);
+    return ok;
 }
 
 static void test_ay_source_scan(void)
@@ -1350,15 +1400,28 @@ static void test_ay_source_scan(void)
     static const char *const LOGIN_C[] = { "../drivers/http/web_auth_login_http.c",
                                            "App/drivers/http/web_auth_login_http.c",
                                            "firmware/KilnFW/App/drivers/http/web_auth_login_http.c" };
-    TEST_SECTION("AY-01 / AY-05 source scan");
-    TEST_CHECK(ay_file_has(AUTH_C, "auth_wipe(token, sizeof(token)); /* AY-01 */"),
-               "resolve_role_for_request wipes its token copy");
-    TEST_CHECK(ay_file_has(STATUS_C, "AY-01: the session token is not needed past the lookup"),
-               "session-status handler wipes its token copy");
-    TEST_CHECK(ay_file_has(LOGIN_C, "login_wipe(token, sizeof(token)); /* AY-01 */"),
-               "logout handler wipes its token copy");
-    TEST_CHECK(ay_file_has(STATUS_C, "uint64_t timeout_ms = (uint64_t)timeout_s * 1000u;"),
+    TEST_SECTION("AY-01 / AY-05 / AQ-03 wipe placement scan");
+    char *auth = ay_src(AUTH_C);
+    char *status = ay_src(STATUS_C);
+    char *login = ay_src(LOGIN_C);
+    TEST_CHECK(auth && status && login, "sources readable");
+    TEST_CHECK(ay_span_has(auth, "static void resolve_role_for_request", "\n}\n", "auth_wipe(token, sizeof(token));", NULL),
+               "resolve_role_for_request wipes its token copy (AY-01)");
+    /* AQ-03: between the out_token copy (resolve_role_for_request call) and the switch on the decision every
+     * deny path shares one wipe, with no return in between. */
+    TEST_CHECK(ay_span_has(auth, "resolve_role_for_request(req, &role, token, sizeof(token));", "switch (decision)",
+                           "auth_wipe(token, sizeof(token));", "return "),
+               "prehandler wipes the caller token copy before the decision switch, no early return (AQ-03)");
+    TEST_CHECK(ay_span_has(status, "http_auth_session_status(have_token", "bool prompt",
+                           "for (volatile char *q = token; q < token + sizeof(token); q++) {\n        *q = 0;\n    }", NULL),
+               "session-status handler wipes its token copy with a volatile loop (AY-01)");
+    TEST_CHECK(ay_span_has(login, "esp_err_t logout_post_handler", "\n}\n", "login_wipe(token, sizeof(token));", NULL),
+               "logout handler wipes its token copy (AY-01)");
+    TEST_CHECK(status && strstr(status, "uint64_t timeout_ms = (uint64_t)timeout_s * 1000u;") != NULL,
                "session-status computes timeout ms in 64-bit (AY-05)");
+    free(auth);
+    free(status);
+    free(login);
 }
 
 static void test_logout_with_valid_cookie_clears_session(void)
@@ -1580,7 +1643,8 @@ void run_test_web_auth_login_http(void)
     test_ax05_relogin_revokes_presented_session_only();
     test_ay02_refused_success_does_not_reset_ladder();
     test_ay03_relogin_revoke_needs_matching_ip();
-    test_ay03_failed_create_keeps_presented_session();
+    test_aq01_full_table_relogin_keeps_bystander();
+    test_aq01_full_admin_table_user_relogin_replaces_own_slot();
     test_ay_source_scan();
     test_lockout_is_per_ip_not_global();
     test_lockout_table_is_bounded();

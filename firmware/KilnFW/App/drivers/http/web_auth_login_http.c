@@ -662,6 +662,36 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    char cookie[128];
+    int cookie_len = snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s; HttpOnly; SameSite=Strict; Path=/",
+                               token_hex);
+    // SS-04: the cookie now carries the only copy needed; wipe the hex form.
+    login_wipe(token_hex, sizeof(token_hex));
+    if (cookie_len < 0 || (size_t)cookie_len >= sizeof(cookie)) {
+        login_wipe(cookie, sizeof(cookie));
+        login_wipe(token_hash, sizeof(token_hash));
+        ESP_LOGE(TAG, "Set-Cookie formatting failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
+        return ESP_OK;
+    }
+
+    /* AQ-01 (AY-03): a re-login from a client presenting its previous valid cookie revokes that one
+     * session (bound to this requester's IP) right BEFORE create, after every refusal path above, so a
+     * full table frees the presenter's own slot instead of evicting a bystander's. The only refusal
+     * left is the all-ADMIN 503, which cannot happen after a revoke freed a slot. */
+    {
+        char old_token[128] = { 0 };
+        if (http_auth_extract_session_token(req, old_token, sizeof(old_token)) && old_token[0] != '\0') {
+            web_auth_session_role_t old_role = WEB_AUTH_SESSION_ROLE_NONE;
+            uint32_t old_seen = 0;
+            uint32_t old_timeout = 0;
+            if (http_auth_session_status(old_token, ip, &old_role, &old_seen, &old_timeout)) {
+                http_auth_session_logout(old_token);
+            }
+        }
+        login_wipe(old_token, sizeof(old_token));
+    }
+
     web_auth_session_role_t session_role =
         (store_role == WEB_AUTH_ROLE_ADMINISTRATOR) ? WEB_AUTH_SESSION_ROLE_ADMIN : WEB_AUTH_SESSION_ROLE_USER;
     size_t session_idx =
@@ -676,6 +706,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_sendstr(req, "all sessions in use by admins, try later");
         // DF-01: this refusal path also owes the SS-04 wipe of the token copies.
+        login_wipe(cookie, sizeof(cookie));
         login_wipe(token_hex, sizeof(token_hex));
         login_wipe(token_hash, sizeof(token_hash));
         return ESP_OK;
@@ -690,46 +721,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     web_auth_table_set_via_ap(http_session_table(), session_idx,
                                wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req)));
 
-    // 128 bytes: "kiln_sid=" (9) + 64 hex chars + "; HttpOnly; SameSite=Strict; Path=/"
-    // (35) + NUL = 109 -- Finding 5 fix (2026-09-17 review): this comment's
-    // arithmetic previously read "36 + NUL = 110", one byte over the actual
-    // 108-byte-plus-NUL total; the buffer itself was already correctly sized
-    // (128 is still comfortably above 109), only the comment's sum was wrong.
-    // The previous 96-byte buffer was too small to hold a real cookie and
-    // made every successful login fail with a spurious 500 (found by this
-    // pass's host tests, not itself one of the seven audit findings, but
-    // blocking their test coverage). Still well under the stack budget,
-    // this file's stated httpd-stack budget.
-    char cookie[128];
-    int cookie_len = snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s; HttpOnly; SameSite=Strict; Path=/",
-                               token_hex);
-    // SS-04: the cookie now carries the only copy needed; wipe the hex form.
-    login_wipe(token_hex, sizeof(token_hex));
-    if (cookie_len < 0 || (size_t)cookie_len >= sizeof(cookie)) {
-        login_wipe(cookie, sizeof(cookie));
-        // GD-04: no client holds this session; remove the orphan from the table.
-        web_auth_table_destroy_session(http_session_table(), session_idx);
-        ESP_LOGE(TAG, "Set-Cookie formatting failed");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-        return ESP_OK;
-    }
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
-
-    /* AY-03 (was AX-05): a re-login from a client presenting its previous valid cookie revokes that
-     * one session, but only now that the new session and Set-Cookie succeeded, and only if the old
-     * session is bound to this requester's IP (status is valid only for the bound address). */
-    {
-        char old_token[128] = { 0 };
-        if (http_auth_extract_session_token(req, old_token, sizeof(old_token)) && old_token[0] != '\0') {
-            web_auth_session_role_t old_role = WEB_AUTH_SESSION_ROLE_NONE;
-            uint32_t old_seen = 0;
-            uint32_t old_timeout = 0;
-            if (http_auth_session_status(old_token, ip, &old_role, &old_seen, &old_timeout)) {
-                http_auth_session_logout(old_token);
-            }
-        }
-        login_wipe(old_token, sizeof(old_token));
-    }
 
     ESP_LOGI(TAG, "login succeeded from %s (role=%d)", ip, (int)session_role);
     httpd_resp_set_type(req, "application/json");
