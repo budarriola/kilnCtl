@@ -97,7 +97,14 @@ def test_recovery_elf_missing_fails(tmp_path, fake_root):
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
-def test_main_tree_resolved_from_worktree(tmp_path):
+def test_main_tree_resolved_from_worktree():
+    # System temp, not pytest tmp_path: nested git repos under the checkout defeat `git clean -fdx` (negtest).
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        _worktree_case(__import__("pathlib").Path(td))
+
+
+def _worktree_case(tmp_path):
     main = tmp_path / "main"
     main.mkdir()
     _git(main, "init", "-q")
