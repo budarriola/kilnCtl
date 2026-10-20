@@ -1,4 +1,7 @@
 #include "boot_history.h"
+#include "esp_attr.h"
+#include "persist_scratch.h"
+#include <stdlib.h>
 
 #include <ctype.h>
 #include <stddef.h>
@@ -125,7 +128,7 @@ bool boot_history_load(boot_history_blob_t *out)
     return true;
 }
 
-static boot_history_entry_t s_recent[BOOT_HISTORY_RECENT];
+EXT_RAM_BSS_ATTR static boot_history_entry_t s_recent[BOOT_HISTORY_RECENT];
 static unsigned s_recent_n;
 
 unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT])
@@ -220,11 +223,11 @@ esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
     if (s_recent_n == 0u || wall_time == 0u) {
         return ESP_ERR_INVALID_STATE;
     }
-    boot_history_blob_t *b = heap_caps_malloc(sizeof(*b), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    boot_history_blob_t *b = persist_scratch_alloc(sizeof(*b));
     if (!b) {
         return ESP_ERR_NO_MEM;
     }
     esp_err_t r = backfill_with_blob(b, wall_time);
-    heap_caps_free(b);
+    free(b);
     return r;
 }

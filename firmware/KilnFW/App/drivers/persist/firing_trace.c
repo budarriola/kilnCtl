@@ -1,5 +1,6 @@
 // See firing_trace.h for the design, size and power-cut loss statement.
 #include "firing_trace.h"
+#include "esp_attr.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -19,7 +20,7 @@
 
 static firing_trace_io_t s_io;
 static uint8_t *s_buf; /* FT_FILE_MAX bytes: 24 B header area + samples */
-static firing_trace_entry_t s_idx[FT_SLOTS];
+EXT_RAM_BSS_ATTR static firing_trace_entry_t s_idx[FT_SLOTS];
 static uint32_t s_next_seq = 1;
 
 static volatile bool s_active;

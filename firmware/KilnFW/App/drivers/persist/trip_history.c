@@ -1,4 +1,7 @@
 #include "trip_history.h"
+#include "esp_attr.h"
+#include "persist_scratch.h"
+#include <stdlib.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -111,7 +114,7 @@ bool trip_history_load(trip_history_blob_t *out)
 }
 
 /* ---- pending queue: single producer (link RX task), single consumer (telemetry_log task) ---- */
-static trip_history_entry_t s_pending[TRIP_HISTORY_PENDING_MAX];
+EXT_RAM_BSS_ATTR static trip_history_entry_t s_pending[TRIP_HISTORY_PENDING_MAX];
 static volatile uint8_t s_pend_head; /* written by the producer */
 static volatile uint8_t s_pend_tail; /* written by the consumer */
 static volatile unsigned s_dropped;
@@ -184,7 +187,7 @@ static void flush_job(void *arg)
         return;
     }
     /* Internal heap, not a local: the stack check attributes this frame to the telemetry_log task. */
-    trip_history_blob_t *bp = heap_caps_malloc(sizeof(*bp), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    trip_history_blob_t *bp = persist_scratch_alloc(sizeof(*bp));
     if (!bp) {
         ESP_LOGE(TAG, "no internal heap for trip blob -- trip not recorded");
         return;
@@ -197,7 +200,7 @@ static void flush_job(void *arg)
     }
     if (j->recorded == 0u) {
         j->ok = true;
-        heap_caps_free(bp);
+        free(bp);
         return; /* all duplicates: no flash write */
     }
     bp->crc32 = BLOB_CRC(bp);
@@ -206,7 +209,7 @@ static void flush_job(void *arg)
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "hal_kv_open failed: %s -- trip not recorded", hal_status_to_name(err));
         j->recorded = 0;
-        heap_caps_free(bp);
+        free(bp);
         return;
     }
     err = hal_kv_set_blob(&h, NVS_KEY_TRIP_HIST, bp, sizeof(*bp));
@@ -214,7 +217,7 @@ static void flush_job(void *arg)
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
-    heap_caps_free(bp);
+    free(bp);
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "trip history persist failed: %s", hal_status_to_name(err));
         j->recorded = 0;
