@@ -1,5 +1,6 @@
 /* fake_kv.c -- host fake backend for hal_kv.h. See fake_kv.h. */
 #include "fake_kv.h"
+#include "../common/hal_kv_wstat_impl.h" /* BW-01 */
 
 #include <string.h>
 

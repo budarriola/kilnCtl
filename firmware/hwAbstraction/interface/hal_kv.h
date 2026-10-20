@@ -179,7 +179,7 @@ hal_status_t hal_kv_stats(const char *partition, hal_kv_stats_t *out);
  * so it adds no flash wear). Backends call hal_kv_wstat_note() on every successful set_*, erase_key
  * and commit-free write path; writes to other partitions are ignored. Up to HAL_KV_WSTAT_SLOTS
  * distinct keys are tracked by name, further keys fold into "other". Implemented in
- * common/hal_status.c (already linked everywhere hal_kv is). Counts are racy-tolerant
+ * common/hal_kv_wstat_impl.h, included by each backend. Counts are racy-tolerant
  * (volatile, no lock): a lost increment under contention is acceptable for a diagnostic. */
 #define HAL_KV_WSTAT_SLOTS 6
 #define HAL_KV_WSTAT_NAME_MAX 16

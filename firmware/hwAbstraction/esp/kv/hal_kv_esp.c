@@ -106,6 +106,7 @@
 #include "nvs_flash.h"
 
 #include "hal_esp_common.h"
+#include "../common/hal_kv_wstat_impl.h" /* BW-01 */
 
 static const char *TAG = "hal_kv_esp";
 
