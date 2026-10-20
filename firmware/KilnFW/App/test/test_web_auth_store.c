@@ -548,6 +548,17 @@ static void test_au02_provisioned_board_policy_loss_fails_closed(void)
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", "password1", salt, false) == HAL_OK,
                "set user password");
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE, "user-only credential also fails closed");
+
+    // Unreadable (bad CRC) web credential blob counts as a credential record.
+    reset_all();
+    web_auth_web_blob_t wblob;
+    memset(&wblob, 0, sizeof(wblob));
+    wblob.version = WEB_AUTH_STORE_VERSION;
+    wblob.crc32 = web_blob_crc(&wblob) ^ 0xFFu; // bad CRC
+    TEST_CHECK(set_blob_verified(WEB_AUTH_KEY_WEB, &wblob, sizeof(wblob)) == HAL_OK, "seed bad-CRC web blob");
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "no marker with corrupt web blob");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "policy+marker absent, corrupt web blob: UNREADABLE, not open");
 }
 
 static void test_policy_set_and_load(void)
