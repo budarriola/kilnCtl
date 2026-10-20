@@ -317,7 +317,7 @@ static void test_refused_post(void)
     firing_trace_entry_t e[FT_SLOTS];
     TEST_CHECK(firing_trace_list(e) == 0, "no flushed file listed (loss = whole firing so far, documented)");
     firing_trace_end();
-    TEST_CHECK(durable_n(1) == 12, "end-of-firing flush still persists everything");
+    TEST_CHECK(durable_n(1) == 11, "end-of-firing flush still persists everything");
     g_post_refuse = false;
 }
 

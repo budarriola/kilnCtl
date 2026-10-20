@@ -223,7 +223,7 @@ bool firing_trace_note(uint32_t run_token, uint32_t uptime_s, uint32_t epoch, fl
 void firing_trace_flush_job(void *arg)
 {
     (void)arg;
-    if (s_buf && s_io.write && s_active) {
+    if (s_buf && s_io.write) { /* FY-07: not gated on s_active, a deferred final job runs after end() cleared it */
         uint16_t n = s_n;
         bool closed = s_closed;
         if (n != 0 && (n != s_flushed || closed != s_closed_flushed)) {
