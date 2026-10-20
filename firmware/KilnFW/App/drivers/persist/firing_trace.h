@@ -1,0 +1,112 @@
+// firing_trace -- FD-02: durable per-firing temperature trace on the cfg LittleFS partition.
+//
+// /api/history.csv is a 640 x 30 s RAM ring lost on reboot. This module keeps, for the last
+// FT_SLOTS firings, one sample per minute (uptime, UTC epoch, setpoint, per-zone temperature as
+// int16 deci-C, per-zone duty, segment index) in "trace/ft<seq % 4>.bin".
+//
+// FLOW. firing_trace_note() is RAM-only (called from the control tick under s_exec.lock): it appends
+// to a PSRAM buffer and never touches flash. Every FT_FLUSH_EVERY samples (and after the first sample)
+// it marks a flush due; firing_trace_service() (called by the executor AFTER the lock is released)
+// posts the flush to the flash worker WITHOUT blocking. firing_trace_end() (firing end/abort) flushes
+// synchronously through the flash hop. The flush job rewrites the whole slot file atomically
+// (cfg_fs_write_atomic: temp + rename), so a power cut leaves the previous complete flush.
+//
+// WORST-CASE LOSS ON A POWER CUT: the samples not yet flushed, i.e. at most FT_FLUSH_EVERY (10) samples
+// = 10 minutes (plus the one or two appended while a flush is in flight). A cut during the write itself
+// loses no more: the rename is atomic, the older file stays.
+//
+// SIZE: sample = 20 B, header = 24 B, cap FT_MAX_SAMPLES = 1440 (24 h) => 28,824 B per firing file,
+// 4 slots = 115,296 B (+ one transient temp copy of 28,824 B during a write) of the 2.3 MB cfg partition.
+// A firing longer than 24 h keeps its first 24 h and sets the "truncated" flag.
+//
+// Integrity: header and sample block each carry a CommonFW kilnlink_crc16_ccitt_false(); a file that
+// fails either is ignored (never partially trusted).
+#ifndef FIRING_TRACE_H
+#define FIRING_TRACE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+
+#ifndef ESP_ERR_INVALID_CRC /* real ESP-IDF defines it (0x109); the host esp_err.h stub does not */
+#define ESP_ERR_INVALID_CRC 0x109
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define FT_ZONES 3u
+#define FT_SLOTS 4u
+#define FT_MAX_SAMPLES 1440u
+#define FT_SAMPLE_PERIOD_S 60u
+#define FT_FLUSH_EVERY 10u
+#define FT_REC_SIZE 20u
+#define FT_HDR_SIZE 24u
+#define FT_FILE_MAX (FT_HDR_SIZE + FT_MAX_SAMPLES * FT_REC_SIZE)
+#define FT_TEMP_INVALID ((int16_t)INT16_MIN)
+#define FT_DUTY_INACTIVE 255u /* duty is 0..200 in 0.5 % units */
+
+#define FT_FLAG_TRUNCATED 0x0001u
+#define FT_FLAG_CLOSED 0x0002u
+
+typedef struct {
+    uint32_t seq; /* firing id; 0 = empty slot */
+    uint32_t start_epoch;
+    uint16_t n;
+    uint16_t flags;
+} firing_trace_entry_t;
+
+/* IO seam. All members optional; a NULL write disables persistence (host default). */
+typedef struct {
+    esp_err_t (*write)(const char *rel_path, const void *data, size_t len);
+    esp_err_t (*read)(const char *rel_path, void *buf, size_t cap, size_t *out_len);
+    esp_err_t (*post)(void (*fn)(void *arg));              /* non-blocking, one outstanding */
+    esp_err_t (*run)(void (*fn)(void *arg), void *arg);    /* blocking, runs fn on the flash worker */
+    void *(*alloc)(size_t bytes);                          /* PSRAM buffer */
+} firing_trace_io_t;
+
+/* Installs io, allocates the PSRAM buffer, and scans the slot files to restore the in-RAM index.
+ * Call once at boot after cfg_fs mounts. Safe to call again (rescans). */
+void firing_trace_init(const firing_trace_io_t *io);
+void firing_trace_reset_for_test(void);
+
+/* RAM-only append. run_token identifies the run (a new token starts a new firing). epoch 0 = unsynced.
+ * temp_c[i] NaN = zone inactive or invalid; duty[i] 0..1, NaN = inactive. Returns true if stored. */
+bool firing_trace_note(uint32_t run_token, uint32_t uptime_s, uint32_t epoch, float setpoint_c,
+                       const float temp_c[FT_ZONES], const float duty[FT_ZONES], uint8_t segment);
+
+/* Posts a flush if one is due; non-blocking. Call outside any executor lock. */
+void firing_trace_service(void);
+
+/* Firing finished or aborted: synchronous final flush, marks the file closed. No-op if none active. */
+void firing_trace_end(void);
+
+/* The flush body (exposed so the host test can run it directly as the worker would). */
+void firing_trace_flush_job(void *arg);
+
+/* Index (newest first). Returns the number of valid entries written to out (max FT_SLOTS). */
+size_t firing_trace_list(firing_trace_entry_t out[FT_SLOTS]);
+
+/* A validated view of one firing file. samples points into the caller's buffer. */
+typedef struct {
+    firing_trace_entry_t entry;
+    const uint8_t *samples;
+} firing_trace_view_t;
+
+/* Reads firing `id` into scratch (cap >= FT_FILE_MAX) and validates it. ESP_ERR_NOT_FOUND when the
+ * slot is empty/other firing; ESP_ERR_INVALID_CRC when corrupt. */
+esp_err_t firing_trace_open(uint32_t id, uint8_t *scratch, size_t cap, firing_trace_view_t *out);
+
+/* CSV helpers: both return bytes written (excluding NUL), 0 on overflow. */
+size_t firing_trace_csv_header(char *out, size_t cap);
+size_t firing_trace_csv_row(const firing_trace_view_t *v, uint16_t idx, char *out, size_t cap);
+#define FT_CSV_LINE_CAP 128u
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FIRING_TRACE_H */

@@ -868,6 +868,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t firing_history_uri = {
         .uri = "/api/firing_history", .method = HTTP_GET, .handler = firing_history_get_handler,
     };
+    static const httpd_uri_t firing_trace_uri = {
+        .uri = "/api/firing_trace", .method = HTTP_GET, .handler = firing_trace_get_handler,
+    };
     static const httpd_uri_t safety_clear_trip_uri = {
         .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
     };
@@ -962,6 +965,11 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = kiln_http_register(server, &firing_history_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/firing_history) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = kiln_http_register(server, &firing_trace_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/firing_trace) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = kiln_http_register(server, &history_csv_uri);

@@ -920,6 +920,8 @@ try {
             "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
+            # FD-02: profile_executor.c now appends to the durable firing trace (RAM-only) and ends it.
+            "`"$(Join-Path $driversDir 'persist/firing_trace.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kilnlink_crc.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             # docs/LIVE_PROFILE_EDIT.md pass 1: profile_executor.c (#included
@@ -2621,6 +2623,16 @@ try {
 
     Invoke-HostTestExe -Name "boot_history" -ExePath $exeBh -BuildCmd $cmdBh
 
+    # ---- test_firing_trace.c (FD-02): firing_trace.c #included, RAM file store, CommonFW CRC linked ----
+    $exeFt = Join-Path $outDir "kilnctl_host_tests_firing_trace.exe"
+    $ftObjDir = Join-Path $outDir "ft"
+    New-Item -ItemType Directory -Force -Path $ftObjDir | Out-Null
+    $cmdFt = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$ftObjDir\\`" /Fe:`"$exeFt`" `"$(Join-Path $testDir 'test_firing_trace.c')`" " +
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\kilnlink_crc.c')`""
+
+    Invoke-HostTestExe -Name "firing_trace" -ExePath $exeFt -BuildCmd $cmdFt
+
     # ---- test_trip_history.c (FD-05): trip_history.c #included, fake_kv + flash_hop stubs ----
     $exeTh = Join-Path $outDir "kilnctl_host_tests_trip_history.exe"
     $thObjDir = Join-Path $outDir "th"
@@ -3716,7 +3728,8 @@ try {
     # 105 -> 106: boot_history (FD-03)
     # 106 -> 107: trip_history (FD-05)
     # 107 -> 108: telemetry_time_sync (FQ-05)
-    $totalExpected = 108
+    # 108 -> 109: firing_trace (FD-02)
+    $totalExpected = 109
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

@@ -19,6 +19,7 @@
 
 #include "adaptive_tune.h" /* PID_EXPANSION_PLAN.md Phase 7d -- see that file's own header comment */
 #include "autotune_engine.h"
+#include "firing_trace.h" /* FD-02: durable per-firing trace, RAM-only append from here */
 #include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
@@ -833,6 +834,7 @@ void executor_task_entry(void *arg)
             }
             xSemaphoreGive(s_exec.lock);
             if (fs_need_persist) {
+                firing_trace_end(); /* FD-02: final synchronous flush of this firing's trace */
                 firing_stats_persist(&fs_rec);
                 /* Outside s_exec.lock, same as the persist call above --
                  * this can do a batch fit and an NVS write of its own (via
@@ -2105,6 +2107,17 @@ void executor_task_entry(void *arg)
             if (s_exec.history_count < HISTORY_MAX_SAMPLES) {
                 s_exec.history_count++;
             }
+            /* FD-02: durable trace, 1 sample/min, RAM-only append (flash flush happens after the lock). */
+            _Static_assert(MAX31856_CHANNEL_COUNT == FT_ZONES, "firing_trace zone count");
+            {
+                time_t ft_now = time(NULL);
+                for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) { /* inactive zones: NaN, not stack garbage */
+                    if (inactive_mask & (1u << zi)) { actual_c[zi] = NAN; duty[zi] = NAN; }
+                }
+                firing_trace_note((uint32_t)s_exec.history_run_start_tick, ticks_to_s(now),
+                                  (ft_now >= (time_t)1577836800) ? (uint32_t)ft_now : 0u, s_exec.target_c,
+                                  actual_c, duty, s_exec.segment_index);
+            }
         }
 
         /* --- Reboot breadcrumb (TODO.md 6A.3) -------------------------------
@@ -2161,6 +2174,7 @@ void executor_task_entry(void *arg)
         capture_run_snapshot(&tick_snap);
         bool faulted_now = run_faulted_this_tick;
         xSemaphoreGive(s_exec.lock);
+        firing_trace_service(); /* FD-02: non-blocking post of a due flush, outside the lock */
 
         /* Rate-limited internally (at most one NVS write per 10 min, and only
          * if something changed) -- see relay_cycles.h's flash-wear note.
