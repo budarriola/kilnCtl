@@ -390,6 +390,18 @@ static volatile bool s_crash_clear_in_progress;
 /* FD-03: appends `"boot_history":[...]` (newest first, no leading comma) to buf at *o.
  * The 524 B ring blob lives on the heap (httpd stack blob class). Returns false on
  * overflow. An unloadable ring is an empty array. */
+/* BR-02: appends `"kiln_nvs":{used,free,total},` (trailing comma) to buf at *o. */
+static bool append_kiln_nvs_json(char *buf, size_t cap, size_t *o)
+{
+    int n = boot_history_nvs_stats_json(buf + *o, cap - *o);
+    if (n < 0 || (size_t)n + 2 > cap - *o) {
+        return false;
+    }
+    *o += (size_t)n;
+    buf[(*o)++] = ',';
+    return true;
+}
+
 static bool append_boot_history_json(char *buf, size_t cap, size_t *o)
 {
     boot_history_blob_t *bh = heap_caps_malloc(sizeof(*bh), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -402,6 +414,7 @@ static bool append_boot_history_json(char *buf, size_t cap, size_t *o)
         return true;
     }
     boot_history_load(bh);
+    boot_history_merge_live(bh); /* BR-01 */
     int n = snprintf(buf + *o, cap - *o, "\"boot_history\":[");
     if (n < 0 || (size_t)n >= cap - *o) {
         free(bh);
@@ -507,7 +520,7 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
         n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s,",
                      s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
-        if (!append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
+        if (!append_kiln_nvs_json(json, json_cap, &o) || !append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
             o + 2 > json_cap) {
             free(json);
             httpd_resp_set_status(req, "500 Internal Server Error");
@@ -569,7 +582,7 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
         APPEND("%s\"0x%08lx\"", i == 0 ? "" : ",", (unsigned long)rec.backtrace_pc[i]);
     }
     APPEND("],\"backtrace_corrupted\":%s,", rec.bt_corrupted ? "true" : "false");
-    if (!append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
+    if (!append_kiln_nvs_json(json, json_cap, &o) || !append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
         o + 2 > json_cap) {
         goto overflow;
     }

@@ -1,6 +1,7 @@
 #include "boot_history.h"
 #include "esp_attr.h"
 #include "persist_scratch.h"
+#include <stdio.h>
 #include <stdlib.h>
 
 #include <ctype.h>
@@ -159,6 +160,30 @@ uint32_t boot_history_latest_seq(void)
 uint8_t boot_history_latest_rep(void)
 {
     return s_recent_n > 0u ? (uint8_t)(s_recent[0].repeat & 0xFFu) : 0u;
+}
+
+void boot_history_merge_live(boot_history_blob_t *b)
+{
+    if (b == NULL || s_recent_n == 0u || b->count == 0u) {
+        return;
+    }
+    unsigned lidx = ((unsigned)b->head + BOOT_HISTORY_MAX - 1u) % BOOT_HISTORY_MAX;
+    if (b->entries[lidx].seq == s_recent[0].seq && s_recent[0].repeat > b->entries[lidx].repeat) {
+        b->entries[lidx].repeat = s_recent[0].repeat;
+    }
+}
+
+int boot_history_nvs_stats_json(char *buf, size_t cap)
+{
+    hal_kv_stats_t st;
+    int n;
+    if (hal_kv_stats(KILN_NVS_PARTITION, &st) == HAL_OK) {
+        n = snprintf(buf, cap, "\"kiln_nvs\":{\"used\":%u,\"free\":%u,\"total\":%u}", (unsigned)st.used_entries,
+                     (unsigned)st.free_entries, (unsigned)st.total_entries);
+    } else {
+        n = snprintf(buf, cap, "\"kiln_nvs\":null");
+    }
+    return (n < 0 || (size_t)n >= cap) ? -1 : n;
 }
 
 esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_known,

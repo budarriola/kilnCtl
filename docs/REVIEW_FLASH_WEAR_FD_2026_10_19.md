@@ -113,4 +113,4 @@ There is no cfg_fs, hal_kv or log_store write on that path.
 - **FW-06 INFO**: FD-04 log events and the diag bundle are negligible / read-only (see above).
 - **FW-07 INFO**: kiln_nvs live-data occupancy was not measured on the bench. The boot-loop figure
   assumes 50 % or less. If the partition is nearly full of static data, GC amplification rises and
-  FW-01 gets worse. Measure with nvs_get_stats on the bench.
+  FW-01 gets worse. benchmain22: not measurable, no tool reads kiln_nvs stats (KNOWN_ISSUES BR-02); default nvs shows 89/756 entries used.
