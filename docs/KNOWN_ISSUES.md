@@ -656,3 +656,19 @@ Owner request: with web auth on, no protected page content to a logged-out reque
 - **TH-01** LOW (REVIEW_FD05_2026_10_19): trip_history floats from the wire printed unclamped; worst-case rows overflow the 8192 B /api/crash_report buffer -> 500 hides the crash record. Fix: isfinite/clamp at note, or truncate the array. FIXED: trip floats clamped at note (NaN->0, +-1e5); test.
 - **TH-02** LOW (REVIEW_FD05_2026_10_19): trip_history_flush() advances the queue tail when the hop ran but the NVS write failed; trip lost permanently. Fix: keep tail on write failure (dedupe makes retry safe); add fault test. FIXED: flush keeps the queue when the NVS write fails; test.
 - **TH-03** LOW (REVIEW_FD05_2026_10_19): trip_history_dropped() is never exposed; queue-overflow loss invisible. Fix: add to crash_report JSON. FIXED: trip_history_dropped exposed in /api/crash_report JSON; test.
+- **TH-01** LOW (REVIEW_FD05_2026_10_19): trip_history floats from the wire printed unclamped; worst-case rows overflow the 8192 B /api/crash_report buffer -> 500 hides the crash record. Fix: isfinite/clamp at note, or truncate the array.
+- **TH-02** LOW (REVIEW_FD05_2026_10_19): trip_history_flush() advances the queue tail when the hop ran but the NVS write failed; trip lost permanently. Fix: keep tail on write failure (dedupe makes retry safe); add fault test.
+- **TH-03** LOW (REVIEW_FD05_2026_10_19): trip_history_dropped() is never exposed; queue-overflow loss invisible. Fix: add to crash_report JSON.
+
+## REVIEW_FD01_2026_10_19 (DB)
+HIGH 0, MED 4, LOW 6, INFO 5. Detail: docs/REVIEW_FD01_2026_10_19.md.
+- **DB-01** MED: diag_bundle_run keeps json[1536] on the httpd stack (3152 B free) above producers that reach fopen/LittleFS (path[600]). Not measured. Fix: PSRAM buffer, then target stack high-water. Open.
+- **DB-02** MED: the coredump section (CAPTURE_DRAM=y) can carry the Wi-Fi PSK, session tokens and auth tables into a shareable bundle. Already ADMIN-readable via /api/coredump/chunk. OWNER DECISION: opt-in coredump, warning file and manifest flag, or accept. Open.
+- **DB-03** MED: PC _fetch_supplements replaces only "/" in device-supplied names, so backslash path traversal can write outside out_dir on Windows. Fix: sanitize, check realpath containment. Open.
+- **DB-04** MED: PC parse_bundle accepts a negative length. A crafted frame stops pos advancing (infinite loop). Fix: digits-only length, require strict progress. Open.
+- **DB-05** LOW: the whole bundle streams on the single httpd task, so other requests wait for the transfer. Document, or use an async handler. Open.
+- **DB-06** LOW: boot_history and trip_history are not in the bundle (sec_crash_report omits them; /api/crash_report not in pc_supplement). reset_reason is also dropped. Open.
+- **DB-07** LOW: a section name can overwrite manifest.json, trailer.json or supplement files. Fix: prefix or subdirectory. Open.
+- **DB-08** LOW: the parser does not enforce manifest-first, trailer-last or the trailer byte counts. JSON errors escape, read size is unbounded, and a mid-frame truncation discards everything. Open.
+- **DB-09** LOW: the secret pin scans source words only, so it cannot see coredump content. The diag_bundle_http.c producers have no host test. PC tests miss DB-03/04/07/08. Open.
+- **DB-10** LOW: the log reader takes no lock while append and rotation run (pre-existing, fails safely). Flash reads are short and no lock is held across a send. Open.
