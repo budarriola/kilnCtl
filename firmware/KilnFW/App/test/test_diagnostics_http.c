@@ -184,6 +184,9 @@ const uint8_t safety_page_html_gz_end[1] = {0};
 #include "profile_executor.h"
 #include "zones_config_cfg_fs.h"
 
+// FD-03: real boot_history.c is linked (fake_kv backed) so GET /api/crash_report emits real rows.
+#include "../drivers/persist/boot_history.h"
+
 // crash_report
 static bool g_cr_present;
 static crash_report_record_t g_cr_rec;
@@ -529,6 +532,19 @@ static void test_crash_report(void)
     world_reset();
     crash_report_get_handler(&s_req);
     TEST_CHECK(s_status == 200 && body_has("\"present\":false"), "crash_report GET absent: present:false");
+    TEST_CHECK(body_has("\"boot_history\":[]"), "crash_report GET absent: empty boot_history array on a fresh ring");
+
+    /* FD-03: boot history rides on the same route, present or absent crash record. */
+    world_reset();
+    hal_kv_init_partition("kiln_nvs");
+    boot_history_record_boot(4, true, 345u, 77u, true, "v1-2-gabc1234", 0u);
+    boot_history_record_boot(1, false, 0u, 0u, false, "v1-3-gdef5678", 0u);
+    crash_report_get_handler(&s_req);
+    TEST_CHECK(s_status == 200 && body_has("\"present\":false") &&
+                   body_has("\"boot_history\":[{\"seq\":2,\"reset_reason\":\"POWERON\"") &&
+                   body_has("{\"seq\":1,\"reset_reason\":\"PANIC\",\"prev_uptime_s\":345,\"prev_uptime_known\":true,\"dump_id\":77") &&
+                   body_has("\"fw\":\"abc1234\""),
+               "crash_report GET: boot_history rows newest-first with reason name, uptime, dump_id, fw");
 
     world_reset();
     g_cr_present = true;

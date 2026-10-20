@@ -290,6 +290,11 @@ them.</p>
   <div class="row"><span class="label">Loading&hellip;</span><span class="value">--</span></div>
 </div>
 
+<h2>Boot history (last 16)</h2>
+<div class="card" id="bootHistCard">
+  <div class="row"><span class="label">Loading&hellip;</span><span class="value">--</span></div>
+</div>
+
 <h2>Safety-processor build</h2>
 <div class="card" id="safetyBuildCard">
   <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
@@ -947,7 +952,30 @@ here:</p>
     return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) + '</span><span class="value">' +
            window.kcEscapeHtml(String(value)) + '</span></div>';
   }
+  // FD-03: boot_history rides on GET /api/crash_report (newest first).
+  function renderBootHistory(cr) {
+    var card = document.getElementById('bootHistCard');
+    var rows = (cr && cr.boot_history) || [];
+    if (!rows.length) {
+      card.innerHTML = crashRow('Status', 'No boots recorded yet.');
+      return;
+    }
+    var h = '<div class="table-scroll"><table class="relay-life-table"><thead><tr>' +
+            '<th>Boot #</th><th>Reset reason</th><th>Previous uptime</th><th>Crash dump</th>' +
+            '<th>Firmware</th><th>Time</th></tr></thead><tbody>';
+    for (var i = 0; i < rows.length; i++) {
+      var b = rows[i];
+      h += '<tr><td>' + window.kcEscapeHtml(String(b.seq)) + '</td><td>' + window.kcEscapeHtml(String(b.reset_reason)) +
+           '</td><td>' + (b.prev_uptime_known ? window.kcEscapeHtml(String(b.prev_uptime_s)) + ' s' : 'unknown') +
+           '</td><td>' + (b.has_crash ? window.kcEscapeHtml(String(b.dump_id)) : '-') +
+           '</td><td>' + window.kcEscapeHtml(String(b.fw || '?')) +
+           '</td><td>' + (b.time ? window.kcEscapeHtml(new Date(b.time * 1000).toISOString()) : 'unknown') +
+           '</td></tr>';
+    }
+    card.innerHTML = h + '</tbody></table></div>';
+  }
   function renderCrash(cr) {
+    renderBootHistory(cr);
     var card = document.getElementById('crashCard');
     if (!cr || !cr.present) {
       card.innerHTML = crashRow('Status', 'No crash recorded.');
@@ -1030,6 +1058,7 @@ here:</p>
     return fetch('/api/crash_report').then(function (r) { return r.json(); }).then(renderCrash).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('crashCard').innerHTML = crashRow('Status', 'unable to load crash record');
+      document.getElementById('bootHistCard').innerHTML = crashRow('Status', 'unable to load boot history');
     });
   }
 

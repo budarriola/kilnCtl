@@ -121,6 +121,18 @@ typedef struct {
  * rejected by the magic check in crash_report_init() below. */
 RTC_NOINIT_ATTR static crash_uptime_beacon_t s_uptime_beacon;
 
+/* FD-03: the PREVIOUS boot's last beacon reading, snapshotted by crash_report_init(). */
+static bool s_prev_uptime_known;
+static uint32_t s_prev_uptime_s;
+
+bool crash_report_prev_boot_uptime(uint32_t *out_s)
+{
+    if (out_s) {
+        *out_s = s_prev_uptime_s;
+    }
+    return s_prev_uptime_known;
+}
+
 void crash_report_note_alive(void)
 {
     s_uptime_beacon.uptime_s = (uint32_t)(hal_time_now_us() / 1000000ull);
@@ -551,6 +563,8 @@ void crash_report_init(void)
     const crash_uptime_beacon_t boot_beacon = s_uptime_beacon;
     s_uptime_beacon.magic = 0u;
     s_uptime_beacon.uptime_s = 0u;
+    s_prev_uptime_known = (boot_beacon.magic == CRASH_UPTIME_BEACON_MAGIC);
+    s_prev_uptime_s = s_prev_uptime_known ? boot_beacon.uptime_s : 0u;
 
     esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != ESP_OK) {

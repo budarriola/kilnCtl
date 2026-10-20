@@ -19,7 +19,8 @@
 #include "hal_sysinfo.h" /* hal_sysinfo_reset_reason()/_get_build_info()/_get_running_partition() */
 #include "MAX31856.h"
 #include "board_temps.h"
-#include "crash_report.h" /* 2026-09-15 MEDIUM fix: LCD acknowledge control, see Crash Report page below */
+#include "crash_report.h"
+#include "boot_history.h" /* 2026-09-15 MEDIUM fix: LCD acknowledge control, see Crash Report page below */
 #include "dashboard_http.h"
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md -- the Relay Life page below */
 #include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
@@ -477,6 +478,7 @@ static lv_obj_t *s_rl_value_label[RELAY_CYCLES_COUNT];
  * Relay Life page's own equivalent state was removed, UI_PLAN.md section
  * 6.4). */
 static lv_obj_t *s_cr_summary_label;
+static lv_obj_t *s_cr_resets_label; /* FD-03: last 5 resets */
 static lv_obj_t *s_cr_ack_row; /* LOW-5 fix: the whole row, hidden as a unit -- see refresh_cb() */
 static lv_obj_t *s_cr_ack_btn;
 static lv_obj_t *s_cr_ack_label;
@@ -1302,6 +1304,30 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_set_style_text_color(s_cr_summary_label,
                                      cr_unacked ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
     }
+    if (s_page_index == UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT) {
+        /* FD-03: five short lines ("#12 TASK_WDT up 345s a1b2c3d"), RAM cache, no NVS read. */
+        boot_history_entry_t bh[BOOT_HISTORY_RECENT];
+        unsigned bn = boot_history_recent(bh);
+        char bh_buf[BOOT_HISTORY_RECENT * 36 + 24];
+        size_t bo = (size_t)snprintf(bh_buf, sizeof(bh_buf), "Last %u resets:", (unsigned)BOOT_HISTORY_RECENT);
+        for (unsigned i = 0; i < bn && bo < sizeof(bh_buf); i++) {
+            char up[16];
+            if (bh[i].prev_uptime_known) {
+                snprintf(up, sizeof(up), "%lus", (unsigned long)bh[i].prev_uptime_s);
+            } else {
+                snprintf(up, sizeof(up), "?");
+            }
+            char fw7[8];
+            snprintf(fw7, sizeof(fw7), "%.7s", bh[i].fw);
+            int w = snprintf(bh_buf + bo, sizeof(bh_buf) - bo, "\n#%lu %s up %s %s",
+                             (unsigned long)bh[i].seq, boot_history_reason_name(bh[i].reset_reason), up, fw7);
+            if (w < 0 || (size_t)w >= sizeof(bh_buf) - bo) {
+                break;
+            }
+            bo += (size_t)w;
+        }
+        lv_label_set_text(s_cr_resets_label, bh_buf);
+    }
     /* LOW-5 fix: hide the WHOLE row (name label + button) as a unit once
      * there's no unacknowledged record any more, not just the button --
      * the row's name label is fixed "Unacknowledged crash" text, so leaving
@@ -1775,6 +1801,8 @@ lv_obj_t *ui_page_diagnostics_build(void)
     lv_obj_t *crash_report_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT];
     s_cr_summary_label = build_full_text_row_accent(crash_report_page, "No crash report on record.",
                                                       UI_THEME_ACCENT_1);
+    s_cr_resets_label = build_full_text_row_accent(crash_report_page, "Last resets: n/a",
+                                                    UI_THEME_ACCENT_2);
     build_crash_report_ack_row(crash_report_page);
 
     /* MUST come after content exists -- ui_topbar.h's own usage note: the

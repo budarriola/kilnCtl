@@ -20,6 +20,7 @@
 #include "cfg_fs_mount.h"
 #include "cfg_fs_status.h"
 #include "crash_report.h"
+#include "boot_history.h"
 #include "estop_verification.h"
 #include "danger_mode.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- HR-01 mode gate */
@@ -384,6 +385,57 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * http_async_job). */
 static volatile bool s_crash_clear_in_progress;
 
+/* FD-03: appends `"boot_history":[...]` (newest first, no leading comma) to buf at *o.
+ * The 524 B ring blob lives on the heap (httpd stack blob class). Returns false on
+ * overflow. An unloadable ring is an empty array. */
+static bool append_boot_history_json(char *buf, size_t cap, size_t *o)
+{
+    boot_history_blob_t *bh = heap_caps_malloc(sizeof(*bh), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (bh == NULL) {
+        int n0 = snprintf(buf + *o, cap - *o, "\"boot_history\":[]");
+        if (n0 < 0 || (size_t)n0 >= cap - *o) {
+            return false;
+        }
+        *o += (size_t)n0;
+        return true;
+    }
+    boot_history_load(bh);
+    int n = snprintf(buf + *o, cap - *o, "\"boot_history\":[");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        free(bh);
+        return false;
+    }
+    *o += (size_t)n;
+    for (unsigned i = 0; i < BOOT_HISTORY_MAX; i++) {
+        boot_history_entry_t e;
+        if (!boot_history_blob_get(bh, i, &e)) {
+            break;
+        }
+        char fw_esc[BOOT_HISTORY_FW_MAX * 2 + 1];
+        json_escape(e.fw, fw_esc, sizeof(fw_esc));
+        n = snprintf(buf + *o, cap - *o,
+                     "%s{\"seq\":%lu,\"reset_reason\":\"%s\",\"prev_uptime_s\":%lu,"
+                     "\"prev_uptime_known\":%s,\"dump_id\":%lu,\"has_crash\":%s,"
+                     "\"fw\":\"%s\",\"time\":%lu}",
+                     i == 0 ? "" : ",", (unsigned long)e.seq, boot_history_reason_name(e.reset_reason),
+                     (unsigned long)e.prev_uptime_s, e.prev_uptime_known ? "true" : "false",
+                     (unsigned long)e.dump_id, e.has_crash ? "true" : "false", fw_esc,
+                     (unsigned long)e.wall_time);
+        if (n < 0 || (size_t)n >= cap - *o) {
+            free(bh);
+            return false;
+        }
+        *o += (size_t)n;
+    }
+    free(bh);
+    n = snprintf(buf + *o, cap - *o, "]");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        return false;
+    }
+    *o += (size_t)n;
+    return true;
+}
+
 /* GET /api/crash_report -- the last-crash summary crash_report.c persisted
  * (task/cause/PC/backtrace/reset-reason), for the diagnostics page's "Last
  * crash" section. {"present":false,"clear_in_progress":<bool>} is a
@@ -396,10 +448,10 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
 
     /* HEAP, not stack (httpd_worker 8 KB, "httpd stack blob class"): freed on
      * every return path below. */
-    const size_t json_cap = 1024;
+    const size_t json_cap = 4096; /* crash record ~1 KB + 16 boot_history rows ~2 KB */
     char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
-        ESP_LOGE(TAG, "GET /api/crash_report: malloc(1024) failed for the response buffer");
+        ESP_LOGE(TAG, "GET /api/crash_report: malloc(4096) failed for the response buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
@@ -408,9 +460,16 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     int n;
 
     if (!present) {
-        n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s}",
+        n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s,",
                      s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
+        if (!append_boot_history_json(json, json_cap, &o) || o + 2 > json_cap) {
+            free(json);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"boot history too large to encode\"}");
+        }
+        json[o++] = '}';
         httpd_resp_set_type(req, "application/json");
         esp_err_t sent = httpd_resp_send(req, json, o);
         free(json);
@@ -464,7 +523,11 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
          * small integer rather than the obviously-wrong address it is. */
         APPEND("%s\"0x%08lx\"", i == 0 ? "" : ",", (unsigned long)rec.backtrace_pc[i]);
     }
-    APPEND("],\"backtrace_corrupted\":%s}", rec.bt_corrupted ? "true" : "false");
+    APPEND("],\"backtrace_corrupted\":%s,", rec.bt_corrupted ? "true" : "false");
+    if (!append_boot_history_json(json, json_cap, &o) || o + 2 > json_cap) {
+        goto overflow;
+    }
+    json[o++] = '}';
 
     httpd_resp_set_type(req, "application/json");
     {

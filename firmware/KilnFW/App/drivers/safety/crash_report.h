@@ -198,6 +198,10 @@ void crash_report_init(void);
 // doesn't recognize.
 bool crash_report_get(crash_report_record_t *out);
 
+// FD-03: previous boot's last uptime beacon (seconds), snapshotted by crash_report_init().
+// Returns false (and *out_s = 0) when unknown (power-on, or no heartbeat ran). Call after init.
+bool crash_report_prev_boot_uptime(uint32_t *out_s);
+
 // Cached, no-I/O version of "have_record && !acknowledged" (the same
 // condition readiness_crash_report_status() gates a firing on -- see
 // readiness_http.h). Added 2026-09-15 (docs/audits/

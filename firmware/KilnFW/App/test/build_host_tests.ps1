@@ -2031,7 +2031,7 @@ try {
     $diagObjDir = Join-Path $outDir "diaghttp"
     New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
     $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" `"$(Join-Path $driversDir 'persist/boot_history.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
@@ -2598,6 +2598,17 @@ try {
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "crash_report" -ExePath $exe41 -BuildCmd $cmd41
+
+    # ---- test_boot_history.c (FD-03): boot_history.c #included, fake_kv backed ----
+    $exeBh = Join-Path $outDir "kilnctl_host_tests_boot_history.exe"
+    $bhObjDir = Join-Path $outDir "bh"
+    New-Item -ItemType Directory -Force -Path $bhObjDir | Out-Null
+    $cmdBh = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$bhObjDir\\`" /Fe:`"$exeBh`" `"$(Join-Path $testDir 'test_boot_history.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "boot_history" -ExePath $exeBh -BuildCmd $cmdBh
 
     # ---- test_heat_owner_active_decide.c: its own 42nd, separate executable --
     # 2026-09-15 (Opus adversarial re-review, F6: docs/audits/review_tc_type_
@@ -3679,7 +3690,8 @@ try {
     # 101 -> 103: sx1509_reset_first (boot audit MED-2) plus one executable already unaccounted for on dev (built count was 102)
     # 103 -> 104: flash_xip_lock (REVIEW_FLASH_MMAP_SERIALIZATION MED-1)
     # 104 -> 105: web_encoding_cache (KH-09)
-    $totalExpected = 105
+    # 105 -> 106: boot_history (FD-03)
+    $totalExpected = 106
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
