@@ -8,6 +8,7 @@
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "hal_sysinfo.h"
 #include "nvs_key_check.h"
 
 static const char *TAG = "boot_history";
@@ -96,7 +97,11 @@ const char *boot_history_reason_name(uint8_t r)
 {
     /* Order mirrors hal_reset_reason_t (hal_sysinfo.h). */
     static const char *const names[] = {"UNKNOWN", "POWERON",   "EXT",     "SW",  "PANIC", "INT_WDT", "TASK_WDT",
-                                        "WDT",     "DEEPSLEEP", "BROWNOUT", "SDIO", "USB",   "JTAG",    "EFUSE"};
+                                        "WDT",     "DEEPSLEEP", "BROWNOUT", "SDIO", "USB",   "JTAG",    "EFUSE",
+                                        "PWR_GLITCH", "CPU_LOCKUP"};
+    /* BH-01: the table must cover the whole hal_reset_reason_t enum. */
+    typedef char names_cover_enum[(sizeof(names) / sizeof(names[0]) == (size_t)HAL_RESET_CPU_LOCKUP + 1u) ? 1 : -1];
+    (void)sizeof(names_cover_enum);
     return (r < sizeof(names) / sizeof(names[0])) ? names[r] : "UNKNOWN";
 }
 
@@ -173,5 +178,37 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
         ESP_LOGE(TAG, "boot history persist failed: %s", hal_status_to_name(err));
         return hal_status_to_esp_err(err);
     }
+    return ESP_OK;
+}
+
+esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
+{
+    if (s_recent_n == 0u || wall_time == 0u) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    boot_history_blob_t b;
+    if (!boot_history_load(&b)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    unsigned idx = ((unsigned)b.head + BOOT_HISTORY_MAX - 1u) % BOOT_HISTORY_MAX;
+    if (b.count == 0u || b.entries[idx].seq != s_recent[0].seq || b.entries[idx].wall_time != 0u) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    b.entries[idx].wall_time = wall_time;
+    b.crc32 = blob_crc(&b);
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
+    }
+    err = hal_kv_set_blob(&h, NVS_KEY_BOOT_HIST, &b, sizeof(b));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        return hal_status_to_esp_err(err);
+    }
+    s_recent[0].wall_time = wall_time;
     return ESP_OK;
 }

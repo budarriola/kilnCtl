@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h" /* MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT below -- was previously reached
                             * only transitively via freertos/idf_additions.h */
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -17,7 +18,7 @@
 #include "profile_executor.h"
 #include "stack_margin.h"
 #include "telemetry_format.h"
-#include "time_sync.h" /* FD-04: time_sync_take_event() */
+#include "telemetry_time_sync.h"
 #include "trip_history.h" /* FD-05: trip_history_flush() */
 
 static const char *TAG = "KTEL";
@@ -244,14 +245,8 @@ static void telemetry_log_task(void *arg)
         }
         firing_prev_state = fst->state;
 
-        /* FD-04: log uptime->UTC mapping once per SNTP sync into both stores. */
-        time_t sync_utc;
-        if (time_sync_take_event(&sync_utc)) {
-            event_log_emit(LOG_STORE_KIND_FIRING, EVENT_LOG_SEV_INFO, EVENT_LOG_SRC_SYSTEM,
-                           EVENT_CODE_SYS_TIME_SYNC, EVENT_LOG_ZONE_NONE, (int32_t)(uint32_t)sync_utc, NULL);
-            event_log_emit(LOG_STORE_KIND_AUTOTUNE, EVENT_LOG_SEV_INFO, EVENT_LOG_SRC_SYSTEM,
-                           EVENT_CODE_SYS_TIME_SYNC, EVENT_LOG_ZONE_NONE, (int32_t)(uint32_t)sync_utc, NULL);
-        }
+        /* FD-04/FQ-01..03/BH-02: SYS_BOOT marker, TIME_SYNC event, boot_history wall-time backfill. */
+        telemetry_time_sync_service((uint32_t)(esp_timer_get_time() / 1000000));
 
         /* FD-05: persist any Pico trips the link RX task queued (flash hop, not the RX context). */
         (void)trip_history_flush();

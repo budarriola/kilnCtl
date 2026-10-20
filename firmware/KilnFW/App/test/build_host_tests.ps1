@@ -1761,6 +1761,15 @@ try {
 
     Invoke-HostTestExe -Name "telemetry_format" -ExePath $exe16 -BuildCmd $cmd16
 
+    # ---- test_telemetry_time_sync.c (FQ-05): SYS_BOOT / TIME_SYNC take-and-write path. event_log_emit,
+    # time_sync and boot_history are faked inside the test file; only telemetry_time_sync.c is included.
+    $exeTts = Join-Path $outDir "kilnctl_host_tests_telemetry_time_sync.exe"
+    $ttsObjDir = Join-Path $outDir "tts"
+    New-Item -ItemType Directory -Force -Path $ttsObjDir | Out-Null
+    $cmdTts = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$ttsObjDir\\`" /Fe:`"$exeTts`" `"$(Join-Path $testDir 'test_telemetry_time_sync.c')`""
+    Invoke-HostTestExe -Name "telemetry_time_sync" -ExePath $exeTts -BuildCmd $cmdTts
+
     # ---- test_adaptive_tune.c: its own SEVENTEENTH, separate executable -------
     # PID_EXPANSION_PLAN.md Phase 7d. #includes adaptive_tune.c directly (same
     # convention as test_autotune_engine_prestart.c/test_profile_executor_

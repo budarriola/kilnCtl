@@ -105,6 +105,8 @@ class AutotuneCode(IntEnum):
 class SystemCode(IntEnum):
     # FD-04: arg = UTC epoch seconds (uint32 bits) at SNTP sync; uptime_s = same instant.
     TIME_SYNC = 32
+    # FQ-01: first record of each boot, arg = boot_history seq.
+    BOOT = 33
 
 
 class EventLogFormatError(ValueError):
@@ -182,6 +184,8 @@ def format_record(rec: EventRecord) -> str:
         code = _AUTOTUNE_CODE_NAMES.get(rec.code, f"CODE{rec.code}")
     elif rec.source == Source.SYSTEM and rec.code == SystemCode.TIME_SYNC:
         code = "TIME_SYNC"
+    elif rec.source == Source.SYSTEM and rec.code == SystemCode.BOOT:
+        code = "BOOT"
     else:
         code = f"CODE{rec.code}"
     zone = "-" if rec.zone == ZONE_NONE else str(rec.zone)
@@ -194,7 +198,8 @@ def annotate_utc(records):
 
     A TIME_SYNC record (SYSTEM/32) pins uptime -> UTC for its boot; a record's
     utc = sync_utc + (uptime_s - sync_uptime_s). A boot segment ends where
-    uptime_s decreases. Records before the segment's first sync are back-filled
+    uptime_s decreases or a SYSTEM/BOOT marker record appears (FQ-01: a reboot whose
+    first uptime is >= the previous boot's last must still split). Records before the segment's first sync are back-filled
     from it (same boot, same monotonic clock); segments with no sync give None.
     Returns a list of (record, utc_or_None) in input order."""
     out = [None] * len(records)
@@ -202,7 +207,11 @@ def annotate_utc(records):
     n = len(records)
     while start < n:
         end = start + 1
-        while end < n and records[end].uptime_s >= records[end - 1].uptime_s:
+        while (
+            end < n
+            and records[end].uptime_s >= records[end - 1].uptime_s
+            and not (records[end].source == Source.SYSTEM and records[end].code == SystemCode.BOOT)
+        ):
             end += 1
         anchors = [
             r for r in records[start:end]

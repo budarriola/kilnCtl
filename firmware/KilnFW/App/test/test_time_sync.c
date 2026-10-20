@@ -331,12 +331,15 @@ static void test_ts_set_tz_refused_under_reset_mark(void)
 static void test_ts_fd04_sync_event_once_per_sync(void)
 {
     time_t e = 0;
-    TEST_CHECK(!time_sync_take_event(&e), "FD-04: no event before any sync");
+    s_event_pending = false; /* order-independent: other tests may have fired the callback */
+    TEST_CHECK(!time_sync_peek_event(&e), "FD-04: no event before any sync");
     struct timeval tv = {.tv_sec = 1800000000L, .tv_usec = 0};
     sntp_sync_cb(&tv);
-    TEST_CHECK(time_sync_take_event(&e), "FD-04: event pending after sync");
+    TEST_CHECK(time_sync_peek_event(&e), "FD-04: event pending after sync");
     TEST_CHECK(e == (time_t)1800000000L, "FD-04: event carries the synced UTC epoch");
-    TEST_CHECK(!time_sync_take_event(&e), "FD-04: event consumed, not repeated");
+    TEST_CHECK(time_sync_peek_event(&e), "FQ-02: peek does not clear");
+    time_sync_ack_event(e);
+    TEST_CHECK(!time_sync_peek_event(&e), "FD-04: event consumed by ack, not repeated");
 }
 
 static void run_test_time_sync(void)

@@ -117,22 +117,31 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
-/* FD-04: set by sntp_sync_cb, consumed by time_sync_take_event(). Guarded by s_status_mux. */
+/* FD-04: set by sntp_sync_cb, peeked by time_sync_peek_event() and acked after the write (FQ-02). Guarded by s_status_mux. */
 static bool s_event_pending;
 
-bool time_sync_take_event(time_t *utc_epoch)
+bool time_sync_peek_event(time_t *utc_epoch)
 {
     bool pending;
     time_t e;
     portENTER_CRITICAL(&s_status_mux);
     pending = s_event_pending;
     e = s_status.last_sync_epoch;
-    s_event_pending = false;
     portEXIT_CRITICAL(&s_status_mux);
     if (pending && utc_epoch) {
         *utc_epoch = e;
     }
     return pending;
+}
+
+/* FQ-02: clears the flag only if no newer sync landed since the peek. */
+void time_sync_ack_event(time_t utc_epoch)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    if (s_status.last_sync_epoch == utc_epoch) {
+        s_event_pending = false;
+    }
+    portEXIT_CRITICAL(&s_status_mux);
 }
 
 /* Runs on the lwIP SNTP task -- must stay fast and non-blocking, no logging

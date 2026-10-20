@@ -137,8 +137,34 @@ static void test_short_hash(void)
     TEST_CHECK(strcmp(boot_history_reason_name(200), "UNKNOWN") == 0, "out-of-range reason");
 }
 
+static void test_bh01_bh02(void)
+{
+    TEST_SECTION("boot_history: BH-01 names cover the enum, BH-02 wall-time backfill");
+    TEST_CHECK(strcmp(boot_history_reason_name(HAL_RESET_PWR_GLITCH), "PWR_GLITCH") == 0, "BH-01: PWR_GLITCH named");
+    TEST_CHECK(strcmp(boot_history_reason_name(HAL_RESET_CPU_LOCKUP), "CPU_LOCKUP") == 0, "BH-01: CPU_LOCKUP named");
+    for (int r = 1; r <= (int)HAL_RESET_CPU_LOCKUP; r++) {
+        TEST_CHECK(strcmp(boot_history_reason_name((uint8_t)r), "UNKNOWN") != 0, "BH-01: every enum value has a name");
+    }
+    reset_all();
+    boot_history_record_boot(1, false, 0, 0, false, "x-gabc", 0);
+    TEST_CHECK(boot_history_backfill_wall_time(1700000000u) == ESP_OK, "BH-02: backfill ok");
+    boot_history_blob_t b;
+    boot_history_entry_t e;
+    boot_history_load(&b);
+    boot_history_blob_get(&b, 0, &e);
+    TEST_CHECK(e.wall_time == 1700000000u, "BH-02: wall_time persisted on this boot's entry");
+    boot_history_entry_t r[BOOT_HISTORY_RECENT];
+    boot_history_recent(r);
+    TEST_CHECK(r[0].wall_time == 1700000000u, "BH-02: RAM cache updated");
+    TEST_CHECK(boot_history_backfill_wall_time(1700000999u) != ESP_OK, "BH-02: second backfill refused");
+    boot_history_load(&b);
+    boot_history_blob_get(&b, 0, &e);
+    TEST_CHECK(e.wall_time == 1700000000u, "BH-02: first value kept");
+}
+
 int main(void)
 {
+    test_bh01_bh02();
     test_first_boot();
     test_fields_and_order();
     test_wrap();

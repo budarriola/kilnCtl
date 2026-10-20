@@ -184,5 +184,17 @@ def test_annotate_utc_uint32_arg_after_2038():
     assert [u for _, u in eld.annotate_utc(recs)] == [2_200_000_000, 2_200_000_010]
 
 
+def _boot(up, seq=1):
+    return _rec(up, eld.Source.SYSTEM, eld.SystemCode.BOOT, seq)
+
+
+def test_annotate_utc_splits_on_boot_marker_when_uptime_does_not_decrease():
+    # FQ-01: new boot's first uptime (300) >= previous boot's last (200): only the marker splits it.
+    recs = [_boot(1, 1), _sync(100, 1_800_000_000), _rec(200), _boot(300, 2), _rec(310)]
+    got = [u for _, u in eld.annotate_utc(recs)]
+    assert got[:3] == [1_800_000_000 - 99, 1_800_000_000, 1_800_000_100]
+    assert got[3:] == [None, None]
+
+
 def test_format_time_sync_name():
     assert "TIME_SYNC" in eld.format_record(_sync(1, 5))

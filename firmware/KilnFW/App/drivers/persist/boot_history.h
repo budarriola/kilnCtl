@@ -54,6 +54,11 @@ bool boot_history_blob_get(const boot_history_blob_t *b, unsigned i, boot_histor
 void boot_history_short_hash(const char *version, char out[BOOT_HISTORY_FW_MAX]);
 const char *boot_history_reason_name(uint8_t hal_reset_reason);
 
+/* BH-02: sets wall_time on THIS boot's entry (the one boot_history_record_boot() wrote) if it is
+ * still 0. One NVS write. Call from task context at most once per boot (first SNTP sync).
+ * ESP_ERR_INVALID_STATE when this boot recorded no entry or the entry already has a wall time. */
+esp_err_t boot_history_backfill_wall_time(uint32_t wall_time);
+
 /* Loads the ring; a missing/corrupt/wrong-version blob yields an empty ring
  * (returns false then). */
 bool boot_history_load(boot_history_blob_t *out);
