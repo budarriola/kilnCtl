@@ -295,6 +295,11 @@ them.</p>
   <div class="row"><span class="label">Loading&hellip;</span><span class="value">--</span></div>
 </div>
 
+<h2>Safety trip history (last 16)</h2>
+<div class="card" id="tripHistCard">
+  <div class="row"><span class="label">Loading&hellip;</span><span class="value">--</span></div>
+</div>
+
 <h2>Safety-processor build</h2>
 <div class="card" id="safetyBuildCard">
   <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
@@ -974,8 +979,34 @@ here:</p>
     }
     card.innerHTML = h + '</tbody></table></div>';
   }
+  // FD-05: trip_history rides on GET /api/crash_report (newest first).
+  function renderTripHistory(cr) {
+    var card = document.getElementById('tripHistCard');
+    var rows = (cr && cr.trip_history) || [];
+    if (!rows.length) {
+      card.innerHTML = crashRow('Status', 'No safety trips recorded.');
+      return;
+    }
+    var h = '<div class="table-scroll"><table class="relay-life-table"><thead><tr>' +
+            '<th>#</th><th>Reason</th><th>Mask</th><th>Zone</th><th>Safety TC (C)</th><th>Threshold</th>' +
+            '<th>ESP uptime</th><th>Boot #</th><th>Time (UTC)</th></tr></thead><tbody>';
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i];
+      h += '<tr><td>' + window.kcEscapeHtml(String(t.seq)) + '</td><td>' + window.kcEscapeHtml(String(t.reason)) +
+           '</td><td>0x' + window.kcEscapeHtml(Number(t.mask).toString(16).toUpperCase()) +
+           '</td><td>' + (t.zone >= 0 ? window.kcEscapeHtml(String(t.zone)) : 'unknown') +
+           '</td><td>' + window.kcEscapeHtml(String(t.safety_tc_c)) +
+           '</td><td>' + window.kcEscapeHtml(String(t.threshold)) +
+           '</td><td>' + window.kcEscapeHtml(String(t.esp_uptime_s)) + ' s' +
+           '</td><td>' + (t.boot_seq ? window.kcEscapeHtml(String(t.boot_seq)) : '-') +
+           '</td><td>' + (t.utc ? window.kcEscapeHtml(new Date(t.utc * 1000).toISOString()) : 'unknown') +
+           '</td></tr>';
+    }
+    card.innerHTML = h + '</tbody></table></div>';
+  }
   function renderCrash(cr) {
     renderBootHistory(cr);
+    renderTripHistory(cr);
     var card = document.getElementById('crashCard');
     if (!cr || !cr.present) {
       card.innerHTML = crashRow('Status', 'No crash recorded.');
@@ -1059,6 +1090,7 @@ here:</p>
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
       document.getElementById('crashCard').innerHTML = crashRow('Status', 'unable to load crash record');
       document.getElementById('bootHistCard').innerHTML = crashRow('Status', 'unable to load boot history');
+      document.getElementById('tripHistCard').innerHTML = crashRow('Status', 'unable to load trip history');
     });
   }
 

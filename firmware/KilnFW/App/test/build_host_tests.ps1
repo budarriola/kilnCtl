@@ -2031,7 +2031,7 @@ try {
     $diagObjDir = Join-Path $outDir "diaghttp"
     New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
     $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" `"$(Join-Path $driversDir 'persist/boot_history.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" `"$(Join-Path $driversDir 'persist/boot_history.c')`" `"$(Join-Path $driversDir 'persist/trip_history.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
@@ -2609,6 +2609,18 @@ try {
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "boot_history" -ExePath $exeBh -BuildCmd $cmdBh
+
+    # ---- test_trip_history.c (FD-05): trip_history.c #included, fake_kv + flash_hop stubs ----
+    $exeTh = Join-Path $outDir "kilnctl_host_tests_trip_history.exe"
+    $thObjDir = Join-Path $outDir "th"
+    New-Item -ItemType Directory -Force -Path $thObjDir | Out-Null
+    $cmdTh = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$thObjDir\\`" /Fe:`"$exeTh`" `"$(Join-Path $testDir 'test_trip_history.c')`" " +
+            $hopStubFull +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "trip_history" -ExePath $exeTh -BuildCmd $cmdTh
 
     # ---- test_heat_owner_active_decide.c: its own 42nd, separate executable --
     # 2026-09-15 (Opus adversarial re-review, F6: docs/audits/review_tc_type_
@@ -3691,7 +3703,8 @@ try {
     # 103 -> 104: flash_xip_lock (REVIEW_FLASH_MMAP_SERIALIZATION MED-1)
     # 104 -> 105: web_encoding_cache (KH-09)
     # 105 -> 106: boot_history (FD-03)
-    $totalExpected = 106
+    # 106 -> 107: trip_history (FD-05)
+    $totalExpected = 107
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

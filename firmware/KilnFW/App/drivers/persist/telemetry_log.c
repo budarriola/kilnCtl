@@ -18,6 +18,7 @@
 #include "stack_margin.h"
 #include "telemetry_format.h"
 #include "time_sync.h" /* FD-04: time_sync_take_event() */
+#include "trip_history.h" /* FD-05: trip_history_flush() */
 
 static const char *TAG = "KTEL";
 
@@ -251,6 +252,9 @@ static void telemetry_log_task(void *arg)
             event_log_emit(LOG_STORE_KIND_AUTOTUNE, EVENT_LOG_SEV_INFO, EVENT_LOG_SRC_SYSTEM,
                            EVENT_CODE_SYS_TIME_SYNC, EVENT_LOG_ZONE_NONE, (int32_t)(uint32_t)sync_utc, NULL);
         }
+
+        /* FD-05: persist any Pico trips the link RX task queued (flash hop, not the RX context). */
+        (void)trip_history_flush();
 
         /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag warning event,
          * ALWAYS checked (not gated on ramp_assist_enabled -- see

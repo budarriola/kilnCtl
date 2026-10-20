@@ -21,6 +21,7 @@
 #include "cfg_fs_status.h"
 #include "crash_report.h"
 #include "boot_history.h"
+#include "trip_history.h"
 #include "estop_verification.h"
 #include "danger_mode.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- HR-01 mode gate */
@@ -436,6 +437,48 @@ static bool append_boot_history_json(char *buf, size_t cap, size_t *o)
     return true;
 }
 
+/* FD-05: appends `"trip_history":[...]` (newest first, preceded by a comma) to buf at *o.
+ * The 588 B ring blob lives in PSRAM. Returns false on overflow. Unloadable => empty array. */
+static bool append_trip_history_json(char *buf, size_t cap, size_t *o)
+{
+    trip_history_blob_t *th = heap_caps_malloc(sizeof(*th), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (th != NULL) {
+        trip_history_load(th);
+    }
+    int n = snprintf(buf + *o, cap - *o, ",\"trip_history\":[");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        free(th);
+        return false;
+    }
+    *o += (size_t)n;
+    for (unsigned i = 0; th != NULL && i < TRIP_HISTORY_MAX; i++) {
+        trip_history_entry_t e;
+        if (!trip_history_blob_get(th, i, &e)) {
+            break;
+        }
+        n = snprintf(buf + *o, cap - *o,
+                     "%s{\"seq\":%lu,\"reason\":%u,\"mask\":%u,\"zone\":%d,\"safety_tc_c\":%.1f,"
+                     "\"threshold\":%.1f,\"pico_uptime_ms\":%lu,\"esp_uptime_s\":%lu,\"utc\":%lu,"
+                     "\"boot_seq\":%lu}",
+                     i == 0 ? "" : ",", (unsigned long)e.seq, (unsigned)e.reason, (unsigned)e.mask,
+                     e.zone == TRIP_HISTORY_ZONE_UNKNOWN ? -1 : (int)e.zone, (double)e.safety_tc_c,
+                     (double)e.threshold, (unsigned long)e.pico_uptime_ms, (unsigned long)e.esp_uptime_s,
+                     (unsigned long)e.utc, (unsigned long)e.boot_seq);
+        if (n < 0 || (size_t)n >= cap - *o) {
+            free(th);
+            return false;
+        }
+        *o += (size_t)n;
+    }
+    free(th);
+    n = snprintf(buf + *o, cap - *o, "]");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        return false;
+    }
+    *o += (size_t)n;
+    return true;
+}
+
 /* GET /api/crash_report -- the last-crash summary crash_report.c persisted
  * (task/cause/PC/backtrace/reset-reason), for the diagnostics page's "Last
  * crash" section. {"present":false,"clear_in_progress":<bool>} is a
@@ -448,10 +491,10 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
 
     /* HEAP, not stack (httpd_worker 8 KB, "httpd stack blob class"): freed on
      * every return path below. */
-    const size_t json_cap = 4096; /* crash record ~1 KB + 16 boot_history rows ~2 KB */
+    const size_t json_cap = 8192; /* crash record ~1 KB + 16 boot_history rows ~2 KB + 16 trip_history rows ~3 KB */
     char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
-        ESP_LOGE(TAG, "GET /api/crash_report: malloc(4096) failed for the response buffer");
+        ESP_LOGE(TAG, "GET /api/crash_report: malloc(8192) failed for the response buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
@@ -463,7 +506,8 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
         n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s,",
                      s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
-        if (!append_boot_history_json(json, json_cap, &o) || o + 2 > json_cap) {
+        if (!append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
+            o + 2 > json_cap) {
             free(json);
             httpd_resp_set_status(req, "500 Internal Server Error");
             httpd_resp_set_type(req, "application/json");
@@ -524,7 +568,8 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
         APPEND("%s\"0x%08lx\"", i == 0 ? "" : ",", (unsigned long)rec.backtrace_pc[i]);
     }
     APPEND("],\"backtrace_corrupted\":%s,", rec.bt_corrupted ? "true" : "false");
-    if (!append_boot_history_json(json, json_cap, &o) || o + 2 > json_cap) {
+    if (!append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
+        o + 2 > json_cap) {
         goto overflow;
     }
     json[o++] = '}';
