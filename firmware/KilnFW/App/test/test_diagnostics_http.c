@@ -140,6 +140,7 @@ static int s_reg_n;
 static int s_reg_fail_at;
 static httpd_handle_t s_server_handle = (httpd_handle_t)1;
 httpd_handle_t wifi_provision_http_get_server(void) { return s_server_handle; }
+esp_err_t diag_bundle_http_register(void *server_handle) { (void)server_handle; return ESP_OK; } /* FD-01 route: own test is test_diag_bundle.c */
 esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri)
 {
     (void)server;
