@@ -3820,3 +3820,19 @@ Bundle fetched three times without include_coredump; no dump contents read or pr
 Note: sw_reset_esp reboots the Pico too; no S6a trip latched, nothing to clear.
 
 Backup diff pre vs post: none.
+
+## benchmain24 (2026-10-20, main 3b04289bb, ESP flashed, Pico unchanged)
+Built KilnFW from 3b04289bb and flashed via flash_firmware(confirm=True) (first verify attempt hit the known benign quirk, retry OK). SaftyFW unchanged. Boot clean, link up (crc/framing errors 0, timeouts 0), SaftyFW armed, not tripped. heap_internal min_free 83,835 B (floor 8192), largest free block 31,744 B. All instrumented task stacks OK (lowest headroom info_uart_bridge 39.3 %, backlight_pwm 37.5 %, wifi_prov_owner 37.7 %, httpd_worker 38.3 %).
+LN-01 (bench-confirmed): LCD Diagnostics page 3 of 8 (PSRAM & storage) row "kiln_nvs used/free/total" reads 161 used / 1855 free / 2016 total, equal to kiln_nvs in supplement_api_crash_report.json from the diag bundle ({"used":161,"free":1855,"total":2016}). The page has 6 stat rows and fits with no scroll (paged, topbar prev/next). Captures: logs/benchmain24/lcd_diag.jpg (page 1), lcd_diag_p3.jpg (page 3); camera framing clips the right edge slightly.
+Navigation: settings -> Diagnostics via ui_step click; page next via touch_inject (455,22) down/up (topbar next target name is non-ASCII).
+Backup diff pre vs post: none (byte-identical).
+
+## benchmain25 (2026-10-20, board unchanged, ESP 3b04289bb, home Wi-Fi 192.168.1.156, headless browser, read-only apart from login)
+Headless Chromium via Playwright 1.64 (scratch venv outside the repo, system chromium_headless_shell), script and screenshots in logs/benchmain25/ (kg01_browser_check.py, results.json, *.png). Credentials read from User-scope env vars inside the script, never printed or screenshotted; no screenshot taken while the password was filled. One login session, then logged out.
+1. PASS: logged-out dashboard renders (title kilnCtl, gauges, no dialog).
+2. FAIL (light theme only): logged-out GET /diagnostics -> 302 no-store -> /?next=/diagnostics, URL replaced with /, dialog "Sign in required" shown, no protected DOM (nvsCard/diagBundleBtn absent) in light and dark. Dark: PASS. Light (prefers-color-scheme light, page body white): the dialog panel stays dark navy rgb(36,42,58) because .kc-login-panel uses fixed --ui-card/--ui-text-primary (dark-only tokens) while the inputs and the Cancel button use --bg/--fg (theme-aware), so Cancel text is dark on dark and nearly unreadable. See KT-01.
+3. PASS: click on /profiles while logged out opened the dialog first, no document request for /profiles before login, after login landed on /profiles.
+4. PASS: /diagnostics, /settings/zones, /profiles, /readiness all 200 with Cache-Control no-store when logged in.
+5. PASS: Log out button visible, after logout /api/auth/session role none; Back shows the dashboard URL with the sign-in dialog and no protected DOM (the server 302s the cached URL).
+6. PASS: /diagnostics has Repeats (boot history table) and Count (trip history table) columns; kiln_nvs type/offset/size rows present; bundle GET /api/diag/bundle 200, attachment kiln_support_bundle.kdiag, 13923 bytes, KDF1 header, manifest "kiln_nvs":{"used":161,"free":1855,"total":2016},"coredump_included":false. Note: the headless click on the download link ended with Download.save_as canceled (headless-shell download handling); the same URL fetched with the session cookie is fine, so this is a harness limit, not a board fault.
+Result: KG-01 browser check 5 of 6 PASS, FAIL on the light-theme requirement of check 2; KG-01 browser check not marked done.

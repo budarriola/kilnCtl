@@ -473,12 +473,12 @@ details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
 .kc-login-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 1100;
                      display: flex; align-items: center; justify-content: center; }
 .kc-login-overlay[hidden] { display: none; }
-.kc-login-panel { background: var(--ui-card); color: var(--ui-text-primary);
+.kc-login-panel { background: var(--card-bg); color: var(--fg);
                    border-radius: var(--ui-radius); padding: 1.2em 1.4em; width: 18rem;
                    max-width: calc(100vw - 2em); box-sizing: border-box; display: flex;
                    flex-direction: column; gap: 0.6em; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
 .kc-login-title { margin: 0 0 0.2em 0; font-size: 1.05em; }
-.kc-login-panel label { font-size: 0.85em; color: var(--ui-text-secondary); }
+.kc-login-panel label { font-size: 0.85em; color: var(--fg); opacity: 0.8; }
 .kc-login-panel input { padding: 0.5em; font-size: 1rem; border-radius: var(--ui-radius);
                          border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
 .kc-login-error { color: var(--ui-accent-5); min-height: 1.1em; font-size: 0.85em; }
