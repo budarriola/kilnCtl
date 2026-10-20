@@ -85,6 +85,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req);
 esp_err_t profile_plan_get_handler(httpd_req_t *req);
 esp_err_t control_status_get_handler(httpd_req_t *req);
 esp_err_t firing_history_get_handler(httpd_req_t *req);
+esp_err_t firing_trace_get_handler(httpd_req_t *req); /* FD-02, http/firing_trace_http.c */
 esp_err_t history_csv_get_handler(httpd_req_t *req);
 esp_err_t profile_exec_start_post_handler(httpd_req_t *req);
 esp_err_t profile_exec_stop_post_handler(httpd_req_t *req);

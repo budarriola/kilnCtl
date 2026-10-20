@@ -8,7 +8,7 @@ Fresh clone: `tools/setup.ps1`, then open `kilnCtl.code-workspace` (not the fold
 **edit `templates/`, never generated output.** Start tasks from **ROADMAP.md** (links per-area plans).
 
 ## MCP facade (always start here for boards or KiCad)
-Servers publish 6-7 tools; the rest (235 tools for `kilnctrl`, 86 for `kicad`) sit behind a search facade.
+Servers publish 6-7 tools; the rest (236 tools for `kilnctrl`, 86 for `kicad`) sit behind a search facade.
 Never conclude a capability is missing because you cannot see a tool.
 ```
 kiln_help()   kicad_help()   kiln_find(query="read the temperature")

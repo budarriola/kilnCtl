@@ -520,6 +520,15 @@ static inline TickType_t safety_link_test_xTaskGetTickCount(void) { return s_fak
 // changes, only which token this test's single merged TU sees for each.
 #define TAG TAG_frames
 #include "../drivers/safety/safety_link_frames.c"
+/* FD-05 link stand-ins: record what safety_apply_trip_event() hands to trip_history_note(). */
+static unsigned g_th_note_calls;
+static trip_history_entry_t g_th_last_note;
+bool trip_history_note(const trip_history_entry_t *e) { g_th_note_calls++; g_th_last_note = *e; return true; }
+bool trip_history_note_event(uint32_t pu, uint32_t eu, uint32_t utc, uint32_t bs, float tc, float thr, uint8_t reason, uint8_t seq) { trip_history_entry_t e; memset(&e, 0, sizeof(e)); e.pico_uptime_ms = pu; e.esp_uptime_s = eu; e.utc = utc; e.boot_seq = bs; e.safety_tc_c = tc; e.threshold = thr; e.reason = reason; e.pico_trip_seq = seq; e.zone = TRIP_HISTORY_ZONE_UNKNOWN; return trip_history_note(&e); }
+unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT]) { memset(out, 0, sizeof(boot_history_entry_t) * BOOT_HISTORY_RECENT); out[0].seq = 7u; return 1u; }
+void time_sync_get_status(time_sync_status_t *out) { memset(out, 0, sizeof(*out)); }
+uint32_t boot_history_latest_seq(void) { return 7u; }
+uint32_t time_sync_utc_or_zero(void) { return 0u; }
 #undef TAG
 #define TAG TAG_inbox
 #include "../drivers/safety/safety_link_inbox.c"
@@ -3987,13 +3996,19 @@ static void test_safetyfx10_trip_event_after_diag_is_arrival_order(void)
     TEST_SECTION("SAFETYFX10 MED-1 -- trip_event_after_diag records arrival order: set by TRIP_EVENT, cleared by DIAG "
                  "and by a Pico reboot; immune to the 2^32 ms age aliasing");
     s_fake_tick_count = 0;
+    g_th_note_calls = 0;
     SafetyLinkClass link = make_link();
     link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
     TEST_CHECK(!link.cached.trip_event_after_diag, "fresh link: flag clear");
     apply_diag_uptime(&link, 600000u);
     apply_trip_event_seq(&link, 1u);
     TEST_CHECK(link.cached.trip_event_after_diag, "TRIP_EVENT after a DIAG sets the flag");
+    /* FD-05: a new trip hands exactly one entry to trip_history_note(); the resend copy does not. */
+    TEST_CHECK(g_th_note_calls == 1u && g_th_last_note.pico_trip_seq == 1u && g_th_last_note.reason == 1u &&
+                   g_th_last_note.boot_seq == 7u && g_th_last_note.zone == TRIP_HISTORY_ZONE_UNKNOWN,
+               "FD-05: new TRIP_EVENT noted once with reason, trip_seq, boot_seq");
     apply_trip_event_seq(&link, 1u); /* resend copy of the same burst */
+    TEST_CHECK(g_th_note_calls == 1u, "FD-05: resent TRIP_EVENT (same trip_seq) is not noted again");
     TEST_CHECK(link.cached.trip_event_after_diag, "a resend copy keeps the flag set");
     apply_diag_uptime(&link, 601000u);
     TEST_CHECK(!link.cached.trip_event_after_diag, "a DIAG after the event clears the flag");

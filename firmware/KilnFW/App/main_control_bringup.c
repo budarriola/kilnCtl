@@ -17,6 +17,7 @@
 #include "esp_log.h"
 
 #include "danger_mode.h"
+#include "firing_trace_glue.h" /* FD-02 */
 #include "heat_enable.h"
 #include "kiln_cfg_store.h" /* kiln_cfg_store_capture_expected_pico_fields() -- safety_ceiling_sync's
                               * standing divergence-check seam, docs/audits/kiln_profiles_feature_review_
@@ -360,6 +361,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     // reset-looping under a kiln nobody is watching.
     ctx->exec_err = ESP_ERR_INVALID_STATE;
     if (!ctx->recovery_mode) {
+        firing_trace_glue_init(); /* FD-02: restore the durable firing-trace index before any firing can start */
         ctx->exec_err = profile_executor_start(ctx->io_ready ? &ctx->kio : NULL,
                                                 ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
                                                 safety_err == ESP_OK ? ctx->safety : NULL);

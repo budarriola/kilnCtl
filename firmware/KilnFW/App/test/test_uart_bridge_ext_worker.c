@@ -513,6 +513,42 @@ static void test_posted_job_delayed_not_dropped(void)
     check_lock_quiescent();
 }
 
+// FY-01: the firing trace has its own slot; neither poster can lock the other out.
+static unsigned g_trace_runs;
+static void trace_fn(void *arg) { (void)arg; g_trace_runs++; }
+static unsigned g_other_trace_runs;
+static void other_trace_fn(void *arg) { (void)arg; g_other_trace_runs++; }
+
+static void test_trace_slot_independent_of_recapture_slot(void)
+{
+    g_trace_runs = 0;
+    g_cur_task = TASK_B;
+    // Order 1: recapture slot owner already latched by earlier tests; the trace posts after it.
+    reset_job_counters();
+    CHECK(uart_bridge_ext_post_on_flash_worker(posted_fn) == ESP_OK);
+    CHECK(uart_bridge_ext_post_trace_on_flash_worker(trace_fn) == ESP_OK);
+    run_worker_once();
+    CHECK(g_posted_runs == 1);
+    CHECK(g_trace_runs == 1);
+    // Order 2: trace first, then the recapture still posts and runs.
+    CHECK(uart_bridge_ext_post_trace_on_flash_worker(trace_fn) == ESP_OK);
+    CHECK(uart_bridge_ext_post_on_flash_worker(posted_fn) == ESP_OK);
+    run_worker_once();
+    CHECK(g_posted_runs == 2);
+    CHECK(g_trace_runs == 2);
+    // The trace slot coalesces and keeps its own one-poster tripwire.
+    CHECK(uart_bridge_ext_post_trace_on_flash_worker(trace_fn) == ESP_OK);
+    CHECK(uart_bridge_ext_post_trace_on_flash_worker(trace_fn) == ESP_ERR_INVALID_STATE);
+    run_worker_once();
+    CHECK(uart_bridge_ext_post_trace_on_flash_worker(other_trace_fn) == ESP_ERR_NOT_SUPPORTED);
+    // A refused trace post never disturbs the recapture slot.
+    CHECK(uart_bridge_ext_post_on_flash_worker(posted_fn) == ESP_OK);
+    run_worker_once();
+    CHECK(g_posted_runs == 3);
+    g_cur_task = TASK_A;
+    check_lock_quiescent();
+}
+
 int main(void)
 {
     test_reservation_before_worker_start();
@@ -520,6 +556,7 @@ int main(void)
     test_dispatch_inside_section_recursive_counts();
     test_timeout_path_gives_nothing();
     test_posted_job_delayed_not_dropped();
+    test_trace_slot_independent_of_recapture_slot();
     CHECK(g_task_create_calls == 1);
     CHECK(g_q.send_while_full == 0);
 

@@ -96,6 +96,7 @@ esp_err_t autotune_trace_csv_get_handler(httpd_req_t *req) { (void)req; return E
 esp_err_t control_status_get_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t dashboard_status_get_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t firing_history_get_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
+esp_err_t firing_trace_get_handler(httpd_req_t *req) { (void)req; return ESP_OK; } /* FD-02 */
 esp_err_t history_csv_get_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t profile_exec_ack_last_run_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t profile_exec_pause_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }

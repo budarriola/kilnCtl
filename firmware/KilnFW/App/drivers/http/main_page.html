@@ -471,6 +471,8 @@
      firing or autotune run owns the relays. -->
 <div id="auxCard" style="display:none"></div>
 <div id="channels"><p class="empty">Loading…</p></div>
+<!-- FD-04: wall-clock footer from /api/status time_synced/time_now_epoch (SNTP, display only). -->
+<div id="wallClockFooter" class="empty" style="margin-top:1em;font-size:0.85em"></div>
 
 <!-- Press-and-hold PID popup (2026-09-01) -- markup only, built once here
      rather than injected via JS, so it exists in the DOM before the
@@ -4503,6 +4505,17 @@ document.getElementById('auxCard').addEventListener('click', function (e) {
   auxToggle(parseInt(b.dataset.relay, 10), parseInt(b.dataset.on, 10));
 });
 
+// FD-04: UTC footer; falls back to nothing (uptime shown elsewhere) when unsynced / AP mode.
+function renderWallClockFooter(data) {
+  var el = document.getElementById('wallClockFooter');
+  if (!el) return;
+  if (data && data.time_synced && data.time_now_epoch > 0) {
+    el.textContent = new Date(data.time_now_epoch * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  } else {
+    el.textContent = 'Clock not synced';
+  }
+}
+
 function poll() {
   Promise.all([
     fetch('/api/status').then(function (r) { return r.json(); }).catch(function () { return null; }),
@@ -4521,6 +4534,7 @@ function poll() {
       // other status-derived control on this page already uses.
       lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
       renderChannels(data);
+      renderWallClockFooter(data);
       renderAuxCard();
       renderRelayLife(data);
       renderSpiWedged(data);

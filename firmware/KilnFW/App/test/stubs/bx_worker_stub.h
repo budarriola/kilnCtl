@@ -165,6 +165,21 @@ esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg))
     return ESP_OK;
 }
 
+// FY-01: the firing trace's separate slot, same shape.
+static void (*s_stub_trace_fn)(void *arg) = NULL;
+
+esp_err_t uart_bridge_ext_post_trace_on_flash_worker(void (*fn)(void *arg))
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_stub_trace_fn) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_stub_trace_fn = fn;
+    return ESP_OK;
+}
+
 // Drains the posted slot the way bx_worker_task's own loop does. Returns
 // true if there was something to run.
 static bool bx_stub_run_posted_job(void)

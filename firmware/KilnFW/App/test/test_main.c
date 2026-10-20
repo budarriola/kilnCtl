@@ -54,6 +54,7 @@ void run_test_profile_plan_curve(void);
 // from this main().
 void run_test_backup_import(void);
 void run_test_ota_record(void);
+void run_test_diag_bundle(void);
 void run_test_uart_log_bridge(void);
 void run_test_safety_watchdog(void);
 void run_test_safety_link(void);
@@ -199,6 +200,7 @@ int main(void)
     run_test_profile_plan_curve();
     run_test_backup_import();
     run_test_ota_record();
+    run_test_diag_bundle();
     run_test_uart_log_bridge();
     run_test_safety_watchdog();
     run_test_safety_link();

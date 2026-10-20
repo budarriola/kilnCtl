@@ -317,6 +317,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * per-profile firing history card (ADMIN-tier /settings/zones shell);
      * the dashboard does not fetch this route. Moved out of OPEN. */
     ROUTE_TIER("/api/firing_history", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* FD-02: durable per-firing trace list / CSV download; read by the same ADMIN zones page card. */
+    ROUTE_TIER("/api/firing_trace", HTTP_GET, ROUTE_TIER_ADMIN),
 
     /* Tuning */
     ROUTE_TIER("/api/autotune/start", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -398,6 +400,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * route above reads, so it is classified ADMIN on the same basis. */
     ROUTE_TIER("/api/dualwrite_window/restore_verified", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/partitions", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diag/bundle", HTTP_GET, ROUTE_TIER_ADMIN), /* FD-01 support bundle */
     ROUTE_TIER("/api/backup/export", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/crash_report", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/boot_guard", HTTP_GET, ROUTE_TIER_ADMIN),

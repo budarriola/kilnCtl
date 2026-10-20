@@ -32,6 +32,7 @@ project(kilnlink C)
 
 add_library(kilnlink STATIC
     src/kilnlink_crc.c
+    src/kiln_crc32.c
     src/kilnlink_frame.c
     src/kilnlink_context.c
     src/kilnlink_status.c
