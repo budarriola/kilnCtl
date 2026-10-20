@@ -459,6 +459,62 @@ static void test_res_versions(void)
     TEST_CHECK(!update_install_res_apply_rollback(&s, true), "ROLLBACK: a FAIL record is not rewritten");
 }
 
+/* OH-04: OK result -> pending_confirm until the app marks it confirmed; recovery never rolls back a confirmed one. */
+static void test_oh04_confirm(void)
+{
+    update_install_res_t r, d;
+    memset(&r, 0, sizeof(r));
+    r.code = UPD_INST_RES_OK;
+    strcpy(r.semver, "2.0.0");
+    TEST_CHECK(strcmp(update_install_res_state_name(&r), "pending_confirm") == 0,
+               "OH-04: unconfirmed OK reads pending_confirm");
+    TEST_CHECK(update_install_res_mark_confirmed(&r) && r.detail == UPD_INST_DETAIL_CONFIRMED &&
+                   strcmp(update_install_res_state_name(&r), "recorded") == 0,
+               "OH-04: mark_confirmed makes OK read recorded");
+    TEST_CHECK(!update_install_res_mark_confirmed(&r), "OH-04: second mark is a no-op");
+    TEST_CHECK(!update_install_res_apply_rollback(&r, true) && r.code == UPD_INST_RES_OK,
+               "OH-04: a confirmed result is never rewritten to rolled_back");
+    TEST_CHECK(strcmp(update_install_detail_name(UPD_INST_DETAIL_CONFIRMED), "confirmed") == 0,
+               "OH-04: detail name");
+    update_install_res_t f2;
+    memset(&f2, 0, sizeof(f2));
+    f2.code = UPD_INST_RES_FAIL;
+    f2.reason = UPD_INST_REASON_ROLLED_BACK;
+    TEST_CHECK(!update_install_res_mark_confirmed(&f2) && strcmp(update_install_res_state_name(&f2), "recorded") == 0,
+               "OH-04: a FAIL/rolled_back result is not confirmable");
+    /* Unconfirmed OK + last invalid partition is the app: recovery rewrites it to rolled_back. */
+    memset(&r, 0, sizeof(r));
+    r.code = UPD_INST_RES_OK;
+    strcpy(r.semver, "2.0.0");
+    TEST_CHECK(update_install_res_apply_rollback(&r, true) && r.code == UPD_INST_RES_FAIL &&
+                   r.reason == UPD_INST_REASON_ROLLED_BACK,
+               "OH-04: unconfirmed OK on a rolled-back app becomes rolled_back");
+
+    /* App side, through the IO ops. */
+    fake_t f;
+    fake_init(&f);
+    update_install_ops_t o = ops_for(&f);
+    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 0, "OH-04: no result -> nothing written");
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL) == 0 &&
+                   f.res_writes == 1,
+               "OH-04: setup OK result");
+    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 2 &&
+                   update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
+                   d.detail == UPD_INST_DETAIL_CONFIRMED && strcmp(d.semver, "2.0.0") == 0,
+               "OH-04: confirm_result rewrites the OK result as confirmed");
+    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 2, "OH-04: already confirmed -> no rewrite");
+    fake_init(&f);
+    o = ops_for(&f);
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_SHA_MISMATCH, "2.0.0", NULL) == 0,
+               "OH-04: setup FAIL result");
+    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 1, "OH-04: a FAIL result is left alone");
+    fake_init(&f);
+    o = ops_for(&f);
+    (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL);
+    f.res_rc = -1;
+    TEST_CHECK(update_install_confirm_result(&o) == -1, "OH-04: a failed write is reported");
+}
+
 /* recfx leftover: the LCD warning line (40 columns) holds "INSTALL FAILED: " plus the reason. */
 static void test_reason_lcd_fits(void)
 {
@@ -820,6 +876,7 @@ void run_test_update_install_record(void)
     test_drop_stale_recorded();
     test_reason_lcd_fits();
     test_res_versions();
+    test_oh04_confirm();
     test_refusal_clear_failure();
     test_result_identity();
     test_prepare();

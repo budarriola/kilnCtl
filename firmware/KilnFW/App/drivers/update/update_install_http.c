@@ -258,6 +258,25 @@ int update_install_http_drop_stale_request(void)
     return rc;
 }
 
+// OH-04: boot confirm completed on an OTA slot: an unconfirmed OK result becomes confirmed. Never fails the boot.
+int update_install_http_mark_confirmed(void)
+{
+    bool claimed = ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP);
+    int rc = 1;
+    if (claimed) {
+        update_install_ops_t ops;
+        memset(&ops, 0, sizeof(ops));
+        ops.res_write = stale_res_write;
+        ops.res_read = stale_res_read;
+        rc = update_install_confirm_result(&ops);
+        ota_http_update_end();
+    }
+    if (rc != 0) {
+        ESP_LOGW(TAG, "install result not marked confirmed (rc=%d)", rc);
+    }
+    return rc;
+}
+
 static esp_err_t install_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > INSTALL_BODY_MAX) {
@@ -329,7 +348,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                      "\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\","
                      "\"detail\":\"%s\",\"app_modified\":%s}}",
                      rv, busy ? "true" : "false", staged ? "true" : "false", sv,
-                     have == 1 ? "recorded" : (have == 0 ? "none" : "unreadable"),
+                     have == 1 ? update_install_res_state_name(&res) : (have == 0 ? "none" : "unreadable"),
                      have == 1 ? update_install_code_name(res.code) : "none",
                      have == 1 ? update_install_reason_name(res.reason) : "none", lv, lid,
                      have == 1 ? update_install_detail_name(res.detail) : "none",

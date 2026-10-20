@@ -813,6 +813,8 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             .timeout_ms = FETCH_HTTP_TIMEOUT_MS,
             .event_handler = http_event,
             .user_data = w,
+            // OH-03: esp_http_client callocs the rx and tx buffers (2048 B each); under
+            // SPIRAM_MALLOC_ALWAYSINTERNAL=8192 both are INTERNAL RAM, part of the fetch's internal draw.
             .buffer_size = 2048,
             .buffer_size_tx = FETCH_TX_BUF_BYTES,
             .disable_auto_redirect = true,

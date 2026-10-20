@@ -184,6 +184,7 @@ done by the recovery image: <b>Install</b> below reboots the board into it.</p>
   <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
 </div>
 <p id="stageMsg" class="msg"></p>
+<p id="lastInstall" class="msg"></p>
 
 <h2>Update from GitHub</h2>
 <p>Ask GitHub for the newest release of the repository below and, if you
@@ -1116,6 +1117,28 @@ document.getElementById('stageInstallBtn').addEventListener('click', function ()
     msg.textContent = 'Install refused: ' + e.message;
   });
 });
+
+/* OH-04: last install result from GET /api/update/status. pending_confirm = installed but the new
+ * firmware has not finished its 30 s boot confirm, so a reset in that window still rolls it back
+ * (the result then reads FAIL / rolled_back). */
+function lastInstallText(li) {
+  if (!li || li.state === 'none') return '';
+  if (li.state === 'unreadable') return 'Last install: the result record cannot be read.';
+  var v = li.version ? ' ' + li.version : '';
+  if (li.state === 'pending_confirm') return 'Last install' + v + ': installed, waiting for the new firmware to confirm itself (about 30 s after boot). Not final yet.';
+  if (li.code === 'ok') return 'Last install' + v + ': installed and confirmed.';
+  if (li.reason === 'rolled_back') return 'Last install' + v + ': ROLLED BACK. The new firmware did not confirm its boot and the board returned to recovery.';
+  return 'Last install' + v + ': FAILED (' + li.reason + (li.detail && li.detail !== 'none' ? ', ' + li.detail : '') + ').';
+}
+function loadLastInstall() {
+  return window.kcOtaAuthedFetch('/api/update/status', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) return;
+      document.getElementById('lastInstall').textContent = lastInstallText(JSON.parse(text).last_install);
+    });
+  }).catch(function () {});
+}
+loadLastInstall();
 
 /* ---- Update repo setting ---------------------------------------------------
  * GET/POST /api/update/settings -- update_settings_http.c, ROUTE_TIER_ADMIN.

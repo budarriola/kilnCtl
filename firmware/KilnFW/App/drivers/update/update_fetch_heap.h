@@ -11,6 +11,10 @@
 // same base: idle free (scratch held) minus the global low-water of the whole run. A draw is NOT the change of
 // a prior min_free (REVIEW_UPDFX6 MED-1: the previous text mistook benchupd4's 2908 B min_free delta for one).
 //
+// OH-02 NOTE: admission still derives from the pre-XIP benchupd4 draw (21488 B less the 4496 B writer share). Only one
+// reading (xipland C) comes from the current build and it predates UR-01; four more heap.min_free readings are
+// bench-pending before the table can be rewritten. The block gate is FETCH_CHECK_BLOCK_MIN (3072 B); the old
+// FETCH_LARGEST_BLOCK_MIN no longer exists.
 // UR-01 NOTE: the prose below and the draw table are the pre-UR-01 history (heap writer, 21488 B draw). Current pinned
 // values: MEASURED_DRAW 16992, MODEL_DRAW 18016, ADMISSION (held) 27232, PRECHECK 28256, hop download 25696; every
 // "31728 / 32752 / 22512 / 30192 / 7168" figure below is the old value. Floor margins are unchanged by construction.
@@ -71,8 +75,10 @@
 //   - SHA-256 (hardware SHA DMA): a partial block is copied into an internal DMA buffer of at most one block,
 //     64 B (components/mbedtls/port/sha/core/sha.c:335, buf_len <= block_length checked at :322); the reallocs at
 //     :172/:185 are the flash-encryption-only paths and are inactive here (flash encryption is off);
-//   - mbedtls record buffers: PSRAM (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y); the client rx/tx buffers (2048 B each)
-//     are allocated at open, before the loop; lwIP/WiFi pbufs prefer PSRAM and the WiFi static rx buffers are
+//   - mbedtls record buffers: PSRAM (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y). The client rx/tx buffers (2048 B each,
+//     OH-03) are NOT in PSRAM: esp_http_client callocs them, and under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+//     both land in internal RAM (4 KB of every fetch's draw that cannot be moved). They are allocated at open,
+//     before the loop; lwIP/WiFi pbufs prefer PSRAM and the WiFi static rx buffers are
 //     preallocated.
 // So the fetch itself moves internal heap by about 100 B per pass. The 1024 B is therefore NOT a fetch
 // allocation: it is an empirical margin for concurrent tasks (one httpd request-handler allocation, a KDF, an

@@ -115,12 +115,49 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
 
 bool update_install_res_apply_rollback(update_install_res_t *res, bool app_rolled_back)
 {
-    if (!res || !app_rolled_back || res->code != UPD_INST_RES_OK) {
+    if (!res || !app_rolled_back || res->code != UPD_INST_RES_OK || res->detail == UPD_INST_DETAIL_CONFIRMED) {
         return false;
     }
     res->code = UPD_INST_RES_FAIL;
     res->reason = UPD_INST_REASON_ROLLED_BACK;
     return true;
+}
+
+bool update_install_res_mark_confirmed(update_install_res_t *res)
+{
+    if (!res || res->code != UPD_INST_RES_OK || res->detail == UPD_INST_DETAIL_CONFIRMED) {
+        return false;
+    }
+    res->detail = UPD_INST_DETAIL_CONFIRMED;
+    return true;
+}
+
+const char *update_install_res_state_name(const update_install_res_t *res)
+{
+    return (res && res->code == UPD_INST_RES_OK && res->detail != UPD_INST_DETAIL_CONFIRMED) ? "pending_confirm"
+                                                                                           : "recorded";
+}
+
+int update_install_confirm_result(const update_install_ops_t *ops)
+{
+    if (!ops || !ops->res_read || !ops->res_write) {
+        return -1;
+    }
+    uint8_t buf[UPD_INST_RES_SIZE];
+    size_t n = 0;
+    int rc = ops->res_read(ops->ctx, buf, sizeof(buf), &n);
+    if (rc > 0) {
+        return 0; // no result
+    }
+    update_install_res_t res;
+    if (rc < 0 || !update_install_res_decode(buf, n, &res)) {
+        return -1;
+    }
+    if (!update_install_res_mark_confirmed(&res)) {
+        return 0;
+    }
+    size_t w = update_install_res_encode(&res, buf);
+    return (w == UPD_INST_RES_SIZE && ops->res_write(ops->ctx, buf, w) == 0) ? 0 : -1;
 }
 
 void update_install_id_hex(const uint8_t id[UPD_INST_ID_LEN], char out[UPD_INST_ID_HEX_LEN])
@@ -168,6 +205,7 @@ const char *update_install_detail_name(uint8_t detail)
     case UPD_INST_DETAIL_START_NO_APP: return "start_no_app";
     case UPD_INST_DETAIL_START_BUSY: return "start_busy";
     case UPD_INST_DETAIL_START_FAILED: return "start_failed";
+    case UPD_INST_DETAIL_CONFIRMED: return "confirmed";
     default: return "unknown";
     }
 }

@@ -301,6 +301,8 @@ static void main_ota_rollback_confirm_task(void *arg)
                 (void)update_http_stale_stage_check(st.mark_valid_done);
                 /* LOW-4: a leftover install request must not replay at a later recovery entry. */
                 (void)update_install_http_drop_stale_request();
+                /* OH-04: boot confirm done, so the recorded OK install is now confirmed. */
+                (void)update_install_http_mark_confirmed();
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
             }

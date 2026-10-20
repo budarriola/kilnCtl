@@ -90,6 +90,7 @@ typedef enum {
     UPD_INST_DETAIL_START_NO_APP = 33,    // apply_start refused: no app partition
     UPD_INST_DETAIL_START_BUSY = 34,      // apply_start refused: an apply is already running
     UPD_INST_DETAIL_START_FAILED = 35,    // apply_start refused for any other reason
+    UPD_INST_DETAIL_CONFIRMED = 36,       // OH-04: OK result only; the new app finished boot confirm (30 s soak)
     UPD_INST_DETAIL_COUNT
 } update_install_detail_t;
 
@@ -118,7 +119,15 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
 
 // MED-3 (AUDIT_UPDATE_FAULTS): recovery found the app image was aborted by the bootloader (never
 // confirmed on its first boot). Rewrites a last OK result to FAIL/rolled_back; returns true when it changed.
+// A result already marked confirmed is never rewritten (the app proved itself; a later invalid partition is another image).
 bool update_install_res_apply_rollback(update_install_res_t *res, bool app_rolled_back);
+
+// OH-04: the app marks an OK result confirmed once boot confirm completed. Returns true when it changed
+// (OK and not yet confirmed); FAIL and none results are left alone.
+bool update_install_res_mark_confirmed(update_install_res_t *res);
+// OH-04: status state for GET /api/update/status last_install.state: "pending_confirm" for an OK result that
+// has not been confirmed (a reset inside the soak still rolls it back), else "recorded".
+const char *update_install_res_state_name(const update_install_res_t *res);
 
 // Writes the identity as UPD_INST_ID_LEN*2 lowercase hex chars plus NUL into out (needs
 // UPD_INST_ID_HEX_LEN bytes). All-zero (no identity) prints as "00000000".
@@ -165,6 +174,10 @@ typedef enum {
 // failure that was recorded (the write is attempted; it may itself have failed).
 update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t *ops,
                                                       update_install_res_t *res_out);
+
+// App side, after boot confirm: reads the result through ops->res_read and rewrites an unconfirmed OK result as
+// confirmed through ops->res_write. 0 = rewritten or already final/absent (nothing to do), <0 = IO failure.
+int update_install_confirm_result(const update_install_ops_t *ops);
 
 // Records a failure/success for the request that update_install_boot_run
 // started (apply task failed, or pre-boot success). Returns 0 when the result

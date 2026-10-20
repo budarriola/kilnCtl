@@ -675,6 +675,16 @@ def _stale_id(li: dict, pend: dict) -> bool:
     return bool(rid and pend.get("id") and rid != pend["id"])
 
 
+# OH-04: last_install.state is "recorded" once the new app confirmed its boot (30 s soak), "pending_confirm"
+# for an ok result not yet confirmed (a reset inside the soak still rolls it back to recovery, result
+# FAIL/rolled_back). A board that predates OH-04 reports "recorded" at once.
+_SETTLED_STATES = ("recorded", "pending_confirm")
+
+
+def _pending_confirm(li: dict) -> bool:
+    return li.get("state") == "pending_confirm" and li.get("code") == "ok"
+
+
 def _ok_is_new(host: str, st: dict, pend: dict, deadline: Optional[float] = None) -> bool:
     """Is a matching `ok` record evidence of THIS install (not a stale one)?"""
     li = st.get("last_install") or {}
@@ -770,6 +780,10 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
             if _failure_is_this(li, pend):
                 _PENDING_INSTALL.pop(resolved, None)
                 return f"FAILED: install recorded a failure: {_install_line(before)} (host={resolved})"
+            if _pending_confirm(li):
+                return (f"UNKNOWN: install of {pend['want']!r} is recorded ok but pending_confirm (the new image has "
+                        f"not finished its 30 s boot confirm; a reset now rolls it back): {_install_line(before)}; "
+                        f"poll again with update_install_staged(confirm=False) (host={resolved})")
             return (f"UNKNOWN: an earlier install of {pend['want']!r} is still pending, not yet proven: "
                     f"{_install_line(before)}; poll again with update_install_staged(confirm=False) "
                     f"(host={resolved})")
@@ -780,7 +794,7 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
                     f"(last_install.state=unreadable), so whether an install happened is not provable "
                     f"from here: {_install_line(before)}; compare running_version with the version you "
                     f"meant to install via update_status (host={resolved})")
-        if lost is None and not before.get("staged") and bli0.get("state") != "recorded":
+        if lost is None and not before.get("staged") and bli0.get("state") not in _SETTLED_STATES:
             # Plain status read: nothing staged, no install ever recorded, no record of ours.
             return (f"ok - nothing staged and no install recorded (read-only, nothing sent): "
                     f"{_install_line(before)} (host={resolved})")
@@ -823,7 +837,7 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
     want = before.get("staged_version")
     inst_id = _staged_id(resolved)
     bli = before.get("last_install") or {}
-    before_ok_id = _id_of(bli) if (bli.get("state") == "recorded" and bli.get("code") == "ok") else ""
+    before_ok_id = _id_of(bli) if (bli.get("state") in _SETTLED_STATES and bli.get("code") == "ok") else ""
     before_up = _read_uptime(resolved)
     t_pre = time.monotonic()  # after the read returned: transit time must not count as board time
     post_unknown = False
@@ -907,6 +921,9 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
     else:
         tail = "board never answered the application API"
     note = " The install POST got no HTTP answer (possibly applied)." if post_unknown else ""
+    if last and _pending_confirm(last.get("last_install") or {}):
+        note += (" The result is pending_confirm: installed, but the new image has not finished its 30 s boot "
+                 "confirm yet, so it is not final (a reset now rolls it back).")
     if (post_unknown and last and (last.get("last_install") or {}).get("code") == "ok"
             and last.get("running_version") == want):
         note += (" The board shows an `ok` install for this version but no reboot is proven (uptime did not drop),"
