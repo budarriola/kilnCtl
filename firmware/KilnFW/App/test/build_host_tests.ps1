@@ -921,7 +921,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             # FD-02: profile_executor.c now appends to the durable firing trace (RAM-only) and ends it.
-            "`"$(Join-Path $driversDir 'persist/firing_trace.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kilnlink_crc.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/firing_trace.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kilnlink_crc.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kiln_crc32.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             # docs/LIVE_PROFILE_EDIT.md pass 1: profile_executor.c (#included
@@ -2637,7 +2637,7 @@ try {
     New-Item -ItemType Directory -Force -Path $ftObjDir | Out-Null
     $cmdFt = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$ftObjDir\\`" /Fe:`"$exeFt`" `"$(Join-Path $testDir 'test_firing_trace.c')`" " +
-            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\kilnlink_crc.c')`""
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\kilnlink_crc.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kiln_crc32.c')`""
 
     Invoke-HostTestExe -Name "firing_trace" -ExePath $exeFt -BuildCmd $cmdFt
 

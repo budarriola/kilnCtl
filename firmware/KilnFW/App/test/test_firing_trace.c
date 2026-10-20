@@ -23,6 +23,9 @@ typedef struct {
 } ramfile_t;
 static ramfile_t g_files[8];
 static int g_write_calls;
+static int g_append_calls;
+static size_t g_bytes_written; /* FW-03: total bytes sent to flash (write + append) */
+static esp_err_t g_append_fail;
 static esp_err_t g_write_fail; /* ESP_OK = succeed */
 static void (*g_pending)(void *);
 static int g_post_calls;
@@ -50,11 +53,26 @@ static esp_err_t t_write(const char *p, const void *d, size_t n)
 {
     g_write_calls++;
     if (g_write_fail != ESP_OK) return g_write_fail;
+    g_bytes_written += n;
     ramfile_t *f = rf_find(p, 1);
     free(f->data);
     f->data = malloc(n);
     memcpy(f->data, d, n);
     f->len = n;
+    return ESP_OK;
+}
+
+static esp_err_t t_append(const char *p, const void *d1, size_t n1, const void *d2, size_t n2)
+{
+    g_append_calls++;
+    if (g_append_fail != ESP_OK) return g_append_fail;
+    ramfile_t *f = rf_find(p, 0);
+    if (!f) return ESP_ERR_NOT_FOUND;
+    f->data = realloc(f->data, f->len + n1 + n2);
+    memcpy(f->data + f->len, d1, n1);
+    memcpy(f->data + f->len + n1, d2, n2);
+    f->len += n1 + n2;
+    g_bytes_written += n1 + n2;
     return ESP_OK;
 }
 
@@ -100,7 +118,7 @@ static void *t_alloc(size_t n)
     return malloc(n);
 }
 
-static const firing_trace_io_t k_io = {.write = t_write, .read = t_read, .post = t_post, .run = t_run, .alloc = t_alloc};
+static const firing_trace_io_t k_io = {.write = t_write, .append = t_append, .read = t_read, .post = t_post, .run = t_run, .alloc = t_alloc};
 
 static void wipe_files(void)
 {
@@ -114,7 +132,9 @@ static void fresh(void)
 {
     firing_trace_reset_for_test();
     wipe_files();
-    g_write_calls = g_post_calls = g_run_calls = 0;
+    g_write_calls = g_post_calls = g_run_calls = g_append_calls = 0;
+    g_bytes_written = 0;
+    g_append_fail = ESP_OK;
     g_write_fail = ESP_OK;
     g_pending = NULL;
     g_post_refuse = false;
@@ -158,9 +178,9 @@ static void test_append_and_batch(void)
     float t[3] = {1, 1, 1};
     TEST_CHECK(!firing_trace_note(7, g_up + 30, 0, 1.0f, t, t, 0), "sample < 60 s after the last is refused");
     for (int i = 0; i < 9; i++) note(7, 100.0f, 51.0f + i, 0.5f);
-    TEST_CHECK(g_write_calls == 1, "9 more samples buffered, no write yet");
+    TEST_CHECK(g_write_calls + g_append_calls == 1, "9 more samples buffered, no write yet");
     note(7, 100.0f, 60.0f, 0.5f);
-    TEST_CHECK(g_write_calls == 2 && durable_n(1) == 11, "flush when 10 are unflushed");
+    TEST_CHECK(g_write_calls + g_append_calls == 2 && durable_n(1) == 11, "flush when 10 are unflushed");
     firing_trace_entry_t le[FT_SLOTS];
     TEST_CHECK(firing_trace_list(le) == 1, "one firing listed");
 }
@@ -215,14 +235,14 @@ static void test_corrupt_and_restore(void)
     firing_trace_view_t v;
     ramfile_t *f2 = rf_find("trace/ft2.bin", 0);
     TEST_CHECK(f2 != NULL, "firing 2 file exists");
-    f2->data[FT_HDR_SIZE + 3] ^= 0x40; /* flip a sample bit */
+    f2->data[FT_SAMPLES_OFF + 3] ^= 0x40; /* flip a sample bit */
     TEST_CHECK(firing_trace_open(2, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "sample corruption caught");
-    f2->data[FT_HDR_SIZE + 3] ^= 0x40;
+    f2->data[FT_SAMPLES_OFF + 3] ^= 0x40;
     f2->data[9] ^= 0x01; /* header seq byte */
     TEST_CHECK(firing_trace_open(2, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "header corruption caught");
     f2->data[9] ^= 0x01;
     ramfile_t *f1 = rf_find("trace/ft1.bin", 0);
-    f1->len -= 5; /* torn / truncated file */
+    f1->len = 10; /* file cut inside the header */
     firing_trace_reset_for_test();
     firing_trace_init(&k_io); /* "reboot" */
     firing_trace_entry_t e[FT_SLOTS];
@@ -257,7 +277,64 @@ static void test_truncation(void)
     TEST_CHECK(e[0].n == FT_MAX_SAMPLES, "capped at 1440 samples");
     TEST_CHECK((e[0].flags & FT_FLAG_TRUNCATED) != 0, "truncated flag set");
     TEST_CHECK(durable_n(1) == FT_MAX_SAMPLES, "file holds 1440 samples");
-    TEST_CHECK(rf_find("trace/ft1.bin", 0)->len == FT_FILE_MAX, "file size is exactly 28,824 B");
+    TEST_CHECK(rf_find("trace/ft1.bin", 0)->len <= FT_FILE_MAX && rf_find("trace/ft1.bin", 0)->len > 28824u,
+               "file size: 1440 samples plus the header and per-batch headers, within FT_FILE_MAX");
+}
+
+static void test_fw03_wear(void)
+{
+    TEST_SECTION("firing_trace: FW-03 a 1440-sample firing writes under 2x the final file size");
+    fresh();
+    run_firing(31, FT_MAX_SAMPLES);
+    firing_trace_end();
+    size_t flen = rf_find("trace/ft1.bin", 0)->len;
+    TEST_CHECK(durable_n(1) == FT_MAX_SAMPLES, "all 1440 samples durable");
+    TEST_CHECK(g_bytes_written < 2u * flen, "FW-03: total bytes written < 2x the final file size");
+    TEST_CHECK(g_write_calls == 1 && g_append_calls >= 140, "FW-03: one atomic create, then appends");
+    firing_trace_entry_t e[FT_SLOTS];
+    firing_trace_list(e);
+    TEST_CHECK((e[0].flags & FT_FLAG_CLOSED) != 0, "closed marker batch read back");
+
+    TEST_SECTION("firing_trace: FW-03 failed append falls back to one atomic rewrite, no data lost");
+    fresh();
+    run_firing(32, 25);
+    g_append_fail = ESP_FAIL;
+    for (int i = 0; i < 10; i++) note(32, 100.0f, 70.0f + i, 0.5f);
+    g_append_fail = ESP_OK;
+    TEST_CHECK(g_write_calls >= 2, "after the failed append the next flush was a whole-file rewrite");
+    int a0 = g_append_calls;
+    for (int i = 0; i < 10; i++) note(32, 100.0f, 90.0f + i, 0.5f);
+    TEST_CHECK(g_append_calls > a0, "appends resume after the rewrite");
+    firing_trace_end();
+    TEST_CHECK(durable_n(1) == 45, "all 45 samples durable after the fallback");
+}
+
+static void test_fw03_torn(void)
+{
+    TEST_SECTION("firing_trace: FW-03 torn last batch is dropped, earlier batches kept");
+    fresh();
+    run_firing(41, 25); /* batches: 1, 10, 10, then 4 unflushed in RAM */
+    ramfile_t *f = rf_find("trace/ft1.bin", 0);
+    TEST_CHECK(f && durable_n(1) == 21, "21 samples durable before the cut");
+    size_t full = f->len;
+    f->len = full - 7; /* power cut mid-append of the last batch */
+    TEST_CHECK(durable_n(1) == 11, "short last batch dropped (11 left)");
+    f->len = full;
+    f->data[full - 1] ^= 0x01; /* full-length but garbled last batch */
+    TEST_CHECK(durable_n(1) == 11, "last batch with a bad CRC dropped");
+    f->data[full - 1] ^= 0x01;
+    TEST_CHECK(durable_n(1) == 21, "restored file reads whole again");
+    f->len = full - 7;
+    firing_trace_reset_for_test();
+    firing_trace_init(&k_io); /* reboot with the torn tail */
+    firing_trace_entry_t e[FT_SLOTS];
+    size_t n = firing_trace_list(e);
+    TEST_CHECK(n == 1 && e[0].n == 11 && (e[0].flags & FT_FLAG_INTERRUPTED) != 0, "init lists the torn file as interrupted with 11 samples");
+    f->len = full;
+    f->data[FT_SAMPLES_OFF + 3] ^= 0x01; /* first batch garbled, data after it */
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "a bad batch with data after it rejects the file");
 }
 
 static void test_post_busy(void)
@@ -373,6 +450,8 @@ int main(void)
     test_end_and_loss();
     test_rotation();
     test_corrupt_and_restore();
+    test_fw03_wear();
+    test_fw03_torn();
     test_write_failure();
     test_truncation();
     test_post_busy();

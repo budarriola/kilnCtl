@@ -6,6 +6,10 @@
 // telemetry_log task calls trip_history_flush() (FD-04 pattern), which hops the NVS write onto
 // bx_flash_worker via flash_hop_run().
 //
+// FW-04 (flash wear): a trip with the same reason as the NEWEST entry, on the same boot and within
+// TRIP_HISTORY_MERGE_WINDOW_S of it, is merged into that entry (count++, newest key/stamps), and the blob is
+// rewritten only when the count reaches a power of 2. Unpersisted merges live in a RAM shadow of the entry.
+//
 // Dedupe: a Pico re-sends the same latched TRIP_EVENT on every status poll, and again after an
 // ESP reboot. A trip is the triple (pico trip_seq, reason, pico uptime at trip); a trip already in
 // the ring is dropped without a write. The wire frame carries no zone, so zone is 0xFF (unknown)
@@ -26,6 +30,7 @@ extern "C" {
 #define TRIP_HISTORY_VERSION 1u
 #define TRIP_HISTORY_ZONE_UNKNOWN 0xFFu
 #define TRIP_HISTORY_PENDING_MAX 4
+#define TRIP_HISTORY_MERGE_WINDOW_S 60u /* FW-04: same-reason trips this close merge into the last entry */
 
 typedef struct {
     uint32_t seq;            /* ESP-side sequence number, 1-based, strictly increasing */
@@ -39,7 +44,8 @@ typedef struct {
     uint8_t  pico_trip_seq;  /* Pico's trip_seq (dedupe key part) */
     uint16_t mask;           /* 1 << (reason-1), 0 if reason out of 1..16 */
     uint8_t  zone;           /* TRIP_HISTORY_ZONE_UNKNOWN when not in the message */
-    uint8_t  pad[3];
+    uint8_t  pad;
+    uint16_t count;          /* FW-04: identical trips merged into this entry; 0 or 1 = a single trip */
 } trip_history_entry_t;      /* 7*4 + 8 = 36 bytes */
 
 typedef struct {

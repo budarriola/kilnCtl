@@ -1,7 +1,8 @@
 // boot_history -- FD-03: persisted ring of the last BOOT_HISTORY_MAX boots.
 //
 // One NVS blob (kiln_cfg/boot_hist in KILN_NVS_PARTITION), rewritten ONCE per
-// boot by boot_history_record_boot() after the reset reason is known: that is
+// boot (FW-01: identical consecutive boots are coalesced into the last entry's
+// repeat count and persisted only every BOOT_HISTORY_FLUSH_EVERY repeats) by boot_history_record_boot() after the reset reason is known: that is
 // the whole flash-wear budget (1 write per boot, no heartbeat writes). The
 // previous boot's uptime is NOT tracked here; the caller passes the RTC-memory
 // beacon value crash_report.c already snapshots (known flag false => unknown).
@@ -19,7 +20,8 @@ extern "C" {
 #endif
 
 #define BOOT_HISTORY_MAX 16
-#define BOOT_HISTORY_VERSION 1u
+#define BOOT_HISTORY_VERSION 2u /* v2 (FW-01): entry gained a repeat count; a v1 blob is discarded cleanly */
+#define BOOT_HISTORY_FLUSH_EVERY 16u /* FW-01: coalesced identical boots persist every Nth repeat */
 #define BOOT_HISTORY_FW_MAX 13 /* up to 12 chars of commit short hash + NUL */
 
 typedef struct {
@@ -31,7 +33,8 @@ typedef struct {
     uint8_t  reset_reason;   /* hal_reset_reason_t numeric value */
     uint8_t  prev_uptime_known;
     uint8_t  has_crash;      /* 1 if a crash record existed at this boot */
-} boot_history_entry_t;      /* 4*4 + 13 + 3 = 32 bytes */
+    uint16_t repeat;         /* FW-01: further identical boots (same reason + fw) folded into this entry */
+} boot_history_entry_t;      /* 4*4 + 13 + 3 + 2 (+2 pad) = 36 bytes */
 
 typedef struct {
     uint8_t  version;

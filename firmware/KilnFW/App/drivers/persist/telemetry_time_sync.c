@@ -46,7 +46,7 @@ void telemetry_time_sync_service(uint32_t uptime_s)
     s_anchor_off = off;
     time_sync_ack_event(sync_utc);
 
-    if (!s_wall_backfilled && off > 0) {
+    if (!s_wall_backfilled && off > 0 && uptime_s >= 60u) { /* FW-02: not in the first minute of a boot loop */
         s_wall_backfilled = true; /* one attempt per boot: at most one extra NVS write */
         (void)boot_history_backfill_wall_time((uint32_t)off);
     }

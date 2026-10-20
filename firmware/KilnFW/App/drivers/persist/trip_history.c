@@ -72,7 +72,8 @@ bool trip_history_blob_push(trip_history_blob_t *b, const trip_history_entry_t *
     trip_history_entry_t ent = *e;
     ent.seq = b->next_seq;
     ent.mask = trip_history_mask_for_reason(ent.reason);
-    memset(ent.pad, 0, sizeof(ent.pad));
+    ent.pad = 0;
+    ent.count = 1u;
     b->entries[b->head] = ent;
     b->head = (uint8_t)((b->head + 1u) % TRIP_HISTORY_MAX);
     if (b->count < TRIP_HISTORY_MAX) {
@@ -169,6 +170,15 @@ unsigned trip_history_dropped(void)
     return s_dropped;
 }
 
+/* FW-04: RAM shadow of the newest entry, holding merges not yet persisted. */
+static trip_history_entry_t s_shadow;
+static bool s_shadow_valid;
+
+static bool is_pow2(unsigned v)
+{
+    return v != 0u && (v & (v - 1u)) == 0u;
+}
+
 typedef struct {
     trip_history_entry_t ents[TRIP_HISTORY_PENDING_MAX];
     unsigned n;
@@ -193,21 +203,55 @@ static void flush_job(void *arg)
         return;
     }
     trip_history_load(bp);
+    trip_history_entry_t shadow_save = s_shadow;
+    bool shadow_valid_save = s_shadow_valid;
+    unsigned newest = ((unsigned)bp->head + TRIP_HISTORY_MAX - 1u) % TRIP_HISTORY_MAX;
+    if (s_shadow_valid && bp->count > 0u && bp->entries[newest].seq == s_shadow.seq) {
+        bp->entries[newest] = s_shadow; /* overlay merges not yet persisted */
+    }
+    bool need_write = false;
     for (unsigned i = 0; i < j->n; i++) {
-        if (trip_history_blob_push(bp, &j->ents[i])) {
+        const trip_history_entry_t *in = &j->ents[i];
+        if (trip_history_blob_has(bp, in)) {
+            continue;
+        }
+        trip_history_entry_t *last = bp->count > 0u ? &bp->entries[newest] : NULL;
+        if (last && last->reason == in->reason && last->boot_seq == in->boot_seq &&
+            in->esp_uptime_s >= last->esp_uptime_s &&
+            in->esp_uptime_s - last->esp_uptime_s < TRIP_HISTORY_MERGE_WINDOW_S) {
+            /* FW-04: merge; persist only when the count crosses a power of 2. */
+            uint32_t c = (last->count == 0u ? 1u : last->count) + 1u;
+            last->count = (uint16_t)(c > 0xFFFFu ? 0xFFFFu : c);
+            last->pico_uptime_ms = in->pico_uptime_ms;
+            last->pico_trip_seq = in->pico_trip_seq;
+            last->esp_uptime_s = in->esp_uptime_s;
+            last->utc = in->utc;
+            last->safety_tc_c = in->safety_tc_c;
+            if (is_pow2(last->count)) {
+                need_write = true;
+            }
+            s_shadow = *last;
+            s_shadow_valid = true;
+            j->recorded++;
+        } else if (trip_history_blob_push(bp, in)) {
+            need_write = true;
+            newest = ((unsigned)bp->head + TRIP_HISTORY_MAX - 1u) % TRIP_HISTORY_MAX;
+            s_shadow_valid = false;
             j->recorded++;
         }
     }
-    if (j->recorded == 0u) {
+    if (!need_write) {
         j->ok = true;
         free(bp);
-        return; /* all duplicates: no flash write */
+        return; /* duplicates and/or merges below a power of 2: no flash write */
     }
     bp->crc32 = BLOB_CRC(bp);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "hal_kv_open failed: %s -- trip not recorded", hal_status_to_name(err));
+        s_shadow = shadow_save;
+        s_shadow_valid = shadow_valid_save;
         j->recorded = 0;
         free(bp);
         return;
@@ -220,6 +264,8 @@ static void flush_job(void *arg)
     free(bp);
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "trip history persist failed: %s", hal_status_to_name(err));
+        s_shadow = shadow_save;
+        s_shadow_valid = shadow_valid_save;
         j->recorded = 0;
         return;
     }
