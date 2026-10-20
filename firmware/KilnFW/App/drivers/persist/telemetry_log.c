@@ -7,7 +7,7 @@
 #include "esp_heap_caps.h" /* MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT below -- was previously reached
                             * only transitively via freertos/idf_additions.h */
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -246,7 +246,7 @@ static void telemetry_log_task(void *arg)
         firing_prev_state = fst->state;
 
         /* FD-04/FQ-01..03/BH-02: SYS_BOOT marker, TIME_SYNC event, boot_history wall-time backfill. */
-        telemetry_time_sync_service((uint32_t)(esp_timer_get_time() / 1000000));
+        telemetry_time_sync_service((uint32_t)(hal_time_now_us() / 1000000));
 
         /* FD-05: persist any Pico trips the link RX task queued (flash hop, not the RX context). */
         (void)trip_history_flush();

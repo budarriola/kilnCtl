@@ -32,7 +32,7 @@
 #include "trip_history.h" /* FD-05 */
 #include "boot_history.h"
 #include "time_sync.h"
-#include "esp_timer.h"
+#include "hal_time.h"
 #include "safety_pico_relay_mask.h"
 
 #include <inttypes.h>
@@ -1433,7 +1433,7 @@ bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *
         trip_history_entry_t th;
         memset(&th, 0, sizeof(th));
         th.pico_uptime_ms = safety_read_u32_le(&p[3]);
-        th.esp_uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+        th.esp_uptime_s = (uint32_t)(hal_time_now_us() / 1000000);
         th.safety_tc_c = safety_tc_c;
         th.threshold = deciding_threshold;
         th.reason = trip_reason;
