@@ -153,6 +153,14 @@ uint32_t boot_history_latest_seq(void)
     return s_recent_n > 0u ? s_recent[0].seq : 0u;
 }
 
+/* FV-01: coalesced boots share one seq, so per-boot keys also need the entry's repeat count, which
+ * differs for every consecutive boot (persisted repeat + RTC pending, folded into s_recent). Low 8 bits
+ * are enough: consecutive boots differ by 1. */
+uint8_t boot_history_latest_rep(void)
+{
+    return s_recent_n > 0u ? (uint8_t)(s_recent[0].repeat & 0xFFu) : 0u;
+}
+
 esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_known,
                                    uint32_t prev_uptime_s, uint32_t dump_id, bool has_crash,
                                    const char *fw_version, uint32_t wall_time)
@@ -180,6 +188,7 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
     uint32_t pending = pend_ok ? s_pending.pending : 0u;
     s_coalesced = false;
     if (had_blob && b.count > 0u && b.entries[lidx].reset_reason == e.reset_reason &&
+        b.entries[lidx].has_crash == e.has_crash && /* FV-03: a crash-record boot always gets its own entry */
         strcmp(b.entries[lidx].fw, e.fw) == 0) {
         /* FW-01: identical boot -- fold into the last entry, persist only every Nth repeat. */
         pending++;

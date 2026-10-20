@@ -44,7 +44,7 @@ typedef struct {
     uint8_t  pico_trip_seq;  /* Pico's trip_seq (dedupe key part) */
     uint16_t mask;           /* 1 << (reason-1), 0 if reason out of 1..16 */
     uint8_t  zone;           /* TRIP_HISTORY_ZONE_UNKNOWN when not in the message */
-    uint8_t  pad;
+    uint8_t  boot_rep;       /* FV-01: boot_history_latest_rep() of the noting boot (with boot_seq: unique per boot) */
     uint16_t count;          /* FW-04: identical trips merged into this entry; 0 or 1 = a single trip */
 } trip_history_entry_t;      /* 7*4 + 8 = 36 bytes */
 
@@ -79,7 +79,7 @@ bool trip_history_note(const trip_history_entry_t *e);
  * (safety_apply_trip_event, on small task stacks) needs no entry struct in its own frame. */
 bool trip_history_note_event(uint32_t pico_uptime_ms, uint32_t esp_uptime_s, uint32_t utc,
                              uint32_t boot_seq, float safety_tc_c, float threshold,
-                             uint8_t reason, uint8_t pico_trip_seq);
+                             uint8_t reason, uint8_t pico_trip_seq, uint8_t boot_rep);
 unsigned trip_history_dropped(void);
 
 /* Task context (telemetry_log): persists every pending, not-yet-recorded trip. At most one NVS

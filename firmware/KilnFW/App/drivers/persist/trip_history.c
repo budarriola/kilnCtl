@@ -72,7 +72,6 @@ bool trip_history_blob_push(trip_history_blob_t *b, const trip_history_entry_t *
     trip_history_entry_t ent = *e;
     ent.seq = b->next_seq;
     ent.mask = trip_history_mask_for_reason(ent.reason);
-    ent.pad = 0;
     ent.count = 1u;
     b->entries[b->head] = ent;
     b->head = (uint8_t)((b->head + 1u) % TRIP_HISTORY_MAX);
@@ -149,7 +148,7 @@ bool trip_history_note(const trip_history_entry_t *e_in)
 
 bool trip_history_note_event(uint32_t pico_uptime_ms, uint32_t esp_uptime_s, uint32_t utc,
                              uint32_t boot_seq, float safety_tc_c, float threshold,
-                             uint8_t reason, uint8_t pico_trip_seq)
+                             uint8_t reason, uint8_t pico_trip_seq, uint8_t boot_rep)
 {
     trip_history_entry_t th;
     memset(&th, 0, sizeof(th));
@@ -157,6 +156,7 @@ bool trip_history_note_event(uint32_t pico_uptime_ms, uint32_t esp_uptime_s, uin
     th.esp_uptime_s = esp_uptime_s;
     th.utc = utc;
     th.boot_seq = boot_seq;
+    th.boot_rep = boot_rep;
     th.safety_tc_c = safety_tc_c;
     th.threshold = threshold;
     th.reason = reason;
@@ -217,9 +217,13 @@ static void flush_job(void *arg)
         }
         trip_history_entry_t *last = bp->count > 0u ? &bp->entries[newest] : NULL;
         if (last && last->reason == in->reason && last->boot_seq == in->boot_seq &&
+            last->boot_rep == in->boot_rep && /* FV-01: never merge across a (coalesced) reboot */
             in->esp_uptime_s >= last->esp_uptime_s &&
             in->esp_uptime_s - last->esp_uptime_s < TRIP_HISTORY_MERGE_WINDOW_S) {
-            /* FW-04: merge; persist only when the count crosses a power of 2. */
+            /* FW-04: merge; persist only when the count crosses a power of 2.
+             * FV-04 (accepted): merges between powers of 2 live only in the RAM shadow, so a reboot or
+             * power loss drops up to 127 merged trips (count, newest stamps). The first trip of each
+             * reason/boot is always written; that bounds flash wear in a trip storm, which is the point. */
             uint32_t c = (last->count == 0u ? 1u : last->count) + 1u;
             last->count = (uint16_t)(c > 0xFFFFu ? 0xFFFFu : c);
             last->pico_uptime_ms = in->pico_uptime_ms;

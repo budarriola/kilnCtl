@@ -1,4 +1,4 @@
-﻿// See firing_trace.h for the design, size and power-cut loss statement.
+// See firing_trace.h for the design, size and power-cut loss statement.
 #include "firing_trace.h"
 #include "esp_attr.h"
 
@@ -133,7 +133,18 @@ static bool parse_file(uint8_t *b, size_t len, firing_trace_entry_t *e, size_t *
         uint16_t fl = get16(b + off + 2);
         size_t bytes = (size_t)cnt * FT_REC_SIZE;
         size_t end = off + FT_BHDR_SIZE + bytes;
-        if (cnt > FT_MAX_SAMPLES - n || end > len) break; /* short: torn tail */
+        if (cnt > FT_MAX_SAMPLES - n || end > len) {
+            /* FV-05: a count that runs past the end is a torn tail ONLY if no valid batch follows. A
+             * corrupted count in a middle batch has real batches after it: scan the record-aligned
+             * offsets for one whose seal checks out and reject the file then. */
+            for (size_t q = off + FT_BHDR_SIZE; q + FT_BHDR_SIZE <= len; q += FT_REC_SIZE) {
+                size_t qb = (size_t)get16(b + q) * FT_REC_SIZE;
+                if (q + FT_BHDR_SIZE + qb <= len && get32(b + q + 4) == batch_seal(b + q, b + q + FT_BHDR_SIZE, qb)) {
+                    return false; /* valid batch after it: real corruption */
+                }
+            }
+            break; /* short: torn tail */
+        }
         if (get32(b + off + 4) != batch_seal(b + off, b + off + FT_BHDR_SIZE, bytes)) {
             if (end == len) break; /* torn last batch: drop it */
             return false;          /* bad batch with data after it: real corruption */

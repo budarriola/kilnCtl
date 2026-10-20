@@ -1432,7 +1432,8 @@ bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *
         /* FD-05: RAM-only hand-off; telemetry_log task persists it (no flash from this RX context). */
         (void)trip_history_note_event(safety_read_u32_le(&p[3]), (uint32_t)(hal_time_now_us() / 1000000),
                                       time_sync_utc_or_zero(), boot_history_latest_seq(),
-                                      safety_tc_c, deciding_threshold, trip_reason, trip_seq);
+                                      safety_tc_c, deciding_threshold, trip_reason, trip_seq,
+                                      boot_history_latest_rep());
         ESP_LOGW(TAG, "safety processor TRIPPED: reason 0x%02X, trip_seq %u, safety TC %.1f C "
                       "(threshold %.1f)",
                  (unsigned)trip_reason, (unsigned)trip_seq, (double)safety_tc_c,

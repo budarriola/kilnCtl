@@ -210,8 +210,30 @@ static void test_fw01_fw02_coalesce(void)
     TEST_CHECK(boot_history_record_boot(1, false, 0, 0, false, "g", 0) == ESP_OK, "FW-01: first boot after a v1 blob records");
 }
 
+static void test_fv01_fv03(void)
+{
+    TEST_SECTION("boot_history: FV-01 unique per-boot id across coalesced boots, FV-03 crash boot gets its own entry");
+    reset_all();
+    uint32_t seen[8];
+    for (unsigned i = 0; i < 6; i++) {
+        boot_history_record_boot(7, false, 5, 0, false, "x-gabc", 0);
+        seen[i] = (boot_history_latest_seq() << 8) | boot_history_latest_rep();
+        for (unsigned j = 0; j < i; j++) {
+            TEST_CHECK(seen[j] != seen[i], "FV-01: every coalesced boot has a distinct (seq, rep) id");
+        }
+    }
+    TEST_CHECK(boot_history_latest_seq() == 1u, "FV-01: seq itself is still shared by the coalesced boots");
+    boot_history_record_boot(7, false, 5, 0x11u, true, "x-gabc", 0);
+    boot_history_blob_t b;
+    boot_history_entry_t e;
+    boot_history_load(&b);
+    TEST_CHECK(b.count == 2 && boot_history_blob_get(&b, 0, &e) && e.has_crash == 1 && e.dump_id == 0x11u,
+               "FV-03: same reason + fw but has_crash differs => distinct entry");
+}
+
 int main(void)
 {
+    test_fv01_fv03();
     test_fw01_fw02_coalesce();
     test_bh01_bh02();
     test_first_boot();

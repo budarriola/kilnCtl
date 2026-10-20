@@ -263,8 +263,33 @@ static void test_fw04_storm(void)
     TEST_CHECK(trip_history_flush() == 1u && fake_kv_set_call_count() == before + 2u, "FW-04: a different reason is a new entry (1 write)");
 }
 
+static void test_fv01_cross_boot(void)
+{
+    TEST_SECTION("trip_history: FV-01 same-reason trips never merge across a coalesced reboot");
+    reset_all();
+    trip_history_entry_t a = mk(1, 6, 10000u);
+    a.esp_uptime_s = 10u;
+    a.boot_rep = 3u;
+    trip_history_note(&a);
+    trip_history_flush();
+    trip_history_entry_t b = mk(1, 6, 20000u); /* next boot: same boot_seq, uptime already past the stored one */
+    b.esp_uptime_s = 30u;
+    b.boot_rep = 4u;
+    trip_history_note(&b);
+    trip_history_flush();
+    trip_history_blob_t blob;
+    TEST_CHECK(trip_history_load(&blob) && blob.count == 2, "FV-01: two entries, not merged across the reboot");
+    trip_history_entry_t c = mk(2, 6, 20500u); /* same boot as b, 5 s later: still merges */
+    c.esp_uptime_s = 35u;
+    c.boot_rep = 4u;
+    trip_history_note(&c);
+    trip_history_flush();
+    TEST_CHECK(trip_history_load(&blob) && blob.count == 2, "FV-01: same-boot trip still merges");
+}
+
 int main(void)
 {
+    test_fv01_cross_boot();
     test_fw04_storm();
     test_th01_th02();
     test_first_trip();

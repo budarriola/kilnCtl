@@ -976,7 +976,7 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
     }
     var h = '<div class="table-scroll"><table class="relay-life-table"><thead><tr>' +
             '<th>Boot #</th><th>Reset reason</th><th>Previous uptime</th><th>Crash dump</th>' +
-            '<th>Firmware</th><th>Time</th></tr></thead><tbody>';
+            '<th>Firmware</th><th>Time</th><th>Repeats</th></tr></thead><tbody>';
     for (var i = 0; i < rows.length; i++) {
       var b = rows[i];
       h += '<tr><td>' + window.kcEscapeHtml(String(b.seq)) + '</td><td>' + window.kcEscapeHtml(String(b.reset_reason)) +
@@ -984,6 +984,7 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
            '</td><td>' + (b.has_crash ? window.kcEscapeHtml(String(b.dump_id)) : '-') +
            '</td><td>' + window.kcEscapeHtml(String(b.fw || '?')) +
            '</td><td>' + (b.time ? window.kcEscapeHtml(new Date(b.time * 1000).toISOString()) : 'unknown') +
+           '</td><td>' + window.kcEscapeHtml(String(b.repeat || 0)) +
            '</td></tr>';
     }
     card.innerHTML = h + '</tbody></table></div>';
@@ -998,7 +999,7 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
     }
     var h = '<div class="table-scroll"><table class="relay-life-table"><thead><tr>' +
             '<th>#</th><th>Reason</th><th>Mask</th><th>Zone</th><th>Safety TC (C)</th><th>Threshold</th>' +
-            '<th>ESP uptime</th><th>Boot #</th><th>Time (UTC)</th></tr></thead><tbody>';
+            '<th>ESP uptime</th><th>Boot #</th><th>Time (UTC)</th><th>Count</th></tr></thead><tbody>';
     for (var i = 0; i < rows.length; i++) {
       var t = rows[i];
       h += '<tr><td>' + window.kcEscapeHtml(String(t.seq)) + '</td><td>' + window.kcEscapeHtml(String(t.reason)) +
@@ -1009,6 +1010,7 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
            '</td><td>' + window.kcEscapeHtml(String(t.esp_uptime_s)) + ' s' +
            '</td><td>' + (t.boot_seq ? window.kcEscapeHtml(String(t.boot_seq)) : '-') +
            '</td><td>' + (t.utc ? window.kcEscapeHtml(new Date(t.utc * 1000).toISOString()) : 'unknown') +
+           '</td><td>' + window.kcEscapeHtml(String(t.count || 1)) +
            '</td></tr>';
     }
     card.innerHTML = h + '</tbody></table></div>';

@@ -337,6 +337,21 @@ static void test_fw03_torn(void)
     TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "a bad batch with data after it rejects the file");
 }
 
+static void test_fv05_middle_count(void)
+{
+    TEST_SECTION("firing_trace: FV-05 a middle batch whose count runs past the end is corruption, not a torn tail");
+    fresh();
+    run_firing(41, 25);
+    ramfile_t *f = rf_find("trace/ft1.bin", 0);
+    TEST_CHECK(f && durable_n(1) == 21, "setup: 21 samples durable");
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    f->data[FT_HDR_SIZE] = 0xFFu; /* first batch count corrupted upward (little endian low byte), valid batches follow */
+    f->data[FT_HDR_SIZE + 1] = 0x00u;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC,
+               "FV-05: oversized middle count with valid batches after it rejects the file");
+}
+
 static void test_post_busy(void)
 {
     TEST_SECTION("firing_trace: service() never double-posts");
@@ -452,6 +467,7 @@ int main(void)
     test_corrupt_and_restore();
     test_fw03_wear();
     test_fw03_torn();
+    test_fv05_middle_count();
     test_write_failure();
     test_truncation();
     test_post_busy();
