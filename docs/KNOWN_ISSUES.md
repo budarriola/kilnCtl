@@ -678,3 +678,11 @@ HIGH 0, MED 4, LOW 6, INFO 5. Detail: docs/REVIEW_FD01_2026_10_19.md.
 - **FY-06** LOW: the monitor-only aux zone shows duty 0.0 rather than blank in the trace. Fixed: monitor-only zones get a blank duty in the trace.
 - **FY-07** LOW: the synchronous end flush (28.8 KB atomic write) blocks the executor/halt caller; a flash_hop_run error can clear s_job_busy while a job is still queued. Fixed: s_job_busy is no longer cleared when run() errors (job may be queued); the deferred job is not gated on s_active, so two firings cannot mix. Timing-budget note: end flush stays synchronous.
 - **FY-08..FY-11** INFO: cfg space for the temp copy, boot recovery after a rename, the httpd frame (~0.6 KB), and RAM/executor checks were OK. See REVIEW_FD02_2026_10_19.
+
+## REVIEW_FLASH_WEAR_FD_2026_10_19 (FW)
+HIGH 0, MED 1, LOW 3, INFO 3. Detail: docs/REVIEW_FLASH_WEAR_FD_2026_10_19.md. Worst-case wear at 10 years, 100k-cycle flash: firing_trace about 4 % (1 firing/day), boot loop about 27 erases/page/day on kiln_nvs.
+- **FW-01** MED: boot_history writes 2 blobs (about 1.2 KB of NVS) every boot, uncoalesced. A persistent boot loop wears all 16 kiln_nvs pages at 10k to 20k erases/page/year (100k in 5 to 10 years). Fix: coalesce identical consecutive (reason, fw) boots into a repeat count; persist at most 1 in N or on change. Open.
+- **FW-02** LOW: the wall-time backfill doubles the boot-loop NVS cost. Fix: skip it for coalesced boots, or defer until uptime is at least 60 s. Open.
+- **FW-03** LOW: firing_trace rewrites the whole file via temp+rename on each flush: 146 writes, 2.1 MB per 24 h firing for 28.8 KB of data (quadratic, about 600 block erases over about 526 free cfg blocks, about 420 cycles/block/year). Fix: append periodic batches, atomic rewrite only at end. Open.
+- **FW-04** LOW: trip_history is rate-limited only by the telemetry tick and the 4-deep queue. Fix: coalesce identical trips within 60 s. Open.
+- **FW-05..FW-07** INFO: LittleFS block_cycles is the Kconfig default 512 (pin it); FD-04 log events and the diag bundle are negligible / read-only; kiln_nvs occupancy was not measured (the boot-loop figure assumes 50 % or less).
