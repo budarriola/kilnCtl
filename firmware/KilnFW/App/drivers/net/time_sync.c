@@ -274,6 +274,14 @@ void time_sync_get_status(time_sync_status_t *out)
     out->now_epoch = out->ever_synced ? time(NULL) : 0;
 }
 
+uint32_t time_sync_utc_or_zero(void)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    bool synced = s_status.ever_synced;
+    portEXIT_CRITICAL(&s_status_mux);
+    return synced ? (uint32_t)time(NULL) : 0u;
+}
+
 /* Callers: httpd and backup_import's own async task (http_async_job_try_start),
  * so the rev read, RAM assign, commit and rev bump are one section
  * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also

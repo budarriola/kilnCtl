@@ -524,8 +524,11 @@ static inline TickType_t safety_link_test_xTaskGetTickCount(void) { return s_fak
 static unsigned g_th_note_calls;
 static trip_history_entry_t g_th_last_note;
 bool trip_history_note(const trip_history_entry_t *e) { g_th_note_calls++; g_th_last_note = *e; return true; }
+bool trip_history_note_event(uint32_t pu, uint32_t eu, uint32_t utc, uint32_t bs, float tc, float thr, uint8_t reason, uint8_t seq) { trip_history_entry_t e; memset(&e, 0, sizeof(e)); e.pico_uptime_ms = pu; e.esp_uptime_s = eu; e.utc = utc; e.boot_seq = bs; e.safety_tc_c = tc; e.threshold = thr; e.reason = reason; e.pico_trip_seq = seq; e.zone = TRIP_HISTORY_ZONE_UNKNOWN; return trip_history_note(&e); }
 unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT]) { memset(out, 0, sizeof(boot_history_entry_t) * BOOT_HISTORY_RECENT); out[0].seq = 7u; return 1u; }
 void time_sync_get_status(time_sync_status_t *out) { memset(out, 0, sizeof(*out)); }
+uint32_t boot_history_latest_seq(void) { return 7u; }
+uint32_t time_sync_utc_or_zero(void) { return 0u; }
 #undef TAG
 #define TAG TAG_inbox
 #include "../drivers/safety/safety_link_inbox.c"

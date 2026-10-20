@@ -68,6 +68,8 @@ bool boot_history_load(boot_history_blob_t *out);
  * the number of entries copied, newest first; 0 before the first record. */
 #define BOOT_HISTORY_RECENT 5
 unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT]);
+/* seq of the newest in-RAM entry (this boot), 0 when none. No copy: safe on small stacks. */
+uint32_t boot_history_latest_seq(void);
 
 /* Appends this boot and persists with exactly one write. Call once per boot
  * from the early-boot sequence. Returns ESP_OK or the write error (the boot

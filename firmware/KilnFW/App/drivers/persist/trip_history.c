@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "kiln/kiln_crc32.h"
 
@@ -142,6 +143,24 @@ bool trip_history_note(const trip_history_entry_t *e_in)
     return true;
 }
 
+bool trip_history_note_event(uint32_t pico_uptime_ms, uint32_t esp_uptime_s, uint32_t utc,
+                             uint32_t boot_seq, float safety_tc_c, float threshold,
+                             uint8_t reason, uint8_t pico_trip_seq)
+{
+    trip_history_entry_t th;
+    memset(&th, 0, sizeof(th));
+    th.pico_uptime_ms = pico_uptime_ms;
+    th.esp_uptime_s = esp_uptime_s;
+    th.utc = utc;
+    th.boot_seq = boot_seq;
+    th.safety_tc_c = safety_tc_c;
+    th.threshold = threshold;
+    th.reason = reason;
+    th.pico_trip_seq = pico_trip_seq;
+    th.zone = TRIP_HISTORY_ZONE_UNKNOWN; /* TRIP_EVENT frame carries no zone */
+    return trip_history_note(&th);
+}
+
 unsigned trip_history_dropped(void)
 {
     return s_dropped;
@@ -164,30 +183,38 @@ static void flush_job(void *arg)
         ESP_LOGE(TAG, "NVS partition init failed -- trip not recorded");
         return;
     }
-    trip_history_blob_t b; /* 588 B: bx_flash_worker has a 10 KB internal stack */
-    trip_history_load(&b);
+    /* Internal heap, not a local: the stack check attributes this frame to the telemetry_log task. */
+    trip_history_blob_t *bp = heap_caps_malloc(sizeof(*bp), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!bp) {
+        ESP_LOGE(TAG, "no internal heap for trip blob -- trip not recorded");
+        return;
+    }
+    trip_history_load(bp);
     for (unsigned i = 0; i < j->n; i++) {
-        if (trip_history_blob_push(&b, &j->ents[i])) {
+        if (trip_history_blob_push(bp, &j->ents[i])) {
             j->recorded++;
         }
     }
     if (j->recorded == 0u) {
         j->ok = true;
+        heap_caps_free(bp);
         return; /* all duplicates: no flash write */
     }
-    b.crc32 = BLOB_CRC(&b);
+    bp->crc32 = BLOB_CRC(bp);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "hal_kv_open failed: %s -- trip not recorded", hal_status_to_name(err));
         j->recorded = 0;
+        heap_caps_free(bp);
         return;
     }
-    err = hal_kv_set_blob(&h, NVS_KEY_TRIP_HIST, &b, sizeof(b));
+    err = hal_kv_set_blob(&h, NVS_KEY_TRIP_HIST, bp, sizeof(*bp));
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
+    heap_caps_free(bp);
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "trip history persist failed: %s", hal_status_to_name(err));
         j->recorded = 0;
@@ -201,7 +228,9 @@ unsigned trip_history_flush(void)
     if (s_pend_tail == s_pend_head) {
         return 0;
     }
-    flush_job_t j;
+    /* Static, not a local: ents[] is ~1.2 KB and this runs on the telemetry_log task's small
+     * stack (check_all_task_stack_budgets). Single caller (telemetry_log task) => not re-entered. */
+    static flush_job_t j;
     memset(&j, 0, sizeof(j));
     uint8_t tail = s_pend_tail;
     uint8_t head = s_pend_head;

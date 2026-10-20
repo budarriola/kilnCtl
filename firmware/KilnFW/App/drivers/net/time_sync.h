@@ -96,6 +96,10 @@ void time_sync_notify_got_ip(void);
  * got_ip()/the SNTP sync callback run on -- guarded internally). */
 void time_sync_get_status(time_sync_status_t *out);
 
+/* Current UTC epoch seconds, or 0 when no SNTP sync has landed this boot. Same value as
+ * time_sync_get_status().now_epoch without the ~90 B status struct on the caller's stack. */
+uint32_t time_sync_utc_or_zero(void);
+
 /* FD-04/FQ-02: true while a landed SNTP sync is not yet logged; *utc_epoch gets the synced UTC
  * epoch seconds. Does NOT clear the flag: the caller (telemetry_log task) calls
  * time_sync_ack_event() only after its write succeeded, so a failed write retries next pass. */

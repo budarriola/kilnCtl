@@ -15,8 +15,7 @@ static bool s_wall_backfilled;
 void telemetry_time_sync_service(uint32_t uptime_s)
 {
     if (!s_boot_marked) {
-        boot_history_entry_t r[BOOT_HISTORY_RECENT];
-        int32_t seq = (boot_history_recent(r) > 0u) ? (int32_t)r[0].seq : 0;
+        int32_t seq = (int32_t)boot_history_latest_seq();
         bool ok = true;
         ok &= (event_log_emit(LOG_STORE_KIND_FIRING, EVENT_LOG_SEV_INFO, EVENT_LOG_SRC_SYSTEM,
                               EVENT_CODE_SYS_BOOT, EVENT_LOG_ZONE_NONE, seq, NULL) == ESP_OK);

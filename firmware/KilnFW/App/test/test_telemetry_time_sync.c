@@ -43,6 +43,7 @@ unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT])
     out[0].seq = 7u;
     return 1u;
 }
+uint32_t boot_history_latest_seq(void) { return 7u; }
 esp_err_t boot_history_backfill_wall_time(uint32_t w) { s_backfill_calls++; s_backfill_val = w; return ESP_OK; }
 
 #include "../drivers/persist/telemetry_time_sync.c"

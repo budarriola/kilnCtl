@@ -147,7 +147,7 @@ static void telemetry_log_task(void *arg)
      * than just retried. */
     static EXT_RAM_BSS_ATTR profile_exec_status_t fst_storage;
     profile_exec_status_t *fst = &fst_storage;
-    autotune_engine_status_t ast;
+    static EXT_RAM_BSS_ATTR autotune_engine_status_t ast; /* static: this task's stack ceiling (check_all_task_stack_budgets) */
     char line[TELEMETRY_LOG_LINE_BUF];
 
     uint32_t firing_next_s = 0;

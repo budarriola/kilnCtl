@@ -69,6 +69,11 @@ bool trip_history_load(trip_history_blob_t *out);
  * (esp_uptime_s, utc = 0 if unsynced, boot_seq = 0 if unknown). Returns false if the
  * pending queue was full (the trip is then lost from the history; counted). */
 bool trip_history_note(const trip_history_entry_t *e);
+/* Same as trip_history_note() but builds the entry here (zone unknown), so a deep caller
+ * (safety_apply_trip_event, on small task stacks) needs no entry struct in its own frame. */
+bool trip_history_note_event(uint32_t pico_uptime_ms, uint32_t esp_uptime_s, uint32_t utc,
+                             uint32_t boot_seq, float safety_tc_c, float threshold,
+                             uint8_t reason, uint8_t pico_trip_seq);
 unsigned trip_history_dropped(void);
 
 /* Task context (telemetry_log): persists every pending, not-yet-recorded trip. At most one NVS

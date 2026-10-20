@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "kiln/kiln_crc32.h"
 
@@ -133,6 +134,11 @@ unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT])
     return s_recent_n;
 }
 
+uint32_t boot_history_latest_seq(void)
+{
+    return s_recent_n > 0u ? s_recent[0].seq : 0u;
+}
+
 esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_known,
                                    uint32_t prev_uptime_s, uint32_t dump_id, bool has_crash,
                                    const char *fw_version, uint32_t wall_time)
@@ -179,27 +185,23 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
     return ESP_OK;
 }
 
-esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
+static esp_err_t backfill_with_blob(boot_history_blob_t *b, uint32_t wall_time)
 {
-    if (s_recent_n == 0u || wall_time == 0u) {
+    if (!boot_history_load(b)) {
         return ESP_ERR_INVALID_STATE;
     }
-    boot_history_blob_t b;
-    if (!boot_history_load(&b)) {
+    unsigned idx = ((unsigned)b->head + BOOT_HISTORY_MAX - 1u) % BOOT_HISTORY_MAX;
+    if (b->count == 0u || b->entries[idx].seq != s_recent[0].seq || b->entries[idx].wall_time != 0u) {
         return ESP_ERR_INVALID_STATE;
     }
-    unsigned idx = ((unsigned)b.head + BOOT_HISTORY_MAX - 1u) % BOOT_HISTORY_MAX;
-    if (b.count == 0u || b.entries[idx].seq != s_recent[0].seq || b.entries[idx].wall_time != 0u) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    b.entries[idx].wall_time = wall_time;
-    b.crc32 = BLOB_CRC(&b);
+    b->entries[idx].wall_time = wall_time;
+    b->crc32 = BLOB_CRC(b);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
         return hal_status_to_esp_err(err);
     }
-    err = hal_kv_set_blob(&h, NVS_KEY_BOOT_HIST, &b, sizeof(b));
+    err = hal_kv_set_blob(&h, NVS_KEY_BOOT_HIST, b, sizeof(*b));
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
@@ -209,4 +211,20 @@ esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
     }
     s_recent[0].wall_time = wall_time;
     return ESP_OK;
+}
+
+/* The blob is on the internal heap, not the stack: this runs on the telemetry_log task
+ * (check_all_task_stack_budgets). */
+esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
+{
+    if (s_recent_n == 0u || wall_time == 0u) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    boot_history_blob_t *b = heap_caps_malloc(sizeof(*b), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!b) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t r = backfill_with_blob(b, wall_time);
+    heap_caps_free(b);
+    return r;
 }

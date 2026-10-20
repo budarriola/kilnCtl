@@ -1430,21 +1430,9 @@ bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *
 
     if (is_new_event) {
         /* FD-05: RAM-only hand-off; telemetry_log task persists it (no flash from this RX context). */
-        trip_history_entry_t th;
-        memset(&th, 0, sizeof(th));
-        th.pico_uptime_ms = safety_read_u32_le(&p[3]);
-        th.esp_uptime_s = (uint32_t)(hal_time_now_us() / 1000000);
-        th.safety_tc_c = safety_tc_c;
-        th.threshold = deciding_threshold;
-        th.reason = trip_reason;
-        th.pico_trip_seq = trip_seq;
-        th.zone = TRIP_HISTORY_ZONE_UNKNOWN; /* TRIP_EVENT frame carries no zone */
-        time_sync_status_t th_ts;
-        time_sync_get_status(&th_ts);
-        th.utc = th_ts.ever_synced ? (uint32_t)th_ts.now_epoch : 0u;
-        boot_history_entry_t th_boot[BOOT_HISTORY_RECENT];
-        th.boot_seq = boot_history_recent(th_boot) > 0u ? th_boot[0].seq : 0u;
-        (void)trip_history_note(&th);
+        (void)trip_history_note_event(safety_read_u32_le(&p[3]), (uint32_t)(hal_time_now_us() / 1000000),
+                                      time_sync_utc_or_zero(), boot_history_latest_seq(),
+                                      safety_tc_c, deciding_threshold, trip_reason, trip_seq);
         ESP_LOGW(TAG, "safety processor TRIPPED: reason 0x%02X, trip_seq %u, safety TC %.1f C "
                       "(threshold %.1f)",
                  (unsigned)trip_reason, (unsigned)trip_seq, (double)safety_tc_c,
