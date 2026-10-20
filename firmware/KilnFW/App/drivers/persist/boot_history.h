@@ -77,6 +77,15 @@ uint32_t boot_history_latest_seq(void);
  * identifies THIS boot uniquely even when the boot was folded into the previous entry. */
 uint8_t boot_history_latest_rep(void);
 
+/* BR-01: readers (HTTP, diag bundle) load the persisted blob, whose newest-entry repeat lags by up to
+ * BOOT_HISTORY_FLUSH_EVERY-1. Overlays the live RAM repeat count of this boot's entry (same seq) onto
+ * the loaded blob. No NVS access. */
+void boot_history_merge_live(boot_history_blob_t *b);
+
+/* BR-02: writes `"kiln_nvs":{"used":U,"free":F,"total":T}` (entry counts of the KILN_NVS_PARTITION
+ * partition; `"kiln_nvs":null` when unreadable) into buf. Returns the length, or -1 when it does not fit. */
+int boot_history_nvs_stats_json(char *buf, size_t cap);
+
 /* Appends this boot and persists with exactly one write. Call once per boot
  * from the early-boot sequence. Returns ESP_OK or the write error (the boot
  * continues either way). */

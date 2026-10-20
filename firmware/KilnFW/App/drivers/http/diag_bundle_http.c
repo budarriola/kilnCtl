@@ -197,6 +197,7 @@ static esp_err_t sec_boot_history(diag_out_t *out, const char *name)
         return ESP_ERR_NO_MEM;
     }
     boot_history_load(&s->bh);
+    boot_history_merge_live(&s->bh); /* BR-01 */
     esp_err_t e = diag_frame_write(out, name, "[", 1);
     for (unsigned i = 0; e == ESP_OK && i < BOOT_HISTORY_MAX; i++) {
         boot_history_entry_t en;
@@ -399,6 +400,8 @@ static bool query_wants_coredump(httpd_req_t *req)
     return httpd_query_key_value(q, "coredump", v, sizeof(v)) == ESP_OK && strcmp(v, "1") == 0;
 }
 
+#define DIAG_MANIFEST_EXTRA_MAX 384u
+
 static esp_err_t diag_bundle_get_handler(httpd_req_t *req)
 {
     sink_ctx_t c = {.req = req, .fill = 0};
@@ -417,8 +420,18 @@ static esp_err_t diag_bundle_get_handler(httpd_req_t *req)
     if (want_core) {
         secs[nsec++] = s_coredump_section;
     }
-    esp_err_t e = diag_bundle_run_x(secs, nsec, DIAG_BUNDLE_PC_SUPPLEMENT_JSON,
-                                    diag_bundle_manifest_extra(want_core), http_sink, &c);
+    /* BR-02: kiln_nvs entry counts ride in the manifest (heap, not stack: the warning text is ~170 B). */
+    char *extra = heap_caps_malloc(DIAG_MANIFEST_EXTRA_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const char *extra_s = diag_bundle_manifest_extra(want_core);
+    if (extra != NULL) {
+        int nn = boot_history_nvs_stats_json(extra, DIAG_MANIFEST_EXTRA_MAX);
+        int mm = nn < 0 ? -1 : snprintf(extra + nn, DIAG_MANIFEST_EXTRA_MAX - (size_t)nn, ",%s", extra_s);
+        if (mm > 0 && (size_t)(nn + mm) < DIAG_MANIFEST_EXTRA_MAX) {
+            extra_s = extra;
+        }
+    }
+    esp_err_t e = diag_bundle_run_x(secs, nsec, DIAG_BUNDLE_PC_SUPPLEMENT_JSON, extra_s, http_sink, &c);
+    free(extra);
     if (e == ESP_OK) {
         e = sink_flush(&c);
     }

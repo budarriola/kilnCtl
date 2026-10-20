@@ -231,8 +231,33 @@ static void test_fv01_fv03(void)
                "FV-03: same reason + fw but has_crash differs => distinct entry");
 }
 
+static void test_br01_br02(void)
+{
+    TEST_SECTION("boot_history: BR-01 readers merge the live repeat, BR-02 kiln_nvs stats JSON");
+    reset_all();
+    for (unsigned i = 0; i < 100; i++) {
+        boot_history_record_boot(7, false, 5, 0, false, "x-gabc", 0);
+    }
+    boot_history_blob_t b;
+    boot_history_entry_t e;
+    unsigned before = fake_kv_set_call_count();
+    TEST_CHECK(boot_history_load(&b) && boot_history_blob_get(&b, 0, &e) && e.repeat < 99, "BR-01: persisted repeat lags the truth");
+    boot_history_merge_live(&b);
+    TEST_CHECK(boot_history_blob_get(&b, 0, &e) && e.repeat == 99, "BR-01: merged repeat is the live count (99)");
+    TEST_CHECK(fake_kv_set_call_count() == before, "BR-01: merge adds no NVS writes");
+    boot_history_blob_init(&b);
+    boot_history_merge_live(&b);
+    TEST_CHECK(b.count == 0, "BR-01: empty ring untouched");
+    char js[96];
+    int n = boot_history_nvs_stats_json(js, sizeof(js));
+    TEST_CHECK(n > 0 && strstr(js, "\"kiln_nvs\":{\"used\":") != NULL && strstr(js, "\"free\":") && strstr(js, "\"total\":"),
+               "BR-02: stats JSON has used/free/total");
+    TEST_CHECK(boot_history_nvs_stats_json(js, 8) == -1, "BR-02: too-small buffer reports -1");
+}
+
 int main(void)
 {
+    test_br01_br02();
     test_fv01_fv03();
     test_fw01_fw02_coalesce();
     test_bh01_bh02();
