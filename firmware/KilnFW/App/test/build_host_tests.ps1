@@ -2044,10 +2044,17 @@ try {
     $diagObjDir = Join-Path $outDir "diaghttp"
     New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
     $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
-            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" `"$(Join-Path $driversDir 'persist/boot_history.c')`" `"$(Join-Path $driversDir 'persist/trip_history.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" `"$(Join-Path $driversDir 'persist/boot_history.c')`" `"$(Join-Path $driversDir 'persist/trip_history.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kiln_crc32.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
+    # ---- test_diag_bundle_http.c: its own separate executable (FD-01 DB-09) -----
+    $exeDbh = Join-Path $outDir "kilnctl_host_tests_diag_bundle_http.exe"
+    $dbhObjDir = Join-Path $outDir "diagbundlehttp"
+    New-Item -ItemType Directory -Force -Path $dbhObjDir | Out-Null
+    $cmdDbh = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dbhObjDir\\`" /Fe:`"$exeDbh`" `"$(Join-Path $testDir 'test_diag_bundle_http.c')`" `"$(Join-Path $driversDir 'http/diag_bundle.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" `"$(Join-Path $driversDir 'persist/boot_history.c')`" `"$(Join-Path $driversDir 'persist/trip_history.c')`" `"$(Join-Path $testDir '..\..\..\CommonFW\src\kiln_crc32.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`""
+    Invoke-HostTestExe -Name "diag_bundle_http" -ExePath $exeDbh -BuildCmd $cmdDbh
     # ---- test_adaptive_tune_http_gate.c: its own separate executable ----------
     # Task 1a (docs/SYSTEM_MODE_GATE.md known gap): adaptive_tune_http.c's
     # enable_post_handler()/revert_post_handler() system_mode_gate wiring
@@ -2619,6 +2626,7 @@ try {
     $cmdBh = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$bhObjDir\\`" /Fe:`"$exeBh`" `"$(Join-Path $testDir 'test_boot_history.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\kiln_crc32.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "boot_history" -ExePath $exeBh -BuildCmd $cmdBh
@@ -2641,6 +2649,7 @@ try {
             "/Fo:`"$thObjDir\\`" /Fe:`"$exeTh`" `"$(Join-Path $testDir 'test_trip_history.c')`" " +
             $hopStubFull +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\kiln_crc32.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "trip_history" -ExePath $exeTh -BuildCmd $cmdTh
@@ -3729,7 +3738,8 @@ try {
     # 106 -> 107: trip_history (FD-05)
     # 107 -> 108: telemetry_time_sync (FQ-05)
     # 108 -> 109: firing_trace (FD-02)
-    $totalExpected = 109
+    # 109 -> 110: diag_bundle_http (FD-01 DB-09)
+    $totalExpected = 110
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

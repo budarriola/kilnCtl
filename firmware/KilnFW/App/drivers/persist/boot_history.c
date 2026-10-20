@@ -1,15 +1,20 @@
 #include "boot_history.h"
 
 #include <ctype.h>
+#include <stddef.h>
 #include <string.h>
 
-#include "esp_crc.h"
 #include "esp_log.h"
+#include "kiln/kiln_crc32.h"
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_sysinfo.h"
 #include "nvs_key_check.h"
+
+/* CRC over the blob with its own crc32 field read as zero. */
+#define BLOB_CRC(bp) \
+    kiln_crc32_le_zeroed((const uint8_t *)(bp), sizeof(boot_history_blob_t), offsetof(boot_history_blob_t, crc32), sizeof((bp)->crc32))
 
 static const char *TAG = "boot_history";
 
@@ -23,20 +28,13 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 typedef char boot_history_entry_size_check[(sizeof(boot_history_entry_t) == 32) ? 1 : -1];
 typedef char boot_history_blob_size_check[(sizeof(boot_history_blob_t) == 12 + 32 * BOOT_HISTORY_MAX) ? 1 : -1];
 
-static uint32_t blob_integrity(const boot_history_blob_t *b)
-{
-    boot_history_blob_t tmp = *b;
-    tmp.crc32 = 0;
-    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
-}
-
 bool boot_history_blob_valid(const boot_history_blob_t *b)
 {
     if (b->version != BOOT_HISTORY_VERSION || b->count > BOOT_HISTORY_MAX ||
         b->head >= BOOT_HISTORY_MAX || b->next_seq == 0u) {
         return false;
     }
-    return blob_integrity(b) == b->crc32;
+    return BLOB_CRC(b) == b->crc32;
 }
 
 void boot_history_blob_init(boot_history_blob_t *b)
@@ -157,7 +155,7 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
     e.wall_time = wall_time;
     boot_history_short_hash(fw_version, e.fw);
     boot_history_blob_push(&b, &e);
-    b.crc32 = blob_integrity(&b);
+    b.crc32 = BLOB_CRC(&b);
     s_recent_n = 0;
     for (unsigned i = 0; i < BOOT_HISTORY_RECENT && boot_history_blob_get(&b, i, &s_recent[i]); i++) {
         s_recent_n++;
@@ -195,7 +193,7 @@ esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
         return ESP_ERR_INVALID_STATE;
     }
     b.entries[idx].wall_time = wall_time;
-    b.crc32 = blob_integrity(&b);
+    b.crc32 = BLOB_CRC(&b);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {

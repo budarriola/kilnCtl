@@ -2403,15 +2403,18 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
 
 
 @_core._tool()
-def diag_bundle_fetch(host: Optional[str] = None, out_dir: Optional[str] = None, symbolize: bool = True) -> str:
+def diag_bundle_fetch(host: Optional[str] = None, out_dir: Optional[str] = None, symbolize: bool = True,
+                      include_coredump: bool = False) -> str:
     """FD-01 support bundle: GET /api/diag/bundle (ADMIN login), unpack it into
     `out_dir` (default: a temp dir), decode the firing/autotune event logs with
     event_log_decoder, merge the /api/status, readiness, partitions, boot_guard,
     OTA and Pico stack-margin JSON the firmware lists as pc_supplement, and
     symbolize the coredump (if present) against a matching ELF in
-    firmware/KilnFW/elf_archive. Read-only on the board; never includes
-    passwords, hashes, tokens or TOTP seeds. A truncated transfer is flagged
-    with INCOMPLETE.txt, never accepted silently."""
+    firmware/KilnFW/elf_archive. Read-only on the board. The crash dump is
+    OPT-IN (`include_coredump=True`, default False): it is a RAM capture that
+    may contain the Wi-Fi password and web session data, so do not share a
+    bundle that includes it. A truncated transfer is flagged with
+    INCOMPLETE.txt (complete frames are kept), never accepted silently."""
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
     resolved = _ota_resolve_host(host)
     if out_dir is None:
@@ -2424,7 +2427,8 @@ def diag_bundle_fetch(host: Optional[str] = None, out_dir: Optional[str] = None,
 
     elves = (elf_archive.list_all_kiln_elf_paths() + elf_archive.list_recovery_elf_paths()) if symbolize else []
     try:
-        files = diag_bundle.fetch_and_unpack(resolved, out_dir, elf_paths=elves, symbolize=_sym if symbolize else None)
+        files = diag_bundle.fetch_and_unpack(resolved, out_dir, elf_paths=elves, symbolize=_sym if symbolize else None,
+                                          include_coredump=include_coredump)
     except diag_bundle.BundleError as exc:
         return f"error: {exc}"
     return f"support bundle from {resolved} -> {out_dir}\n" + "\n".join(os.path.basename(f) for f in files)

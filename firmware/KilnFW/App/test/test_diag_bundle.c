@@ -69,6 +69,30 @@ void run_test_diag_bundle(void)
     TEST_CHECK(diag_frame_write(&o, "", "x", 1) == ESP_ERR_INVALID_ARG, "empty name refused");
     TEST_CHECK(c.len == 0, "refused frame writes nothing");
 
+    /* DB-07: reserved names refused by name, both as frames and as section names. */
+    memset(&c, 0, sizeof(c));
+    TEST_CHECK(diag_frame_write(&o, "_manifest", "x", 1) == ESP_ERR_INVALID_ARG, "reserved _manifest refused");
+    TEST_CHECK(diag_frame_write(&o, "_trailer", "x", 1) == ESP_ERR_INVALID_ARG, "reserved _trailer refused");
+    TEST_CHECK(diag_frame_write(&o, "supplement_x", "x", 1) == ESP_ERR_INVALID_ARG, "reserved supplement_ prefix refused");
+    TEST_CHECK(c.len == 0, "reserved frames write nothing");
+    static const diag_section_t rsv[] = {{"alpha", prod_ok}, {"_trailer", prod_ok}};
+    TEST_CHECK(diag_bundle_run(rsv, 2, NULL, cap_sink, &c) == ESP_ERR_INVALID_ARG, "reserved section name refused");
+    TEST_CHECK(c.len == 0, "reserved section name emits nothing, not even a manifest");
+
+    /* DB-04: oversized frame refused (length only; the data pointer is never read). */
+    TEST_CHECK(diag_frame_write(&o, "big", "x", (size_t)64 * 1024 * 1024) == ESP_ERR_INVALID_ARG, "oversize frame refused");
+    TEST_CHECK(c.len == 0, "oversize frame writes nothing");
+
+    /* DB-02: manifest_extra rides in the manifest. */
+    memset(&c, 0, sizeof(c));
+    TEST_CHECK(diag_bundle_run_x(secs, 3, NULL, diag_bundle_manifest_extra(false), cap_sink, &c) == ESP_OK, "run_x ok");
+    TEST_CHECK(strstr(c.buf, "\"coredump_included\":false") != NULL, "extra false in manifest");
+    TEST_CHECK(strstr(c.buf, "Wi-Fi password") == NULL, "no warning when excluded");
+    memset(&c, 0, sizeof(c));
+    TEST_CHECK(diag_bundle_run_x(secs, 3, NULL, diag_bundle_manifest_extra(true), cap_sink, &c) == ESP_OK, "run_x ok (core)");
+    TEST_CHECK(strstr(c.buf, "\"coredump_included\":true") != NULL && strstr(c.buf, "Wi-Fi password") != NULL,
+               "extra true carries the warning");
+
     /* Secret pin: the producer source must never reach credential stores. */
     char *p = test_resolve_from_here(__FILE__, "../drivers/http/diag_bundle_http.c");
     char *src = p ? test_read_whole_file(p) : NULL;

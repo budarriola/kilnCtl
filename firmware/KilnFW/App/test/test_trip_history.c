@@ -124,15 +124,15 @@ static void test_corrupt(void)
     TEST_CHECK(!trip_history_blob_valid(&bad), "payload flip fails CRC");
     bad = b;
     bad.head = TRIP_HISTORY_MAX;
-    bad.crc32 = blob_integrity(&bad);
+    bad.crc32 = BLOB_CRC(&bad);
     TEST_CHECK(!trip_history_blob_valid(&bad), "head out of range invalid even with good CRC");
     bad = b;
     bad.count = TRIP_HISTORY_MAX + 1;
-    bad.crc32 = blob_integrity(&bad);
+    bad.crc32 = BLOB_CRC(&bad);
     TEST_CHECK(!trip_history_blob_valid(&bad), "count out of range invalid");
     bad = b;
     bad.version = 9;
-    bad.crc32 = blob_integrity(&bad);
+    bad.crc32 = BLOB_CRC(&bad);
     TEST_CHECK(!trip_history_blob_valid(&bad), "wrong version invalid");
 
     /* Store a CRC-broken blob; a new trip must start a fresh ring at seq 1. */

@@ -1,14 +1,19 @@
 #include "trip_history.h"
 
+#include <stddef.h>
 #include <string.h>
 
-#include "esp_crc.h"
 #include "esp_log.h"
+#include "kiln/kiln_crc32.h"
 
 #include "flash_hop.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+
+/* CRC over the blob with its own crc32 field read as zero. */
+#define BLOB_CRC(bp) \
+    kiln_crc32_le_zeroed((const uint8_t *)(bp), sizeof(trip_history_blob_t), offsetof(trip_history_blob_t, crc32), sizeof((bp)->crc32))
 
 static const char *TAG = "trip_history";
 
@@ -22,20 +27,13 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 typedef char trip_history_entry_size_check[(sizeof(trip_history_entry_t) == 36) ? 1 : -1];
 typedef char trip_history_blob_size_check[(sizeof(trip_history_blob_t) == 12 + 36 * TRIP_HISTORY_MAX) ? 1 : -1];
 
-static uint32_t blob_integrity(const trip_history_blob_t *b)
-{
-    trip_history_blob_t tmp = *b;
-    tmp.crc32 = 0;
-    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
-}
-
 bool trip_history_blob_valid(const trip_history_blob_t *b)
 {
     if (b->version != TRIP_HISTORY_VERSION || b->count > TRIP_HISTORY_MAX || b->head >= TRIP_HISTORY_MAX ||
         b->next_seq == 0u) {
         return false;
     }
-    return blob_integrity(b) == b->crc32;
+    return BLOB_CRC(b) == b->crc32;
 }
 
 void trip_history_blob_init(trip_history_blob_t *b)
@@ -177,7 +175,7 @@ static void flush_job(void *arg)
         j->ok = true;
         return; /* all duplicates: no flash write */
     }
-    b.crc32 = blob_integrity(&b);
+    b.crc32 = BLOB_CRC(&b);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
