@@ -555,6 +555,7 @@ static void test_crash_report(void)
                    body_has("{\"seq\":1,\"reason\":6,\"mask\":32,\"zone\":-1,\"safety_tc_c\":1250.5,\"threshold\":1200.0,"
                             "\"pico_uptime_ms\":1000,\"esp_uptime_s\":50,\"utc\":1700000000,\"boot_seq\":3}"),
                "crash_report GET: trip_history rows newest-first with mask, zone -1 unknown, stamps");
+    TEST_CHECK(body_has("\"trip_history_dropped\":0"), "TH-03: dropped counter exposed");
 
     /* FD-03: boot history rides on the same route, present or absent crash record. */
     world_reset();

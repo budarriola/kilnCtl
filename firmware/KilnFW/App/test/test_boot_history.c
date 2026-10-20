@@ -108,7 +108,7 @@ static void test_corrupt(void)
     /* out-of-range head with a self-consistent CRC is still rejected */
     boot_history_blob_init(&b);
     b.head = BOOT_HISTORY_MAX;
-    b.crc32 = blob_crc(&b);
+    b.crc32 = blob_integrity(&b);
     TEST_CHECK(!boot_history_blob_valid(&b), "head out of range rejected");
 }
 

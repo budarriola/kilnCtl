@@ -2,6 +2,7 @@
 // corrupt blob, pending queue and the flush write path. trip_history.c is #included so the
 // statics are reachable; fake_kv backs NVS and the flash_hop stubs stand in for bx_flash_worker.
 #include <stddef.h>
+#include <math.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -123,15 +124,15 @@ static void test_corrupt(void)
     TEST_CHECK(!trip_history_blob_valid(&bad), "payload flip fails CRC");
     bad = b;
     bad.head = TRIP_HISTORY_MAX;
-    bad.crc32 = blob_crc(&bad);
+    bad.crc32 = blob_integrity(&bad);
     TEST_CHECK(!trip_history_blob_valid(&bad), "head out of range invalid even with good CRC");
     bad = b;
     bad.count = TRIP_HISTORY_MAX + 1;
-    bad.crc32 = blob_crc(&bad);
+    bad.crc32 = blob_integrity(&bad);
     TEST_CHECK(!trip_history_blob_valid(&bad), "count out of range invalid");
     bad = b;
     bad.version = 9;
-    bad.crc32 = blob_crc(&bad);
+    bad.crc32 = blob_integrity(&bad);
     TEST_CHECK(!trip_history_blob_valid(&bad), "wrong version invalid");
 
     /* Store a CRC-broken blob; a new trip must start a fresh ring at seq 1. */
@@ -202,11 +203,11 @@ static void test_th01_th02(void)
     reset_all();
     trip_history_entry_t e = mk(1, 1, 500);
     e.safety_tc_c = 3.0e38f;
-    e.threshold = -(1.0f / 0.0f);
+    e.threshold = -INFINITY;
     trip_history_note(&e);
     TEST_CHECK(s_pending[0].safety_tc_c == 1.0e5f && s_pending[0].threshold == -1.0e5f, "TH-01: huge/inf clamped");
     trip_history_entry_t n = mk(2, 1, 600);
-    n.safety_tc_c = 0.0f / 0.0f;
+    n.safety_tc_c = NAN;
     trip_history_note(&n);
     TEST_CHECK(s_pending[1].safety_tc_c == 0.0f, "TH-01: NaN becomes 0");
 
