@@ -3798,3 +3798,16 @@ One interruption: the agent hit an API rate limit between about 16:35 and 18:20;
 Backup diff pre vs post: relay_cycles only (c0 51 -> 173, c1 25 -> 299, c2 34 -> 413, c4 35 -> 37; raise-only wear counters from the firing) and one extra profile (#2 BM21_SOAK created by this run; restore does not delete it, KNOWN_ISSUES BW-09). Nothing else differs.
 
 Cleanup: logger and load script stopped.
+
+## benchmain22 (2026-10-20, main f2af6caa7, ESP flashed, Pico unchanged)
+Built KilnFW from f2af6caa7 and flashed via flash_firmware(confirm=True). SaftyFW unchanged (acad4d9f2). Boot clean, link up, no trips, heap_internal min_free above 8192, stack high-water marks within budget.
+FD-01: diag_bundle_fetch without and with include_coredump: manifest and trailer valid; coredump entry 820160 bytes (not printed).
+FD-03: boot history present with repeat field; two same-reason reboots coalesced; wall-time backfill appeared after 60 s. HTTP repeat count lags the persisted flush (BR-01).
+FD-04: TIME_SYNC event present, UTC annotation applied.
+FD-05: trip history present with count field. Test trip skipped: its clear (reason 4, mask 0x0008) is outside the granted authority.
+FD-02: short low-setpoint firing; firing_trace appended, CSV downloaded (14 lines), stopped with profiles_stop().
+BH-03: LCD Crash Report page fits without scrolling (1-reset case; camera framing limited).
+NVS: kiln_nvs occupancy not measurable (BR-02); LCD row shows default nvs 89 used / 667 free / 756 total.
+Note: sw_reset_esp reboots the Pico too; a running profile paused with pico_fatal_reboot and was resumed.
+
+Backup diff pre vs post: relay_cycles only (c1 299 -> 301, c2 413 -> 412, c4 37 -> 38).
