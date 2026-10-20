@@ -3820,3 +3820,9 @@ Bundle fetched three times without include_coredump; no dump contents read or pr
 Note: sw_reset_esp reboots the Pico too; no S6a trip latched, nothing to clear.
 
 Backup diff pre vs post: none.
+
+## benchmain24 (2026-10-20, main 3b04289bb, ESP flashed, Pico unchanged)
+Built KilnFW from 3b04289bb and flashed via flash_firmware(confirm=True) (first verify attempt hit the known benign quirk, retry OK). SaftyFW unchanged. Boot clean, link up (crc/framing errors 0, timeouts 0), SaftyFW armed, not tripped. heap_internal min_free 83,835 B (floor 8192), largest free block 31,744 B. All instrumented task stacks OK (lowest headroom info_uart_bridge 39.3 %, backlight_pwm 37.5 %, wifi_prov_owner 37.7 %, httpd_worker 38.3 %).
+LN-01 (bench-confirmed): LCD Diagnostics page 3 of 8 (PSRAM & storage) row "kiln_nvs used/free/total" reads 161 used / 1855 free / 2016 total, equal to kiln_nvs in supplement_api_crash_report.json from the diag bundle ({"used":161,"free":1855,"total":2016}). The page has 6 stat rows and fits with no scroll (paged, topbar prev/next). Captures: logs/benchmain24/lcd_diag.jpg (page 1), lcd_diag_p3.jpg (page 3); camera framing clips the right edge slightly.
+Navigation: settings -> Diagnostics via ui_step click; page next via touch_inject (455,22) down/up (topbar next target name is non-ASCII).
+Backup diff pre vs post: none (byte-identical).
