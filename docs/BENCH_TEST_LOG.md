@@ -3811,3 +3811,12 @@ NVS: kiln_nvs occupancy not measurable (BR-02); LCD row shows default nvs 89 use
 Note: sw_reset_esp reboots the Pico too; a running profile paused with pico_fatal_reboot and was resumed.
 
 Backup diff pre vs post: relay_cycles only (c1 299 -> 301, c2 413 -> 412, c4 37 -> 38).
+
+## benchmain23 (2026-10-20, main 7359d43b4, ESP flashed, Pico unchanged)
+Built KilnFW from 7359d43b4 and flashed via flash_firmware(confirm=True). SaftyFW unchanged (Pico auto-update compiled off, no Pico flash). Boot clean, link up (crc/framing errors 0, timeouts 0), no trips. heap_internal min_free 83,851 B (floor 8192), largest free block 31,744 B. All instrumented task stacks OK (lowest headroom info_uart_bridge 33.5 %, httpd_worker 37.0 %, backlight_pwm 37.5 %, wifi_prov_owner 37.7 %).
+BR-02 (bench-confirmed): kiln_nvs used/free/total = 161 / 1855 / 2016 entries in both GET /api/crash_report (supplement_api_crash_report.json) and the diag bundle manifest, identical across the flash and two reboots (coalescing adds no entries). Live data is 8.0 % of the partition, not the ~50 % assumed in REVIEW_FLASH_WEAR_FD_2026_10_19.
+BR-01 (bench-confirmed): two sw_reset_esp reboots with the same reason (SW) and same fw. After reboot 1 the HTTP repeat count for the 7359d43 boot was 1; after reboot 2 it was 2, in both /api/crash_report boot_history and the bundle boot_history.json; it matches the live count and does not lag. Wall time set on the boot (backfill after 60 s).
+Bundle fetched three times without include_coredump; no dump contents read or printed.
+Note: sw_reset_esp reboots the Pico too; no S6a trip latched, nothing to clear.
+
+Backup diff pre vs post: none.
