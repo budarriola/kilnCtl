@@ -322,7 +322,8 @@ def ota_recovery_exit_esp(host: Optional[str] = None) -> str:
 
 
 @_core._tool()
-def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
+def sw_reset_esp(confirm: bool = False, host: Optional[str] = None,
+                 wait_for_confirm: bool = True) -> str:
     """Reboot BOTH processors right now -- this ESP32-S3, and (since
     8b0e799a) the RP2040 safety processor IN PLACE, same firmware slot --
     POST /api/sw_reset. This is the sanctioned, non-JTAG way to reopen the
@@ -374,6 +375,11 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     NOT YET VERIFIED AGAINST REAL HARDWARE by this repo's own automated test
     suite -- request construction/response-parsing are unit-tested with
     mocked HTTP only; see test_ota_http_client.py.
+
+    BC-01: with `wait_for_confirm=True` (default) this first waits until the
+    board's uptime is >= 35 s (past the 30 s boot-confirm soak), because every
+    boot younger than the soak is counted by boot_guard and the 4th such boot
+    lands in recovery. Pass False to reset immediately.
     """
     if confirm is not True:
         return ("error: refused -- confirm=True is required. This reboots BOTH processors right "
@@ -382,6 +388,10 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
                 "clear it yourself afterward (safety_clear_trip(), only once trip_mask is confirmed "
                 "to be exactly 0x0020). No request was sent to the board.")
     resolved = _ota_resolve_host(host)
+    soak_note = ""
+    if wait_for_confirm:
+        from . import reset_probe  # local import
+        soak_note = reset_probe.wait_for_boot_soak_http(resolved)
     try:
         body = ota_http.sw_reset(resolved)
     except ota_http.OtaHttpError as exc:
@@ -389,7 +399,8 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
         return f"error: {exc}{status_bit} (host={resolved})"
     if not body.get("ok"):
         return f"error: board reported failure: {body} (host={resolved})"
-    return (f"ok - sw_reset accepted (host={resolved}); board detail: {body.get('detail')!r} -- "
+    return (soak_note + ("\n" if soak_note else "")
+            + f"ok - sw_reset accepted (host={resolved}); board detail: {body.get('detail')!r} -- "
             f"expect ~10-15s unreachable; then check safety_get_status() -- an S6a trip is NOT "
             f"expected (none was observed for sw_reset, 2026-10-01), but if one latched, clear it "
             f"with safety_clear_trip() only once trip_mask is confirmed to be exactly 0x0020")

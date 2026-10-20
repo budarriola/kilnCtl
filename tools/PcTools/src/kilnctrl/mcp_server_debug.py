@@ -383,6 +383,7 @@ def debug_reset(
     verify_window_s: float = reset_probe.DEFAULT_WINDOW_S,
     allow_dark_rereset: bool = False,
     allow_running: bool = False,
+    wait_for_confirm: bool = True,
 ) -> str:
     """Resets `peer` ("esp"/"pico"). `mode` is "run" (default, resumes
     execution), "halt" (resets and halts), or "init" (resets and runs any
@@ -416,11 +417,19 @@ def debug_reset(
 
     Guard (peer="esp"): also REFUSES while a profile is running or paused
     (a reset mid-firing drops relay control); pass allow_running=True
-    (exactly True) to override."""
+    (exactly True) to override.
+
+    BC-01: for peer="esp" with `wait_for_confirm=True` (default) first waits
+    until the board's uptime is >= 35 s (past the 30 s boot-confirm soak),
+    since boots younger than the soak count toward boot_guard's recovery
+    threshold of 3. Unreadable uptime does not block. Pass False to skip."""
     if peer == debug_probe.PEER_ESP and allow_running is not True:
         refusal = _esp_profile_running_refusal("reset")
         if refusal is not None:
             return refusal
+    soak_note = ""
+    if peer == debug_probe.PEER_ESP and wait_for_confirm:
+        soak_note = _wait_boot_soak()
     if peer == debug_probe.PEER_ESP and allow_dark_rereset is not True:
         dark = reset_probe.recent_dark_esp_reset(debug_probe._repo_root())
         if dark is not None:
@@ -497,7 +506,7 @@ def debug_reset(
             + output.strip()
         )
     if ok:
-        msg = f"reset {peer} ({mode}) OK"
+        msg = (soak_note + "\n" if soak_note else "") + f"reset {peer} ({mode}) OK"
         marker_line = _reset_marker_line(post_state)
         if marker_line:
             msg += "\n" + marker_line
@@ -518,6 +527,28 @@ def debug_reset(
     failed = _openocd_error_message(f"reset failed for {peer}", output)
     marker_line = _reset_marker_line(post_state)
     return f"{failed}\n{marker_line}" if marker_line else failed
+
+
+def _wait_boot_soak() -> str:
+    from .mcp_server_flash import _resolve_verify_hosts  # local: avoids a circular import
+    try:
+        hosts = _resolve_verify_hosts(None)
+    except Exception as exc:  # noqa: BLE001
+        return f"NOTE: could not resolve board host ({exc}); boot-confirm soak not checked."
+    if not hosts:
+        return ""
+    return reset_probe.wait_for_boot_soak_http(hosts[0])
+
+
+def _wait_boot_soak() -> str:
+    from .mcp_server_flash import _resolve_verify_hosts  # local: avoids a circular import
+    try:
+        hosts = _resolve_verify_hosts(None)
+    except Exception as exc:  # noqa: BLE001
+        return f"NOTE: could not resolve board host ({exc}); boot-confirm soak not checked."
+    if not hosts:
+        return ""
+    return reset_probe.wait_for_boot_soak_http(hosts[0])
 
 
 def _probe_esp_after_reset(window_s: float) -> "reset_probe.ProbeResult":

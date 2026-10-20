@@ -50,6 +50,11 @@
   Python interpreter with numpy and Pillow. Defaults to this tree's PcTools
   venv (a fresh worktree has none, so pass the main tree's).
 
+.PARAMETER StartCorners
+  Eight comma-separated numbers (TL,TR,BL,BR x,y in frame px) giving the panel's rough position
+  when the camera has moved too far for the automatic search. The bottom
+  corners may lie below the frame. The text fit refines them.
+
 .PARAMETER ReadAttempts
   Live captures to try before giving up on reading the screen (default 4).
   Ignored with -Image.
@@ -69,6 +74,7 @@ param(
     [switch]$DryRun,
     [switch]$Disconnect,
     [string]$ProfileName,
+    [string]$StartCorners,
     [int]$ReadAttempts = 4,
     [int]$ConnectTimeoutSec = 20,
     [string]$Python
@@ -145,6 +151,7 @@ try {
         # -I keeps a stray module in the cwd from shadowing the reader, and also
         # ignores PYTHONPATH, so the source dir goes on sys.path explicitly.
         $pyArgs = @('-I', '-c', $boot, $src, '--image', $imgPath, '--mode', $Mode)
+        if ($StartCorners) { $pyArgs += @('--start-corners', $StartCorners) }
         if (-not $DryRun) { $pyArgs += @('--candidates-out', $candFile) }
         $json = & $venvPython @pyArgs
         $rc = $LASTEXITCODE

@@ -151,7 +151,8 @@ typedef struct {
 } main_ota_confirm_ctx_t;
 
 #define MAIN_OTA_CONFIRM_POLL_MS   500
-#define MAIN_OTA_CONFIRM_WARN_MS   10000
+/* BC-01: derived from the soak (boot_guard.h) plus a margin, never a bare constant below it. */
+#define MAIN_OTA_CONFIRM_WARN_MS   (BOOT_CONFIRM_SOAK_MS + 15000)
 
 /* stack_margin_register() target for the ota_confirm task; cleared by the task before it self-deletes. */
 static TaskHandle_t s_ota_confirm_task;
