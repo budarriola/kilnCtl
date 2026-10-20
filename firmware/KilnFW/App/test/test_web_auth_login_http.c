@@ -358,6 +358,9 @@ static void set_admin_credential(const char *username, const char *password)
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, username, password, TEST_SALT, false) ==
                    HAL_OK,
                "test setup: admin credential stores cleanly");
+    // AU-02: a provisioned board always has a policy record; without one it fails closed.
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "test setup: policy stores cleanly");
 }
 
 static esp_err_t do_login(const char *username, const char *password)
@@ -758,6 +761,8 @@ static void set_user_credential(const char *username, const char *password)
 {
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, username, password, TEST_SALT, false) == HAL_OK,
                "test setup: user credential stores cleanly");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "test setup: policy stores cleanly");
 }
 
 static void test_user_success_does_not_reset_admin_ladder(void)

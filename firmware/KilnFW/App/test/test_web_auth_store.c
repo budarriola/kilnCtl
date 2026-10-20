@@ -532,6 +532,24 @@ static void test_au02_marker(void)
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "ABSENT, not UNREADABLE");
 }
 
+static void test_au02_provisioned_board_policy_loss_fails_closed(void)
+{
+    TEST_SECTION("AU-02 policy AND marker lost on a provisioned board fails closed");
+    reset_all();
+    static const uint8_t salt[WEB_AUTH_SALT_LEN] = {1, 2, 3};
+    web_auth_policy_t pol;
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "never provisioned: ABSENT (open)");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "password1", salt, false) == HAL_OK,
+               "set admin password");
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "no marker (lost or never set)");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "admin configured, policy and marker absent: UNREADABLE, not open");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", "password1", salt, false) == HAL_OK,
+               "set user password");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE, "user-only credential also fails closed");
+}
+
 static void test_policy_set_and_load(void)
 {
     TEST_SECTION("auth_policy set/load round trip");
@@ -1375,6 +1393,7 @@ int main(void)
     test_au02_marker();
     test_policy_absent_is_off();
     test_policy_set_and_load();
+    test_au02_provisioned_board_policy_loss_fails_closed();
     test_upgrade_path_unreadable_fails_closed();
     test_set_detects_lying_write();
     test_enable_gate_primitive();

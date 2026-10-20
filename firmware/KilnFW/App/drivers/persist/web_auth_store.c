@@ -999,7 +999,17 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
         if (web_auth_store_ever_enabled() || s_storage_reset_latched) {
             return WEB_AUTH_LOAD_UNREADABLE; // FS-02: latched storage reset also fails closed
         }
-        return WEB_AUTH_LOAD_ABSENT; // item 11: absent record reads as both-off
+        // AU-02 (2026-10-20): marker also gone (both keys lost), but a web credential
+        // record exists or is unreadable: the board was provisioned, so fail closed
+        // (dashboards only; admin logs in or bootstrap re-saves the policy). Only a
+        // board with no credential record at all is "never provisioned" and stays open.
+        web_auth_password_record_t cred;
+        web_auth_load_status_t ast = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &cred);
+        bool user_cfg = web_auth_store_password_configured(WEB_AUTH_ROLE_USER);
+        if (ast == WEB_AUTH_LOAD_UNREADABLE || (ast == WEB_AUTH_LOAD_OK && cred.configured) || user_cfg) {
+            return WEB_AUTH_LOAD_UNREADABLE;
+        }
+        return WEB_AUTH_LOAD_ABSENT; // item 11: never provisioned reads as both-off
     }
     if (blob.version != WEB_AUTH_STORE_VERSION) {
         return WEB_AUTH_LOAD_UNREADABLE;
