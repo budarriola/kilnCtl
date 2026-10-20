@@ -50,6 +50,8 @@ __all__ = [
     "decode_record",
     "decode_stream",
     "format_record",
+    "SystemCode",
+    "annotate_utc",
 ]
 
 # Byte layout (event_log.h / event_log.c, OFF_* constants) -- 32 bytes total:
@@ -98,6 +100,11 @@ class AutotuneCode(IntEnum):
     STARTED = 16
     DONE = 17
     ABORTED = 18
+
+
+class SystemCode(IntEnum):
+    # FD-04: arg = UTC epoch seconds (uint32 bits) at SNTP sync; uptime_s = same instant.
+    TIME_SYNC = 32
 
 
 class EventLogFormatError(ValueError):
@@ -173,8 +180,41 @@ def format_record(rec: EventRecord) -> str:
         code = _FIRING_CODE_NAMES.get(rec.code, f"CODE{rec.code}")
     elif rec.source == Source.AUTOTUNE:
         code = _AUTOTUNE_CODE_NAMES.get(rec.code, f"CODE{rec.code}")
+    elif rec.source == Source.SYSTEM and rec.code == SystemCode.TIME_SYNC:
+        code = "TIME_SYNC"
     else:
         code = f"CODE{rec.code}"
     zone = "-" if rec.zone == ZONE_NONE else str(rec.zone)
     note = f" note={rec.note!r}" if rec.note else ""
     return f"[{rec.uptime_s:>8}s] {sev:<5} {src:<8} {code:<12} zone={zone} arg={rec.arg}{note}"
+
+
+def annotate_utc(records):
+    """FD-04: map each record to a UTC epoch (int) or None.
+
+    A TIME_SYNC record (SYSTEM/32) pins uptime -> UTC for its boot; a record's
+    utc = sync_utc + (uptime_s - sync_uptime_s). A boot segment ends where
+    uptime_s decreases. Records before the segment's first sync are back-filled
+    from it (same boot, same monotonic clock); segments with no sync give None.
+    Returns a list of (record, utc_or_None) in input order."""
+    out = [None] * len(records)
+    start = 0
+    n = len(records)
+    while start < n:
+        end = start + 1
+        while end < n and records[end].uptime_s >= records[end - 1].uptime_s:
+            end += 1
+        anchors = [
+            r for r in records[start:end]
+            if r.source == Source.SYSTEM and r.code == SystemCode.TIME_SYNC
+        ]
+        for i in range(start, end):
+            if not anchors:
+                out[i] = None
+                continue
+            # nearest preceding anchor, else the first one (back-fill)
+            prior = [a for a in anchors if a.uptime_s <= records[i].uptime_s]
+            a = prior[-1] if prior else anchors[0]
+            out[i] = (a.arg & 0xFFFFFFFF) + (records[i].uptime_s - a.uptime_s)
+        start = end
+    return list(zip(records, out))

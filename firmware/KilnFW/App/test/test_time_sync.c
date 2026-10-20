@@ -328,9 +328,21 @@ static void test_ts_set_tz_refused_under_reset_mark(void)
     cfg_fs_deinit();
 }
 
+static void test_ts_fd04_sync_event_once_per_sync(void)
+{
+    time_t e = 0;
+    TEST_CHECK(!time_sync_take_event(&e), "FD-04: no event before any sync");
+    struct timeval tv = {.tv_sec = 1800000000L, .tv_usec = 0};
+    sntp_sync_cb(&tv);
+    TEST_CHECK(time_sync_take_event(&e), "FD-04: event pending after sync");
+    TEST_CHECK(e == (time_t)1800000000L, "FD-04: event carries the synced UTC epoch");
+    TEST_CHECK(!time_sync_take_event(&e), "FD-04: event consumed, not repeated");
+}
+
 static void run_test_time_sync(void)
 {
     TEST_SECTION("time_sync (TZ validation + degrade-to-UTC)");
+    test_ts_fd04_sync_event_once_per_sync();
 
     // ---- time_sync_tz_is_valid(): valid strings accepted -------------------
     TEST_CHECK(time_sync_tz_is_valid("UTC0"), "plain UTC accepted");

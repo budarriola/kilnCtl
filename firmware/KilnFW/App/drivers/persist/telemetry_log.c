@@ -17,6 +17,7 @@
 #include "profile_executor.h"
 #include "stack_margin.h"
 #include "telemetry_format.h"
+#include "time_sync.h" /* FD-04: time_sync_take_event() */
 
 static const char *TAG = "KTEL";
 
@@ -241,6 +242,15 @@ static void telemetry_log_task(void *arg)
                             EVENT_LOG_ZONE_NONE, arg, note_ptr);
         }
         firing_prev_state = fst->state;
+
+        /* FD-04: log uptime->UTC mapping once per SNTP sync into both stores. */
+        time_t sync_utc;
+        if (time_sync_take_event(&sync_utc)) {
+            event_log_emit(LOG_STORE_KIND_FIRING, EVENT_LOG_SEV_INFO, EVENT_LOG_SRC_SYSTEM,
+                           EVENT_CODE_SYS_TIME_SYNC, EVENT_LOG_ZONE_NONE, (int32_t)(uint32_t)sync_utc, NULL);
+            event_log_emit(LOG_STORE_KIND_AUTOTUNE, EVENT_LOG_SEV_INFO, EVENT_LOG_SRC_SYSTEM,
+                           EVENT_CODE_SYS_TIME_SYNC, EVENT_LOG_ZONE_NONE, (int32_t)(uint32_t)sync_utc, NULL);
+        }
 
         /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag warning event,
          * ALWAYS checked (not gated on ramp_assist_enabled -- see

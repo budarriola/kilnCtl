@@ -117,6 +117,24 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
+/* FD-04: set by sntp_sync_cb, consumed by time_sync_take_event(). Guarded by s_status_mux. */
+static bool s_event_pending;
+
+bool time_sync_take_event(time_t *utc_epoch)
+{
+    bool pending;
+    time_t e;
+    portENTER_CRITICAL(&s_status_mux);
+    pending = s_event_pending;
+    e = s_status.last_sync_epoch;
+    s_event_pending = false;
+    portEXIT_CRITICAL(&s_status_mux);
+    if (pending && utc_epoch) {
+        *utc_epoch = e;
+    }
+    return pending;
+}
+
 /* Runs on the lwIP SNTP task -- must stay fast and non-blocking, no logging
  * of anything that could itself block (ESP_LOGI is fine, it's buffered). */
 static void sntp_sync_cb(struct timeval *tv)
@@ -124,6 +142,7 @@ static void sntp_sync_cb(struct timeval *tv)
     portENTER_CRITICAL(&s_status_mux);
     s_status.ever_synced = true;
     s_status.last_sync_epoch = tv ? (time_t)tv->tv_sec : time(NULL);
+    s_event_pending = true; /* FD-04: telemetry_log task writes the TIME_SYNC event, not this lwIP task */
     portEXIT_CRITICAL(&s_status_mux);
     ESP_LOGI(TAG, "SNTP sync landed");
 }

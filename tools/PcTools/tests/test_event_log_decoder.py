@@ -150,3 +150,39 @@ def test_decode_record_wrong_version_raises():
     mutated = bytes([good[0], good[1] + 1]) + good[2:]
     with pytest.raises(eld.EventLogFormatError):
         eld.decode_record(mutated)
+
+
+# ---------------------------------------------------------------------------
+# FD-04: TIME_SYNC uptime -> UTC mapping
+# ---------------------------------------------------------------------------
+def _rec(up, src=eld.Source.FIRING, code=0, arg=0):
+    return eld.EventRecord(
+        severity=0, source=int(src), code=code, zone=eld.ZONE_NONE, uptime_s=up, arg=arg, note=""
+    )
+
+
+def _sync(up, utc):
+    return _rec(up, eld.Source.SYSTEM, eld.SystemCode.TIME_SYNC, utc)
+
+
+def test_annotate_utc_maps_and_backfills_within_boot():
+    recs = [_rec(10), _sync(100, 1_800_000_000), _rec(160)]
+    got = [u for _, u in eld.annotate_utc(recs)]
+    assert got == [1_800_000_000 - 90, 1_800_000_000, 1_800_000_060]
+
+
+def test_annotate_utc_new_boot_without_sync_is_none():
+    recs = [_sync(100, 1_800_000_000), _rec(200), _rec(5), _rec(50)]
+    got = [u for _, u in eld.annotate_utc(recs)]
+    assert got[:2] == [1_800_000_000, 1_800_000_100]
+    assert got[2:] == [None, None]
+
+
+def test_annotate_utc_uint32_arg_after_2038():
+    arg = (2_200_000_000 & 0xFFFFFFFF) - (1 << 32)  # stored as negative int32
+    recs = [_sync(1, arg), _rec(11)]
+    assert [u for _, u in eld.annotate_utc(recs)] == [2_200_000_000, 2_200_000_010]
+
+
+def test_format_time_sync_name():
+    assert "TIME_SYNC" in eld.format_record(_sync(1, 5))

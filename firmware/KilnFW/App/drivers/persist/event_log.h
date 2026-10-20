@@ -94,6 +94,11 @@ typedef enum {
     EVENT_CODE_TUNE_STARTED = 16,
     EVENT_CODE_TUNE_DONE = 17,
     EVENT_CODE_TUNE_ABORTED = 18,
+
+    /* FD-04: SYSTEM source. arg = UTC epoch seconds (uint32 bits stored in the int32) at the
+     * moment of the SNTP sync; the record's own uptime_s is the same instant, so a decoder
+     * maps uptime -> UTC as utc = arg + (uptime_s' - uptime_s). Wall time is display only. */
+    EVENT_CODE_SYS_TIME_SYNC = 32,
 } event_log_code_t;
 
 /* 0xFF in the `zone` field means "not zone-specific" (a global/run-level
