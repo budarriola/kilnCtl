@@ -1,0 +1,109 @@
+{
+ "1_dashboard": {
+  "title": "kilnCtl",
+  "body_chars": 262,
+  "dialog_open": false
+ },
+ "2_light": {
+  "chain": [
+   [
+    "http://192.168.1.156/diagnostics",
+    302,
+    "no-store"
+   ],
+   [
+    "http://192.168.1.156/?next=/diagnostics",
+    200,
+    "no-cache"
+   ]
+  ],
+  "final_url": "http://192.168.1.156/",
+  "protected_dom": false,
+  "colors": {
+   "panel_bg": "rgb(36, 42, 58)",
+   "panel_fg": "rgb(240, 240, 240)",
+   "overlay_bg": "rgba(0, 0, 0, 0.55)",
+   "body_bg": "rgb(255, 255, 255)"
+  },
+  "dialog": true
+ },
+ "2_dark": {
+  "chain": [
+   [
+    "http://192.168.1.156/diagnostics",
+    302,
+    "no-store"
+   ],
+   [
+    "http://192.168.1.156/?next=/diagnostics",
+    200,
+    "no-cache"
+   ]
+  ],
+  "final_url": "http://192.168.1.156/",
+  "protected_dom": false,
+  "colors": {
+   "panel_bg": "rgb(36, 42, 58)",
+   "panel_fg": "rgb(240, 240, 240)",
+   "overlay_bg": "rgba(0, 0, 0, 0.55)",
+   "body_bg": "rgb(26, 31, 43)"
+  },
+  "dialog": true
+ },
+ "3_prompt_first": {
+  "href": "/profiles",
+  "url_while_dialog": "http://192.168.1.156/",
+  "navigated_before_login": false,
+  "landed": "http://192.168.1.156/profiles"
+ },
+ "4_shells": {
+  "/diagnostics": {
+   "status": 200,
+   "cache_control": "no-store",
+   "url": "http://192.168.1.156/diagnostics"
+  },
+  "/settings/zones": {
+   "status": 200,
+   "cache_control": "no-store",
+   "url": "http://192.168.1.156/settings/zones"
+  },
+  "/profiles": {
+   "status": 200,
+   "cache_control": "no-store",
+   "url": "http://192.168.1.156/profiles"
+  },
+  "/readiness": {
+   "status": 200,
+   "cache_control": "no-store",
+   "url": "http://192.168.1.156/readiness"
+  }
+ },
+ "6_diag": {
+  "has_Repeats": true,
+  "has_Count": true,
+  "kiln_nvs_lines": [
+   "kiln_nvs \u2014 type",
+   "kiln_nvs \u2014 offset",
+   "kiln_nvs \u2014 size",
+   "kiln_nvs"
+  ],
+  "bundle_href": "/api/diag/bundle",
+  "bundle": {
+   "click_download": "FAILED: Download.save_as: canceled",
+   "fetch_status": 200,
+   "ctype": "application/octet-stream",
+   "cdisp": "attachment; filename=\"kiln_support_bundle.kdiag\"",
+   "bytes": 13923,
+   "head": "KDF1 _ma",
+   "coredump_in_bytes": true
+  }
+ },
+ "5_logout": {
+  "logout_btn_visible": true,
+  "url_after_logout": "http://192.168.1.156/",
+  "url_after_back": "http://192.168.1.156/",
+  "protected_dom_after_back": false,
+  "dialog_visible": true,
+  "session_after": "{\"role\":\"none\",\"prompt\":false,\"seconds_left\":-1,\"bootstrap_needed\":false,\"auth_enabled\":true}"
+ }
+}
