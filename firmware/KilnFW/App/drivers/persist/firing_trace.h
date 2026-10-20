@@ -11,6 +11,10 @@
 // synchronously through the flash hop. The flush job rewrites the whole slot file atomically
 // (cfg_fs_write_atomic: temp + rename), so a power cut leaves the previous complete flush.
 //
+// FY-02/03: if the worker refuses every post (slot busy forever), no periodic flush happens and the
+// loss on a power cut is the WHOLE firing so far (only the end-of-firing flush persists); the retry is
+// rate-limited to once per new sample and logged once, so it costs the control tick nothing extra.
+//
 // WORST-CASE LOSS ON A POWER CUT: the samples not yet flushed, i.e. at most FT_FLUSH_EVERY (10) samples
 // = 10 minutes (plus the one or two appended while a flush is in flight). A cut during the write itself
 // loses no more: the rename is atomic, the older file stays.
@@ -51,12 +55,18 @@ extern "C" {
 
 #define FT_FLAG_TRUNCATED 0x0001u
 #define FT_FLAG_CLOSED 0x0002u
+/* FY-05: never stored in a file. Derived in RAM: the file says closed:false but no firing is
+ * writing it any more (ESP rebooted mid-firing, or the final flush failed). */
+#define FT_FLAG_INTERRUPTED 0x0004u
+/* FY-04: a listed/opened firing is "in progress" iff neither CLOSED nor INTERRUPTED. */
+#define FT_IN_PROGRESS(flags) (((flags) & (FT_FLAG_CLOSED | FT_FLAG_INTERRUPTED)) == 0u)
 
 typedef struct {
     uint32_t seq; /* firing id; 0 = empty slot */
     uint32_t start_epoch;
     uint16_t n;
     uint16_t flags;
+    uint32_t last_epoch; /* FY-04: UTC epoch of the last DURABLE sample (0 = unsynced/none) */
 } firing_trace_entry_t;
 
 /* IO seam. All members optional; a NULL write disables persistence (host default). */

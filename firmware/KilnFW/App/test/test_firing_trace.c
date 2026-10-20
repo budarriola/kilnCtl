@@ -27,6 +27,9 @@ static esp_err_t g_write_fail; /* ESP_OK = succeed */
 static void (*g_pending)(void *);
 static int g_post_calls;
 static int g_run_calls;
+static bool g_post_refuse; /* FY-02: post refused forever */
+static bool g_run_fail_queued; /* FY-07: run() queues the job but reports an error */
+static void (*g_run_queued)(void *);
 
 static ramfile_t *rf_find(const char *p, int create)
 {
@@ -68,6 +71,7 @@ static esp_err_t t_read(const char *p, void *buf, size_t cap, size_t *out)
 static esp_err_t t_post(void (*fn)(void *))
 {
     g_post_calls++;
+    if (g_post_refuse) return ESP_ERR_INVALID_STATE;
     if (g_pending) return ESP_ERR_INVALID_STATE;
     g_pending = fn;
     return ESP_OK;
@@ -76,6 +80,10 @@ static esp_err_t t_post(void (*fn)(void *))
 static esp_err_t t_run(void (*fn)(void *), void *a)
 {
     g_run_calls++;
+    if (g_run_fail_queued) {
+        g_run_queued = fn;
+        return ESP_FAIL;
+    }
     fn(a);
     return ESP_OK;
 }
@@ -109,6 +117,9 @@ static void fresh(void)
     g_write_calls = g_post_calls = g_run_calls = 0;
     g_write_fail = ESP_OK;
     g_pending = NULL;
+    g_post_refuse = false;
+    g_run_fail_queued = false;
+    g_run_queued = NULL;
     firing_trace_init(&k_io);
 }
 
@@ -287,6 +298,75 @@ static void test_csv(void)
     TEST_CHECK(firing_trace_csv_row(&v, 1, line, sizeof(line)) == 0, "index past n refused");
 }
 
+static void test_refused_post(void)
+{
+    TEST_SECTION("firing_trace: FY-02/03 post refused forever");
+    fresh();
+    g_post_refuse = true;
+    g_up = 0;
+    float t[3] = {1, 2, 3};
+    firing_trace_note(1, 60, 0, 1.0f, t, t, 0);
+    for (int i = 0; i < 50; i++) firing_trace_service(); /* 50 executor ticks, one sample */
+    TEST_CHECK(g_post_calls == 1, "FY-03: refused post is retried at most once per sample, not per tick");
+    for (int i = 0; i < 11; i++) {
+        note(1, 100.0f, 50.0f + i, 0.5f);
+        for (int k = 0; k < 20; k++) firing_trace_service();
+    }
+    TEST_CHECK(g_post_calls <= 12, "FY-03: one attempt per new sample (12 samples => <= 12 posts)");
+    TEST_CHECK(durable_n(1) == (size_t)-1, "FY-02: nothing durable while every post is refused");
+    firing_trace_entry_t e[FT_SLOTS];
+    TEST_CHECK(firing_trace_list(e) == 0, "no flushed file listed (loss = whole firing so far, documented)");
+    firing_trace_end();
+    TEST_CHECK(durable_n(1) == 12, "end-of-firing flush still persists everything");
+    g_post_refuse = false;
+}
+
+static void test_in_progress_and_interrupted(void)
+{
+    TEST_SECTION("firing_trace: FY-04 in_progress/last_flush, FY-05 interrupted after reboot");
+    fresh();
+    run_firing(40, 3);
+    firing_trace_entry_t e[FT_SLOTS];
+    TEST_CHECK(firing_trace_list(e) == 1, "listed");
+    TEST_CHECK(FT_IN_PROGRESS(e[0].flags), "FY-04: active firing is in_progress");
+    TEST_CHECK(e[0].last_epoch == 1700000000u + 60u, "FY-04: last_flush epoch = newest durable sample (1 flushed)");
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_OK && FT_IN_PROGRESS(v.entry.flags) &&
+                   v.entry.last_epoch == 1700000000u + 60u,
+               "FY-04: open() reports in_progress and last flush");
+    firing_trace_reset_for_test();
+    firing_trace_init(&k_io); /* reboot mid-firing */
+    TEST_CHECK(firing_trace_list(e) == 1 && (e[0].flags & FT_FLAG_INTERRUPTED) && !FT_IN_PROGRESS(e[0].flags),
+               "FY-05: stale closed:false file is interrupted, not in progress, after boot");
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_OK && (v.entry.flags & FT_FLAG_INTERRUPTED),
+               "FY-05: open() reports interrupted");
+    fresh();
+    run_firing(41, 3);
+    firing_trace_end();
+    firing_trace_list(e);
+    TEST_CHECK((e[0].flags & FT_FLAG_CLOSED) && !(e[0].flags & FT_FLAG_INTERRUPTED) && e[0].last_epoch == 1700000000u + 180u,
+               "closed firing is neither in progress nor interrupted; last flush = last sample");
+}
+
+static void test_busy_not_cleared_while_queued(void)
+{
+    TEST_SECTION("firing_trace: FY-07 busy flag stays set while a job may still be queued");
+    fresh();
+    run_firing(50, 3);
+    g_run_fail_queued = true;
+    firing_trace_end(); /* run() errors but the job is queued and still reads the buffer */
+    TEST_CHECK(g_run_queued != NULL, "final job queued");
+    g_up = 0;
+    TEST_CHECK(!note(51, 1.0f, 1.0f, 0.0f), "FY-07: a new firing cannot start (reuse the buffer) while the job is queued");
+    g_run_fail_queued = false;
+    g_run_queued(NULL); /* the worker finally runs it */
+    g_run_queued = NULL;
+    TEST_CHECK(durable_n(1) == 3, "queued job wrote firing 1 intact");
+    TEST_CHECK(note(51, 1.0f, 1.0f, 0.0f), "new firing starts once the job drained");
+    TEST_CHECK(durable_n(1) == 3, "firing 1 file not mixed with firing 2");
+}
+
 int main(void)
 {
     test_append_and_batch();
@@ -297,6 +377,9 @@ int main(void)
     test_truncation();
     test_post_busy();
     test_csv();
+    test_refused_post();
+    test_in_progress_and_interrupted();
+    test_busy_not_cleared_while_queued();
     firing_trace_reset_for_test();
     wipe_files();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

@@ -15,14 +15,18 @@ static esp_err_t ft_list_json(httpd_req_t *req)
 {
     firing_trace_entry_t e[FT_SLOTS];
     size_t n = firing_trace_list(e);
-    char json[48 + FT_SLOTS * 96];
+    char json[48 + FT_SLOTS * 160];
     size_t o = (size_t)snprintf(json, sizeof(json), "{\"firings\":[");
     for (size_t i = 0; i < n && o < sizeof(json); i++) {
         o += (size_t)snprintf(json + o, sizeof(json) - o,
-                              "%s{\"id\":%lu,\"start_epoch\":%lu,\"samples\":%u,\"closed\":%s,\"truncated\":%s}",
+                              "%s{\"id\":%lu,\"start_epoch\":%lu,\"samples\":%u,\"closed\":%s,\"truncated\":%s,"
+                              "\"in_progress\":%s,\"interrupted\":%s,\"last_flush_epoch\":%lu}",
                               i ? "," : "", (unsigned long)e[i].seq, (unsigned long)e[i].start_epoch,
                               (unsigned)e[i].n, (e[i].flags & FT_FLAG_CLOSED) ? "true" : "false",
-                              (e[i].flags & FT_FLAG_TRUNCATED) ? "true" : "false");
+                              (e[i].flags & FT_FLAG_TRUNCATED) ? "true" : "false",
+                              FT_IN_PROGRESS(e[i].flags) ? "true" : "false",
+                              (e[i].flags & FT_FLAG_INTERRUPTED) ? "true" : "false",
+                              (unsigned long)e[i].last_epoch);
     }
     if (o < sizeof(json)) o += (size_t)snprintf(json + o, sizeof(json) - o, "]}");
     httpd_resp_set_type(req, "application/json");
@@ -66,7 +70,13 @@ esp_err_t firing_trace_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
     char disp[64];
-    snprintf(disp, sizeof(disp), "attachment; filename=\"firing_%lu.csv\"", id);
+    snprintf(disp, sizeof(disp), "attachment; filename=\"firing_%lu%s.csv\"", id,
+             FT_IN_PROGRESS(v.entry.flags) ? "_in_progress" : "");
+    /* FY-04: the CSV holds only flushed samples; say so for an in-progress firing. */
+    char lastf[16];
+    snprintf(lastf, sizeof(lastf), "%lu", (unsigned long)v.entry.last_epoch);
+    httpd_resp_set_hdr(req, "X-Firing-In-Progress", FT_IN_PROGRESS(v.entry.flags) ? "1" : "0");
+    httpd_resp_set_hdr(req, "X-Firing-Last-Flush-Epoch", lastf);
     httpd_resp_set_type(req, "text/csv");
     httpd_resp_set_hdr(req, "Content-Disposition", disp);
     size_t o = firing_trace_csv_header(line, FT_CSV_LINE_CAP);

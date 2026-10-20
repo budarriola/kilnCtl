@@ -22,7 +22,7 @@ static esp_err_t ft_run(void (*fn)(void *arg), void *arg)
 
 static esp_err_t ft_post(void (*fn)(void *arg))
 {
-    return uart_bridge_ext_post_on_flash_worker(fn);
+    return uart_bridge_ext_post_trace_on_flash_worker(fn); /* FY-01: own slot, never the safety recapture's */
 }
 
 void firing_trace_glue_init(void)

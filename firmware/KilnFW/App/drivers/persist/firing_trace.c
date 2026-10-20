@@ -26,6 +26,9 @@ static volatile bool s_active;
 static volatile bool s_closed; /* end() was called for the active firing */
 static volatile bool s_job_busy;
 static volatile bool s_flush_due;
+static bool s_post_hold;       /* FY-03: last post was refused; hold retries until a new sample arrives */
+static uint16_t s_post_hold_n;
+static bool s_post_refused_logged;
 static uint32_t s_run_token;
 static bool s_have_token;
 static uint32_t s_ended_token;
@@ -37,6 +40,7 @@ static volatile uint16_t s_flushed;
 static volatile bool s_closed_flushed;
 static bool s_truncated;
 static uint32_t s_last_uptime;
+static uint32_t s_last_epoch; /* FY-04: epoch of the newest appended sample */
 static bool s_have_last;
 
 static void put16(uint8_t *p, uint16_t v)
@@ -98,6 +102,7 @@ static bool parse_file(const uint8_t *b, size_t len, firing_trace_entry_t *e)
     e->start_epoch = get32(b + 12);
     e->n = n;
     e->flags = get16(b + 18);
+    e->last_epoch = n ? get32(b + FT_HDR_SIZE + (size_t)(n - 1) * FT_REC_SIZE + 4) : 0;
     return e->seq != 0;
 }
 
@@ -119,6 +124,14 @@ void firing_trace_reset_for_test(void)
     s_n = 0;
     s_flushed = 0;
     s_closed_flushed = false;
+    s_post_hold = false;
+    s_post_refused_logged = false;
+}
+
+/* FY-05: a file stored closed:false is interrupted unless it is the firing being written right now. */
+static void derive_flags(firing_trace_entry_t *e)
+{
+    if (!(e->flags & FT_FLAG_CLOSED) && !(s_active && s_seq == e->seq)) e->flags |= FT_FLAG_INTERRUPTED;
 }
 
 void firing_trace_init(const firing_trace_io_t *io)
@@ -137,6 +150,7 @@ void firing_trace_init(const firing_trace_io_t *io)
         firing_trace_entry_t e;
         if (s_io.read(path, s_buf, FT_FILE_MAX, &len) != ESP_OK || !parse_file(s_buf, len, &e)) continue;
         if ((e.seq % FT_SLOTS) != slot) continue;
+        derive_flags(&e); /* FY-05: left open across a reboot => interrupted */
         s_idx[slot] = e;
         if (e.seq >= s_next_seq) s_next_seq = e.seq + 1;
     }
@@ -179,6 +193,8 @@ bool firing_trace_note(uint32_t run_token, uint32_t uptime_s, uint32_t epoch, fl
         s_n = 0;
         s_flushed = 0;
         s_flush_due = false;
+        s_post_hold = false;
+        s_post_refused_logged = false;
     }
     if (s_have_last && (uint32_t)(uptime_s - s_last_uptime) < FT_SAMPLE_PERIOD_S) return false;
     if (s_n >= FT_MAX_SAMPLES) {
@@ -196,6 +212,7 @@ bool firing_trace_note(uint32_t run_token, uint32_t uptime_s, uint32_t epoch, fl
     }
     r[19] = segment;
     s_last_uptime = uptime_s;
+    s_last_epoch = epoch;
     s_have_last = true;
     uint16_t n = (uint16_t)(s_n + 1);
     s_n = n; /* publish after the record is complete */
@@ -223,6 +240,7 @@ void firing_trace_flush_job(void *arg)
                 e->start_epoch = s_start_epoch;
                 e->n = n;
                 e->flags = flags;
+                e->last_epoch = s_last_epoch;
             } else {
                 FT_LOGW("trace flush failed (%d); %u samples stay in RAM", (int)err, (unsigned)n);
             }
@@ -234,11 +252,21 @@ void firing_trace_flush_job(void *arg)
 void firing_trace_service(void)
 {
     if (!s_flush_due || s_job_busy || !s_io.post) return;
+    if (s_post_hold && s_n == s_post_hold_n) return; /* FY-03: refused; retry only after a new sample */
     s_flush_due = false;
     s_job_busy = true;
     if (s_io.post(firing_trace_flush_job) != ESP_OK) {
         s_job_busy = false;
-        s_flush_due = true; /* worker busy: retry on a later tick */
+        s_flush_due = true; /* worker busy: retry, but not before the next sample */
+        s_post_hold = true;
+        s_post_hold_n = s_n;
+        if (!s_post_refused_logged) {
+            s_post_refused_logged = true;
+            FT_LOGW("trace flush post refused; retrying once per sample");
+        }
+    } else {
+        s_post_hold = false;
+        s_post_refused_logged = false;
     }
 }
 
@@ -250,8 +278,11 @@ void firing_trace_end(void)
     s_job_busy = true;
     esp_err_t err = s_io.run ? s_io.run(firing_trace_flush_job, NULL) : ESP_FAIL;
     if (err != ESP_OK) {
-        s_job_busy = false;
-        FT_LOGW("final trace flush did not run (%d)", (int)err);
+        /* FY-07: the job may already be queued and still reading s_buf, so s_job_busy is NOT cleared here:
+         * the job clears it when it finishes, and note() refuses to start a new firing while it is set. If the
+         * job never ran (worker not started) tracing stays off until reboot, loudly, rather than risk two
+         * firings mixing in one file. */
+        FT_LOGW("final trace flush did not run (%d); tracing held until the job drains", (int)err);
     }
     s_ended_token = s_run_token;
     s_have_ended = true;
@@ -262,7 +293,11 @@ size_t firing_trace_list(firing_trace_entry_t out[FT_SLOTS])
 {
     size_t k = 0;
     for (uint32_t i = 0; i < FT_SLOTS; i++) {
-        if (s_idx[i].seq != 0) out[k++] = s_idx[i];
+        if (s_idx[i].seq != 0) {
+            out[k] = s_idx[i];
+            derive_flags(&out[k]);
+            k++;
+        }
     }
     for (size_t a = 0; a < k; a++) { /* newest (highest seq) first */
         for (size_t b = a + 1; b < k; b++) {
@@ -287,6 +322,7 @@ esp_err_t firing_trace_open(uint32_t id, uint8_t *scratch, size_t cap, firing_tr
     if (err != ESP_OK) return err;
     if (!parse_file(scratch, len, &out->entry)) return ESP_ERR_INVALID_CRC;
     if (out->entry.seq != id) return ESP_ERR_NOT_FOUND;
+    derive_flags(&out->entry);
     out->samples = scratch + FT_HDR_SIZE;
     return ESP_OK;
 }

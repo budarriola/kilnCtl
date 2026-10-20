@@ -2113,6 +2113,8 @@ void executor_task_entry(void *arg)
                 time_t ft_now = time(NULL);
                 for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) { /* inactive zones: NaN, not stack garbage */
                     if (inactive_mask & (1u << zi)) { actual_c[zi] = NAN; duty[zi] = NAN; }
+                    /* FY-06: a monitor-only zone (relay-less HEATER) is never commanded: blank duty, not 0.0 */
+                    else if (s_exec.zones[zi].monitor_only) { duty[zi] = NAN; }
                 }
                 firing_trace_note((uint32_t)s_exec.history_run_start_tick, ticks_to_s(now),
                                   (ft_now >= (time_t)1577836800) ? (uint32_t)ft_now : 0u, s_exec.target_c,
