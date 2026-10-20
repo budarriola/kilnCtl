@@ -145,8 +145,24 @@ static void check_pm(void)
     free(t);
 }
 
+static void check_lcd_kiln_nvs(void)
+{
+    TEST_SECTION("LCD diagnostics NVS row reads the kiln_nvs partition and says so");
+    char *t = body_of("ui/ui_page_diagnostics.c", "static void build_nvs_statics(void)");
+    TEST_CHECK(t != NULL && strstr(t, "hal_kv_stats(\"kiln_nvs\", &stats)") != NULL,
+               "build_nvs_statics must call hal_kv_stats(\"kiln_nvs\", ...)");
+    free(t);
+    const char *cand[3] = {"../drivers/ui/ui_page_diagnostics.c", "App/drivers/ui/ui_page_diagnostics.c",
+                           "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c"};
+    char *f = test_read_source_anchored(__FILE__, cand[0], cand, 3);
+    TEST_CHECK(f != NULL && strstr(f, "build_stat_row(psram_page, \"kiln_nvs used/free/total\"") != NULL,
+               "row label must name the kiln_nvs partition");
+    free(f);
+}
+
 void run_test_lowlink_wiring(void)
 {
+    check_lcd_kiln_nvs();
     check_pm();
     check_up01();
     check_oa02();

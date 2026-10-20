@@ -727,7 +727,8 @@ static void build_firmware_statics(void)
     }
 }
 
-/* NVS usage is read once here too. nvs_get_stats() reflects live state in
+/* kiln_nvs (zones/rules/boot_history/trip_history; NOT the default "nvs"
+ * partition) usage is read once here too. nvs_get_stats() reflects live state in
  * principle, but the entries it counts (zones/rules/profiles/run_state) only
  * change on an explicit save from elsewhere in the UI, never as a
  * background process this page's 2s timer would need to catch -- so one
@@ -737,7 +738,7 @@ static void build_nvs_statics(void)
 {
     hal_kv_stats_t stats;
     char buf[64];
-    if (hal_kv_stats(NULL, &stats) == HAL_OK) {
+    if (hal_kv_stats("kiln_nvs", &stats) == HAL_OK) {
         snprintf(buf, sizeof(buf), "%u used / %u free / %u total",
                  (unsigned)stats.used_entries, (unsigned)stats.free_entries,
                  (unsigned)stats.total_entries);
@@ -1724,7 +1725,7 @@ lv_obj_t *ui_page_diagnostics_build(void)
     s_psram_largest_label = build_stat_row(psram_page, "PSRAM largest free block", UI_THEME_ACCENT_2);
     s_psram_min_label = build_stat_row(psram_page, "PSRAM free (worst-case)", UI_THEME_ACCENT_3);
     s_psram_total_label = build_stat_row(psram_page, "PSRAM total", UI_THEME_ACCENT_4);
-    s_nvs_stats_label = build_stat_row(psram_page, "NVS entries (used/free/total)", UI_THEME_ACCENT_1);
+    s_nvs_stats_label = build_stat_row(psram_page, "kiln_nvs used/free/total", UI_THEME_ACCENT_1);
     s_esp32_temp_label = build_stat_row(psram_page, "ESP32-S3 die temp", UI_THEME_ACCENT_2);
 
     /* Page 4: Safety & Board Health -- merged 2026-09-04 (see this file's
