@@ -44,6 +44,7 @@ unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT])
     return 1u;
 }
 uint32_t boot_history_latest_seq(void) { return 7u; }
+uint8_t boot_history_latest_rep(void) { return 0u; }
 esp_err_t boot_history_backfill_wall_time(uint32_t w) { s_backfill_calls++; s_backfill_val = w; return ESP_OK; }
 
 #include "../drivers/persist/telemetry_time_sync.c"
@@ -96,9 +97,26 @@ static void test_all(void)
     TEST_CHECK(count(LOG_STORE_KIND_AUTOTUNE, EVENT_CODE_SYS_TIME_SYNC) == 2, "FQ-03: a >60 s step is logged to the autotune store");
 }
 
+static void test_fv02_early_sync(void)
+{
+    TEST_SECTION("telemetry_time_sync: FV-02 SNTP before 60 s uptime still backfills at 60 s");
+    s_boot_marked = false; s_have_anchor = false; s_anchor_off = 0; s_wall_backfilled = false;
+    s_backfill_calls = 0; s_backfill_val = 0; s_em_n = 0;
+    sync_at(1900000000);
+    telemetry_time_sync_service(20);
+    TEST_CHECK(!s_pending && s_backfill_calls == 0, "FV-02: early sync acked, no backfill yet");
+    telemetry_time_sync_service(40);
+    TEST_CHECK(s_backfill_calls == 0, "FV-02: still none before 60 s");
+    telemetry_time_sync_service(61);
+    TEST_CHECK(s_backfill_calls == 1 && s_backfill_val == (uint32_t)(1900000000 - 20), "FV-02: deferred backfill runs once with the sync offset");
+    telemetry_time_sync_service(62);
+    TEST_CHECK(s_backfill_calls == 1, "FV-02: only once");
+}
+
 int main(void)
 {
     test_all();
+    test_fv02_early_sync();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures ? 1 : 0;
 }

@@ -19,6 +19,8 @@ static void reset_all(void)
     fake_kv_reset_all();
     fake_kv_set_write_safe_here(true);
     hal_kv_init_partition(KILN_NVS_PARTITION);
+    memset(&s_pending, 0, sizeof(s_pending));
+    s_coalesced = false;
 }
 
 static void test_first_boot(void)
@@ -65,7 +67,7 @@ static void test_wrap(void)
     TEST_SECTION("boot_history: wraps at 16, oldest dropped, seq keeps rising");
     reset_all();
     for (unsigned i = 0; i < BOOT_HISTORY_MAX + 5; i++) {
-        boot_history_record_boot(1, false, 0, 0, false, "g", 0);
+        boot_history_record_boot((uint8_t)(1 + (i & 1u)), false, 0, 0, false, "g", 0); /* alternate: no coalescing */
     }
     boot_history_blob_t b;
     TEST_CHECK(boot_history_load(&b), "loads");
@@ -162,8 +164,77 @@ static void test_bh01_bh02(void)
     TEST_CHECK(e.wall_time == 1700000000u, "BH-02: first value kept");
 }
 
+static void test_fw01_fw02_coalesce(void)
+{
+    TEST_SECTION("boot_history: FW-01 boot loop of 100 identical boots coalesces, FW-02 no backfill write");
+    reset_all();
+    for (unsigned i = 0; i < 100; i++) {
+        boot_history_record_boot(7, false, 5, 0, false, "x-gabc", 0);
+    }
+    unsigned writes = fake_kv_set_call_count();
+    TEST_CHECK(writes <= 8u, "FW-01: 100 identical boots cause at most 8 NVS writes");
+    TEST_CHECK(writes >= 2u, "FW-01: the count is still flushed periodically (not only the first boot)");
+    boot_history_blob_t b;
+    boot_history_entry_t e;
+    boot_history_load(&b);
+    TEST_CHECK(b.count == 1 && boot_history_blob_get(&b, 0, &e) && e.seq == 1u, "FW-01: one entry, no new seq per repeat");
+    TEST_CHECK(e.repeat >= 80 && e.repeat <= 99, "FW-01: persisted repeat count is within one flush of the truth");
+    boot_history_entry_t r[BOOT_HISTORY_RECENT];
+    TEST_CHECK(boot_history_recent(r) == 1u && r[0].repeat == 99, "FW-01: RAM cache has the exact repeat (99)");
+    unsigned before = fake_kv_set_call_count();
+    TEST_CHECK(boot_history_backfill_wall_time(1700000000u) != ESP_OK, "FW-02: coalesced boot refuses the backfill");
+    TEST_CHECK(fake_kv_set_call_count() == before, "FW-02: and writes nothing");
+
+    /* a different reason is a new entry, and folds the pending repeats into that single write */
+    boot_history_record_boot(3, false, 5, 0, false, "x-gabc", 0);
+    boot_history_load(&b);
+    TEST_CHECK(b.count == 2, "FW-01: different reason starts a new entry");
+    boot_history_blob_get(&b, 1, &e);
+    TEST_CHECK(e.repeat == 99, "FW-01: pending repeats folded into the previous entry on the next real write");
+    /* a different firmware is a new entry too */
+    boot_history_record_boot(3, false, 5, 0, false, "x-gdef", 0);
+    boot_history_load(&b);
+    TEST_CHECK(b.count == 3, "FW-01: different firmware starts a new entry");
+    /* v1 blob (524 B) is discarded cleanly */
+    reset_all();
+    uint8_t v1[524];
+    memset(v1, 0, sizeof(v1));
+    v1[0] = 1;
+    v1[1] = 1;
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_BOOT_HIST, v1, sizeof(v1));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(!boot_history_load(&b) && b.count == 0, "FW-01: old v1 blob discarded to an empty ring");
+    TEST_CHECK(boot_history_record_boot(1, false, 0, 0, false, "g", 0) == ESP_OK, "FW-01: first boot after a v1 blob records");
+}
+
+static void test_fv01_fv03(void)
+{
+    TEST_SECTION("boot_history: FV-01 unique per-boot id across coalesced boots, FV-03 crash boot gets its own entry");
+    reset_all();
+    uint32_t seen[8];
+    for (unsigned i = 0; i < 6; i++) {
+        boot_history_record_boot(7, false, 5, 0, false, "x-gabc", 0);
+        seen[i] = (boot_history_latest_seq() << 8) | boot_history_latest_rep();
+        for (unsigned j = 0; j < i; j++) {
+            TEST_CHECK(seen[j] != seen[i], "FV-01: every coalesced boot has a distinct (seq, rep) id");
+        }
+    }
+    TEST_CHECK(boot_history_latest_seq() == 1u, "FV-01: seq itself is still shared by the coalesced boots");
+    boot_history_record_boot(7, false, 5, 0x11u, true, "x-gabc", 0);
+    boot_history_blob_t b;
+    boot_history_entry_t e;
+    boot_history_load(&b);
+    TEST_CHECK(b.count == 2 && boot_history_blob_get(&b, 0, &e) && e.has_crash == 1 && e.dump_id == 0x11u,
+               "FV-03: same reason + fw but has_crash differs => distinct entry");
+}
+
 int main(void)
 {
+    test_fv01_fv03();
+    test_fw01_fw02_coalesce();
     test_bh01_bh02();
     test_first_boot();
     test_fields_and_order();

@@ -206,11 +206,11 @@ static esp_err_t sec_boot_history(diag_out_t *out, const char *name)
         kiln_json_escape_ctl(en.fw, s->fw, sizeof(s->fw));
         int n = snprintf(s->json, sizeof(s->json),
                          "%s{\"seq\":%lu,\"reset_reason\":\"%s\",\"prev_uptime_s\":%lu,"
-                         "\"prev_uptime_known\":%s,\"dump_id\":%lu,\"has_crash\":%s,\"fw\":\"%s\",\"time\":%lu}",
+                         "\"prev_uptime_known\":%s,\"dump_id\":%lu,\"has_crash\":%s,\"fw\":\"%s\",\"time\":%lu,\"repeat\":%u}",
                          i ? "," : "", (unsigned long)en.seq, boot_history_reason_name(en.reset_reason),
                          (unsigned long)en.prev_uptime_s, en.prev_uptime_known ? "true" : "false",
                          (unsigned long)en.dump_id, en.has_crash ? "true" : "false", s->fw,
-                         (unsigned long)en.wall_time);
+                         (unsigned long)en.wall_time, (unsigned)en.repeat);
         e = (n <= 0 || (size_t)n >= sizeof(s->json)) ? ESP_ERR_INVALID_SIZE
                                                       : diag_frame_write(out, name, s->json, (size_t)n);
     }
@@ -241,11 +241,11 @@ static esp_err_t sec_trip_history(diag_out_t *out, const char *name)
         int n = snprintf(s->json, sizeof(s->json),
                          "%s{\"seq\":%lu,\"reason\":%u,\"mask\":%u,\"zone\":%d,\"safety_tc_c\":%.1f,"
                          "\"threshold\":%.1f,\"pico_uptime_ms\":%lu,\"esp_uptime_s\":%lu,\"utc\":%lu,"
-                         "\"boot_seq\":%lu}",
+                         "\"boot_seq\":%lu,\"count\":%u}",
                          i ? "," : "", (unsigned long)en.seq, (unsigned)en.reason, (unsigned)en.mask,
                          en.zone == TRIP_HISTORY_ZONE_UNKNOWN ? -1 : (int)en.zone, (double)en.safety_tc_c,
                          (double)en.threshold, (unsigned long)en.pico_uptime_ms, (unsigned long)en.esp_uptime_s,
-                         (unsigned long)en.utc, (unsigned long)en.boot_seq);
+                         (unsigned long)en.utc, (unsigned long)en.boot_seq, (unsigned)(en.count ? en.count : 1u));
         e = (n <= 0 || (size_t)n >= sizeof(s->json)) ? ESP_ERR_INVALID_SIZE
                                                       : diag_frame_write(out, name, s->json, (size_t)n);
     }

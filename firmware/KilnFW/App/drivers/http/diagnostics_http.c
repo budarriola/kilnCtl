@@ -418,11 +418,11 @@ static bool append_boot_history_json(char *buf, size_t cap, size_t *o)
         n = snprintf(buf + *o, cap - *o,
                      "%s{\"seq\":%lu,\"reset_reason\":\"%s\",\"prev_uptime_s\":%lu,"
                      "\"prev_uptime_known\":%s,\"dump_id\":%lu,\"has_crash\":%s,"
-                     "\"fw\":\"%s\",\"time\":%lu}",
+                     "\"fw\":\"%s\",\"time\":%lu,\"repeat\":%u}",
                      i == 0 ? "" : ",", (unsigned long)e.seq, boot_history_reason_name(e.reset_reason),
                      (unsigned long)e.prev_uptime_s, e.prev_uptime_known ? "true" : "false",
                      (unsigned long)e.dump_id, e.has_crash ? "true" : "false", fw_esc,
-                     (unsigned long)e.wall_time);
+                     (unsigned long)e.wall_time, (unsigned)e.repeat);
         if (n < 0 || (size_t)n >= cap - *o) {
             free(bh);
             return false;
@@ -460,11 +460,11 @@ static bool append_trip_history_json(char *buf, size_t cap, size_t *o)
         n = snprintf(buf + *o, cap - *o,
                      "%s{\"seq\":%lu,\"reason\":%u,\"mask\":%u,\"zone\":%d,\"safety_tc_c\":%.1f,"
                      "\"threshold\":%.1f,\"pico_uptime_ms\":%lu,\"esp_uptime_s\":%lu,\"utc\":%lu,"
-                     "\"boot_seq\":%lu}",
+                     "\"boot_seq\":%lu,\"count\":%u}",
                      i == 0 ? "" : ",", (unsigned long)e.seq, (unsigned)e.reason, (unsigned)e.mask,
                      e.zone == TRIP_HISTORY_ZONE_UNKNOWN ? -1 : (int)e.zone, (double)e.safety_tc_c,
                      (double)e.threshold, (unsigned long)e.pico_uptime_ms, (unsigned long)e.esp_uptime_s,
-                     (unsigned long)e.utc, (unsigned long)e.boot_seq);
+                     (unsigned long)e.utc, (unsigned long)e.boot_seq, (unsigned)(e.count ? e.count : 1u));
         if (n < 0 || (size_t)n >= cap - *o) {
             free(th);
             return false;

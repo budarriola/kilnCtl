@@ -905,3 +905,37 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
     *out_count = (count < max_out) ? count : max_out;
     return ESP_OK;
 }
+
+/* FW-03: append two parts (e.g. batch header + records) to an EXISTING file in one open/sync/close.
+ * Not atomic: a power cut can tear the tail, so callers must carry their own per-record integrity
+ * (firing_trace's per-batch CRC32). The path buffer is on the heap (stack budgets). */
+esp_err_t cfg_fs_append(const char *rel_path, const void *p1, size_t n1, const void *p2, size_t n2)
+{
+    bool (*refuse)(void) = s_write_refuse_fn;
+    if (refuse && refuse()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!rel_path || (!p1 && n1 > 0) || (!p2 && n2 > 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!cfg_fs_is_available()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char *path = persist_scratch_alloc(CFG_FS_PATH_MAX);
+    if (!path) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (!path_join_ok(path, CFG_FS_PATH_MAX, s_base_dir, rel_path)) {
+        free(path);
+        return ESP_ERR_INVALID_ARG;
+    }
+    FILE *f = fopen(path, "ab");
+    free(path);
+    if (!f) {
+        return ESP_FAIL;
+    }
+    bool ok = (n1 == 0 || fwrite(p1, 1, n1, f) == n1) && (n2 == 0 || fwrite(p2, 1, n2, f) == n2) &&
+              fflush(f) == 0 && cfg_fs_fsync(f) == 0;
+    int rc = fclose(f);
+    return (ok && rc == 0) ? ESP_OK : ESP_FAIL;
+}

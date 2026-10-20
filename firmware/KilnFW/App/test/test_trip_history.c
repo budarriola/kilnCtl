@@ -25,6 +25,7 @@ static void reset_all(void)
     s_pend_head = 0;
     s_pend_tail = 0;
     s_dropped = 0;
+    s_shadow_valid = false;
 }
 
 static trip_history_entry_t mk(uint8_t trip_seq, uint8_t reason, uint32_t pico_ms)
@@ -35,7 +36,7 @@ static trip_history_entry_t mk(uint8_t trip_seq, uint8_t reason, uint32_t pico_m
     e.reason = reason;
     e.pico_uptime_ms = pico_ms;
     e.zone = TRIP_HISTORY_ZONE_UNKNOWN;
-    e.esp_uptime_s = 100u + trip_seq;
+    e.esp_uptime_s = 1000u * trip_seq; /* far apart: no FW-04 merging in the older tests */
     e.utc = 0u;
     e.boot_seq = 5u;
     e.safety_tc_c = 1234.5f;
@@ -58,7 +59,7 @@ static void test_first_trip(void)
     trip_history_entry_t g;
     TEST_CHECK(trip_history_blob_get(&b, 0, &g), "newest exists");
     TEST_CHECK(g.seq == 1u && g.reason == 6 && g.mask == 0x20u && g.zone == TRIP_HISTORY_ZONE_UNKNOWN &&
-                   g.boot_seq == 5u && g.utc == 0u && g.esp_uptime_s == 101u && g.pico_uptime_ms == 5000u,
+                   g.boot_seq == 5u && g.utc == 0u && g.esp_uptime_s == 1000u && g.pico_uptime_ms == 5000u,
                "fields stored (mask = 1<<(reason-1), S6a 0x0020)");
     TEST_CHECK(!trip_history_blob_get(&b, 1, &g), "only one entry");
     TEST_CHECK(trip_history_flush() == 0u, "empty queue flush is a no-op");
@@ -221,8 +222,75 @@ static void test_th01_th02(void)
     TEST_CHECK(b.count == 2u, "TH-02: exactly two persisted, no duplicates");
 }
 
+static void test_fw04_storm(void)
+{
+    TEST_SECTION("trip_history: FW-04 trip storm of 200 same-reason trips writes a bounded number of times");
+    reset_all();
+    for (unsigned i = 1; i <= 200; i++) {
+        trip_history_entry_t e = mk((uint8_t)i, 6, 10000u + i);
+        e.esp_uptime_s = 500u + i; /* one per second, all inside the 60 s window */
+        trip_history_note(&e);
+        trip_history_flush();
+    }
+    unsigned writes = fake_kv_set_call_count();
+    TEST_CHECK(writes <= 10u, "FW-04: 200 identical trips cause at most 10 NVS writes (1 + one per power of 2)");
+    trip_history_blob_t b;
+    trip_history_entry_t g;
+    TEST_CHECK(trip_history_load(&b) && b.count == 1, "FW-04: merged into a single entry");
+    trip_history_blob_get(&b, 0, &g);
+    TEST_CHECK(g.count == 128u, "FW-04: persisted count is the last power of 2 reached (128 of 200)");
+    TEST_CHECK(s_shadow_valid && s_shadow.count == 200u, "FW-04: RAM shadow holds the exact count");
+
+    /* a resend of the newest merged trip stays a duplicate */
+    unsigned before = fake_kv_set_call_count();
+    trip_history_entry_t again = mk(200, 6, 10200u);
+    again.esp_uptime_s = 700u;
+    trip_history_note(&again);
+    TEST_CHECK(trip_history_flush() == 0u && fake_kv_set_call_count() == before, "FW-04: resend of the newest trip is a no-op");
+
+    /* outside the window, or another reason: a new entry and a write */
+    trip_history_entry_t late = mk(201, 6, 20000u);
+    late.esp_uptime_s = 500u + 200u + TRIP_HISTORY_MERGE_WINDOW_S + 5u;
+    trip_history_note(&late);
+    TEST_CHECK(trip_history_flush() == 1u && fake_kv_set_call_count() == before + 1u, "FW-04: after the window it is a new entry (1 write)");
+    trip_history_load(&b);
+    TEST_CHECK(b.count == 2, "FW-04: two entries now");
+    trip_history_blob_get(&b, 1, &g);
+    TEST_CHECK(g.count == 200u, "FW-04: the unpersisted merges were folded into that write");
+    trip_history_entry_t other = mk(202, 9, 20001u);
+    other.esp_uptime_s = late.esp_uptime_s + 1u;
+    trip_history_note(&other);
+    TEST_CHECK(trip_history_flush() == 1u && fake_kv_set_call_count() == before + 2u, "FW-04: a different reason is a new entry (1 write)");
+}
+
+static void test_fv01_cross_boot(void)
+{
+    TEST_SECTION("trip_history: FV-01 same-reason trips never merge across a coalesced reboot");
+    reset_all();
+    trip_history_entry_t a = mk(1, 6, 10000u);
+    a.esp_uptime_s = 10u;
+    a.boot_rep = 3u;
+    trip_history_note(&a);
+    trip_history_flush();
+    trip_history_entry_t b = mk(1, 6, 20000u); /* next boot: same boot_seq, uptime already past the stored one */
+    b.esp_uptime_s = 30u;
+    b.boot_rep = 4u;
+    trip_history_note(&b);
+    trip_history_flush();
+    trip_history_blob_t blob;
+    TEST_CHECK(trip_history_load(&blob) && blob.count == 2, "FV-01: two entries, not merged across the reboot");
+    trip_history_entry_t c = mk(2, 6, 20500u); /* same boot as b, 5 s later: still merges */
+    c.esp_uptime_s = 35u;
+    c.boot_rep = 4u;
+    trip_history_note(&c);
+    trip_history_flush();
+    TEST_CHECK(trip_history_load(&blob) && blob.count == 2, "FV-01: same-boot trip still merges");
+}
+
 int main(void)
 {
+    test_fv01_cross_boot();
+    test_fw04_storm();
     test_th01_th02();
     test_first_trip();
     test_dedupe();

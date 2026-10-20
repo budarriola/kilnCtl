@@ -9,7 +9,7 @@
 #include "flash_hop.h"
 #include "flash_worker.h"
 
-/* The 28,824 B trace buffer lives in PSRAM only: never fall back to internal RAM (8 KB floor). */
+/* The trace buffer lives in PSRAM only: never fall back to internal RAM (8 KB floor). */
 static void *ft_alloc_psram(size_t bytes)
 {
     return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -29,6 +29,7 @@ void firing_trace_glue_init(void)
 {
     static const firing_trace_io_t io = {
         .write = cfg_fs_write_atomic,
+        .append = cfg_fs_append,
         .read = cfg_fs_read,
         .post = ft_post,
         .run = ft_run,

@@ -122,6 +122,9 @@ bool fake_kv_handle_is_live(const hal_kv_handle_t *h);
  * comment on the counter itself for the motivating case. */
 unsigned fake_kv_get_call_count(void);
 
+/* Total hal_kv_set_blob() calls since the last reset (wear tests count NVS writes with it). */
+unsigned fake_kv_set_call_count(void);
+
 /* True if `partition` (NULL means the default partition, matching
  * hal_kv_open's shape) has at least one key whose pending write has not
  * been merged in by hal_kv_commit(). Returns false for a partition never

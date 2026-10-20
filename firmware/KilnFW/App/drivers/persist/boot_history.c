@@ -29,8 +29,8 @@ NVS_KEY_LEN_CHECK(NVS_KEY_BOOT_HIST);
 #define KILN_NVS_PARTITION "kiln_nvs"
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
-typedef char boot_history_entry_size_check[(sizeof(boot_history_entry_t) == 32) ? 1 : -1];
-typedef char boot_history_blob_size_check[(sizeof(boot_history_blob_t) == 12 + 32 * BOOT_HISTORY_MAX) ? 1 : -1];
+typedef char boot_history_entry_size_check[(sizeof(boot_history_entry_t) == 36) ? 1 : -1];
+typedef char boot_history_blob_size_check[(sizeof(boot_history_blob_t) == 12 + 36 * BOOT_HISTORY_MAX) ? 1 : -1];
 
 bool boot_history_blob_valid(const boot_history_blob_t *b)
 {
@@ -128,6 +128,17 @@ bool boot_history_load(boot_history_blob_t *out)
     return true;
 }
 
+/* FW-01: unpersisted coalesced-boot count. RTC_NOINIT survives panic/WDT/software resets (the
+ * boot-loop cases) and is invalid after power-on; then the count restarts at 1. */
+#define BH_PENDING_MAGIC 0xB007C0A1u
+typedef struct {
+    uint32_t magic;
+    uint32_t seq;     /* entry the pending repeats belong to */
+    uint32_t pending; /* repeats not yet in the persisted blob */
+} bh_pending_t;
+RTC_NOINIT_ATTR static bh_pending_t s_pending;
+static bool s_coalesced; /* this boot was folded into the last entry (FW-02: no wall-time backfill) */
+
 EXT_RAM_BSS_ATTR static boot_history_entry_t s_recent[BOOT_HISTORY_RECENT];
 static unsigned s_recent_n;
 
@@ -142,6 +153,14 @@ uint32_t boot_history_latest_seq(void)
     return s_recent_n > 0u ? s_recent[0].seq : 0u;
 }
 
+/* FV-01: coalesced boots share one seq, so per-boot keys also need the entry's repeat count, which
+ * differs for every consecutive boot (persisted repeat + RTC pending, folded into s_recent). Low 8 bits
+ * are enough: consecutive boots differ by 1. */
+uint8_t boot_history_latest_rep(void)
+{
+    return s_recent_n > 0u ? (uint8_t)(s_recent[0].repeat & 0xFFu) : 0u;
+}
+
 esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_known,
                                    uint32_t prev_uptime_s, uint32_t dump_id, bool has_crash,
                                    const char *fw_version, uint32_t wall_time)
@@ -152,7 +171,7 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
         return hal_status_to_esp_err(perr);
     }
     boot_history_blob_t b;
-    boot_history_load(&b);
+    bool had_blob = boot_history_load(&b);
 
     boot_history_entry_t e;
     memset(&e, 0, sizeof(e));
@@ -163,13 +182,45 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
     e.has_crash = has_crash ? 1u : 0u;
     e.wall_time = wall_time;
     boot_history_short_hash(fw_version, e.fw);
+
+    unsigned lidx = ((unsigned)b.head + BOOT_HISTORY_MAX - 1u) % BOOT_HISTORY_MAX;
+    bool pend_ok = s_pending.magic == BH_PENDING_MAGIC && b.count > 0u && s_pending.seq == b.entries[lidx].seq;
+    uint32_t pending = pend_ok ? s_pending.pending : 0u;
+    s_coalesced = false;
+    if (had_blob && b.count > 0u && b.entries[lidx].reset_reason == e.reset_reason &&
+        b.entries[lidx].has_crash == e.has_crash && /* FV-03: a crash-record boot always gets its own entry */
+        strcmp(b.entries[lidx].fw, e.fw) == 0) {
+        /* FW-01: identical boot -- fold into the last entry, persist only every Nth repeat. */
+        pending++;
+        uint32_t total = (uint32_t)b.entries[lidx].repeat + pending;
+        b.entries[lidx].repeat = (uint16_t)(total > 0xFFFFu ? 0xFFFFu : total);
+        s_coalesced = true;
+        s_pending.magic = BH_PENDING_MAGIC;
+        s_pending.seq = b.entries[lidx].seq;
+        s_pending.pending = pending;
+        s_recent_n = 0;
+        for (unsigned i = 0; i < BOOT_HISTORY_RECENT && boot_history_blob_get(&b, i, &s_recent[i]); i++) {
+            s_recent_n++;
+        }
+        if (pending < BOOT_HISTORY_FLUSH_EVERY) {
+            return ESP_OK;
+        }
+        s_pending.pending = 0u;
+        b.crc32 = BLOB_CRC(&b);
+        goto persist;
+    }
+    if (pending > 0u) { /* fold the unpersisted repeats into the write this boot needs anyway */
+        uint32_t total = (uint32_t)b.entries[lidx].repeat + pending;
+        b.entries[lidx].repeat = (uint16_t)(total > 0xFFFFu ? 0xFFFFu : total);
+    }
+    s_pending.magic = 0u;
     boot_history_blob_push(&b, &e);
     b.crc32 = BLOB_CRC(&b);
     s_recent_n = 0;
     for (unsigned i = 0; i < BOOT_HISTORY_RECENT && boot_history_blob_get(&b, i, &s_recent[i]); i++) {
         s_recent_n++;
     }
-
+persist:;
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
@@ -220,7 +271,7 @@ static esp_err_t backfill_with_blob(boot_history_blob_t *b, uint32_t wall_time)
  * (check_all_task_stack_budgets). */
 esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
 {
-    if (s_recent_n == 0u || wall_time == 0u) {
+    if (s_recent_n == 0u || wall_time == 0u || s_coalesced) { /* FW-02: coalesced boot: no extra write */
         return ESP_ERR_INVALID_STATE;
     }
     boot_history_blob_t *b = persist_scratch_alloc(sizeof(*b));

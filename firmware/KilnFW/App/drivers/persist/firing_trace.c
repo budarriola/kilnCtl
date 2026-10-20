@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "kiln/kiln_crc32.h"
 #include "kilnlink/kilnlink_frame.h" /* kilnlink_crc16_ccitt_false() -- CommonFW's CRC, no local CRC code */
 
 #ifdef ESP_PLATFORM
@@ -16,7 +17,8 @@
 #define FT_LOGW(...) ((void)0)
 #endif
 
-#define FT_VERSION 1u
+#define FT_VERSION 1u  /* legacy whole-file format FTR1 (read only) */
+#define FT_VERSION2 2u /* FW-03 batch format FTR2 */
 
 static firing_trace_io_t s_io;
 static uint8_t *s_buf; /* FT_FILE_MAX bytes: 24 B header area + samples */
@@ -43,6 +45,8 @@ static bool s_truncated;
 static uint32_t s_last_uptime;
 static uint32_t s_last_epoch; /* FY-04: epoch of the newest appended sample */
 static bool s_have_last;
+static bool s_on_flash;   /* FW-03: this firing's file exists on flash with a valid batch chain */
+static uint16_t s_batches;
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -68,42 +72,95 @@ static void slot_path(uint32_t seq, char *out, size_t cap)
     snprintf(out, cap, "trace/ft%u.bin", (unsigned)(seq % FT_SLOTS));
 }
 
-/* Header layout (24 B): magic "FTR1" ver u8 zones u8 rec_size u16 seq u32 start_epoch u32 n u16 flags u16
- * crc_data u16 crc_hdr u16 (crc_hdr covers bytes 0..21). */
-static void build_header(uint8_t *h, uint32_t seq, uint32_t start_epoch, uint16_t n, uint16_t flags,
-                         const uint8_t *samples)
+/* File header (24 B): magic "FTR2" ver u8 zones u8 rec_size u16 seq u32 start_epoch u32 reserved[6]
+ * crc_hdr u16 (covers bytes 0..21). Batches follow (see firing_trace.h). */
+static void build_file_header(uint8_t *h, uint32_t seq, uint32_t start_epoch)
 {
+    memset(h, 0, FT_HDR_SIZE);
     h[0] = 'F';
     h[1] = 'T';
     h[2] = 'R';
-    h[3] = '1';
-    h[4] = FT_VERSION;
+    h[3] = '2';
+    h[4] = FT_VERSION2;
     h[5] = FT_ZONES;
     put16(h + 6, FT_REC_SIZE);
     put32(h + 8, seq);
     put32(h + 12, start_epoch);
-    put16(h + 16, n);
-    put16(h + 18, flags);
-    put16(h + 20, n ? kilnlink_crc16_ccitt_false(samples, (size_t)n * FT_REC_SIZE) : 0);
     put16(h + 22, kilnlink_crc16_ccitt_false(h, 22));
 }
 
-/* True when b[0..len) is a well-formed file; fills *e. */
-static bool parse_file(const uint8_t *b, size_t len, firing_trace_entry_t *e)
+static uint32_t batch_seal(const uint8_t *bh4, const uint8_t *recs, size_t nbytes)
+{
+    return kiln_crc32_le(kiln_crc32_le(0, bh4, 4), recs, nbytes);
+}
+
+static void build_batch_header(uint8_t *bh, uint16_t count, uint16_t flags, const uint8_t *recs)
+{
+    put16(bh, count);
+    put16(bh + 2, flags);
+    put32(bh + 4, batch_seal(bh, recs, (size_t)count * FT_REC_SIZE));
+}
+
+/* True when b[0..len) is a well-formed file; fills *e and *soff (offset of the contiguous samples).
+ * FTR2: the batches are compacted in place; a torn LAST batch is dropped, a bad batch with data after
+ * it rejects the file. */
+static bool parse_file(uint8_t *b, size_t len, firing_trace_entry_t *e, size_t *soff)
 {
     if (len < FT_HDR_SIZE) return false;
-    if (b[0] != 'F' || b[1] != 'T' || b[2] != 'R' || b[3] != '1') return false;
-    if (b[4] != FT_VERSION || b[5] != FT_ZONES || get16(b + 6) != FT_REC_SIZE) return false;
+    if (b[0] != 'F' || b[1] != 'T' || b[2] != 'R') return false;
+    if (b[3] == '1') {
+        if (b[4] != FT_VERSION || b[5] != FT_ZONES || get16(b + 6) != FT_REC_SIZE) return false;
+        if (get16(b + 22) != kilnlink_crc16_ccitt_false(b, 22)) return false;
+        uint16_t n = get16(b + 16);
+        if (n > FT_MAX_SAMPLES || len != FT_HDR_SIZE + (size_t)n * FT_REC_SIZE) return false;
+        uint16_t crc = n ? kilnlink_crc16_ccitt_false(b + FT_HDR_SIZE, (size_t)n * FT_REC_SIZE) : 0;
+        if (get16(b + 20) != crc) return false;
+        e->seq = get32(b + 8);
+        e->start_epoch = get32(b + 12);
+        e->n = n;
+        e->flags = get16(b + 18);
+        e->last_epoch = n ? get32(b + FT_HDR_SIZE + (size_t)(n - 1) * FT_REC_SIZE + 4) : 0;
+        *soff = FT_HDR_SIZE;
+        return e->seq != 0;
+    }
+    if (b[3] != '2' || b[4] != FT_VERSION2 || b[5] != FT_ZONES || get16(b + 6) != FT_REC_SIZE) return false;
     if (get16(b + 22) != kilnlink_crc16_ccitt_false(b, 22)) return false;
-    uint16_t n = get16(b + 16);
-    if (n > FT_MAX_SAMPLES || len != FT_HDR_SIZE + (size_t)n * FT_REC_SIZE) return false;
-    uint16_t crc = n ? kilnlink_crc16_ccitt_false(b + FT_HDR_SIZE, (size_t)n * FT_REC_SIZE) : 0;
-    if (get16(b + 20) != crc) return false;
+    size_t off = FT_HDR_SIZE, dst = FT_SAMPLES_OFF;
+    uint32_t n = 0;
+    uint16_t flags = 0;
+    while (off + FT_BHDR_SIZE <= len) {
+        uint16_t cnt = get16(b + off);
+        uint16_t fl = get16(b + off + 2);
+        size_t bytes = (size_t)cnt * FT_REC_SIZE;
+        size_t end = off + FT_BHDR_SIZE + bytes;
+        if (cnt > FT_MAX_SAMPLES - n || end > len) {
+            /* FV-05: a count that runs past the end is a torn tail ONLY if no valid batch follows. A
+             * corrupted count in a middle batch has real batches after it: scan the record-aligned
+             * offsets for one whose seal checks out and reject the file then. */
+            for (size_t q = off + FT_BHDR_SIZE; q + FT_BHDR_SIZE <= len; q += FT_REC_SIZE) {
+                size_t qb = (size_t)get16(b + q) * FT_REC_SIZE;
+                if (q + FT_BHDR_SIZE + qb <= len && get32(b + q + 4) == batch_seal(b + q, b + q + FT_BHDR_SIZE, qb)) {
+                    return false; /* valid batch after it: real corruption */
+                }
+            }
+            break; /* short: torn tail */
+        }
+        if (get32(b + off + 4) != batch_seal(b + off, b + off + FT_BHDR_SIZE, bytes)) {
+            if (end == len) break; /* torn last batch: drop it */
+            return false;          /* bad batch with data after it: real corruption */
+        }
+        memmove(b + dst, b + off + FT_BHDR_SIZE, bytes);
+        dst += bytes;
+        n += cnt;
+        flags |= fl;
+        off = end;
+    }
     e->seq = get32(b + 8);
     e->start_epoch = get32(b + 12);
-    e->n = n;
-    e->flags = get16(b + 18);
-    e->last_epoch = n ? get32(b + FT_HDR_SIZE + (size_t)(n - 1) * FT_REC_SIZE + 4) : 0;
+    e->n = (uint16_t)n;
+    e->flags = flags;
+    e->last_epoch = n ? get32(b + FT_SAMPLES_OFF + (size_t)(n - 1) * FT_REC_SIZE + 4) : 0;
+    *soff = FT_SAMPLES_OFF;
     return e->seq != 0;
 }
 
@@ -127,6 +184,8 @@ void firing_trace_reset_for_test(void)
     s_closed_flushed = false;
     s_post_hold = false;
     s_post_refused_logged = false;
+    s_on_flash = false;
+    s_batches = 0;
 }
 
 /* FY-05: a file stored closed:false is interrupted unless it is the firing being written right now. */
@@ -149,7 +208,8 @@ void firing_trace_init(const firing_trace_io_t *io)
         slot_path(slot, path, sizeof(path));
         size_t len = 0;
         firing_trace_entry_t e;
-        if (s_io.read(path, s_buf, FT_FILE_MAX, &len) != ESP_OK || !parse_file(s_buf, len, &e)) continue;
+        size_t soff;
+        if (s_io.read(path, s_buf, FT_FILE_MAX, &len) != ESP_OK || !parse_file(s_buf, len, &e, &soff)) continue;
         if ((e.seq % FT_SLOTS) != slot) continue;
         derive_flags(&e); /* FY-05: left open across a reboot => interrupted */
         s_idx[slot] = e;
@@ -196,6 +256,8 @@ bool firing_trace_note(uint32_t run_token, uint32_t uptime_s, uint32_t epoch, fl
         s_flush_due = false;
         s_post_hold = false;
         s_post_refused_logged = false;
+        s_on_flash = false;
+        s_batches = 0;
     }
     if (s_have_last && (uint32_t)(uptime_s - s_last_uptime) < FT_SAMPLE_PERIOD_S) return false;
     if (s_n >= FT_MAX_SAMPLES) {
@@ -203,7 +265,7 @@ bool firing_trace_note(uint32_t run_token, uint32_t uptime_s, uint32_t epoch, fl
         return false;
     }
     if (s_start_epoch == 0 && epoch != 0) s_start_epoch = epoch;
-    uint8_t *r = s_buf + FT_HDR_SIZE + (size_t)s_n * FT_REC_SIZE;
+    uint8_t *r = s_buf + FT_SAMPLES_OFF + (size_t)s_n * FT_REC_SIZE;
     put32(r, uptime_s);
     put32(r + 4, epoch);
     put16(r + 8, (uint16_t)temp_to_dc(setpoint_c));
@@ -229,10 +291,30 @@ void firing_trace_flush_job(void *arg)
         bool closed = s_closed;
         if (n != 0 && (n != s_flushed || closed != s_closed_flushed)) {
             uint16_t flags = (uint16_t)((s_truncated ? FT_FLAG_TRUNCATED : 0) | (closed ? FT_FLAG_CLOSED : 0));
-            build_header(s_buf, s_seq, s_start_epoch, n, flags, s_buf + FT_HDR_SIZE);
             char path[24];
             slot_path(s_seq, path, sizeof(path));
-            esp_err_t err = s_io.write(path, s_buf, FT_HDR_SIZE + (size_t)n * FT_REC_SIZE);
+            esp_err_t err;
+            if (s_io.append && s_on_flash && s_batches < FT_MAX_BATCHES) {
+                /* FW-03: append only the new samples as one CRC'd batch. */
+                uint8_t bh[FT_BHDR_SIZE];
+                const uint8_t *recs = s_buf + FT_SAMPLES_OFF + (size_t)s_flushed * FT_REC_SIZE;
+                build_batch_header(bh, (uint16_t)(n - s_flushed), flags, recs);
+                err = s_io.append(path, bh, sizeof(bh), recs, (size_t)(n - s_flushed) * FT_REC_SIZE);
+                if (err == ESP_OK) {
+                    s_batches++;
+                } else {
+                    s_on_flash = false; /* a failed append may leave a torn tail: rewrite whole next time */
+                }
+            } else {
+                /* First flush, no append seam, a failed append, or the batch cap: atomic whole-file write as one batch. */
+                build_file_header(s_buf, s_seq, s_start_epoch);
+                build_batch_header(s_buf + FT_HDR_SIZE, n, flags, s_buf + FT_SAMPLES_OFF);
+                err = s_io.write(path, s_buf, FT_SAMPLES_OFF + (size_t)n * FT_REC_SIZE);
+                if (err == ESP_OK) {
+                    s_on_flash = true;
+                    s_batches = 1;
+                }
+            }
             if (err == ESP_OK) {
                 s_flushed = n;
                 s_closed_flushed = closed;
@@ -321,10 +403,11 @@ esp_err_t firing_trace_open(uint32_t id, uint8_t *scratch, size_t cap, firing_tr
     size_t len = 0;
     esp_err_t err = s_io.read(path, scratch, cap, &len);
     if (err != ESP_OK) return err;
-    if (!parse_file(scratch, len, &out->entry)) return ESP_ERR_INVALID_CRC;
+    size_t soff;
+    if (!parse_file(scratch, len, &out->entry, &soff)) return ESP_ERR_INVALID_CRC;
     if (out->entry.seq != id) return ESP_ERR_NOT_FOUND;
     derive_flags(&out->entry);
-    out->samples = scratch + FT_HDR_SIZE;
+    out->samples = scratch + soff;
     return ESP_OK;
 }
 

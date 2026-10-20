@@ -174,6 +174,7 @@ static bool key_logically_present(const fake_kv_key_slot_t *k)
  * of do_get() and fake_kv_reset_all(), both below) since this file has no
  * header of its own for internal statics and forward declarations. */
 static unsigned s_get_call_count = 0;
+static unsigned s_set_call_count = 0; /* FW-01/04: NVS write counting in wear tests */
 /* Probe-error injection for hal_kv_key_exists(): the next `s_key_exists_fail_count` probes return the status. */
 static unsigned s_key_exists_fail_count = 0;
 static unsigned s_key_exists_fail_skip = 0; /* probes that succeed normally before the failures start */
@@ -196,6 +197,7 @@ void fake_kv_reset_all(void)
     s_silent_set_noops = 0u;
     s_blob_get_misses_size1 = false;
     s_get_call_count = 0u;
+    s_set_call_count = 0u;
     s_key_exists_fail_count = 0u;
     s_key_exists_fail_skip = 0u;
     s_next_open_fail_armed = false;
@@ -212,6 +214,11 @@ void fake_kv_reset_all(void)
  * flash worker, which the dispatch-count assertion alone cannot catch (a
  * caller-side load() plus a dispatched job would both count as "one
  * dispatch" and give the same answer). */
+unsigned fake_kv_set_call_count(void)
+{
+    return s_set_call_count;
+}
+
 unsigned fake_kv_get_call_count(void)
 {
     return s_get_call_count;
@@ -577,6 +584,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, fake_kv_k
 
 hal_status_t hal_kv_set_blob(hal_kv_handle_t *h, const char *key, const void *buf, size_t len)
 {
+    s_set_call_count++;
     return do_set(get_handle(h), key, FAKE_KV_KIND_BLOB, buf, len);
 }
 
