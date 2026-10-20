@@ -2420,17 +2420,14 @@ def diag_bundle_fetch(host: Optional[str] = None, out_dir: Optional[str] = None,
 
     def _sym(core_path, elves):
         elf, text = coredump_fetch.find_matching_archived_elf(core_path, elves)
-        return f"elf={elf}
-{text}"
+        return f"elf={elf}\n{text}"
 
     elves = (elf_archive.list_all_kiln_elf_paths() + elf_archive.list_recovery_elf_paths()) if symbolize else []
     try:
         files = diag_bundle.fetch_and_unpack(resolved, out_dir, elf_paths=elves, symbolize=_sym if symbolize else None)
     except diag_bundle.BundleError as exc:
         return f"error: {exc}"
-    return f"support bundle from {resolved} -> {out_dir}
-" + "
-".join(os.path.basename(f) for f in files)
+    return f"support bundle from {resolved} -> {out_dir}\n" + "\n".join(os.path.basename(f) for f in files)
 
 
 @_core._tool()
