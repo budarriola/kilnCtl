@@ -267,6 +267,9 @@ hal_status_t hal_kv_set_blob(hal_kv_handle_t *h, const char *key,
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_blob(impl->handle, key, buf, len);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -297,6 +300,9 @@ hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key,
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_str(impl->handle, key, value);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -324,6 +330,9 @@ hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_u32(impl->handle, key, value);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -351,6 +360,9 @@ hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value) {
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_u8(impl->handle, key, value);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -379,6 +391,9 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key) {
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_erase_key(impl->handle, key);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
