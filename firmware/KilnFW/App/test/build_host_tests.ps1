@@ -3715,7 +3715,8 @@ try {
     # 104 -> 105: web_encoding_cache (KH-09)
     # 105 -> 106: boot_history (FD-03)
     # 106 -> 107: trip_history (FD-05)
-    $totalExpected = 107
+    # 107 -> 108: telemetry_time_sync (FQ-05)
+    $totalExpected = 108
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
