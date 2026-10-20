@@ -246,3 +246,39 @@ def test_fetch_bundle_coredump_flag(monkeypatch):
     diag_bundle.fetch_bundle("h")
     diag_bundle.fetch_bundle("h", include_coredump=True)
     assert urls == ["http://h/api/diag/bundle", "http://h/api/diag/bundle?coredump=1"]
+
+
+def _core_bundle(sha):
+    crash = json.dumps({"present": True, "dump_elf_sha": sha}).encode()
+    return diag_bundle.parse_bundle(build([("crash_report", crash), ("coredump", b"\x00core")]))
+
+
+def test_missing_elf_reported_by_sha(tmp_path):
+    b = _core_bundle("abcdef123456")
+    diag_bundle.unpack_bundle(b, str(tmp_path), elf_paths=["x.elf"], symbolize=lambda c, e: "ok",
+                              find_by_sha=lambda s: (None, f"no archived ELF has sha256 prefix {s}"))
+    txt = (tmp_path / "coredump.symbolize.txt").read_text()
+    assert "ELF MISSING" in txt and "abcdef123456" in txt
+
+
+def test_matching_elf_symbolizes(tmp_path):
+    b = _core_bundle("abcdef123456")
+    diag_bundle.unpack_bundle(b, str(tmp_path), elf_paths=["x.elf"], symbolize=lambda c, e: "decoded-ok",
+                              find_by_sha=lambda s: ("x.elf", "found"))
+    assert (tmp_path / "coredump.symbolize.txt").read_text() == "decoded-ok"
+
+
+def test_empty_archive_not_silent(tmp_path):
+    b = _core_bundle("abcdef123456")
+    diag_bundle.unpack_bundle(b, str(tmp_path), elf_paths=[], symbolize=lambda c, e: "ok")
+    assert "NOT SYMBOLIZED" in (tmp_path / "coredump.symbolize.txt").read_text()
+
+
+def test_release_elf_archive_script_fails_on_bad_input(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "archive_release_elf", os.path.join(os.path.dirname(__file__), "..", "..", "archive_release_elf.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main(["x", str(tmp_path / "no.elf"), str(tmp_path / "no.bin"), "abc", "v1"]) == 1
+    assert mod.main(["x"]) == 2

@@ -1918,7 +1918,7 @@ Owner instruction, 2026-09-21.
 - [ ] FD-03: reset/crash history ring of 16 boots. In progress.
 - [ ] FD-04: SNTP wall-clock timestamps. In progress.
 - [ ] FD-05: Pico trip history, last 16 trips, kept on the ESP. Queued.
-- [ ] Check that each field build's ELF gets archived to firmware/KilnFW/elf_archive. Queued.
+- [x] Each shipping build's ELF is archived to firmware/KilnFW/elf_archive: flash_firmware at flash, make_release via tools/archive_release_elf.py; diag_bundle unpack matches dump_elf_sha and reports a missing ELF.
 
 ## Future work — KilnFW PC-link command acknowledgement
 

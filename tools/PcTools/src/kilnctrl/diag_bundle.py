@@ -138,8 +138,17 @@ def _decode_event_log(raw: bytes) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def _dump_elf_sha(bundle: Bundle) -> str:
+    """dump_elf_sha from the crash_report section (the coredump's own app ELF sha256 prefix), or ''."""
+    try:
+        return str(json.loads(bundle.sections.get("crash_report", b"{}")).get("dump_elf_sha") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
 def unpack_bundle(bundle: Bundle, out_dir: str, *, elf_paths: Optional[list[str]] = None,
-                  symbolize: Optional[Callable[[str, list[str]], str]] = None) -> list[str]:
+                  symbolize: Optional[Callable[[str, list[str]], str]] = None,
+                  find_by_sha: Optional[Callable[[str], tuple[Optional[str], str]]] = None) -> list[str]:
     """Writes every section into out_dir; returns the list of files written.
     Event logs are decoded to <name>.txt beside the raw .bin. The coredump is
     symbolized with `symbolize(coredump_path, elf_paths)` when both are given;
@@ -166,7 +175,22 @@ def unpack_bundle(bundle: Bundle, out_dir: str, *, elf_paths: Optional[list[str]
     for name, raw in bundle.sections.items():
         if name == "coredump":
             core = put("coredump.bin", raw)
-            if symbolize is not None and elf_paths:
+            sha = _dump_elf_sha(bundle)
+            missing = None
+            if find_by_sha is not None and sha:
+                found, why = find_by_sha(sha)
+                if found is None:
+                    missing = why
+            if missing is not None:
+                put("coredump.symbolize.txt", (
+                    f"ELF MISSING: the coredump was written by app ELF sha256 prefix {sha}, "
+                    f"but the ELF archive has no unique match ({missing}). The dump cannot be "
+                    "decoded until that exact ELF is restored to firmware/KilnFW/elf_archive.\n").encode())
+            elif symbolize is None or not elf_paths:
+                put("coredump.symbolize.txt", (
+                    "NOT SYMBOLIZED: no archived ELF candidates were available"
+                    + (f" (coredump app ELF sha256 prefix {sha})" if sha else "") + ".\n").encode())
+            else:
                 try:
                     text = symbolize(core, elf_paths)
                 except Exception as exc:  # noqa: BLE001 - reported in the file, not raised
@@ -235,9 +259,10 @@ def _fetch_supplements(host: str, bundle: Bundle, out_dir: str, timeout: float) 
 def fetch_and_unpack(host: str, out_dir: str, *, elf_paths: Optional[list[str]] = None,
                      symbolize: Optional[Callable[[str, list[str]], str]] = None,
                      timeout: float = 120.0, supplements: bool = True,
-                     include_coredump: bool = False) -> list[str]:
+                     include_coredump: bool = False,
+                     find_by_sha: Optional[Callable[[str], tuple[Optional[str], str]]] = None) -> list[str]:
     bundle = parse_bundle(fetch_bundle(host, timeout, include_coredump))
-    files = unpack_bundle(bundle, out_dir, elf_paths=elf_paths, symbolize=symbolize)
+    files = unpack_bundle(bundle, out_dir, elf_paths=elf_paths, symbolize=symbolize, find_by_sha=find_by_sha)
     if supplements:
         files += _fetch_supplements(host, bundle, out_dir, timeout)
     return files

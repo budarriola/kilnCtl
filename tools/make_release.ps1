@@ -313,6 +313,14 @@ New-Item -ItemType Directory -Path $outDir | Out-Null
 $elfZip = Join-Path $outDir "KilnCtrl-$Tag.elf.zip"
 Compress-Archive -LiteralPath $elf -DestinationPath $elfZip -CompressionLevel Optimal
 
+# The exact ELF of every shipped image must stay decodable from a field coredump: archive it
+# (hash-keyed, never deleted) before publishing. Skipped in a dev dry run (writes the canonical archive).
+if (-not $DevDryRun) {
+    $headSha = (git -C $repoRoot rev-parse HEAD).Trim()
+    & $python (Join-Path $PSScriptRoot "archive_release_elf.py") $elf $appBin $headSha $Tag
+    if ($LASTEXITCODE -ne 0) { Fail "archiving the release ELF into firmware/KilnFW/elf_archive failed (see above)." }
+}
+
 # ---------------------------------------------------------------- manifest
 $genArgs = @((Join-Path $PSScriptRoot "release_manifest.py"), "generate", "--root", $repoRoot, "--out", $outDir,
              "--tag", $Tag, "--repo", $Repo, "--channel", $Channel, "--app", $appBin,
