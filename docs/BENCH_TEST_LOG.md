@@ -3780,3 +3780,21 @@ KH-10 live (home Wi-Fi 192.168.1.156, web auth on, python http.client, raw heade
 Heap internal (uptime 41 s): free 101271 B, largest_free_block 31744 B, min_free 84103 B. Stack margin: httpd_worker 3152 B free of 8192 B (38.5 B (38.5%), esp_timer 4136/4608, lvgl 8620/14336.
 
 End state: ESP e3cce4a03, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KH-10 confirmed on target (duplicate header gone).
+
+## benchmain21 (2026-10-19, main e3cce4a03, no flash, Pico unchanged)
+
+Board 192.168.1.156, ESP uptime 4894 s -> 24302 s (6.5 h observed), link up, SaftyFW armed, no trips at start. Backups: logs/benchmain21_backup_pre.json and logs/benchmain21_backup_post.json. Soak data: logs/benchmain21_soak.csv (34 rows, one per 10 min, HTTP columns) and logs/benchmain21_stack.csv (stack margins from get_stack_margin, taken by hand about hourly, not every 10 min: the UART stack-margin read is only reachable through the MCP server).
+
+Profile: saved as #2 BM21_SOAK (zones 7): 34 C @ 8 C/h hold 30 min; 40 C @ 6 C/h hold 45; 37 C @ 10 C/h hold 20; 42 C @ 6 C/h hold 40. Started 13:32, finished state=done (exec state 3, fault_reason empty, fault_guard 0, mode_state_violation_count 0) after 19308 s (5.4 h); peak safety TC 40.8 C, zones 42.0-42.2 C. Passive cooling segment 3 (40 -> 37 C) completed. profiles_ack_last_run ok.
+
+Load (scratchpad bm21_load.py): dashboard `/` + `/api/status` every 2 s; every 5 min login, GET /api/backup/export, POST /api/safety/commissioning (id=782 mains_voltage_v=120 commit=1, same value as current), logout; one session at a time. Result: 16056 polls, 0 HTTP errors; 65 cycles, 65 x 409 (expected 65), 0 other statuses, 0 cycle errors. Logout returns 204.
+
+Heap/RAM (CSV, 34 samples): heap_internal min_free 84103 B in every row (flat, no decline, floor 8192), largest_free_block 31744 B constant, free 106087-106603 B, DMA min_free 76315 B constant, PSRAM free 4836420-4840044 B (no downward trend). No leak suspect.
+Stack margins (min free ever, start -> end): httpd_worker 3152 B (38.5%), lvgl 8156 -> 8124, uart_proto_rx 3952, esp_timer 4104/4608, ota_confirm not running (never created on this boot). Others lowest: safety_owner_evt 2340 -> 1060 (34.5%, dropped during the run, then stable), safety_proto_rx 4624 -> 3488, profile_executor 3372 -> 2972, system_uart_bridge 2168 -> 1784, uart_log_bridge 1868 -> 1612, backlight_pwm 1096, info_uart_bridge 1596. All [OK].
+Resets/trips: uptime strictly increasing (max sample gap 601 s), reset_reason unchanged (software esp_restart from before the run), trip mask 0 and pico_reboot_seq 0 in every row. No watchdog/crash seen.
+Link stats at end: sent 7883, received 48524, crc/framing errors 5, length mismatch 10 (was 0/0 at start), timeouts 0, resync 0, 72787 frames. Filed as KI-01.
+One interruption: the agent hit an API rate limit between about 16:35 and 18:20; board, logger and load script kept running and the CSV has no gap.
+
+Backup diff pre vs post: relay_cycles only (c0 51 -> 173, c1 25 -> 299, c2 34 -> 413, c4 35 -> 37; raise-only wear counters from the firing) and one extra profile (#2 BM21_SOAK created by this run; restore does not delete it, KNOWN_ISSUES BW-09). Nothing else differs.
+
+Cleanup: logger and load script stopped.

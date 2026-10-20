@@ -651,3 +651,4 @@ Owner request: with web auth on, no protected page content to a logged-out reque
 - **BH-01** LOW (REVIEW_FD03_2026_10_19): boot_history_reason_name() lacks PWR_GLITCH/CPU_LOCKUP (enum 14/15), shown as UNKNOWN; add names + static assert. OPEN.
 - **BH-02** LOW (REVIEW_FD03_2026_10_19): boot_history wall_time always 0, Time column dead until FD-04 or an SNTP backfill. OPEN.
 - **BH-03** LOW (REVIEW_FD03_2026_10_19): LCD Crash Report subpage with the new 6-line resets label not verified against the 320x480 no-scroll rule; needs bench capture with a crash record. OPEN.
+- **KI-01** INFO (benchmain21): after a 6.5 h run with 16056 web polls and 65 login/export/refused-write cycles, SaftyFW link stats showed 5 crc/framing errors and 10 length mismatches in 72787 frames (0/0 at the run start); no timeouts, resync or trips. Rate is about 1 in 5000 frames; not yet attributed (HTTP load vs idle). Next: sample safety_get_link_stats before/after a quiet 6 h idle to compare.
