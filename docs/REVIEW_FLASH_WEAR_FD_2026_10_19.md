@@ -114,3 +114,7 @@ There is no cfg_fs, hal_kv or log_store write on that path.
 - **FW-07 INFO**: kiln_nvs live-data occupancy was not measured on the bench. The boot-loop figure
   assumes 50 % or less. If the partition is nearly full of static data, GC amplification rises and
   FW-01 gets worse. benchmain22: not measurable, no tool reads kiln_nvs stats (KNOWN_ISSUES BR-02); default nvs shows 89/756 entries used.
+  benchmain23 measured: kiln_nvs 161 used / 2016 total entries = 8.0 % live (BR-02), not 50 %. GC copy amplification is about 1/(1-0.08) = 1.09, not 2.
+  Recomputed FW-01 boot loop (1 boot/min, 126 entries/page, 19 entries per 524 B blob):
+  - Before the FW-01 fix (2 blob writes/boot, 38 entries): 54,720 entries/day = 434 page fills = 27 erases/page/day, x1.09 = about 29 erases/page/day, about 10.7k/yr, so 100k in about 9 years (was 54/day, 5 to 10 years at 50 %).
+  - After the fix (blob flushed every 16th identical boot, no backfill under 60 s uptime): 90 writes x 19 = 1,710 entries/day = 13.6 page fills = 0.85 erases/page/day, x1.09 = about 0.93/day, about 340/yr, so 100k in about 290 years. Assumes the flush-every-16th policy; measured live occupancy only, loop itself not run on the bench.
