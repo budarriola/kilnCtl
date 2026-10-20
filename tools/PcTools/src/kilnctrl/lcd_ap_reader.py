@@ -197,8 +197,11 @@ def _detect_panel_at(img: np.ndarray, step: int, margin: float) -> np.ndarray:
     if len(rows) < 40 or len(cols) < 40:
         raise ReadError("lit panel region too small (panel dark or camera moved)")
     h, w = comp.shape
-    if rows[0] == 0 or cols[0] == 0 or rows[-1] == h - 1 or cols[-1] == w - 1:
+    if rows[0] == 0 or cols[0] == 0 or cols[-1] == w - 1:
         raise ReadError("lit panel region touches the frame edge (not the panel alone)")
+    # A panel cut off by the BOTTOM of the frame (camera framed too low) is
+    # still usable: its bottom edge is extrapolated below from the other three.
+    cut_bottom = rows[-1] == h - 1
 
     def middle(idx: np.ndarray) -> np.ndarray:
         n = len(idx)
@@ -215,16 +218,32 @@ def _detect_panel_at(img: np.ndarray, step: int, margin: float) -> np.ndarray:
     la, lb = _robust_line(ry, left)
     ra, rb = _robust_line(ry, right)
     ta, tb = _robust_line(cx, top)
-    ba, bb = _robust_line(cx, bottom)
+    if not cut_bottom:
+        ba, bb = _robust_line(cx, bottom)
+    else:
+        ba = bb = 0.0
 
     def cross(xa: float, xb: float, ya: float, yb: float) -> Tuple[float, float]:
         # x = xa*y + xb, y = ya*x + yb
         y = (ya * xb + yb) / (1.0 - ya * xa)
         return xa * y + xb, y
 
-    corners = [cross(la, lb, ta, tb), cross(ra, rb, ta, tb),
-               cross(la, lb, ba, bb), cross(ra, rb, ba, bb)]
-    return np.array(corners, dtype=np.float64) * step
+    tl, tr = cross(la, lb, ta, tb), cross(ra, rb, ta, tb)
+    if cut_bottom:
+        # Walk down each side edge by the panel's aspect ratio times the top
+        # edge length (perspective error is left to coarse_align/refine).
+        drop = np.hypot(tr[0] - tl[0], tr[1] - tl[1]) * PANEL_H / PANEL_W
+        bl = _walk_down(tl, la, drop)
+        br = _walk_down(tr, ra, drop)
+    else:
+        bl, br = cross(la, lb, ba, bb), cross(ra, rb, ba, bb)
+    return np.array([tl, tr, bl, br], dtype=np.float64) * step
+
+
+def _walk_down(p: Tuple[float, float], xa: float, dist: float) -> Tuple[float, float]:
+    """Point ``dist`` px down the edge x = xa*y + b starting at ``p``."""
+    n = float(np.hypot(xa, 1.0))
+    return p[0] + xa / n * dist, p[1] + 1.0 / n * dist
 
 
 def homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
@@ -332,8 +351,13 @@ class _AnchorScorer:
     """
 
     def __init__(self, img: np.ndarray, font: Dict[str, Tuple[int, ...]],
-                 lines: Sequence[Tuple[int, int, str]] = ANCHOR_LINES):
+                 lines: Sequence[Tuple[int, int, str]] = ANCHOR_LINES,
+                 row_limit: int = PANEL_H):
+        # row_limit: panel rows at or below it fall outside the camera frame
+        # (clamped sampling would smear them) and take no part in the score.
+        self.limit = max(1, min(PANEL_H, int(row_limit)))
         self.tmpl = render_template(font, lines)
+        self.tmpl[self.limit:] = 0.0
         self.grey = img if img.ndim == 2 else to_grey(img)
         # Row bands around the anchor lines: blocks of rows that hold
         # template ink, padded past the blur and local-contrast radii, and
@@ -341,7 +365,7 @@ class _AnchorScorer:
         pad = 16
         blocks: List[Tuple[int, int]] = []
         for r in np.flatnonzero(self.tmpl.any(axis=1)):
-            lo, hi = max(0, r - pad), min(PANEL_H, r + pad + 1)
+            lo, hi = max(0, r - pad), min(self.limit, r + pad + 1)
             if blocks and lo <= blocks[-1][1]:
                 blocks[-1] = (blocks[-1][0], hi)
             else:
@@ -359,7 +383,7 @@ class _AnchorScorer:
             if banded:
                 t = self._per_block(self.tmpl[self.rows], lambda b: _box_blur(b, blur))
             else:
-                t = _box_blur(self.tmpl, blur)
+                t = _box_blur(self.tmpl[:self.limit], blur)
             self._t[key] = t - t.mean()
         return self._t[key]
 
@@ -369,7 +393,7 @@ class _AnchorScorer:
         if banded:
             p = self._per_block(rectify(self.grey, cc, 1, self.rows), _local_contrast)
         else:
-            p = _local_contrast(rectify(self.grey, cc, 1))
+            p = _local_contrast(rectify(self.grey, cc, 1, np.arange(self.limit)))
         if blur_panel:
             # Blurring both sides widens the peak to the blur radius, which a
             # coarse grid needs; a sharp panel against a blurred template
@@ -496,8 +520,17 @@ def _band(panel: np.ndarray, scale: int, y_top: int, font_scale: int,
     k = np.ones(9) / 9.0
     bg = np.convolve(np.pad(bg, 4, mode="edge"), k, mode="valid")
     region = region - bg[None, :]
-    thr = max(np.median(region) + 30.0, 0.5 * np.percentile(region, 99))
-    ink = region > thr
+    base_thr = np.median(region) + 30.0
+    # The ink peak is taken per column block, not over the whole line: the
+    # passphrase fades from white to orange across the panel (and the camera
+    # sensitivity falls with it), so one global peak drops the dim end's
+    # strokes. Blocks are 64 rectified px, about one scale-6 glyph at scale 2.
+    thr = np.full(region.shape[1], base_thr)
+    blk = 64
+    for x in range(0, region.shape[1], blk):
+        peak = 0.5 * np.percentile(region[:, x:x + blk], 99)
+        thr[x:x + blk] = max(base_thr, peak)
+    ink = region > thr[None, :]
     # The search margin reaches into the neighbouring layout lines (the SSID
     # sits 4 px under "Join Wi-Fi network:"), and a short SSID has less ink
     # than they do, so the projection would lock onto them. Blank the rows of
@@ -621,10 +654,15 @@ def rank_glyph(cells: np.ndarray, font: Dict[str, Tuple[int, ...]], alphabet: st
 # of a font pixel at the smallest scale would already defeat the sampling.
 LINE_DX = tuple(np.arange(-4.0, 4.01, 0.5))
 LINE_STRETCH = (0.985, 0.99, 0.995, 1.0, 1.005, 1.01, 1.015)
+# Fallback when the text-anchored fit left the far (right) end several percent
+# off, as when the camera moved so the left-aligned static lines no longer pin
+# the right corners. Only tried after a read at LINE_STRETCH fails.
+LINE_STRETCH_WIDE = tuple(np.arange(0.93, 1.0701, 0.005))
 
 
 def read_line(panel: np.ndarray, scale: int, y_top: int, font_scale: int,
-              font: Dict[str, Tuple[int, ...]], alphabet: str) -> LineRead:
+              font: Dict[str, Tuple[int, ...]], alphabet: str,
+              stretches: Sequence[float] = LINE_STRETCH) -> LineRead:
     """Read one line, choosing the grid offset/stretch with the best total match."""
     ink, pad, _top = _band(panel, scale, y_top, font_scale)
     win = FONT_H * font_scale * scale
@@ -632,7 +670,7 @@ def read_line(panel: np.ndarray, scale: int, y_top: int, font_scale: int,
     stack = _font_stack(font, alphabet)
     best: Optional[Tuple[float, LineRead]] = None
     last_err: Optional[ReadError] = None
-    for stretch in LINE_STRETCH:
+    for stretch in stretches:
         pitch = FONT_ADV * font_scale * stretch
         for dx in LINE_DX:
             try:
@@ -731,8 +769,33 @@ class ApRead:
 MIN_ANCHOR_SCORE = 0.15
 
 
+def visible_rows(img: np.ndarray, corners: np.ndarray) -> int:
+    """Panel rows whose side-edge points land inside the frame (0.97 safety factor).
+
+    A camera framed too low cuts the bottom of the panel off; rows past the
+    frame edge must not be scored. Returns PANEL_H when the panel is whole.
+    """
+    fh = img.shape[0]
+    h = homography(PANEL_CORNERS, np.asarray(corners, dtype=np.float64))
+    last = PANEL_H
+    for v in range(PANEL_H, 0, -4):
+        ok = True
+        for u in (0.0, PANEL_W):
+            den = h[2, 0] * u + h[2, 1] * v + h[2, 2]
+            y = (h[1, 0] * u + h[1, 1] * v + h[1, 2]) / den
+            if y >= fh * 0.97:
+                ok = False
+        if ok:
+            last = v
+            break
+    else:
+        last = 1
+    return last
+
+
 def read_recovery(img: np.ndarray, font: Optional[Dict[str, Tuple[int, ...]]] = None,
-                  corners: Optional[np.ndarray] = None, scale: int = 2) -> ApRead:
+                  corners: Optional[np.ndarray] = None, scale: int = 2,
+                  starts: Optional[Sequence[np.ndarray]] = None) -> ApRead:
     font = font or load_font()
     if corners is not None:
         return _read_recovery_at(img, font, np.asarray(corners, dtype=np.float64), scale)
@@ -741,19 +804,25 @@ def read_recovery(img: np.ndarray, font: Optional[Dict[str, Tuple[int, ...]]] = 
     # fall back to the camera's recorded panel corners if that read fails.
     last_err: Optional[ReadError] = None
     best_fit = 0.0
-    scorer = _AnchorScorer(img, font)
-    for start in _corner_starts(img):
+    # ``starts``: rough TL,TR,BL,BR frame corners from the operator (the camera
+    # moved further than detection or coarse_align can follow); fitted like any start.
+    for start in (list(starts) if starts else _corner_starts(img)):
+        start = np.asarray(start, dtype=np.float64)
+        scorer = _AnchorScorer(img, font, row_limit=visible_rows(img, start))
         start, _ = coarse_align(img, start, scorer=scorer)
         c, fit = refine_corners(img, start, steps=REFINE_STEPS, max_rounds=10, scorer=scorer)
         best_fit = max(best_fit, fit)
         if fit < MIN_ANCHOR_SCORE:
             continue
         try:
-            first = _read_recovery_at(img, font, c, scale)
+            try:
+                first = _read_recovery_at(img, font, c, scale)
+            except ReadError:
+                first = _read_recovery_at(img, font, c, scale, LINE_STRETCH_WIDE)
         except ReadError as e:
             last_err = e
             continue
-        return _reread_with_dynamic_lines(img, font, c, scale, first)
+        return _reread_with_dynamic_lines(img, font, c, scale, first, scorer.limit)
     if last_err is not None:
         raise last_err
     raise ReadError(f"recovery screen text not found (anchor fit {best_fit:.2f} < {MIN_ANCHOR_SCORE})")
@@ -771,7 +840,8 @@ REREAD_STEPS = (4, 2, 1)
 
 
 def _reread_with_dynamic_lines(img: np.ndarray, font: Dict[str, Tuple[int, ...]],
-                               corners: np.ndarray, scale: int, first: "ApRead") -> "ApRead":
+                               corners: np.ndarray, scale: int, first: "ApRead",
+                               row_limit: int = PANEL_H) -> "ApRead":
     """Refit the corners with the first read's own text in the template, then reread.
 
     Every static line is left aligned and spans at most 276 of the panel's
@@ -784,7 +854,7 @@ def _reread_with_dynamic_lines(img: np.ndarray, font: Dict[str, Tuple[int, ...]]
         (Y_SSID, 3 if len(first.ssid) <= 26 else 2, first.ssid),
         (Y_PASS, PASS_SCALE, first.passphrases[0]),
     )
-    sc = _AnchorScorer(img, font, lines)
+    sc = _AnchorScorer(img, font, lines, row_limit)
     c, _ = refine_corners(img, corners, steps=REREAD_STEPS, max_rounds=10, scorer=sc)
     try:
         return _read_recovery_at(img, font, c, scale)
@@ -817,7 +887,8 @@ def _corner_starts(img: np.ndarray) -> List[np.ndarray]:
 
 
 def _read_recovery_at(img: np.ndarray, font: Dict[str, Tuple[int, ...]],
-                      corners: np.ndarray, scale: int) -> ApRead:
+                      corners: np.ndarray, scale: int,
+                      stretches: Sequence[float] = LINE_STRETCH) -> ApRead:
     panel = rectify(img, corners, scale)
     warnings = []
 
@@ -825,7 +896,7 @@ def _read_recovery_at(img: np.ndarray, font: Dict[str, Tuple[int, ...]],
     ssid = None
     for ssid_scale in (3, 2):
         try:
-            line = read_line(panel, scale, Y_SSID, ssid_scale, font, printable)
+            line = read_line(panel, scale, Y_SSID, ssid_scale, font, printable, stretches)
         except ReadError:
             continue
         if line.glyphs and all(r[0][0] <= SSID_MAX_GLYPH_DISTANCE for r in line.ranked):
@@ -837,7 +908,7 @@ def _read_recovery_at(img: np.ndarray, font: Dict[str, Tuple[int, ...]],
     if ssid is None:
         raise ReadError("SSID line could not be read (is the recovery screen showing a network?)")
 
-    pw = read_line(panel, scale, Y_PASS, PASS_SCALE, font, PASS_ALPHABET)
+    pw = read_line(panel, scale, Y_PASS, PASS_SCALE, font, PASS_ALPHABET, stretches)
     count = len(pw.glyphs)
     if count != PASS_LEN:
         raise ReadError(f"passphrase line segmented into {count} glyphs, expected {PASS_LEN}")
@@ -971,12 +1042,13 @@ def read_recovery_qr(img: np.ndarray) -> ApRead:
     return ApRead("recovery", ssid, len(password), [password])
 
 
-def read_recovery_auto(img: np.ndarray, font: Optional[Dict[str, Tuple[int, ...]]] = None) -> ApRead:
+def read_recovery_auto(img: np.ndarray, font: Optional[Dict[str, Tuple[int, ...]]] = None,
+                       starts: Optional[Sequence[np.ndarray]] = None) -> ApRead:
     """QR first, glyph segmentation as the fallback (recovery mode only)."""
     try:
         return read_recovery_qr(img)
     except ReadError as qr_err:
-        read = read_recovery(img, font)
+        read = read_recovery(img, font, starts=starts)
         read.warnings.append(f"QR not used ({qr_err}); passphrase read by glyph segmentation")
         return read
 
@@ -1003,13 +1075,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--image", required=True, help="full (uncropped) capture_lcd.ps1 -Full frame")
     ap.add_argument("--mode", choices=("recovery", "normal"), default="recovery")
+    ap.add_argument("--start-corners", help="8 comma-separated frame px: TL,TR,BL,BR x,y of the "
+                    "panel (rough; the text fit refines them). BL/BR may lie below the frame.")
     ap.add_argument("--candidates-out", help="file to write passphrase candidates to (one per line)")
     args = ap.parse_args(argv)
 
     result: Dict[str, object] = {"mode": args.mode}
     try:
         if args.mode == "recovery":
-            read = read_recovery_auto(load_image(args.image))
+            starts = None
+            if args.start_corners:
+                v = [float(t) for t in args.start_corners.split(",")]
+                if len(v) != 8:
+                    raise ReadError("--start-corners needs 8 numbers")
+                starts = [np.array(v, dtype=np.float64).reshape(4, 2)]
+            read = read_recovery_auto(load_image(args.image), starts=starts)
         else:
             read = read_normal(args.image)
     except ReadError as exc:

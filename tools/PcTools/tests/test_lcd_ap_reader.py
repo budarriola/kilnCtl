@@ -111,9 +111,9 @@ def test_fit_and_reread_recover_a_few_px_corner_error(font, monkeypatch):
     seen = []
     orig = r._reread_with_dynamic_lines
 
-    def spy(img_, font_, c, scale, first):
+    def spy(img_, font_, c, scale, first, *rest):
         seen.append(c)
-        return orig(img_, font_, c, scale, first)
+        return orig(img_, font_, c, scale, first, *rest)
 
     monkeypatch.setattr(r, "_reread_with_dynamic_lines", spy)
     read = r.read_recovery(img, font)
@@ -197,7 +197,7 @@ def test_cli_never_prints_the_passphrase(font, tmp_path, capsys):
     orig = r.read_recovery
     rc = None
     try:
-        r.read_recovery = lambda img, font=None: orig(img, font, corners=TRUE_CORNERS)
+        r.read_recovery = lambda img, font=None, **kw: orig(img, font, corners=TRUE_CORNERS)
         rc = r.main(rc_args)
     finally:
         r.read_recovery = orig
@@ -244,7 +244,7 @@ def _qr_read(font, pw, qr, ssid=SSID, monkeypatch=None):
     """read_recovery_auto on a frame; glyph reader pinned to the true corners."""
     img = render_screen(font, pw, ssid=ssid, qr=qr)
     orig = r.read_recovery
-    r.read_recovery = lambda im, f=None: orig(im, f, corners=TRUE_CORNERS)
+    r.read_recovery = lambda im, f=None, **kw: orig(im, f, corners=TRUE_CORNERS)
     try:
         return r.read_recovery_auto(img, font)
     finally:
@@ -515,3 +515,18 @@ def test_region_applies_to_upscaled_retries():
     assert r.read_recovery_qr(inside).passphrases == [pw]
     with pytest.raises(r.ReadError):
         r.read_recovery_qr(outside)
+
+
+def test_visible_rows_limits_scoring_to_the_part_of_the_panel_in_frame():
+    """A camera framed too low cuts the panel's bottom off; those rows must not be scored."""
+    img = np.zeros((720, 1280, 3))
+    whole = r.visible_rows(img, TRUE_CORNERS)
+    assert whole == r.PANEL_H
+    low = TRUE_CORNERS + np.array([0.0, 400.0])
+    cut = r.visible_rows(img, low)
+    assert 1 <= cut < r.PANEL_H
+
+
+def test_walk_down_follows_the_edge_direction():
+    x, y = r._walk_down((100.0, 50.0), 0.0, 200.0)
+    assert (round(x), round(y)) == (100, 250)
