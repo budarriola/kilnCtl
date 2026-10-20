@@ -185,7 +185,9 @@ def unpack_bundle(bundle: Bundle, out_dir: str, *, elf_paths: Optional[list[str]
                 put("coredump.symbolize.txt", (
                     f"ELF MISSING: the coredump was written by app ELF sha256 prefix {sha}, "
                     f"but the ELF archive has no unique match ({missing}). The dump cannot be "
-                    "decoded until that exact ELF is restored to firmware/KilnFW/elf_archive.\n").encode())
+                    "decoded until that exact ELF is restored to firmware/KilnFW/elf_archive "
+                    "(or recovery_elf_archive); release ELFs ship as the KilnCtrl-<tag>.elf.zip "
+                    "release asset: unzip it there.\n").encode())
             elif symbolize is None or not elf_paths:
                 put("coredump.symbolize.txt", (
                     "NOT SYMBOLIZED: no archived ELF candidates were available"

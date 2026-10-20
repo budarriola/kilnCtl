@@ -273,9 +273,37 @@ def _parse_archived_at(entry: dict) -> Optional[float]:
 SUPERSEDED_NAME = "superseded.json"
 
 
-def _repo_root() -> str:
-    """tools/PcTools/src/kilnctrl/ -> repo root is four levels up."""
+def _file_relative_root() -> str:
+    """tools/PcTools/src/kilnctrl/ -> the checkout containing this file (four levels up)."""
     return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+
+def _main_tree_of(checkout: str) -> str:
+    """RA-01: the MAIN working tree for `checkout`, found via `git rev-parse
+    --git-common-dir` (a linked worktree's common dir is the main tree's .git).
+    Falls back to `checkout` itself when git is unavailable, fails, or the
+    common dir is not a `.git` directory (bare repo, odd layout)."""
+    import subprocess  # noqa: PLC0415
+    try:
+        out = subprocess.run(["git", "-C", checkout, "rev-parse", "--git-common-dir"],
+                             capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return checkout
+    line = (out.stdout or "").strip()
+    if out.returncode != 0 or not line:
+        return checkout
+    common = os.path.normpath(os.path.join(checkout, line))  # absolute `line` wins in join
+    if os.path.basename(common) != ".git" or not os.path.isdir(common):
+        return checkout
+    return os.path.dirname(common)
+
+
+def _repo_root() -> str:
+    """RA-01: the MAIN tree's root, not this file's checkout. Archives (and
+    provenance) written from a linked worktree must land in the main tree's
+    gitignored elf_archive/ so they survive worktree removal. Falls back to the
+    file-relative checkout root (the old behaviour) if git is unavailable."""
+    return _main_tree_of(_file_relative_root())
 
 
 def kiln_archive_dir() -> str:
@@ -454,6 +482,10 @@ def _guard_against_test_write(target: str) -> None:
 
 
 def _sha256_key(path: str) -> str:
+    # RA-07: the archive key is the first 12 hex chars of sha256(elf). A
+    # coredump's dump_elf_sha is a 9-char prefix by IDF default (up to 18 via
+    # CRASH_REPORT_ELF_SHA_MAX); find_elf_by_sha_prefix matches it against this
+    # key, so a prefix longer than 12 chars can never match. Keep both in sync.
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):

@@ -293,6 +293,7 @@ if (-not $SkipBuild) {
         Remove-Item Env:\KILNCTL_RELEASE_VERSION -ErrorAction SilentlyContinue
     }
 }
+$externalBuild = [bool]($SkipBuild -or $BuildDir -or $RecoveryBin)  # before the defaults below fill them in
 if (-not $BuildDir)    { $BuildDir = Join-Path $repoRoot "firmware\KilnFW\build" }
 if (-not $RecoveryBin) { $RecoveryBin = Join-Path $repoRoot "firmware\KilnFW_recovery\build\recovery.bin" }
 $appBin = Join-Path $BuildDir "KilnCtrl.bin"
@@ -316,8 +317,10 @@ Compress-Archive -LiteralPath $elf -DestinationPath $elfZip -CompressionLevel Op
 # The exact ELF of every shipped image must stay decodable from a field coredump: archive it
 # (hash-keyed, never deleted) before publishing. Skipped in a dev dry run (writes the canonical archive).
 if (-not $DevDryRun) {
-    $headSha = (git -C $repoRoot rev-parse HEAD).Trim()
-    & $python (Join-Path $PSScriptRoot "archive_release_elf.py") $elf $appBin $headSha $Tag
+    # RA-03: with -SkipBuild/-BuildDir/-RecoveryBin the binaries are not known to come from HEAD.
+    $headSha = if ($externalBuild) { "unknown (external build)" } else { (git -C $repoRoot rev-parse HEAD).Trim() }
+    # RA-02: the recovery image ships too, so its ELF (recovery.elf next to recovery.bin) is archived as well.
+    & $python (Join-Path $PSScriptRoot "archive_release_elf.py") $elf $appBin $headSha $Tag $RecoveryBin
     if ($LASTEXITCODE -ne 0) { Fail "archiving the release ELF into firmware/KilnFW/elf_archive failed (see above)." }
 }
 
