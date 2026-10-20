@@ -472,7 +472,7 @@ static bool append_trip_history_json(char *buf, size_t cap, size_t *o)
         *o += (size_t)n;
     }
     free(th);
-    n = snprintf(buf + *o, cap - *o, "]");
+    n = snprintf(buf + *o, cap - *o, "],\"trip_history_dropped\":%u", trip_history_dropped()); /* TH-03 */
     if (n < 0 || (size_t)n >= cap - *o) {
         return false;
     }

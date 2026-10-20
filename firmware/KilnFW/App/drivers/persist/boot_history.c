@@ -23,7 +23,7 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 typedef char boot_history_entry_size_check[(sizeof(boot_history_entry_t) == 32) ? 1 : -1];
 typedef char boot_history_blob_size_check[(sizeof(boot_history_blob_t) == 12 + 32 * BOOT_HISTORY_MAX) ? 1 : -1];
 
-static uint32_t blob_crc(const boot_history_blob_t *b)
+static uint32_t blob_integrity(const boot_history_blob_t *b)
 {
     boot_history_blob_t tmp = *b;
     tmp.crc32 = 0;
@@ -36,7 +36,7 @@ bool boot_history_blob_valid(const boot_history_blob_t *b)
         b->head >= BOOT_HISTORY_MAX || b->next_seq == 0u) {
         return false;
     }
-    return blob_crc(b) == b->crc32;
+    return blob_integrity(b) == b->crc32;
 }
 
 void boot_history_blob_init(boot_history_blob_t *b)
@@ -157,7 +157,7 @@ esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_kn
     e.wall_time = wall_time;
     boot_history_short_hash(fw_version, e.fw);
     boot_history_blob_push(&b, &e);
-    b.crc32 = blob_crc(&b);
+    b.crc32 = blob_integrity(&b);
     s_recent_n = 0;
     for (unsigned i = 0; i < BOOT_HISTORY_RECENT && boot_history_blob_get(&b, i, &s_recent[i]); i++) {
         s_recent_n++;
@@ -195,7 +195,7 @@ esp_err_t boot_history_backfill_wall_time(uint32_t wall_time)
         return ESP_ERR_INVALID_STATE;
     }
     b.entries[idx].wall_time = wall_time;
-    b.crc32 = blob_crc(&b);
+    b.crc32 = blob_integrity(&b);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {

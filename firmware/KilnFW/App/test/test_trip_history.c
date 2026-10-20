@@ -196,8 +196,33 @@ static void test_queue_and_failures(void)
                "mask is 0 outside reasons 1..16");
 }
 
+static void test_th01_th02(void)
+{
+    TEST_SECTION("trip_history: TH-01 clamp, TH-02 failed write keeps the queue");
+    reset_all();
+    trip_history_entry_t e = mk(1, 1, 500);
+    e.safety_tc_c = 3.0e38f;
+    e.threshold = -(1.0f / 0.0f);
+    trip_history_note(&e);
+    TEST_CHECK(s_pending[0].safety_tc_c == 1.0e5f && s_pending[0].threshold == -1.0e5f, "TH-01: huge/inf clamped");
+    trip_history_entry_t n = mk(2, 1, 600);
+    n.safety_tc_c = 0.0f / 0.0f;
+    trip_history_note(&n);
+    TEST_CHECK(s_pending[1].safety_tc_c == 0.0f, "TH-01: NaN becomes 0");
+
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(trip_history_flush() == 0u, "TH-02: failed write records nothing");
+    TEST_CHECK(s_pend_tail != s_pend_head, "TH-02: queue entries kept after a failed write");
+    TEST_CHECK(trip_history_flush() == 2u, "TH-02: retry persists both");
+    TEST_CHECK(s_pend_tail == s_pend_head, "TH-02: queue drained after success");
+    trip_history_blob_t b;
+    trip_history_load(&b);
+    TEST_CHECK(b.count == 2u, "TH-02: exactly two persisted, no duplicates");
+}
+
 int main(void)
 {
+    test_th01_th02();
     test_first_trip();
     test_dedupe();
     test_wrap();

@@ -22,7 +22,7 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 typedef char trip_history_entry_size_check[(sizeof(trip_history_entry_t) == 36) ? 1 : -1];
 typedef char trip_history_blob_size_check[(sizeof(trip_history_blob_t) == 12 + 36 * TRIP_HISTORY_MAX) ? 1 : -1];
 
-static uint32_t blob_crc(const trip_history_blob_t *b)
+static uint32_t blob_integrity(const trip_history_blob_t *b)
 {
     trip_history_blob_t tmp = *b;
     tmp.crc32 = 0;
@@ -35,7 +35,7 @@ bool trip_history_blob_valid(const trip_history_blob_t *b)
         b->next_seq == 0u) {
         return false;
     }
-    return blob_crc(b) == b->crc32;
+    return blob_integrity(b) == b->crc32;
 }
 
 void trip_history_blob_init(trip_history_blob_t *b)
@@ -117,8 +117,22 @@ static volatile uint8_t s_pend_head; /* written by the producer */
 static volatile uint8_t s_pend_tail; /* written by the consumer */
 static volatile unsigned s_dropped;
 
-bool trip_history_note(const trip_history_entry_t *e)
+/* TH-01: wire floats are printed with %.1f into a fixed JSON buffer; NaN/inf/huge values would
+ * overflow a row. Non-finite -> 0, others clamped to a width-bounded range. */
+static float th_clamp(float v)
 {
+    if (!(v == v) || v > 1.0e5f || v < -1.0e5f) { /* NaN fails v == v; huge/inf out of range */
+        return (v > 1.0e5f) ? 1.0e5f : ((v < -1.0e5f) ? -1.0e5f : 0.0f);
+    }
+    return v;
+}
+
+bool trip_history_note(const trip_history_entry_t *e_in)
+{
+    trip_history_entry_t e_c = *e_in;
+    e_c.safety_tc_c = th_clamp(e_c.safety_tc_c);
+    e_c.threshold = th_clamp(e_c.threshold);
+    const trip_history_entry_t *e = &e_c;
     uint8_t head = s_pend_head;
     uint8_t next = (uint8_t)((head + 1u) % TRIP_HISTORY_PENDING_MAX);
     if (next == s_pend_tail) {
@@ -139,6 +153,7 @@ typedef struct {
     trip_history_entry_t ents[TRIP_HISTORY_PENDING_MAX];
     unsigned n;
     unsigned recorded;
+    bool ok; /* TH-02: false when the partition/open/write failed => queue entries must be kept */
 } flush_job_t;
 
 /* Runs on a flash-safe (internal-stack) context via flash_hop_run(). */
@@ -146,6 +161,7 @@ static void flush_job(void *arg)
 {
     flush_job_t *j = (flush_job_t *)arg;
     j->recorded = 0;
+    j->ok = false;
     if (hal_kv_init_partition(KILN_NVS_PARTITION) != HAL_OK) {
         ESP_LOGE(TAG, "NVS partition init failed -- trip not recorded");
         return;
@@ -158,9 +174,10 @@ static void flush_job(void *arg)
         }
     }
     if (j->recorded == 0u) {
+        j->ok = true;
         return; /* all duplicates: no flash write */
     }
-    b.crc32 = blob_crc(&b);
+    b.crc32 = blob_integrity(&b);
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     if (err != HAL_OK) {
@@ -176,7 +193,9 @@ static void flush_job(void *arg)
     if (err != HAL_OK) {
         ESP_LOGE(TAG, "trip history persist failed: %s", hal_status_to_name(err));
         j->recorded = 0;
+        return;
     }
+    j->ok = true;
 }
 
 unsigned trip_history_flush(void)
@@ -196,6 +215,10 @@ unsigned trip_history_flush(void)
     if (r != ESP_OK) {
         ESP_LOGE(TAG, "flash worker unavailable -- keeping %u pending trip(s)", j.n);
         return 0; /* queue left intact; retried on the next flush */
+    }
+    if (!j.ok) {
+        ESP_LOGE(TAG, "trip history write failed -- keeping %u pending trip(s) for retry", j.n);
+        return 0; /* TH-02: tail not advanced; dedupe makes the retry safe */
     }
     s_pend_tail = tail;
     return j.recorded;

@@ -6,6 +6,7 @@ logic changes. See mcp_server.py's module docstring for the overall map.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import dataclasses
 import functools
 import glob
@@ -1526,7 +1527,13 @@ def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     if not records:
         return f"host={resolved} kind={kind}: log is empty (0 records)"
     lines = [f"host={resolved} kind={kind}: {len(records)} record(s)"]
-    lines.extend(event_log_decoder.format_record(r) for r in records)
+    for rec, utc in event_log_decoder.annotate_utc(records):  # FD-04: UTC per boot segment, blank when unknown
+        stamp = (
+            datetime.datetime.fromtimestamp(utc, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+            if utc is not None
+            else "-"
+        )
+        lines.append(f"{stamp:>20} {event_log_decoder.format_record(rec)}")
     return "\n".join(lines)
 
 
