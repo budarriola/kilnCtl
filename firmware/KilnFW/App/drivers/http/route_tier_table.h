@@ -398,6 +398,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * route above reads, so it is classified ADMIN on the same basis. */
     ROUTE_TIER("/api/dualwrite_window/restore_verified", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/partitions", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diag/bundle", HTTP_GET, ROUTE_TIER_ADMIN), /* FD-01 support bundle */
     ROUTE_TIER("/api/backup/export", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/crash_report", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/boot_guard", HTTP_GET, ROUTE_TIER_ADMIN),

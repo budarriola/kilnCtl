@@ -22,6 +22,7 @@
 #include "crash_report.h"
 #include "boot_history.h"
 #include "trip_history.h"
+#include "diag_bundle_http.h"
 #include "estop_verification.h"
 #include "danger_mode.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- HR-01 mode gate */
@@ -2406,6 +2407,7 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/estop/verify) failed: %s", esp_err_to_name(err));
         return err;
     }
+    diag_bundle_http_register(server); /* logs its own failure; never blocks the routes below */
     err = kiln_http_register(server, &nvs_keys_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/nvs/keys) failed: %s", esp_err_to_name(err));

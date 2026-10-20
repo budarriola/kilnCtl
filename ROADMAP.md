@@ -1911,6 +1911,15 @@ Owner instruction, 2026-09-21.
 
 ---
 
+## Field debug (owner 2026-10-19)
+
+- [ ] FD-01: one-click support bundle (GET /api/diag/bundle, PC `diag_bundle_fetch`). Landed on dev, host-tested only: target build and bench download still to verify; /api/status etc. are PC-merged supplements.
+- [ ] FD-02: durable per-firing temperature trace in flash, about 1 sample per minute. Queued.
+- [ ] FD-03: reset/crash history ring of 16 boots. In progress.
+- [ ] FD-04: SNTP wall-clock timestamps. In progress.
+- [ ] FD-05: Pico trip history, last 16 trips, kept on the ESP. Queued.
+- [ ] Check that each field build's ELF gets archived to firmware/KilnFW/elf_archive. Queued.
+
 ## Future work — KilnFW PC-link command acknowledgement
 
 **CLOSED**, moved out of this file 2026-08-24, closed in the owning doc

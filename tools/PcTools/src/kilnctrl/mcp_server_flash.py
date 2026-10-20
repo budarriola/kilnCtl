@@ -22,7 +22,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, dashboard_http_client, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, otadata_blob, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, dashboard_http_client, diag_bundle, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, otadata_blob, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -2400,6 +2400,37 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
     except coredump_fetch.CoredumpSymbolizeError as exc:
         return f"{result}\nerror: {exc}"
     return f"{result}\nelf={elf_path}\n{symbolized}"
+
+
+@_core._tool()
+def diag_bundle_fetch(host: Optional[str] = None, out_dir: Optional[str] = None, symbolize: bool = True) -> str:
+    """FD-01 support bundle: GET /api/diag/bundle (ADMIN login), unpack it into
+    `out_dir` (default: a temp dir), decode the firing/autotune event logs with
+    event_log_decoder, merge the /api/status, readiness, partitions, boot_guard,
+    OTA and Pico stack-margin JSON the firmware lists as pc_supplement, and
+    symbolize the coredump (if present) against a matching ELF in
+    firmware/KilnFW/elf_archive. Read-only on the board; never includes
+    passwords, hashes, tokens or TOTP seeds. A truncated transfer is flagged
+    with INCOMPLETE.txt, never accepted silently."""
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    resolved = _ota_resolve_host(host)
+    if out_dir is None:
+        import tempfile
+        out_dir = tempfile.mkdtemp(prefix="kiln_diag_bundle_")
+
+    def _sym(core_path, elves):
+        elf, text = coredump_fetch.find_matching_archived_elf(core_path, elves)
+        return f"elf={elf}
+{text}"
+
+    elves = (elf_archive.list_all_kiln_elf_paths() + elf_archive.list_recovery_elf_paths()) if symbolize else []
+    try:
+        files = diag_bundle.fetch_and_unpack(resolved, out_dir, elf_paths=elves, symbolize=_sym if symbolize else None)
+    except diag_bundle.BundleError as exc:
+        return f"error: {exc}"
+    return f"support bundle from {resolved} -> {out_dir}
+" + "
+".join(os.path.basename(f) for f in files)
 
 
 @_core._tool()

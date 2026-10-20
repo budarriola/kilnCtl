@@ -110,6 +110,7 @@ try {
         # test_time_sync.c's move documented at that test's own block below.
         (Join-Path $testDir "test_backup_import.c"),
         (Join-Path $testDir "test_ota_record.c"),
+        (Join-Path $testDir "test_diag_bundle.c"),
         (Join-Path $testDir "test_uart_log_bridge.c"),
         (Join-Path $testDir "test_safety_watchdog.c"),
         (Join-Path $testDir "test_safety_link.c"),
@@ -277,6 +278,7 @@ try {
         (Join-Path $driversDir "http/security_backend_placeholder.c"),
         (Join-Path $driversDir "http/http_auth_enforce.c"),
         (Join-Path $driversDir "persist/ota_record.c"),
+        (Join-Path $driversDir "http/diag_bundle.c"),
         (Join-Path $driversDir "control/heat_interlock.c"),
         (Join-Path $driversDir "control/heat_enable.c"),
         (Join-Path $driversDir "control/thermo_combine.c"),
