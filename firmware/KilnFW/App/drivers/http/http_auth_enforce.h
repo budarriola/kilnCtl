@@ -40,6 +40,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "route_tier_table.h" // route_tier_t, kRouteTierTable, httpd_method_t
 
@@ -229,8 +230,23 @@ bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method,
 // for esp_http_server to purge. The purge runs at CONFIG_HTTPD_PURGE_BUF_LEN
 // (32 B) per read on the single CPU0 httpd task, so a multi-MB unauthenticated
 // POST (an OTA image) would hog it and trip TASK_WDT on IDLE0 (bench finding
-// 2026-10-03). 4 KB = 128 purge reads at most.
-#define HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES 4096u
+// 2026-10-03). RS-02 (benchmain33): a refused request with a body up to this size is drained by the
+// pre-handler itself (small own buffer, hard caps below) so the client reads the 401/403 instead of a
+// connection reset; anything larger closes. 32 KB covers a first backup restore (23 KB).
+#define HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES 32768u
+// Hard wall-clock cap on the whole drain: an unauthenticated client must not hold the single httpd worker.
+// Checked between reads only (LF-02): a blocked recv adds up to recv_wait_timeout (3 s), so the real bound is ~5 s.
+#define HTTP_AUTH_REFUSAL_DRAIN_MAX_MS 2000u
+
+typedef enum {
+    HTTP_AUTH_DRAIN_CONTINUE = 0,
+    HTTP_AUTH_DRAIN_DONE,  // body fully consumed (recv returned 0)
+    HTTP_AUTH_DRAIN_ABORT, // socket error/timeout, byte cap or time cap exceeded: close
+} http_auth_drain_step_t;
+
+// Decision after one httpd_req_recv(): `ret` is its return, `total_bytes` the bytes drained so far INCLUDING
+// this read, `elapsed_ms` the time since the drain started. Pure, host-tested.
+http_auth_drain_step_t http_auth_refusal_drain_step(int ret, size_t total_bytes, uint32_t elapsed_ms);
 
 // True when a refusal sent for a request with `content_len` unread body bytes
 // should return ESP_FAIL (httpd closes the socket without purging) instead of

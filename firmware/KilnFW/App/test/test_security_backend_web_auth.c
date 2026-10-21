@@ -245,6 +245,32 @@ static void test_set_lcd_pin(void)
     TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, "8765"), "previous user PIN still intact after the failed write");
 }
 
+static void test_set_policy_lk(void)
+{
+    TEST_SECTION("LK-01/LK-02 backend set_policy delegates the gate to the store (under its lock) and maps HAL_BUSY to BUSY");
+    reset_all();
+    seed_admin();
+    security_policy_t on = pol(true, false, 15, -1);
+    /* a wipe before the call: the gate (inside the store) sees no admin and refuses */
+    (void)web_auth_store_clear_all_credentials();
+    TEST_CHECK(vt->set_policy(&on) == SECURITY_ERR_INVALID_INPUT, "LK-01: no admin at write time -> refused");
+    web_auth_policy_t stored;
+    TEST_CHECK(web_auth_store_load_policy(&stored) != WEB_AUTH_LOAD_OK || !stored.web_enabled, "LK-01: nothing enabled stored");
+    char *src = test_read_source_anchored(__FILE__, "../drivers/http/security_backend_web_auth.c",
+                                          (const char *const[]){"../drivers/http/security_backend_web_auth.c",
+                                                                "App/drivers/http/security_backend_web_auth.c",
+                                                                "firmware/KilnFW/App/drivers/http/security_backend_web_auth.c"}, 3);
+    TEST_CHECK(src != NULL, "backend source readable");
+    if (src != NULL) {
+        TEST_CHECK(strstr(src, "web_auth_store_set_policy_checked(") != NULL, "LK-01: backend uses the in-lock checked setter");
+        TEST_CHECK(strstr(src, "web_auth_policy_check_transition(") == NULL, "LK-01: no check outside the lock in the backend");
+        char *busy = strstr(src, "status == HAL_BUSY");
+        char *stor = strstr(src, "return SECURITY_ERR_STORAGE;");
+        TEST_CHECK(busy != NULL && strstr(busy, "SECURITY_ERR_BUSY") != NULL && stor != NULL, "LK-02: HAL_BUSY maps to SECURITY_ERR_BUSY");
+        free(src);
+    }
+}
+
 static void test_set_policy(void)
 {
     TEST_SECTION("set_policy: one transition gate, minutes->seconds, sessions cleared only on a real enable edge, failed write clears nothing");
@@ -464,6 +490,7 @@ int main(void)
     test_set_web_password();
     test_set_lcd_pin();
     test_set_policy();
+    test_set_policy_lk();
     test_get_config();
     test_invalidate_sessions();
     test_clear_all_credentials();

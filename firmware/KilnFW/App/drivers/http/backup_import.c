@@ -62,6 +62,7 @@
 #include "live_profile.h" /* live_edit_name_collides() -- Opus review finding B, the pass-1
                             * dup-name pre-check below (before pass 2 writes anything) */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
+#include "ota_http_internal.h" /* RS-02: ota_http_refusal_drain() */
 #include "persist_scratch.h" /* persist_scratch_alloc() -- pass-1 validation scratch */
 #include "profiles_http.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
@@ -4551,6 +4552,23 @@ static void backup_import_job(httpd_req_t *async_req, void *arg)
     atomic_store(&s_backup_restore_in_flight, false);
 }
 
+/* RS-02: every refusal that happens BEFORE the async handoff leaves the request body unread
+ * (the mode gate, interlock, busy and header checks all run ahead of the read). Closing a socket
+ * with unread receive data makes lwIP send RST instead of FIN, and a Windows client then reports
+ * ConnectionResetError (WinError 10054) instead of the status line (first 23 KB restore). Drain
+ * the body after the refusal has been sent, bounded (ota_http_refusal_drain: 30 s cap). A body
+ * larger than BACKUP_BODY_MAX is not drained: ESP_FAIL makes httpd close the socket. */
+static esp_err_t backup_import_refusal_finish(httpd_req_t *req, esp_err_t sent)
+{
+    if (sent != ESP_OK || req->content_len <= 0) {
+        return sent;
+    }
+    if ((size_t)req->content_len > BACKUP_BODY_MAX) {
+        return ESP_FAIL;
+    }
+    return ota_http_refusal_drain(req); /* LK-05: own 512 B buffer, not the shared OTA chunk */
+}
+
 esp_err_t backup_import_post_handler(httpd_req_t *req)
 {
     /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
@@ -4576,7 +4594,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         mode_reason[0] = '\0';
         if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
             ESP_LOGW(BACKUP_TAG, "backup import refused by system mode gate: %s", mode_reason);
-            return system_mode_gate_http_send_refusal(req, mode_reason);
+            return backup_import_refusal_finish(req, system_mode_gate_http_send_refusal(req, mode_reason));
         }
     }
 
@@ -4610,7 +4628,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
                                                             sizeof(reason));
     if (gate != OTA_INTERLOCK_OK) {
-        return ota_http_send_interlock_refusal(req, gate, reason);
+        return backup_import_refusal_finish(req, ota_http_send_interlock_refusal(req, gate, reason));
     }
 
     // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement, or
@@ -4628,12 +4646,12 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     if (http_async_job_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "another commissioning operation is running");
+        return backup_import_refusal_finish(req, httpd_resp_sendstr(req, "another commissioning operation is running"));
     }
 
     if (req->content_len <= 0 || (size_t)req->content_len > BACKUP_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
-        return ESP_OK;
+        return backup_import_refusal_finish(req, ESP_OK);
     }
 
     /* X-Kiln-Config-Mode: merge|mirror (default merge -- the safer choice,
@@ -4649,7 +4667,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     esp_err_t mode_err = httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val));
     if (mode_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Mode value too long");
-        return ESP_OK;
+        return backup_import_refusal_finish(req, ESP_OK);
     }
     if (mode_err == ESP_OK && backup_names_equal_ci(mode_val, "mirror")) {
         mode = KILN_CFG_RESTORE_MIRROR;
@@ -4662,12 +4680,12 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
             dry_run = true;
         } else if (strcmp(dry_run_val, "0") != 0) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Dry-Run must be 1 or 0");
-            return ESP_OK;
+            return backup_import_refusal_finish(req, ESP_OK);
         }
     } else if (dry_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
         /* fail closed: a truncated value must never fall through to a real import */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Dry-Run value too long");
-        return ESP_OK;
+        return backup_import_refusal_finish(req, ESP_OK);
     }
 
     /* X-Kiln-Config-Ack-Delete: <count> (task 8/11): a non-dry-run MIRROR
@@ -4691,7 +4709,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         }
     } else if (ack_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Ack-Delete value too long");
-        return ESP_OK;
+        return backup_import_refusal_finish(req, ESP_OK);
     }
 
     /* Task 4 (docs/HTTP_POST_OWNER_MIGRATION.md slice A4): hand the body
@@ -4710,7 +4728,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     backup_import_job_ctx_t *ctx = malloc(sizeof(backup_import_job_ctx_t));
     if (!ctx) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
-        return ESP_OK;
+        return backup_import_refusal_finish(req, ESP_OK);
     }
     ctx->mode = mode;
     ctx->dry_run = dry_run;
@@ -4733,7 +4751,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
          * difference in which branch produced it. */
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "another commissioning operation is running");
+        return backup_import_refusal_finish(req, httpd_resp_sendstr(req, "another commissioning operation is running"));
     }
     /* HTTP_ASYNC_JOB_RESOURCE_FAILURE: the async handoff itself failed
      * (httpd_req_async_handler_begin()) or the job task could not be
@@ -4741,5 +4759,6 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
      * "out of memory" 500 the pre-A4 handler already sent for its own
      * allocation failures at this point. */
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+    /* No drain here: the async copy was completed and the session is force-closed above. */
     return ESP_OK;
 }

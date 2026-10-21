@@ -219,7 +219,7 @@ static void test_touch_unknown_token_and_never_timeout(void)
 
     set_policy_timeout(-1); // "never" (web_auth_store's -1 sentinel)
     make_session("tok-never", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
-    fake_time_advance_ms(1000u * 3600u * 24u); // a full day later
+    fake_time_advance_ms(1000u * 3600u * 10u); // 10 h later (inside the AG-05 12 h absolute cap)
     http_auth_session_touch("tok-never", "10.0.0.5", false);
 
     web_auth_session_role_t role;
@@ -564,8 +564,8 @@ static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
     // Even long after any ordinary timeout would have expired it, the never
     // policy alone never drops it -- only the presence argument does.
     fake_time_advance_ms(365ULL * 24 * 3600 * 1000);
-    TEST_CHECK(http_auth_any_ap_session_active(true),
-               "a year later, still defers while a station is present -- never-expire really never expires");
+    TEST_CHECK(!http_auth_any_ap_session_active(true),
+               "a year later, no longer defers: AG-05 12 h absolute cap applies even under the never policy");
     TEST_CHECK(!http_auth_any_ap_session_active(false),
                "a year later, does not defer once the station is gone -- never-expire alone can't pin the AP up");
 

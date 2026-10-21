@@ -1316,7 +1316,10 @@ CEILING_BYTES = {
     # reachable from the rescan tick. Declared stack raised 4096 -> 5120 B (PSRAM, 0 B DRAM): 1.6 KB free.
     # 2026-10-20: 3504 -> 3632 B (+128 B) measured on dev tip da16ba544 (OG/OF-05 running_image_id
     # frame reachable from the rescan tick); declared 5120 B PSRAM, 1.4 KB free.
-    "wifi_prov_owner": 3632,
+    # 2026-10-20 (WP-01): 3632 -> 3456 B (-176 B). web_auth_store_load_policy's AU-02 lost-policy probes
+    # (admin record, user record, LCD blob) moved into noinline helpers so load_policy's own frame is
+    # 64 B instead of 272 B; the deepest chain no longer holds the credential/LCD blob locals.
+    "wifi_prov_owner": 3456,
     # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
     # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
     # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.

@@ -90,6 +90,9 @@ static void set_result_from_err(security_result_t *out, security_err_t err)
     case SECURITY_ERR_STORAGE:
         set_result(out, 500, "applied checks passed but the value could not be saved");
         return;
+    case SECURITY_ERR_BUSY:
+        set_result(out, 503, "busy, retry");
+        return;
     case SECURITY_ERR_NOT_IMPLEMENTED:
         set_result(out, 501, "credential storage is not available on this build yet");
         return;

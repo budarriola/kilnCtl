@@ -98,20 +98,18 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 // already sized against the largest existing handler's *smaller* buffers
 // (zones_post_handler's 2561-byte body, see that file's comment on the hang/
 // reset it caused before being bumped); a 4 KB buffer on top of that same
-// stack would eat half of it just for this one variable. Safe as a single
-// shared buffer (also borrowed by ota_http_pico.c and update_http.c via
-// ota_http_esp_chunk_buf()) because every user is an OTA/update handler and
-// they all run on the single httpd task, so two handlers can never execute
-// at once. That single-task property is the real safety reason; NOTHING
-// enforces it (s_update_claim serialises transfers, it does not protect this
-// buffer). If httpd ever gets more than one worker task, this buffer needs a
-// lock or per-transfer storage.
+// stack would eat half of it just for this one variable. Shared
+// (also borrowed by ota_http_pico.c, update_http.c and update_install_http.c via
+// ota_http_esp_chunk_buf()). It is NOT httpd-only (LK-05): stale_running_matches
+// used to hash through it on the ota_confirm task. LF-01: that now has its own temporary
+// PSRAM buffer, so the unclaimed stage status GET / app_stage_info readers (LK-05b) no longer race it.
+// The rule: use the chunk only while holding the update claim (ota_http_update_try_begin) or as a
+// stage-status scratch on httpd. Refusal drains use their own small buffer (ota_http_refusal_drain).
 #define OTA_ESP_CHUNK_SIZE 4096
 static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 
 // Shared with update_http.c (the WP4 stage upload/status), which needs the same
-// internal-SRAM, DMA-safe 4 KB buffer. Safe to share: every user is an httpd
-// handler and httpd is a single task, so two handlers never overlap.
+// internal-SRAM, DMA-safe 4 KB buffer. Claim-holders only; see the LK-05 note above.
 uint8_t *ota_http_esp_chunk_buf(size_t *cap)
 {
     if (cap != NULL) {
@@ -489,13 +487,13 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
         // 850-859). Returning ESP_FAIL instead skips that purge (httpd_uri.c
         // ~line 367, httpd_sess.c ~lines 428-431) but closes the socket with
         // unread RX data, which makes lwIP send a RST and the client can lose
-        // the status. ota_http_refusal_drain() reads the rest in 4 KB chunks
+        // the status. ota_http_refusal_drain() reads the rest in 512 B chunks (own buffer, LK-05)
         // with vTaskDelay(1) between reads (30 s cap) and returns ESP_OK only
         // after a complete drain, ESP_FAIL (close) on error or cap.
         // httpd_sess_trigger_close() is NOT a substitute: it only queues a
         // close and httpd_req_delete() would still purge first.
         (void)ota_http_send_interlock_refusal(req, gate, reason);
-        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk));
+        return ota_http_refusal_drain(req);
     }
 
     // 4. Single update mutex -- claimed before any body byte is read, so a
@@ -506,7 +504,7 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk)); // see the comment above
+        return ota_http_refusal_drain(req); // see the comment above
     }
 
     // From here, the mutex is held and ota_esp_do_transfer() owns releasing
@@ -515,7 +513,7 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
     // Failure (response already sent, body possibly partly unread) -> bounded
     // drain, ESP_FAIL only if the drain itself fails; success -> ESP_OK.
     if (ota_esp_do_transfer(req, ip)) {
-        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk));
+        return ota_http_refusal_drain(req);
     }
     return ESP_OK;
 }

@@ -214,6 +214,16 @@ bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method,
     return web_enabled && tier != ROUTE_TIER_OPEN && http_auth_is_page_shell_get(uri, method);
 }
 
+http_auth_drain_step_t http_auth_refusal_drain_step(int ret, size_t total_bytes, uint32_t elapsed_ms) {
+    if (ret == 0) {
+        return HTTP_AUTH_DRAIN_DONE;
+    }
+    if (ret < 0 || total_bytes > HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES || elapsed_ms > HTTP_AUTH_REFUSAL_DRAIN_MAX_MS) {
+        return HTTP_AUTH_DRAIN_ABORT;
+    }
+    return HTTP_AUTH_DRAIN_CONTINUE;
+}
+
 bool http_auth_refusal_should_close(size_t content_len) {
     return content_len > HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES;
 }

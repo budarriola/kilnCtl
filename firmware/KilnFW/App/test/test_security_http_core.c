@@ -296,6 +296,22 @@ static void test_lcd_pin_dispatch(void)
     TEST_CHECK(fake.set_lcd_pin_calls == 0, "backend never called when the two PINs would collide");
 }
 
+static void test_lk02_busy_maps_to_503(void)
+{
+    TEST_SECTION("LK-02 SECURITY_ERR_BUSY from set_policy maps to 503 busy (retry), not 500 storage");
+    fake_reset();
+    fake.set_policy_result = SECURITY_ERR_BUSY;
+    security_request_t req = blank_request(SECURITY_CMD_SET_POLICY);
+    req.policy.web_enabled = true;
+    req.policy.web_timeout_min = 15;
+    req.policy.lcd_timeout_min = -1;
+    security_result_t result;
+    security_http_dispatch(&fake_vtable, SECURITY_ROLE_ADMIN, &req, &result);
+    TEST_CHECK(result.http_status == 503, "busy -> 503");
+    TEST_CHECK(strstr(result.message, "busy") != NULL, "message says busy");
+    TEST_CHECK(!result.invalidated_sessions, "busy invalidates no session");
+}
+
 static void test_policy_dispatch_never_invalidates(void)
 {
     TEST_SECTION("SET_POLICY -- validated here, never invalidates sessions (item 6: \"a preference\")");
@@ -429,6 +445,7 @@ void run_test_security_http_core(void)
     test_empty_password_refused_before_backend();
     test_lcd_pin_dispatch();
     test_policy_dispatch_never_invalidates();
+    test_lk02_busy_maps_to_503();
     test_not_implemented_maps_to_501();
     test_unknown_command_refused();
     test_clear_credentials_success_invalidates_both_roles();

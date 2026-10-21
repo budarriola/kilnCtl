@@ -17,6 +17,7 @@ const f = ctx.pauseReasonText;
 check(f('') === '' && f(undefined) === '', 'empty reason -> empty');
 check(/Heat withheld/.test(f('pico_reboot_undecided')), 'pico_reboot_undecided text');
 check(/fatal fault/.test(f('pico_fatal_reboot')), 'pico_fatal_reboot text');
+check(/before this restart/.test(f('pico_fatal_before_esp_boot')), 'pico_fatal_before_esp_boot text');
 check(/twice within 15 min/.test(f('pico_repeated_reboot')), 'pico_repeated_reboot text');
 check(/heat grant/.test(f('heat_grant_unconfirmed')), 'heat_grant_unconfirmed text');
 check(f('new_reason') === 'Paused: new_reason', 'unknown reason verbatim');

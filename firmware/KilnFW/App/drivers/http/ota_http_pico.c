@@ -57,10 +57,9 @@
 
 // Shares ota_http_esp.c's 4 KB internal chunk buffer (ota_http_esp_chunk_buf())
 // instead of a second static of its own (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md:
-// saves 4096 B of internal DRAM). Safe: the only users of either buffer are
-// httpd handlers (ESP upload, Pico upload, the refusal drains, WP4 stage
-// upload/status), httpd is a single task so two handlers never overlap, and the
-// Pico relay task started after staging never touches the chunk buffer.
+// saves 4096 B of internal DRAM). Users hold the update claim (ESP upload, Pico
+// upload, WP4 stage upload); the refusal drains no longer use it (LK-05) and the Pico relay
+// task started after staging never touches it.
 // ota_pico_chunk_buf() asserts the capacity is at least what this file's
 // transfer loop assumes.
 #define OTA_PICO_CHUNK_SIZE 4096
@@ -423,7 +422,7 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: refused by interlock: %s", ip, reason);
         (void)ota_http_send_interlock_refusal(req, gate, reason);
-        return ota_http_refusal_drain(req, chunk, chunk_cap); // see ota_esp_post_handler()
+        return ota_http_refusal_drain(req); // see ota_esp_post_handler()
     }
 
     if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
@@ -431,14 +430,14 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ota_http_refusal_drain(req, chunk, chunk_cap);
+        return ota_http_refusal_drain(req);
     }
 
     // From here, ota_pico_do_stage() owns the mutex -- either it releases
     // it itself (staging failure) or it starts the relay task, which then
     // owns release. See that function's own doc comment.
     if (ota_pico_do_stage(req, ip)) {
-        return ota_http_refusal_drain(req, chunk, chunk_cap);
+        return ota_http_refusal_drain(req);
     }
     return ESP_OK;
 }

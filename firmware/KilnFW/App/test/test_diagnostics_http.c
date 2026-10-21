@@ -733,6 +733,17 @@ static void test_watchdog_ramp(void)
     watchdog_cfg_post_handler(&s_req);
     TEST_CHECK(s_status == 400 && g_wd_set_calls == 0, "watchdog POST: recv failure -> 400");
 
+    /* AG-03: 409 (system_mode_gate) while a firing or autotune is active; nothing written. */
+    for (int mode = 0; mode < 2; mode++) {
+        world_reset();
+        g_run_profile = (mode == 0);
+        g_run_autotune = (mode == 1);
+        set_body("disabled=1");
+        watchdog_cfg_post_handler(&s_req);
+        TEST_CHECK(s_status == 409 && g_wd_set_calls == 0 && !g_wd_disabled,
+                   "watchdog POST (AG-03): 409 while a firing/autotune run is active, nothing written");
+    }
+
     const char *bad[] = {"x=1", "disabled=", "disabled=2", "disabled=true", "disabled=01", "disabled=-1", NULL};
     for (int i = 0; bad[i]; i++) {
         world_reset();

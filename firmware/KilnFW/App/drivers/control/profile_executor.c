@@ -2407,11 +2407,17 @@ void watchdog_task_entry(void *arg)
         uint8_t safety_boot_reason = 0u;
         bool safety_status_ok = false;
         bool safety_boot_id_seen = false;
+        bool safety_boot_id_valid = false; /* PF-04 */
+        uint8_t safety_boot_id_value = 0u;
+        uint32_t safety_diag_uptime_ms = 0u;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
                 safety_status_ok = true;
                 safety_boot_id_seen = safety_status.pico_boot_id_ever_seen;
+                safety_boot_id_valid = safety_status.pico_boot_id_valid;
+                safety_boot_id_value = safety_status.pico_boot_id;
+                safety_diag_uptime_ms = safety_status.diag_uptime_ms;
                 safety_age_ms = safety_status.age_ms;
                 /* F5HOLDERFX4 MED-1: the DIAG's own age is diag_frame_age_ms (age_ms is the STATUS
                  * frame's). safety_diag_valid = "fresh enough to act on as OK"; a cached TRIPPED is
@@ -2640,6 +2646,11 @@ void watchdog_task_entry(void *arg)
          */
         /* F1: tell heat_enable what the Pico reports so a lost grant is re-requested. */
         uint32_t wdt_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        /* PF-04: Pico boot id + "Pico booted before this ESP" (DIAG uptime beyond the ESP's own); invalid defaults
+         * when the status read failed. */
+        heat_enable_note_pico_boot_identity(safety_status_ok && safety_boot_id_valid, safety_boot_id_value,
+                                            safety_status_ok && safety_diag_since_reboot &&
+                                                safety_diag_uptime_ms > wdt_now_ms);
         /* A failed status read must never feed reboot seq 0 (looks like a reboot). */
         if (safety_status_ok) {
             heat_enable_note_boot_id_seen(safety_boot_id_seen); /* PF-01: before the reboot rule */
@@ -2660,7 +2671,11 @@ void watchdog_task_entry(void *arg)
         bool hold_unconfirmed = !hold_reboot && heat_enable_grant_unconfirmed();
         if (hold_reboot) {
             /* PF-03: a latch from the claimless lost-trip rule is not a fatal reboot. */
-            if (heat_enable_reboot_hold_lost_trip_only()) {
+            if (heat_enable_reboot_hold_first_sight()) {
+                /* PF-04: the Pico was already running a fatal boot reason when this controller started. */
+                (void)profile_executor_pause_with_reason_bounded("pico_fatal_before_esp_boot");
+                (void)autotune_engine_abort_bounded("pico_fatal_before_esp_boot", 100u);
+            } else if (heat_enable_reboot_hold_lost_trip_only()) {
                 (void)profile_executor_pause_with_reason_bounded("pico_lost_trip_latched");
                 (void)autotune_engine_abort_bounded("pico_lost_trip_latched", 100u);
             } else if (heat_enable_reboot_hold_repeated_benign()) {

@@ -1250,8 +1250,8 @@ static void test_ax05_relogin_revokes_presented_session_only(void)
     uint8_t h_old[32], h_other[32];
     http_session_hash_token("old-token", 9, h_old);
     http_session_hash_token("other-token", 11, h_other);
-    web_auth_table_create_session(http_session_table(), h_old, "10.0.0.1", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
-    web_auth_table_create_session(http_session_table(), h_other, "10.0.0.9", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+    web_auth_table_create_session(http_session_table(), h_old, "10.0.0.1", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
+    web_auth_table_create_session(http_session_table(), h_other, "10.0.0.9", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
     strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
     stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
     (void)do_login("admin", "correct-horse-battery-staple");
@@ -1319,16 +1319,17 @@ static void test_aq01_full_table_relogin_keeps_bystander(void)
     uint8_t h_by[32];
     http_session_hash_token("bystander-token", 15, h_by);
     /* Bystanders are the oldest (LRU) slots; the presenter's slot is the newest. */
-    web_auth_table_create_session(http_session_table(), h_by, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN, 100u);
+    fake_time_advance_ms(2000u); /* AG-05: issue times must not lie in the future of now_ms() */
+    web_auth_table_create_session(http_session_table(), h_by, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms() - 1900u);
     for (size_t i = 1; i + 1 < WEB_AUTH_WEB_SLOT_COUNT; i++) {
         uint8_t h[32];
         memset(h, (int)(i + 1), sizeof(h));
         web_auth_table_create_session(http_session_table(), h, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN,
-                                      100u + (uint32_t)i);
+                                      now_ms() - 1900u + (uint32_t)i);
     }
     uint8_t h_old[32];
     http_session_hash_token("old-token", 9, h_old);
-    web_auth_table_create_session(http_session_table(), h_old, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, 900u);
+    web_auth_table_create_session(http_session_table(), h_old, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms() - 100u);
     stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
     s_last_set_cookie[0] = '\0';
     (void)do_login("admin", "correct-horse-battery-staple");
@@ -1453,7 +1454,7 @@ static void test_logout_with_valid_cookie_clears_session(void)
     uint8_t token_hash[32];
     http_session_hash_token("logout-test-token", strlen("logout-test-token"), token_hash);
     size_t slot_idx =
-        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.5", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.5", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
     TEST_CHECK(slot_idx < WEB_AUTH_WEB_SLOT_COUNT, "test setup: session was created");
     TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
                "test setup: the session resolves before logout");
@@ -1480,7 +1481,7 @@ static void test_logout_with_no_cookie_leaves_session_untouched(void)
     uint8_t token_hash[32];
     http_session_hash_token("untouched-token", strlen("untouched-token"), token_hash);
     size_t slot_idx =
-        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.6", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.6", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
     TEST_CHECK(slot_idx < WEB_AUTH_WEB_SLOT_COUNT, "test setup: an unrelated session was created");
     TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
                "test setup: the unrelated session resolves before the no-cookie logout");

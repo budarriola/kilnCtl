@@ -586,6 +586,20 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
     return g_stub_ota_ack_no_safety;
 }
 
+// RS-02: refusal drain seam. Counts the bytes the handler asked to drain.
+int g_stub_drain_calls = 0;
+static uint8_t s_stub_drain_buf[64];
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
+{
+    g_stub_drain_calls++;
+    return req->content_len > 0 ? ESP_OK : ESP_FAIL;
+}
+uint8_t *ota_http_esp_chunk_buf(size_t *cap)
+{
+    *cap = sizeof(s_stub_drain_buf);
+    return s_stub_drain_buf;
+}
+
 // Records the reason the code under test actually handed to the refusal
 // sender, so a test can prove a specific interlock reason (e.g. the zone
 // sweep's) reaches the response unmodified rather than only that the
@@ -2607,6 +2621,7 @@ static void reset_backup_import_post_stubs(void)
     g_stub_ota_last_refusal_reason[0] = '\0';
     s_post_last_status[0] = '\0';
     s_post_last_body[0] = '\0';
+    g_stub_drain_calls = 0;
 }
 
 // Proves the ordering fix itself, not just its presence in the source: the
@@ -2725,6 +2740,50 @@ static bool header_case_refused_400(void)
     s_hdr_dry_trunc = s_hdr_mode_trunc = s_hdr_ack_trunc = false;
     reset_backup_import_post_stubs();
     return r;
+}
+
+// RS-02: a refusal sent before the body is read must drain the body (else the close carries
+// unread RX data, lwIP sends RST, and a Windows client sees WinError 10054 instead of the status).
+static void test_backup_import_post_refusals_drain_unread_body(void)
+{
+    TEST_SECTION("RS-02: backup_import_post_handler drains the unread body after an early refusal");
+    httpd_req_t req;
+
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 23000;
+    esp_err_t err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_OK && strncmp(s_post_last_status, "409", 3) == 0, "mode-gate 409 still sent");
+    TEST_CHECK(g_stub_drain_calls == 1, "mode-gate refusal drains the 23 KB body");
+
+    reset_backup_import_post_stubs();
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+    req.content_len = 23000;
+    err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_OK && g_stub_drain_calls == 1, "interlock refusal drains the body");
+
+    reset_backup_import_post_stubs();
+    s_hdr_dry = "x";
+    req.content_len = 23000;
+    g_test_get_hdr_hook = test_hdr_hook;
+    err = backup_import_post_handler(&req);
+    g_test_get_hdr_hook = NULL;
+    s_hdr_dry = NULL;
+    TEST_CHECK(err == ESP_OK && g_stub_drain_calls == 1, "bad-header 400 drains the body");
+
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    req.content_len = BACKUP_BODY_MAX + 1;
+    err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_FAIL && g_stub_drain_calls == 0, "an oversized body is not drained: httpd closes instead");
+
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    req.content_len = 0;
+    err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_OK && g_stub_drain_calls == 0, "no body: nothing to drain");
+    reset_backup_import_post_stubs();
 }
 
 static void test_group_a_header_fail_closed(void)
@@ -7832,6 +7891,7 @@ void run_test_backup_import(void)
     test_group_a_pass1_range_checks();
     test_group_a_prefs_bool_exact();
     test_group_a_header_fail_closed();
+    test_backup_import_post_refusals_drain_unread_body();
     test_wrong_kind_refused();
     test_unknown_version_refused();
     test_fractional_and_huge_version_refused();

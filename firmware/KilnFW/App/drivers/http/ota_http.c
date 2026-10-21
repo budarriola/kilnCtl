@@ -1,4 +1,5 @@
 #include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- s_refusal_drain_buf */
 #include "ota_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "ota_http_internal.h"
@@ -634,8 +635,17 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
 
-esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap)
+// LK-05: the drain discards the body, so it reads into its OWN small static buffer, never the shared 4 KB
+// OTA chunk (ota_http_esp_chunk_buf): stale_running_matches hashes through that chunk on the ota_confirm task
+// while a refusal drain runs on httpd. Only httpd handlers call this and httpd is one task, so the static
+// is never used concurrently. Static, not stack: the httpd stack budget is tight (8 KB).
+#define OTA_REFUSAL_DRAIN_BUF_SIZE 512
+EXT_RAM_BSS_ATTR static uint8_t s_refusal_drain_buf[OTA_REFUSAL_DRAIN_BUF_SIZE]; /* PSRAM: DRAM .bss budget */
+
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
 {
+    uint8_t *buf = s_refusal_drain_buf;
+    const size_t cap = sizeof(s_refusal_drain_buf);
     uint32_t start = now_ms();
     for (;;) {
         // httpd_req_recv() returns 0 once remaining_len is 0, negative on a

@@ -688,6 +688,17 @@ static void test_refusal_close_threshold(void) {
     TEST_CHECK(!http_auth_refusal_should_close(HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES), "exactly the threshold: keep");
     TEST_CHECK(http_auth_refusal_should_close(HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES + 1), "one byte over: close");
     TEST_CHECK(http_auth_refusal_should_close(2500000u), "a multi-MB OTA image body: close");
+    TEST_CHECK(!http_auth_refusal_should_close(23u * 1024u), "RS-02: a 23 KB backup body is drained, not closed");
+
+    TEST_SECTION("RS-02 http_auth_refusal_drain_step -- bounded by bytes and by time");
+    TEST_CHECK(http_auth_refusal_drain_step(0, 100, 5) == HTTP_AUTH_DRAIN_DONE, "recv 0: done");
+    TEST_CHECK(http_auth_refusal_drain_step(256, 256, 5) == HTTP_AUTH_DRAIN_CONTINUE, "data within caps: continue");
+    TEST_CHECK(http_auth_refusal_drain_step(-1, 10, 5) == HTTP_AUTH_DRAIN_ABORT, "socket error: abort");
+    TEST_CHECK(http_auth_refusal_drain_step(256, HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES, 5) == HTTP_AUTH_DRAIN_CONTINUE, "exactly the byte cap: continue");
+    TEST_CHECK(http_auth_refusal_drain_step(256, HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES + 1, 5) == HTTP_AUTH_DRAIN_ABORT, "over the byte cap: abort");
+    TEST_CHECK(http_auth_refusal_drain_step(256, 512, HTTP_AUTH_REFUSAL_DRAIN_MAX_MS) == HTTP_AUTH_DRAIN_CONTINUE, "exactly the time cap: continue");
+    TEST_CHECK(http_auth_refusal_drain_step(256, 512, HTTP_AUTH_REFUSAL_DRAIN_MAX_MS + 1) == HTTP_AUTH_DRAIN_ABORT, "over the time cap: abort");
+    TEST_CHECK(HTTP_AUTH_REFUSAL_DRAIN_MAX_MS <= 2000u && HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES <= 32768u, "caps stay hard");
 }
 
 typedef struct { const char *origin, *referer, *host; } fake_hdrs_t;

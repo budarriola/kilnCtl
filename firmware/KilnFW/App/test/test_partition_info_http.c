@@ -44,6 +44,8 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
 #include "fake_sysinfo.h"
 
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; } /* RS-02: http_auth_http.c refusal drain */
+
 // ---------------------------------------------------------------------
 // Fake esp_partition table + iterator -- stands in for the real
 // esp_partition_find()/esp_partition_next() ESP-IDF gives a running app.

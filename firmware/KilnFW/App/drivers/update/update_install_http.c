@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -340,30 +341,39 @@ static int stale_res_read(void *ctx, uint8_t *buf, size_t cap, size_t *len)
 }
 
 // True only when the first req->image_length bytes of the RUNNING app partition hash to req->sha256
-// (the same bytes recovery copied and re-hashed). Called under the update claim, so the shared chunk
-// buffer is free. Any read/hash trouble answers false (recorded as outcome_unknown).
+// (the same bytes recovery copied and re-hashed). LF-01: hashes through its OWN temporary PSRAM buffer,
+// allocated and freed around the hash, never the shared 4 KB chunk (the stage status GET and app_stage_info
+// use that chunk on httpd without the update claim, and overlap this task right after an install reboot).
+// Any read/hash/alloc trouble answers false (recorded as outcome_unknown).
+#define STALE_HASH_BUF_SIZE 4096
 static bool stale_running_matches(void *ctx, const update_install_req_t *req)
 {
     (void)ctx;
     const esp_partition_t *app = esp_ota_get_running_partition();
-    size_t cap = 0;
-    uint8_t *buf = ota_http_esp_chunk_buf(&cap);
-    if (app == NULL || buf == NULL || cap == 0 || req->image_length > app->size) {
+    const size_t cap = STALE_HASH_BUF_SIZE;
+    if (app == NULL || req->image_length > app->size) {
+        return false;
+    }
+    uint8_t *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
         return false;
     }
     psa_hash_operation_t sha = psa_hash_operation_init();
     if (psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        heap_caps_free(buf);
         return false;
     }
     for (uint32_t off = 0; off < req->image_length;) {
         size_t n = req->image_length - off < cap ? (size_t)(req->image_length - off) : cap;
         if (esp_partition_read(app, off, buf, n) != ESP_OK || psa_hash_update(&sha, buf, n) != PSA_SUCCESS) {
             psa_hash_abort(&sha);
+            heap_caps_free(buf);
             return false;
         }
         off += (uint32_t)n;
         vTaskDelay(1);
     }
+    heap_caps_free(buf);
     uint8_t out[UPD_INST_SHA_LEN];
     size_t outn = 0;
     if (psa_hash_finish(&sha, out, sizeof(out), &outn) != PSA_SUCCESS || outn != sizeof(out)) {

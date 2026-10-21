@@ -496,7 +496,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
 
     esp_err_t ret = ESP_OK;
     if (refused || failed_mid_body) {
-        ret = ota_http_refusal_drain(req, buf, buf_cap);
+        ret = ota_http_refusal_drain(req);
     }
     return ret;
 }

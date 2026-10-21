@@ -214,36 +214,10 @@ static security_err_t web_auth_backend_set_policy(const security_policy_t *polic
         return SECURITY_ERR_INVALID_INPUT;
     }
 
-    // Item 1 fix (2026-09-17 adversarial review, 1179e2d3): this used to
-    // re-derive its own, looser version of the enable gate right here --
-    // refusing web_enabled only when NEITHER an admin NOR a user password
-    // was set. web_auth_policy_check_transition() (web_auth_store.h/.c)
-    // correctly requires the ADMINISTRATOR credential specifically, and
-    // until this fix it was called from nowhere but its own host test.
-    // Failure sequence the old code allowed: configure only a USER web
-    // password, enable web auth -> the old gate above was satisfied (a
-    // password IS configured, just not the administrator's) ->
-    // web_auth_admin_bootstrap_needed() reads true -> http_auth_check()
-    // denies every ADMIN-tier route to every caller, including
-    // POST /api/security/policy itself, the one route that could undo the
-    // mistake. There must be exactly one place that decides whether a
-    // policy transition is legal -- this now calls that one place instead
-    // of maintaining a second, weaker copy of its rule.
-    web_auth_policy_t current;
-    web_auth_load_status_t current_status = web_auth_store_load_policy(&current);
-    if (current_status != WEB_AUTH_LOAD_OK) {
-        // ABSENT or UNREADABLE: no persisted transition to compare against.
-        // Treat the current state as fully off so an off->on request is
-        // still correctly seen as an edge (and therefore clears sessions
-        // below), matching web_auth_policy_effective_enabled()'s own
-        // ABSENT-reads-as-off convention rather than inventing a third
-        // interpretation here.
-        current.web_enabled = false;
-        current.lcd_enabled = false;
-        current.web_timeout_s = -1;
-        current.lcd_timeout_s = -1;
-    }
-
+    /* LK-01/LK-02: the enable-gate transition check (an ADMINISTRATOR credential must exist; one place decides:
+     * web_auth_policy_check_transition) runs inside web_auth_store_set_policy_checked under cred_store_lock, so a
+     * credential wipe cannot land between the check and the write. HAL_BUSY is a retryable 503, not a storage
+     * error. */
     web_auth_policy_t requested = {
         .web_enabled = policy->web_enabled,
         .lcd_enabled = policy->lcd_enabled,
@@ -251,19 +225,18 @@ static security_err_t web_auth_backend_set_policy(const security_policy_t *polic
         .lcd_timeout_s = minutes_to_seconds(policy->lcd_timeout_min),
     };
 
-    bool admin_password_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
-    bool admin_pin_configured = web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
     bool clear_web_sessions = false;
     bool clear_lcd_session = false;
-
-    web_auth_policy_transition_t transition = web_auth_policy_check_transition(
-        &current, &requested, admin_password_configured, admin_pin_configured,
-        &clear_web_sessions, &clear_lcd_session);
+    web_auth_policy_transition_t transition = WEB_AUTH_POLICY_TRANSITION_OK;
+    hal_status_t status = web_auth_store_set_policy_checked(&requested, &transition, &clear_web_sessions,
+                                                            &clear_lcd_session);
     if (transition != WEB_AUTH_POLICY_TRANSITION_OK) {
         return SECURITY_ERR_INVALID_INPUT;
     }
-
-    hal_status_t status = web_auth_store_set_policy(&requested);
+    if (status == HAL_BUSY) {
+        ESP_LOGW(TAG, "web_auth_store_set_policy_checked busy: retry");
+        return SECURITY_ERR_BUSY;
+    }
     if (status != HAL_OK) {
         ESP_LOGE(TAG, "web_auth_store_set_policy failed, status=%d", (int)status);
         return SECURITY_ERR_STORAGE;
