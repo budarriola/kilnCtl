@@ -471,6 +471,8 @@
      firing or autotune run owns the relays. -->
 <div id="auxCard" style="display:none"></div>
 <div id="channels"><p class="empty">Loading…</p></div>
+<!-- FD-04: wall-clock footer from /api/status time_synced/time_now_epoch (SNTP, display only). -->
+<div id="wallClockFooter" class="empty" style="margin-top:1em;font-size:0.85em"></div>
 
 <!-- Press-and-hold PID popup (2026-09-01) -- markup only, built once here
      rather than injected via JS, so it exists in the DOM before the
@@ -2385,6 +2387,9 @@ function pauseReasonText(reason) {
   if (!reason) return '';
   if (reason === 'pico_reboot_undecided') return 'Heat withheld: the safety processor rebooted and the cause is not yet known';
   if (reason === 'pico_fatal_reboot') return 'Paused: the safety processor rebooted after a fatal fault';
+  if (reason === 'pico_fatal_before_esp_boot') return 'Paused: the safety processor reset after a fatal fault before this restart';
+  if (reason === 'pico_repeated_reboot') return 'Paused: the safety processor rebooted twice within 15 min';
+  if (reason === 'pico_lost_trip_latched') return 'Paused: a safety trip was lost across a restart; clear it and resume';
   if (reason === 'heat_grant_unconfirmed') return 'Paused: heat grant not confirmed by the safety processor';
   return 'Paused: ' + reason;
 }
@@ -4283,7 +4288,15 @@ var lastAutotuneStatus = null;
 var autotuneTrace = [];
 var autotuneLastFetchedCount = -1;
 function pollAutotune() {
-  fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (st) {
+  // AG-01: /api/autotune is ADMIN. Poll it only for a signed-in admin (no 401 spam when signed
+  // out) and mark it background so the server does not count it as session activity.
+  if (window.kcSessionRole !== 'admin') {
+    // AF-05: drop stale state once the role is no longer admin (logout/expiry).
+    lastAutotuneStatus = null;
+    autotuneTrace = [];
+    return;
+  }
+  fetch('/api/autotune', { headers: { 'X-Kiln-Background': '1' } }).then(function (r) { return r.json(); }).then(function (st) {
     lastAutotuneStatus = st;
     lastAutotuneStatusFetchedAtMs = Date.now();
     // New-run detection for the client-side zone/duty series (autotuneTrace
@@ -4501,6 +4514,17 @@ document.getElementById('auxCard').addEventListener('click', function (e) {
   auxToggle(parseInt(b.dataset.relay, 10), parseInt(b.dataset.on, 10));
 });
 
+// FD-04: UTC footer; falls back to nothing (uptime shown elsewhere) when unsynced / AP mode.
+function renderWallClockFooter(data) {
+  var el = document.getElementById('wallClockFooter');
+  if (!el) return;
+  if (data && data.time_synced && data.time_now_epoch > 0) {
+    el.textContent = new Date(data.time_now_epoch * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  } else {
+    el.textContent = 'Clock not synced';
+  }
+}
+
 function poll() {
   Promise.all([
     fetch('/api/status').then(function (r) { return r.json(); }).catch(function () { return null; }),
@@ -4519,6 +4543,7 @@ function poll() {
       // other status-derived control on this page already uses.
       lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
       renderChannels(data);
+      renderWallClockFooter(data);
       renderAuxCard();
       renderRelayLife(data);
       renderSpiWedged(data);
@@ -4663,6 +4688,9 @@ loadZones().then(function () {
 });
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
 pollAutotune();
+// AF-01: the load-time poll above runs before the first session poll resolves the role; poll
+// right away the first time it becomes admin.
+window.addEventListener('kc-admin-role', function () { pollAutotune(); });
 setInterval(pollAutotune, 10000); // matches AUTOTUNE_ENGINE_SAMPLE_PERIOD_S -- the trace can't move faster than that
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);

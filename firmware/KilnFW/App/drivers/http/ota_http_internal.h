@@ -31,7 +31,7 @@
 //                        (ota_esp_do_transfer/_post_handler,
 //                        ota_esp_status_get_handler,
 //                        ota_esp_rollback_post_handler,
-//                        ota_rollback_reboot_task)
+//                        ota_rollback_reboot_timer_cb)
 //   ota_http_pico.c  -- POST /api/ota/pico stage/relay + status + rollback
 //                        (ota_pico_do_stage/_post_handler,
 //                        ota_pico_status_get_handler,
@@ -111,14 +111,14 @@ void ota_http_set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...);
 // nothing left to purge at 32 B per read on the CPU0 httpd task, and the
 // close carries no unread RX data, so lwIP sends FIN not RST and the client
 // sees the status). Returns ESP_FAIL on a read error/timeout or after
-// OTA_REFUSAL_DRAIN_CAP_MS, so httpd closes the socket instead. `buf` must be
-// a static buffer (never a stack buffer: the httpd task stack is 8 KB);
-// httpd is a single task, so the OTA chunk buffers are race-free here.
+// OTA_REFUSAL_DRAIN_CAP_MS, so httpd closes the socket instead. It reads into
+// its own 512 B static buffer (LK-05), never the shared OTA chunk buffer, which the ota_confirm task also uses.
 #define OTA_REFUSAL_DRAIN_CAP_MS 30000u
-esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap);
+esp_err_t ota_http_refusal_drain(httpd_req_t *req);
 
 // The static internal-SRAM 4 KB chunk buffer of ota_http_esp.c, lent to
-// update_http.c. Only valid inside an httpd handler (single task, no overlap).
+// update_http.c. NOT single-task (LK-05): stale_running_matches uses it on the ota_confirm task under the update
+// claim. Use it only while holding the update claim (ota_http_update_try_begin); refusal drains do not use it.
 uint8_t *ota_http_esp_chunk_buf(size_t *cap);
 
 // --- Single cross-processor safety-link pointer ----------------------------

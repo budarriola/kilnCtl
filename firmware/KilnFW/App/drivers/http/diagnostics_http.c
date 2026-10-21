@@ -20,8 +20,14 @@
 #include "cfg_fs_mount.h"
 #include "cfg_fs_status.h"
 #include "crash_report.h"
+#include "boot_history.h"
+#include "trip_history.h"
+#include "diag_bundle_http.h"
 #include "estop_verification.h"
 #include "danger_mode.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- HR-01 mode gate */
+#include "system_mode_gate.h"
+#include "system_mode_gate_http.h"
 #include "dashboard_http.h"
 #include "aux_outputs_cfg.h"
 #include "ct_verify_store.h"
@@ -381,6 +387,112 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * http_async_job). */
 static volatile bool s_crash_clear_in_progress;
 
+/* FD-03: appends `"boot_history":[...]` (newest first, no leading comma) to buf at *o.
+ * The 524 B ring blob lives on the heap (httpd stack blob class). Returns false on
+ * overflow. An unloadable ring is an empty array. */
+/* BR-02: appends `"kiln_nvs":{used,free,total},` (trailing comma) to buf at *o. */
+static bool append_kiln_nvs_json(char *buf, size_t cap, size_t *o)
+{
+    int n = boot_history_nvs_stats_json(buf + *o, cap - *o);
+    if (n < 0 || (size_t)n + 2 > cap - *o) {
+        return false;
+    }
+    *o += (size_t)n;
+    buf[(*o)++] = ',';
+    return true;
+}
+
+static bool append_boot_history_json(char *buf, size_t cap, size_t *o)
+{
+    boot_history_blob_t *bh = heap_caps_malloc(sizeof(*bh), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (bh == NULL) {
+        int n0 = snprintf(buf + *o, cap - *o, "\"boot_history\":[]");
+        if (n0 < 0 || (size_t)n0 >= cap - *o) {
+            return false;
+        }
+        *o += (size_t)n0;
+        return true;
+    }
+    boot_history_load(bh);
+    boot_history_merge_live(bh); /* BR-01 */
+    int n = snprintf(buf + *o, cap - *o, "\"boot_history\":[");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        free(bh);
+        return false;
+    }
+    *o += (size_t)n;
+    for (unsigned i = 0; i < BOOT_HISTORY_MAX; i++) {
+        boot_history_entry_t e;
+        if (!boot_history_blob_get(bh, i, &e)) {
+            break;
+        }
+        char fw_esc[BOOT_HISTORY_FW_MAX * 2 + 1];
+        json_escape(e.fw, fw_esc, sizeof(fw_esc));
+        n = snprintf(buf + *o, cap - *o,
+                     "%s{\"seq\":%lu,\"reset_reason\":\"%s\",\"prev_uptime_s\":%lu,"
+                     "\"prev_uptime_known\":%s,\"dump_id\":%lu,\"has_crash\":%s,"
+                     "\"fw\":\"%s\",\"time\":%lu,\"repeat\":%u}",
+                     i == 0 ? "" : ",", (unsigned long)e.seq, boot_history_reason_name(e.reset_reason),
+                     (unsigned long)e.prev_uptime_s, e.prev_uptime_known ? "true" : "false",
+                     (unsigned long)e.dump_id, e.has_crash ? "true" : "false", fw_esc,
+                     (unsigned long)e.wall_time, (unsigned)e.repeat);
+        if (n < 0 || (size_t)n >= cap - *o) {
+            free(bh);
+            return false;
+        }
+        *o += (size_t)n;
+    }
+    free(bh);
+    n = snprintf(buf + *o, cap - *o, "]");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        return false;
+    }
+    *o += (size_t)n;
+    return true;
+}
+
+/* FD-05: appends `"trip_history":[...]` (newest first, preceded by a comma) to buf at *o.
+ * The 588 B ring blob lives in PSRAM. Returns false on overflow. Unloadable => empty array. */
+static bool append_trip_history_json(char *buf, size_t cap, size_t *o)
+{
+    trip_history_blob_t *th = heap_caps_malloc(sizeof(*th), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (th != NULL) {
+        trip_history_load(th);
+    }
+    int n = snprintf(buf + *o, cap - *o, ",\"trip_history\":[");
+    if (n < 0 || (size_t)n >= cap - *o) {
+        free(th);
+        return false;
+    }
+    *o += (size_t)n;
+    for (unsigned i = 0; th != NULL && i < TRIP_HISTORY_MAX; i++) {
+        trip_history_entry_t e;
+        if (!trip_history_blob_get(th, i, &e)) {
+            break;
+        }
+        n = snprintf(buf + *o, cap - *o,
+                     "%s{\"seq\":%lu,\"reason\":%u,\"mask\":%u,\"zone\":%d,\"safety_tc_c\":%.1f,"
+                     "\"threshold\":%.1f,\"pico_uptime_ms\":%lu,\"esp_uptime_s\":%lu,\"utc\":%lu,"
+                     "\"boot_seq\":%lu,\"count\":%u}",
+                     i == 0 ? "" : ",", (unsigned long)e.seq, (unsigned)e.reason, (unsigned)e.mask,
+                     e.zone == TRIP_HISTORY_ZONE_UNKNOWN ? -1 : (int)e.zone, (double)e.safety_tc_c,
+                     (double)e.threshold, (unsigned long)e.pico_uptime_ms, (unsigned long)e.esp_uptime_s,
+                     (unsigned long)e.utc, (unsigned long)e.boot_seq, (unsigned)(e.count ? e.count : 1u));
+        if (n < 0 || (size_t)n >= cap - *o) {
+            free(th);
+            return false;
+        }
+        *o += (size_t)n;
+    }
+    free(th);
+    n = snprintf(buf + *o, cap - *o, "],\"trip_history_dropped\":%u", trip_history_dropped()); /* TH-03 */
+    if (n < 0 || (size_t)n >= cap - *o) {
+        return false;
+    }
+    *o += (size_t)n;
+    return true;
+}
+
 /* GET /api/crash_report -- the last-crash summary crash_report.c persisted
  * (task/cause/PC/backtrace/reset-reason), for the diagnostics page's "Last
  * crash" section. {"present":false,"clear_in_progress":<bool>} is a
@@ -393,10 +505,10 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
 
     /* HEAP, not stack (httpd_worker 8 KB, "httpd stack blob class"): freed on
      * every return path below. */
-    const size_t json_cap = 1024;
+    const size_t json_cap = 8192; /* crash record ~1 KB + 16 boot_history rows ~2 KB + 16 trip_history rows ~3 KB */
     char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
-        ESP_LOGE(TAG, "GET /api/crash_report: malloc(1024) failed for the response buffer");
+        ESP_LOGE(TAG, "GET /api/crash_report: malloc(8192) failed for the response buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
@@ -405,9 +517,17 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     int n;
 
     if (!present) {
-        n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s}",
+        n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s,",
                      s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
+        if (!append_kiln_nvs_json(json, json_cap, &o) || !append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
+            o + 2 > json_cap) {
+            free(json);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"boot history too large to encode\"}");
+        }
+        json[o++] = '}';
         httpd_resp_set_type(req, "application/json");
         esp_err_t sent = httpd_resp_send(req, json, o);
         free(json);
@@ -461,7 +581,12 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
          * small integer rather than the obviously-wrong address it is. */
         APPEND("%s\"0x%08lx\"", i == 0 ? "" : ",", (unsigned long)rec.backtrace_pc[i]);
     }
-    APPEND("],\"backtrace_corrupted\":%s}", rec.bt_corrupted ? "true" : "false");
+    APPEND("],\"backtrace_corrupted\":%s,", rec.bt_corrupted ? "true" : "false");
+    if (!append_kiln_nvs_json(json, json_cap, &o) || !append_boot_history_json(json, json_cap, &o) || !append_trip_history_json(json, json_cap, &o) ||
+        o + 2 > json_cap) {
+        goto overflow;
+    }
+    json[o++] = '}';
 
     httpd_resp_set_type(req, "application/json");
     {
@@ -760,6 +885,16 @@ static esp_err_t watchdog_cfg_get_handler(httpd_req_t *req)
 #define WATCHDOG_CFG_BODY_MAX 32
 static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 {
+    /* AG-03 (owner 2026-10-20): HR-02 409 gate while a firing or autotune is active. */
+    {
+        sys_mode_snapshot_t snap = { 0 };
+        char reason[SYSTEM_MODE_GATE_REASON_MAX];
+        reason[0] = '\0';
+        relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &snap, reason, sizeof(reason))) {
+            return system_mode_gate_http_send_refusal(req, reason);
+        }
+    }
     if (req->content_len <= 0 || req->content_len > WATCHDOG_CFG_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -1891,6 +2026,17 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
+    /* HR-01: a restore write of the zones/kiln-scope files mid-run would stage a zone config change
+     * the next boot adopts; same 409 system_mode_gate as every zone/relay write. */
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
+    }
     if (!cfg_fs_is_available()) {
         /* No HTTPD_409_CONFLICT in this esp_http_server's httpd_err_code_t --
          * same manual-status pattern danger_start_post_handler() above
@@ -1899,16 +2045,10 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, "cfg filesystem not mounted");
         return ESP_OK;
     }
-    /* INTERNAL DRAM, deliberately NOT PSRAM (unlike the GET handler's read
-     * buffer above): this buffer is the write SOURCE for cfg_fs_write_atomic()
-     * dispatched onto the flash worker below, and a flash operation disables
-     * the cache, making PSRAM unreachable for the duration -- see
-     * flash_worker.h's own HAZARD comment and relay_cycles_reset()'s
-     * reset_persist_job_arg_t snapshot (a stack-local struct, never PSRAM)
-     * for the precedent this follows. Freed well before the response is
-     * sent, so this is a transient 8KB internal allocation, not a standing
-     * one. */
-    uint8_t *body = heap_caps_malloc(CFGFS_FILE_BODY_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* PSRAM-first (internal fallback), RAM-02 2026-10-16: the flash write copies a PSRAM
+     * source through a bounce buffer under XIP (persist_scratch.h), so the old "cache disabled
+     * makes PSRAM unreachable" reason is stale. Transient, freed before the response. */
+    uint8_t *body = persist_scratch_alloc(CFGFS_FILE_BODY_MAX);
     if (!body) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
@@ -2290,6 +2430,7 @@ esp_err_t diagnostics_http_start(SafetyLinkClass *safety)
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/estop/verify) failed: %s", esp_err_to_name(err));
         return err;
     }
+    diag_bundle_http_register(server); /* logs its own failure; never blocks the routes below */
     err = kiln_http_register(server, &nvs_keys_get_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/nvs/keys) failed: %s", esp_err_to_name(err));

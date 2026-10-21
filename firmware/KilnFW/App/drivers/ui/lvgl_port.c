@@ -1340,44 +1340,47 @@ esp_err_t lvgl_port_start(ILI9488Class *display, const touch_dev_t *touch_dev, s
      * with internal linkage still lands in on-chip DRAM by default on this
      * target, reachable with the flash cache disabled, same as the dynamic
      * allocation was. */
-    /* 2026-09-30 (bench run logs/bench_test/20261001T011515Z_stack, firmware
-     * c471101c, uptime ~215 s): get_stack_margin reported this task LOW at
-     * 1296 B free of 8192 B (15.8%, just above the 15% CRITICAL cutoff).
-     * Raised 8192 -> 10240 (owner pre-authorized raising too-small stacks):
-     * at the same measured worst-case usage (~6896 B) that gives ~3344 B
-     * free, ~32.7%, clear of the 30% LOW cutoff. This stack cannot move to
-     * PSRAM (see the comment above and the NVS-write precedent at
-     * ui_page_edit_firing.c's apply_cb()/live_profile_save_working() --
-     * settings/profile pages write NVS from this task, and a task with a
-     * PSRAM stack must not write NVS), so the extra 2048 B lands in
-     * `.dram0.bss`; see check_kilnfw_dram_bss_budget.py's before/after. */
-    static StackType_t s_lvgl_task_stack[10240 / sizeof(StackType_t)];
-    static StaticTask_t s_lvgl_task_tcb;
-    TaskHandle_t created_handle = xTaskCreateStaticPinnedToCore(
-        lvgl_port_task, "lvgl", sizeof(s_lvgl_task_stack) / sizeof(StackType_t), NULL, 4,
-        s_lvgl_task_stack, &s_lvgl_task_tcb, tskNO_AFFINITY);
-    if (created_handle == NULL) {
-        /* Deliberately NOT falling back to a PSRAM stack: that is the
-         * configuration that crashes on the first settings write, and a UI
-         * that reboots the controller is worse than no UI. Static
-         * allocation from a fixed-size .bss array can still fail if this
-         * task's own arguments are wrong (they aren't) or FreeRTOS itself
-         * rejects the call -- kept as a safety net, not because internal
-         * SRAM headroom is the failure mode anymore. */
-        ESP_LOGE(TAG, "Failed to start lvgl_port_task (static allocation) -- no local display "
-                      "this boot");
+    /* PSRAM stack, 2026-10-16 (KNOWN_ISSUES RAM-01, AUDIT_INTERNAL_RAM_XIP
+     * MED-3). The 2026-08-20 crash above needed a cache-disabled window while
+     * this task ran. Under CONFIG_SPIRAM_XIP_FROM_PSRAM=y (selects
+     * SPIRAM_FETCH_INSTRUCTIONS + SPIRAM_RODATA) ESP-IDF defines
+     * SPI_FLASH_CACHE_NO_DISABLE (spi_flash_os_func_app.c), so flash
+     * erase/write (NVS, LittleFS) no longer disable the cache and NVS writes
+     * from page callbacks are safe on a PSRAM stack. The remaining
+     * cache-freezing path is mmap (esp_partition_mmap and the esp_ota_*
+     * otadata/description readers), which asserts on a PSRAM stack
+     * (esp_cache_utils.c); the only caller on this task was
+     * esp_ota_get_state_partition(), now read once at kiln_ui_init() time by
+     * ui_page_diagnostics_prime_ota_state(). Do NOT add an mmap-class call
+     * (esp_ota_*, esp_image_*, esp_partition_mmap, esp_core_dump_*) to any
+     * LVGL callback, and do not turn XIP_FROM_PSRAM off without moving this
+     * stack back to internal RAM.
+     * 2026-09-30 history: raised 8192 -> 10240 (bench stack run, LOW 1296 B). */
+    static TaskHandle_t s_lvgl_task_handle;
+    /* PM-04: bounded retry like uart_bridge_ext.c; PSRAM may be briefly short at boot. */
+    BaseType_t created_ok = pdFAIL;
+    for (int attempt = 0; attempt < 5 && created_ok != pdPASS; attempt++) {
+        created_ok = xTaskCreatePinnedToCoreWithCaps(
+            lvgl_port_task, "lvgl", 14336, NULL, 4, &s_lvgl_task_handle, tskNO_AFFINITY,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created_ok != pdPASS && attempt < 4) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    if (created_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start lvgl_port_task (PSRAM stack) after 5 attempts -- no local "
+                      "display this boot");
         return ESP_ERR_NO_MEM;
     }
+    TaskHandle_t created_handle = s_lvgl_task_handle;
     /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
      * only reached with a real handle since the failure branch above already
      * returned. Static creation returns the handle directly rather than
      * filling an out-param, so it's copied into a static slot for
      * stack_margin_register() to read through, same as every other call
-     * site's &task_handle. 10240 must match sizeof(s_lvgl_task_stack) above. */
-    static TaskHandle_t s_lvgl_task_handle;
-    s_lvgl_task_handle = created_handle;
+     * site's &task_handle. 14336 must match the WithCaps literal above. */
     s_ui_walk_owner_task = created_handle;
-    stack_margin_register("lvgl", &s_lvgl_task_handle, sizeof(s_lvgl_task_stack));
+    stack_margin_register("lvgl", &s_lvgl_task_handle, 14336);
 
     ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
              height, (unsigned)LVGL_BUF_ROWS, s_port.touch_dev.read ? "on" : "off", idle ? "on" : "off");

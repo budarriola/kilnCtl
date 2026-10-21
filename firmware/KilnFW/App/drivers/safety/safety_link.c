@@ -219,6 +219,25 @@ uint32_t safety_elapsed_ms(TickType_t since)
     return ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
 }
 
+/* EL-01: the DIAG frame's own age (not the STATUS tick's), caller holds the lock. REBOOTFX7 LOW-1: the raw 32-bit
+ * ms difference wraps after 2^32 ms, which would read a 49.7-day-old DIAG as fresh. Staleness is latched once seen
+ * (cleared only by the next DIAG apply) and a latched link never reports a fresh age: fail closed. 0 until a DIAG
+ * has ever been received. */
+uint32_t safety_diag_age_ms_locked(SafetyLinkClass *link)
+{
+    if (!link->cached.diag_ever_received) {
+        return 0u;
+    }
+    uint32_t age = (uint32_t)(uart_proto_rx_stamp_ms(xTaskGetTickCount()) - link->diag_tick);
+    if (age > SAFETY_LINK_DIAG_FRESH_MS) {
+        link->diag_stale_latched = true;
+    }
+    if (link->diag_stale_latched && age <= SAFETY_LINK_DIAG_FRESH_MS) {
+        age = UINT32_MAX;
+    }
+    return age;
+}
+
 /* See safety_link.h's doc comment on safety_link_await_poll_fn/
  * safety_link_await_result_t for the full contract. This is the whole
  * extraction: a plain "poll until PENDING stops, or time runs out" loop,
@@ -697,23 +716,15 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     out->age_ms = safety_age_ms_locked(link);
     out->link_up = safety_link_up_locked(link);
     out->fault_asserted = (link->fault_sources != 0u);
+    out->pico_boot_id_ever_seen = link->pico_boot_id_ever_seen; /* PF-01 */
+    out->pico_boot_id_valid = link->pico_boot_id_known;         /* PF-04 */
+    out->pico_boot_id = link->pico_boot_id;
     /* trip_event_age_ms, same "age computed on read" contract as age_ms
      * above -- meaningless (and left at whatever safety_elapsed_ms(0) works
      * out to) until trip_event_ever_received is true. */
     out->trip_event_age_ms =
         out->trip_event_ever_received ? safety_elapsed_ms(link->trip_event_tick) : 0u;
-    out->diag_frame_age_ms = out->diag_ever_received ? (uint32_t)(uart_proto_rx_stamp_ms(xTaskGetTickCount()) - link->diag_tick) : 0u;
-    /* REBOOTFX7 LOW-1: the raw 32-bit ms difference wraps after 2^32 ms (49.7 days) with the link up and no DIAG,
-     * which would read a 49.7-day-old DIAG as fresh. Latch staleness once seen (cleared only by the next DIAG
-     * apply) and never report a fresh age while latched: fail closed. */
-    if (out->diag_ever_received) {
-        if (out->diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS) {
-            link->diag_stale_latched = true;
-        }
-        if (link->diag_stale_latched && out->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS) {
-            out->diag_frame_age_ms = UINT32_MAX;
-        }
-    }
+    out->diag_frame_age_ms = safety_diag_age_ms_locked(link);
     safety_unlock(link);
     return ESP_OK;
 }

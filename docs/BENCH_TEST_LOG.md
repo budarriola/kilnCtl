@@ -3455,3 +3455,461 @@ end: app partition erased, no Wi-Fi, no link; needs a physical USB power cycle
 (the flash tool's own hint), then a flash of the dev tip. No firmware bug is
 proven; the wedge looks like the flash-write-protect-stuck state or a USB-JTAG
 fault.
+
+## soakmain (2026-10-16/17): main ad565107a soak on the bench, then back to pre.4
+
+Board was pre.4 (fcc645211). Flashed main ad565107a (ESP `flash_firmware`, Pico `debug_program`) from clean worktrees.
+Settings backed up first (`logs/soakmain_backup_pre4.json`).
+
+| Item | Result |
+|---|---|
+| Boot, link up, `safety_get_status`, no trip, S6a not seen | PASS (Pico ad565107a, boot ids 95/144/150, proto v18) |
+| Soak | PASS: ESP uptime 26442 s (about 7.3 h, past the 45 min target), no reset/panic/crash banner |
+| Heap internal | free 117-122 KB, largest block 31744 B constant, min_free 100935 B (floor 8192, SK-04 7168 B), DMA min_free 93147 B; sampled every 5 min for 20 min, then at 7.3 h |
+| safety_cfg_store v6 -> v7 | PASS: config_crc 0xC950 and commissioning (S1 80 C, S8 33.3 C/min, tc_type 3, CT cal, mains 120 V) identical before/after |
+| Backup export, import round trip | PASS with a caveat below; no 400 on the async-job stack (import ok in 1.26 s) |
+| PSRAM-stack saves survive `sw_reset_esp`: profile save (#2), relay4_type, zone_type | PASS |
+| Live profile edit (fork + edit while running) | PASS (accepted; not separately checked across reboot) |
+| ct_cal write | NOT RUN (would alter commissioning) |
+| Short firing (profile #2, 30 C, heat pre-authorized), `profiles_stop()` | PASS; stopped, exec state 0 after reboot; firing log keeps STARTED record; run_state persistence only indirectly seen |
+| HR-02 mode gate | PASS: raw POST /api/safety/commissioning while running returned 409 "a firing or autotune run is active" (MCP tools also refuse client-side) |
+| Return to pre.4: ESP + Pico flashed from fcc645211 worktree, verified | PASS (Pico build fcc645211, link up) |
+| Settings restore | PASS: export diff vs pre-soak differs only in relay_cycles (raise-only wear counters) after deleting SOAK_P and resetting relay4_type by hand (restore never deletes a profile created after the backup; intended, KNOWN_ISSUES BW-09) |
+
+Bug found (compat, not a crash): a pre.4 backup that contains saved kiln_configs
+(safety section names param id 1025 = 0x0401, removed by SR-31) is refused by main with
+HTTP 400 "package's safety-processor section names parameter id 1025 ... refused, not skipped",
+and the package hash blocks hand-stripping. `dry_run=true` did not catch it (reported OK).
+So a pre.4 -> main upgrade cannot import its own backup's kiln_configs. Imported with kiln_configs
+emptied for the round-trip test. Likely site: kiln_cfg package import validation (kiln_cfg_http / backup_import).
+
+## benchmain2 (2026-10-17): main db91b2ad4 on the bench, then back to pre.4
+
+Board was pre.4 (fcc645211), host 192.168.1.156 (COM14 main board). Flashed main db91b2ad4 (ESP `flash_firmware`, Pico `debug_program`) from a clean worktree; returned to fcc645211 the same way. Backups: `logs/benchmain_backup_pre.json` (pre.4, before), `logs/benchmain_backup_onmain.json` (exported on main), `logs/benchmain_backup_post2.json` (after return).
+
+| Step | Result |
+|---|---|
+| 1 Fresh backup | PASS (17471 B, kiln_configs 2) |
+| 2 Flash main, link, no trips | PASS: link up, trip_mask 0, Pico boot after dual flash showed no latched trip |
+| 2 safety cfg v7 -> v8 | PASS: config_crc 51536 (0xC950) identical before/after flash; S1 80 C, S8 33.3 C/min, tc_type 3, mains 120 V unchanged |
+| 2 Pico tc_sheath_tau_s (0x010B) | PASS: reads 0 (param 267) |
+| 3 BW-06 backup_import with kiln_configs (dry_run and real) | FAIL: both refused HTTP 400 "kiln_configs[0]: package hash does not match its contents". dry_run and real import agree (both refuse). The retired-id skip works, but a second cause blocks the pre.4 package. |
+| 4 TC sheath (zone 0 tau 60, Pico tau 60) | PASS: zones GET [60,0,0], Pico param 267 = 60, persisted across `sw_reset_esp` (both read back 60); `/api/control` zone 0 carries `tc_lag_corr_c` (-0.01 at 30.5 C while firing, 0.00 for tau-0 zones). Set back to 0 both sides (Pico write needs a `debug_reset` grace window, ARMED refuses). |
+| 5 Short firing (profile #1 B1_THROWAWAY, 35 C target, stopped after about 25 s at 30.5 C) and `profiles_stop()` | PASS: state 1 then 0, no trip, no fault guard |
+| 6 Return to pre.4, restore | PASS with caveats below |
+
+BW-06 root cause (not the retired ids). The package hash covers the canonical ESP form
+(`zones_config_export_canonical`, field table `ZONE_CFG_FIELDS`, which gained
+`F(U16, tc_sheath_tau_s, 1)` at firmware/KilnFW/App/drivers/persist/zones_config_accessors.c:3143). A
+package hashed on pre.4 does not include that field, so the recomputed hash on main differs and
+`validate_package_json_common` refuses at firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c:2389-2392
+(`recomputed != declared_hash`). Proof: a fresh export taken ON main shows slot 1 (the active slot,
+re-hashed when the zones v26 -> v27 migration saved it: pkg_hash 0x17ff24b6 -> 0x2753552e) importing
+cleanly, while slot 4 (inactive) still exports its stale pre.4 pkg_hash 0x24116fa8 and is refused at
+`kiln_configs[1]`. Stored hashes of inactive slots are exported as stored (kiln_cfg_store.c:2252-2255,
+`kiln_cfg_store_get_package_identity`) and never recomputed after the canonical form changed. Fix
+direction: on zones v26 -> v27 migration, or lazily at export, recompute pkg_hash for every populated
+slot (populate_pico_half_and_hash, kiln_cfg_store.c:1220-1262, keep-existing-half path). Same applies
+to any future canonical-form change. `dry_run` was correct here (it ran the same validator).
+
+Return-to-pre.4 findings:
+- Downgrade loses the zones: after flashing fcc645211, `/api/backup/export` showed `zones: 0 entries`
+  and `control_get_zones` reported 0 thermocouples (pre.4 does not read the v27 zones blob). The
+  pre.4 backup import restored them (zones 3, timing_profiles 1). Merge-mode import also created a
+  third kiln config slot `M18RR_B21renamed (3)` (id 5); no tool deletes a kiln config, left in place.
+  Export diff vs `soakmain_backup_pre4.json`: only that extra slot and relay_cycles (raise-only).
+- Pico config_crc is NOT back at 51536: it reads 38580 on pre.4 after setting Pico tau back to 0
+  by an explicit write on main (value 22083 while tau was 60). Writing tau=0 explicitly appears to
+  change the CRC versus the untouched migrated record (51536); the backup carries no Pico safety
+  cfg so the restore cannot undo it. Commissioned values (S1/S8/tc_type/mains) unchanged.
+- Dual flash after the return left an S6a (trip_mask 0x0020) with link up; cleared once.
+
+## benchmain3 (2026-10-17): main 176bd438c on both chips, no reflash
+
+Host 192.168.1.156, board already on 176bd438c (ESP and Pico). Backup before changes:
+`logs/benchmain3_backup_pre.json` (33041 B, kiln_configs 5 after the round trip below).
+
+| Step | Result |
+|---|---|
+| 1 Health, "Kiln: (none)" | PASS after re-select (see below). get_fw_version OK/clean, Pico armed, no trip, internal min_free 104151 B |
+| 2 BW-07 kiln config round trip | PASS |
+| 3 45 min XIP-lock soak | PASS: no reset, no panic, no trip; internal min_free 104151 B all run (floor 8192 B) |
+| 4 Test-trip flag | PASS: `trip_is_test` true after `safety_test_trip` (mask 0x0008), false after `safety_clear_trip` once armed |
+| 5 Short firing | NOT RUN: `profiles_start` refused, E-STOP INTERLOCK not verified (readiness `estop_verified` not_done). Relays all off, `profiles_stop()` ok, state 0 |
+
+Step 1. `GET /api/kiln_configs` returned `active_id:null` with 3 slots. Not a device bug: backup import
+deliberately never restores the active slot (backup_import.c "Coordinator decision (assessment task 7)";
+the plan line says "informational only -- re-apply from Kiln configs after restore"). Applied slot 1
+(`M18RR_B21renamed`, active before) with `kiln_config_apply(id=1)`: apply_status confirmed, LCD banner
+shows `Kiln: M18RR_B21ren...`. Side finding from the device log of the prior boot: at boot the cfg LittleFS
+partition mounted with "Corrupted dir pair at {0x0,0x1}" (-84), cfg_fs auto-formatted it (751 ms), then
+"zones config UNTRUSTWORTHY: cfg file zones.json missing/unreadable and NVS blob absent/invalid" and
+readiness `storage` not_done until the settings restore rewrote zones. After the restore and re-select
+readiness `storage` is ok. The cfg partition was empty/corrupt after the preceding dual flash; cause not
+established here (flash tool vs firmware). The E-stop attestation record was also gone (`estop_verified`
+never confirmed), which blocks step 5; benchmain2 fired fine, so it was lost between benchmain2 and now,
+plausibly with the same wipe or the benchmain2 return-to-pre.4 sequence.
+
+Step 2. Exported slots 1..3 (`/api/kiln_configs/export`, pkg_hash 0x3d7b692f, 0x0d67de33, 0x033b8ab8) and
+re-imported slot 1 and 2 under new names: both accepted (HTTP 200, new ids 4, 5) and re-exported with the
+identical pkg_hash. Same-name re-import is refused 400 "already has that name" (expected). Server-side
+`backup_import` dry run of the full export (5 slots) was accepted, then a real merge import was accepted
+(zones/profiles read-back match, no slot created because names matched). The two throwaway slots were
+deleted via `/api/kiln_configs/delete`; list is back to 3 slots, slot 1 active. The stale-hash slots 2 and 3
+(refused in benchmain2) now verify, so BW-07 holds.
+
+Step 3. Two overlapping soak scripts for 45 min (the second restarted after the first used a wrong Accept-Encoding and got 406 on the gzip-only
+pages): `/diagnostics`, `/ota`, `/api/status`, `/api/backup/export` read in 3 concurrent threads (~9000 ok
+reads in the second script), `POST /api/ramp_assist` toggled every 7 s (375 writes, all HTTP 200, left
+disabled), plus LCD navigation (home -> config -> Diagnostics, next page x2..x4, home) every 5 min via
+`touch_inject` for about 9 cycles. Polled `/api/status` every 30 s: uptime monotonic (1657 -> 4340 s, no reset),
+reset_reason stayed `software (esp_restart)` (the earlier boot), diag_trip_mask 0, internal min_free 104151 B
+unchanged, largest free block 32768 B unchanged. Script error count is from my own faults (nonexistent
+`/api/ota/status` 404, 406 in the first script), not the device.
+
+Step 4. `safety_test_trip(confirm=True)`: TRIP_EVENT reason 4 seq 1; `/api/status` `trip_is_test` true,
+`diag_trip_mask` 8. `safety_clear_trip()`: mask 0; `trip_is_test` false, diag_state 2, heating enabled.
+
+Final state: idle, Pico armed, no trip, relays off, Kiln config 1 active, ramp assist disabled, units Fahrenheit
+(from the restored backup), readiness: only safety_commissioned (3 values missing), ct_attribution and estop_verified open.
+
+### benchmain3 step 5 follow-up (2026-10-17): E-stop attested, short firing
+- E-stop: owner re-attested in chat ("Estop is fine. This fixture is only a 4w test bed, always safe."); estop_verify recorded once, readiness estop_verified now ok. Readiness otherwise 20 ok, 1 not_done (safety_commissioned, 3 of 66 params), cannot_yet ct_attribution.
+- Web auth: /api/auth/session reports auth_enabled=false, bootstrap_needed=false (admin record present, enforcement off). Not changed.
+- Firing: profiles_start(1) ('B1_THROWAWAY', 1 segment, target 30 C, board at ~30 C). Relays R1-R3 stayed off throughout (target equals ambient, no heat demand). Within about a minute the executor showed state=2 paused, pause_reason pico_fatal_reboot ("safety processor rebooted after a fatal fault") and zone actual=0.0C invalid; no trip latched, link up, Pico armed afterwards. Not investigated (out of scope); worth a follow-up on why the Pico reported a fatal reboot at start.
+- profiles_stop(): ok. Executor state=0 idle, relays off, no trip, TC 29.9-30.1 C. Result: stop path PASS; heating firing NOT exercised (profile target = ambient, paused by pico_fatal_reboot).
+
+## benchmain4 (2026-10-17): main acad4d9f2 dual reflash, PF-01..03 / PQ-01 confirmed
+- Backup taken first to logs/benchmain4_backup_pre.json. Main acad4d9f2 flashed to the ESP and the Pico.
+- After the dual reflash: link up, Pico armed, no trip.
+- Profile #0 M18C_TEST (40 C, 900 C/hr, 2 min dwell, then 30 C) started immediately after the ESP restart with pause_reason none. This confirms the PF-01..03 / PQ-01 fix (no pico_fatal_reboot pause as in benchmain3 step 5).
+- Zones rose from 32 C to about 45.9 C (about 6 C overshoot on the 4 W fixture); Pico TC read 42.8 C. The run completed.
+- profiles_stop and ack followed; K4 dropped.
+
+## benchmain7 (2026-10-18): main d47a9c64f, Pico reboot rule, 30 min RAM soak, GitHub update
+Board 192.168.1.156 (COM14), running main d47a9c64f (ESP and Pico flashed earlier today), idle, link up, Pico armed, no trip before. Backup first: logs/benchmain7_backup_pre.json (v7, 2 profiles, 3 zones, 3 kiln configs, no Wi-Fi/password fields).
+
+Step 1, Pico reboot rule: PASS.
+- profiles_start(0) 'M18C_TEST' at about 00:26:50: K4 (`safety_relay_energized`) true, `safety_heating_enabled` true, zones 29.4 -> 38.9 C in 90 s.
+- Reboot 1 (`debug_reset(peer=pico)`, 00:28:25; the tool printed "Failed to select multidrop rp2040.dap1" and an error although the reset happened, `pico_reboot_seq` 0 -> 1): K4 dropped at once, DIAG state 1 (booting). Pico ARMED (diag 2) and `heating_enabled` back at 00:29:26 (61 s), K4 energized at 00:29:29 (64 s) with no operator action, pause_reason none, temperature kept rising to 44.2 C. This is the 2026-10-10 benign-reboot auto-resume rule.
+- Reboot 2 (about 00:29:50, 85 s after reboot 1, inside the 15 min repeated window): Pico armed again at 00:30:46 (about 56 s) but K4 stayed open for the 60 s observed afterwards; executor state=2 paused, pause_reason `pico_fatal_reboot` ("safety processor rebooted after a fatal fault") although the Pico's boot reason was power-on (see BT-02). Heat held, as the rule requires.
+- profiles_stop at 00:31:3x: executor idle, hold released with the last release (`heat_enable.c:625`); profiles_ack_last_run answered "nothing to acknowledge: no previous-run record" (the stop left no record). No trip, mask 0, relays off.
+
+Step 2, 30 min RAM soak: PASS, no approach to the floor.
+- `latency_soak_start` 1800 s, 5 s interval, job ffd8632e: OK, 361 ticks, 3610 samples over 10 GET surfaces, 0 errors, 0 clustered stalls. p95 about 310 ms on every surface except status (568 ms); max 623 ms (status).
+- In parallel: a status poll every 10 s (170 polls, 0 errors, uptime advanced 7370 -> 9091 s, no reboot), 2 LCD webcam captures, 5 `update_check` calls (stable and allow_prerelease) during the soak.
+- Heap before (uptime 6991 s) and after (9162 s): internal min_free 103579 B both (floor 8192 B; 95.4 KB of margin), internal largest free block 32768 B (low-water 32768 B since uptime 2 s; SK-04 alarm 7168 B), internal free 124927 -> 124635 B, DMA min_free 95791 B both. PSRAM free 4846392 -> 4844896 B, largest block 4718592 B, PSRAM min_free 4818224 -> 4529180 B (the drop came with the update checks, TLS in PSRAM; stable across the later checks). Link: link_reply timeouts 0.
+- The `update_check` heap sample during checks: low-water free 115159 B internal, largest block 32768 B.
+
+Step 3, GitHub update end to end: PARTIAL, blocked by BT-01 and by a classifier denial.
+- Existing releases (GitHub API): v1.0.0-pre.1, pre.3, pre.4, all pre-releases, no stable release. No release or tag created.
+- `update_check` stable: FAILED `no_stable_release`, http 404 (stable path: the board reads the releases list, FA-01 falls back to /releases/latest, which is 404 because only pre-releases exist). This is the expected FA-01 result. PASS.
+- `update_check(allow_prerelease)`: ok, tag v1.0.0-pre.4, verdict `refuse_downgrade` (candidate schema lower than the board, WARNING zones_cfg_lower), sha256 3b36b1f0..., 2975824 B. PASS (the downgrade gate works).
+- `update_stage_release(confirm, allow_prerelease, allow_downgrade, confirm_downgrade=v1.0.0-pre.4)` (also with force): REFUSED every time, HTTP 409 "an update is already in progress", also after `update_stage_clear`, `update_fetch_cancel` and a clean ESP reset (`debug_reset(esp)`, no claim logged at boot; log line "update_http: update download ... refused by interlock: an update is already in progress"). Cause found in source, see BT-01. FAIL.
+- The stage held a verified upload of pre.4 (source=upload) at the start; I cleared it with `update_stage_clear` while diagnosing, so the stage is now blank.
+- Fallback attempted: download the pre.4 asset to the PC to push it with `update_stage_upload`. The auto mode classifier DENIED the download (curl of the release asset). I stopped that step and did not route around it. The recovery AP join, recovery_apply_staged and the return flash were therefore not run. The board never left main d47a9c64f: the final state is the ESP reset once (uptime 93 s at last read), link up, Pico armed (`diag_state` 2), trip_mask 0, relays off, no profile; so no reflash and no settings restore was needed (the backup is unused).
+- Tooling note, not a device bug: `debug_reset(peer=pico)` reports an error while the reset succeeds (openocd "Failed to select multidrop rp2040.dap1" on the second core).
+
+## benchmain8 (2026-10-18, main 1342a0f1d, ESP and Pico flashed)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain8_backup_pre.json. Start: link up, Pico armed.
+
+Task 1, short heat check: PASS. profiles_start(0) 'M18C_TEST': dwell target 40 C, zones 35.0/33.4/34.3 C at 60 s with relays on (duty 0.57-0.80), segment 1 target 30 C relays off at 46-48 C, run ended itself after about 2.5 min (state 3), pause_reason none throughout. profiles_stop and profiles_ack_last_run ok.
+
+Task 2, GitHub OTA: FAIL. update_check(allow_prerelease) ok (v1.0.0-pre.4, refuse_downgrade). update_stage_release(allow_prerelease, allow_downgrade, confirm_downgrade=v1.0.0-pre.4, with and without force): BT-01 verified FIXED (no 409, download ran), but it failed with error=not_an_esp32s3_app_image after the download. Stage stayed blank; nothing applied.
+
+Task 3, RX-06/RX-07: FAIL. update_stage_upload of firmware/KilnFW/build/KilnCtrl.bin (force + confirm_downgrade, running version unknown to the gate) -> HTTP 400 not_an_esp32s3_app_image, same cause as task 2: OP-01 io_image_verify rejects a good image on target (RX-11, suspected 0x611000 non-64KB-aligned stage image). No recovery apply possible; esp_image_verify time and flash_xip bracket impact not measured. I then did recovery_enter (to try recovery_push_esp_image); the recovery image never served HTTP on the LAN address in about 6 min (ping ok, TCP timeout), Pico tripped S6b (LINK_DEAD).
+
+Task 4, return to main: PASS. flash_firmware(confirm, set_otadata_app, allow_unreadable_board_state) flashed and verified main 1342a0f1d (elf a037664e5ceb), boot_guard cleared. Pico S6b trip (mask 0x0040 = 1<<6, cause: ESP offline in recovery) cleared with safety_clear_trip; safety_get_status: link up, SaftyFW armed. control_get_zones reads intact (Kp/Ki/Kd, plant model, coupling present), no restore needed.
+
+New: RX-11 (HIGH) in KNOWN_ISSUES. BT-01 verified; BT-02 not re-exercised.
+
+## benchmain9 (2026-10-18, main 207134862, ESP flashed)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain9_backup_pre.json (post export byte-identical). Pico not reflashed (unchanged).
+
+Task 1, build and flash: PASS. build_kilnfw ok, flash_firmware(confirm) flashed and verified (elf d7c0e2ca4759), boot_guard cleared. safety_get_status: link up, SaftyFW armed.
+
+Task 2, RX-06 app path: PASS (staging). update_stage_upload of the local build refused first by the downgrade gate (running version unknown), then with force + confirm_downgrade staged and verified by read-back (1.0.0-pre.1-201-g2071348, 2992976 B, sha256 78a77f93...). Stage cleared, not applied. Verify wall time NOT measured: the timing Bash call was denied by the classifier and was not routed around. RAM and update_fetch_wr high-water NOT measured: get_stack_margin failed every time (INFO 0x04 ACKed, no reply in 2 s); kiln_find for a heap tool was denied by the classifier.
+
+Task 3, GitHub OTA: PASS (staging). update_check(allow_prerelease): v1.0.0-pre.4, refuse_downgrade, heap low-water free=110327 dma=102519 largest=32768. update_stage_release(allow_prerelease, allow_downgrade, confirm_downgrade=1.0.0-pre.4 failed bad_confirm; the tag form v1.0.0-pre.4 worked) staged and verified (2975824 B, source=github). Cleared, not applied.
+
+Task 4, recovery apply: skipped, AP-only (RX-12).
+
+End state: board on main 207134862, link up, armed, backup unchanged. Result: RX-11 fix confirmed on target; RX-06 timing, RX-07, BX-03, RY-02 numbers still open.
+
+## benchmain10 (2026-10-18, main 179cb0058, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain10_backup_pre.json (mid and post exports byte-identical to pre where compared). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Step 1-2, build and flash: PASS. build_kilnfw ok (263 s), flash_firmware(confirm) verified (elf 002d2ba6cf58), boot_guard cleared. get_fw_version commit 179cb0058 clean; link up, SaftyFW armed. Before the flash get_stack_margin still failed (INFO 0x04 no reply, BM-01 on 207134862); the board holds an unacknowledged crash report from that old boot (info_uart_bridg LoadProhibited, uptime 13 s, fw 07:11:45), not from the new image.
+
+Step 3, stack margin (BM-01): PASS, get_stack_margin answers; uart_proto_rx 3956-3988 B free of 8192 (48%). update_fetch_wr and update_fetch read "not running" before, during-after and after the stage upload, so their high-water cannot be read after the task exits (BX-03/RY-02 high-water still unmeasured; needs a read while the task is alive).
+
+Step 4, stage upload (RX-06, BM-02): update_stage_upload of the local build (2995632 B) with NO force and NO downgrade ack staged and verified by read-back (source=upload, semver 1.0.0-pre.1-202-g179cb00): BM-02 gate now knows the running identity. Verify wall time not exposed by the tool, not measured. Heap after stage (uptime 62 s): internal min_free 96463 B (floor 8192), largest free block 31744 B (low-water, unchanged since uptime 5 s), DMA min_free 88675 B. RX-07: display_flush_us max went 41865 -> 276396 us across the upload/verify, i.e. the flash_xip bracket stalled the LCD flush by about 0.28 s at most. Stage cleared, nothing applied.
+
+Step 5, LCD: ui_run_script home_start_stop_zone0_lcd failed at its first wait_for 'home' (target not on the home page; Start was visible), tooling-side. Navigated settings -> Network / Wi-Fi -> Manage networks -> Scan. ui_worker (lazy start on first job) then appeared: 4152 B free of 6144 (67.6%). lvgl worst 2976 B free of 10240 (29.1%, LOW) after those pages.
+
+End state: main 179cb0058, link up, armed, stage blank, LCD back on home, backup unchanged.
+
+## benchmain11 (2026-10-18, main 293985c24, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain11_backup_pre.json (post export and a mid-flash export byte-identical to pre). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Build and flash: PASS. build_kilnfw ok, flash_firmware(confirm) verified (elf 02a2193e6e56), boot_guard cleared. get_fw_version commit 293985c24 clean; link up, SaftyFW armed.
+
+Stage (RX-06): update_stage_upload of the local build (2996528 B) staged and verified, no force. last_verify_us=883151. Staged semver reads 1.0.0-pre.1-202-g179cb00 (git-describe stale at configure, not a failure). update_fetch_wr: "not running" (upload does not use it; update_stage_release was refused refuse_downgrade, v1.0.0-pre.4 lower schema, so no fetch writer ran). BX-03/RY-02 stack minimum NOT measured. ui_worker is not listed by get_stack_margin. Stage cleared, not applied.
+
+Stack margin, free of configured: lvgl 8160/14336 (SL-08 ok), uart_proto_rx 3964/8192, info_uart_bridge 1608/4096, httpd_worker 3200/8192. Heap internal (uptime 112 s): free 117975, min_free 96159, largest block 31744; during refused GitHub stage low-water free=107555 largest=31744.
+
+Crash: pre-flash record info_uart_bridg LoadProhibited (BM-01/UB-01) acknowledged. Web login as USER: skipped, no USER credential in the environment.
+
+End state: main 293985c24, link up, armed, stage blank, backup unchanged. Result: RX-06, SL-08, UB-01 closed; BX-03, RY-02 still open (need an allowed GitHub stage).
+
+## benchmain12 (2026-10-18, main c7bf7761d, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain12_backup_pre.json (post export byte-identical). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Build and flash: PASS. build_kilnfw ok, flash_firmware(confirm) verified (elf a2f28f50bdbe), boot_guard cleared. get_fw_version commit c7bf7761d clean; link up, SaftyFW armed.
+
+Heap (uptime 126 s): internal free 118255, min_free 96171, largest block 31744; after stage upload/clear and the refused release (uptime 167 s) free 118019, min_free 96171, largest 31744 (SK-04 alarm 7168 B).
+
+Stack margin (free of configured): lvgl 8740/14336, uart_proto_rx 3952/8192, info_uart_bridge 1548/4096, httpd_worker 3024/8192. update_fetch_wr (configured 5120 B, GP-01) "not running" before, after upload and after the release attempt: high-water unread.
+
+Stage: update_stage_upload of the local build (2996656 B), no force, staged and verified by read-back. last_verify_us=881765 (read via GET /api/update/stage after the clear; field persists). update_stage_clear ok. update_stage_release (default channel): FAILED, error=no_stable_release, http_status=404 (no stable release in budarriola/kilnCtl, not a downgrade refusal); heap low-water during the check free=108415, largest_block=31744. The fetch writer therefore did not run.
+
+End state: main c7bf7761d, link up, armed, stage blank, backup unchanged. Result: GP-01 5120 B stack and BX-03 high-water still unmeasured (need an allowed GitHub stage).
+
+## benchmain13 (2026-10-18, main 285e798cb, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain13_backup_pre.json (post export byte-identical, mid-flash export identical). Pico not reflashed (no SaftyFW/CommonFW diff since acad4d9f2).
+
+Build and flash: PASS. build_kilnfw ok; firmware/KilnFW/build/sdkconfig has CONFIG_ESP_TIMER_TASK_STACK_SIZE=4608. flash_firmware(confirm) verified (elf d66dbc5750dd), boot_guard cleared. get_fw_version commit 285e798cb clean; link up, SaftyFW armed.
+
+Heap internal (uptime 128 s): free 110819, min_free 88871, largest 31744. benchmain12 (126 s): free 118255, min_free 96171, largest 31744. Static cost of UR-01 + ET-02: -7436 B free, -7300 B min_free, largest block unchanged (SK-04 alarm 7168 B not near; owner floor 8192 B far below).
+
+Stack margin (free of configured): lvgl 8616/14336, uart_proto_rx 3988/8192, info_uart_bridge 1600/4096, httpd_worker 3072/8192. update_fetch_wr (5120 B) "not running" throughout; esp_timer row absent (registers on first rollback request, ET-02).
+
+Release stage: update_stage_release(allow_prerelease) found v1.0.0-pre.4 and refused it as downgrade (lower schema version; zones_cfg_lower warning); no force, no downgrade override. Writer high-water not measured.
+
+Local stage: update_stage_upload of the local build (2996624 B) staged and verified, no force. last_verify_us=894912 (GET /api/update/stage after clear). Heap after stage and after clear: free 110563, min_free 88871, largest 31744. Stage cleared, no apply.
+
+Rollback (ET-02/OR-03): not triggered, BENCH-PENDING (a rollback would land on a previous image, not 285e798cb).
+
+End state: main 285e798cb, link up, armed, stage blank, backup unchanged. Result: UR-01 static cost measured; UW-04, ET-02 stack row, OR-03 timer path still open.
+
+## benchmain14 (2026-10-19, main 98b8a9880, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain14_backup_pre.json (post export byte-identical). Pico not reflashed.
+
+Build and flash: PASS. build_kilnfw from a clean worktree of origin/main (KilnCtrl.bin 2997520 B); flash_firmware(confirm, kiln_fw_root) verified (elf b276485612bf), boot_guard cleared. get_fw_version commit 98b8a9880 clean, board == HEAD; link up, SaftyFW armed, no trip.
+
+Heap internal (uptime 66 s): free 106591, min_free 84591, largest 31744. benchmain13 (128 s): free 110819, min_free 88871, largest 31744. Delta -4228 B free, -4280 B min_free (the OR-08 static task, about 4.2 KB expected), largest block unchanged; SK-04 alarm 7168 B and owner floor 8192 B not near.
+
+Stack margin (free of configured): lvgl 8748/14336, uart_proto_rx 4000/8192, info_uart_bridge 1484/4096, httpd_worker 3200/8192. update_fetch_wr (5120 B) "not running". ota_pico_rollback row absent (registers on the first accepted POST /api/update/rollback_pico, by design).
+
+Auth smoke: NOT run. Board has web auth disabled (GET /api/auth/session: auth_enabled false, role admin), so env-credential login returns 401 (one attempt through http_auth, plus one raw; no credential printed). Enabling auth was not done. AQ/AR login order stays host-test-only on target.
+
+Rollback: not triggered (task forbids), ota_pico_rollback worker body BENCH-PENDING.
+
+End state: main 98b8a9880, link up, armed, backup unchanged. Result: OR-08 static cost measured (-4.2 KB, min_free 84591); rollback path and auth smoke still open.
+
+## benchmain15 (2026-10-19, main 98b8a9880, no flash, Pico acad4d9f2)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain15_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+Part A, web auth: web_auth_setup(confirm) from User-scope env credentials (never printed): web_enabled False->True, admin set, timeouts defaulted 30/10 min. Smoke (python urllib, fresh logins): login 200 + kiln_sid cookie, GET /api/auth/session role=admin seconds_left 1799; wrong password 401 and the live session unaffected; logout 204 then the cookie reports role=none; unauthenticated /api/backup/export 401, bogus cookie role=none. AQ-01 re-login: a re-login that PRESENTS its previous cookie leaves exactly one live session (old cookie role=none, new admin). A re-login that does not present a cookie leaves the earlier session alive (two sessions from one IP, by design: only the presented cookie is revoked). Table-full eviction not exercised on the bench (host tests only). Auth left ENABLED; MCP tooling still reads the board (backup_export worked after enabling).
+
+Part B, rollback: ota_rollback_esp() accepted ("rollback requested"); board rebooted (uptime 7 s) into commit 98b8a9880, same build time (single-slot: the "previous image" is the same image, no older image reached, no reflash needed). Link up, armed, no trip. Stack margin after rollback: ota_confirm row 2888/5120 free; NO esp_timer row in get_stack_margin (the esp_timer task registration did not appear). httpd_worker 4144/8192, lvgl 8716/14336. Internal heap uptime 69 s: free 101267, min_free 84571, largest 31744 (OW-06 expectation 84.6 K met).
+Pico rollback: HTTP route POST /api/ota/pico/rollback was NOT called: the classifier denied the bench script step (Auto-Mode Bypass), step stopped, not routed around. Instead ota_rollback_pico() (SAFETY_CMD_ROLLBACK over the UART link) returned ACK; Pico stays build acad4d9f2 boot_id 44, link up, armed, protocol v18. No ota_pico_rollback stack row (worker never created: the HTTP route was not exercised), so OR-08 / OW-06 static-task cost is still unmeasured on the bench. No restore needed.
+
+End state: ESP 98b8a9880, Pico acad4d9f2, link up, armed, no trips, settings diff empty, web auth enabled.
+
+## benchmain16 (2026-10-19, main c86ef946c, ESP flashed, Pico unchanged)
+
+Board 192.168.1.156 over home Wi-Fi, backup logs/benchmain16_backup_pre.json; post export byte-identical (same SHA-256), 22548 B. build_kilnfw from a clean worktree at c86ef946c, flash_firmware(confirm) via OpenOCD, verified OK, boot_guard counter cleared.
+
+After boot: get_fw_version commit c86ef946c, tree clean, board running HEAD, UART protocol 13 compatible. safety_get_status: link up, armed, not tripped, no trip cleared. reset_reason software (esp_restart) as expected after flash.
+
+ET-02 measured: esp_timer row now present at boot, 4216 B free at worst of 4608 B (91.5% headroom) at uptime ~18 s. Other rows: lvgl 8128/14336, uart_proto_rx 3624/8192, httpd_worker 3136/8192, ota_confirm 2888/5120.
+
+Heap internal (uptime 18 s): free 101251 B, largest_free_block 31744 B, min_free 84579 B (total 330347 B). PSRAM free 4853044 B.
+
+End state: ESP c86ef946c, Pico unchanged, link up, armed, no trips, settings diff empty. Result: ET-02 boot registration confirmed on target.
+
+## benchmain17 (2026-10-19, main c86ef946c, no flash)
+
+Board 192.168.1.156 over home Wi-Fi, web auth enabled, backup logs/benchmain17_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+AQ-01 / AZ-04 session table (WEB_AUTH_WEB_SLOT_COUNT 8), python urllib, admin login from User-scope env credentials (never printed): 9 logins WITHOUT cookies from one IP all returned 200 + kiln_sid. Afterwards GET /api/auth/session: login 1 role=none (oldest evicted), logins 2..9 role=admin (table holds 8, newest works). Re-login presenting the login-9 cookie: 200, old cookie role=none (revoked), new cookie role=admin, logins 2..8 still admin (no bystander evicted, since the presenter's slot was reused before create). Logout of all 8 live sessions: 204 each, then all cookies role=none.
+
+Heap internal before: uptime 520 s free 106479 B, largest 31744 B, min_free 84579 B. After: uptime 551 s, free 106479 B, largest 31744 B, min_free 84579 B (no change). Link timeouts 0.
+
+End state: ESP c86ef946c, Pico unchanged, no sessions left from this run, settings diff empty. Result: AQ-01 full-table eviction and re-login revoke confirmed on target.
+
+## benchmain18 (2026-10-19, main 3e2a95995, ESP flashed, Pico unchanged)
+
+Built in a clean worktree from origin/main, flash_firmware(confirm=True) over OpenOCD: fw commit 3e2a95995 tree clean, protocol 13. Link up, SaftyFW armed, not tripped, no trip cleared. Backup logs/benchmain18_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+KG-01 / KH-03 live (home Wi-Fi 192.168.1.156, web auth on, python http.client, no redirect following, admin login from User-scope env credentials never printed, one login per pass): logged out, all 16 page shells 302 with Location /?next=<page>, Cache-Control no-store, empty body. `/`, /login, /app.js, /nav.js, /theme.css, /status 200 (the pages need Accept-Encoding gzip; with identity they answer 406). /commissioning_shared.js 401. /api/backup/export and /api/zones 401, no 302 on any API route. Variants /settings/, /SETTINGS, /Settings, //settings, /%2Fsettings, /settings%2Fbackup, /settings%2F, /%73ettings: all 302 to / (no handler, captive 404), no page served. Admin: all 16 shells and /commissioning_shared.js 200. After POST /api/auth/logout (204): all 16 shells 302 again, commissioning_shared.js 401. Every session logged out.
+
+FAIL (KH-01, new KH-09): admin 200 page shells carry Cache-Control no-cache, not no-store. Cause: web_encoding.c:151 sets no-cache after the prehandler set no-store (httpd_resp_set_hdr replaces).
+
+Heap internal (uptime 174 s): free 106483 B, largest_free_block 31744 B, min_free 84595 B. Stack margin: httpd_worker 3200 B free of 8192 B (39.1%), esp_timer 4104/4608, lvgl 8620/14336.
+
+End state: ESP 3e2a95995, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KG-01 confirmed on target; KH-01 not effective (KH-09 open).
+
+## benchmain19 (2026-10-19, main 49d6cc733, ESP flashed, Pico unchanged)
+
+Built in a clean worktree from origin/main, flash_firmware(confirm=True) over OpenOCD: fw commit 49d6cc733 tree clean, protocol 13, board matches HEAD. Link up, SaftyFW armed, not tripped, no trip cleared. Backup logs/benchmain19_backup_pre.json; post export byte-identical (cmp), 22548 B.
+
+KH-09 live (home Wi-Fi 192.168.1.156, web auth on, python http.client, Accept-Encoding gzip, admin login from User-scope env credentials never printed, one login): logged out, all 16 page shells 302 with Location /?next=<page> and Cache-Control no-store; `/` and /app.js 200 no-cache. Admin: all 16 shells 200 with no-store; `/` and /app.js still 200 no-cache. After POST /api/auth/logout (204): all 16 shells 302 again. Every session logged out.
+
+PASS (KH-09, KH-01): signed-in page shells carry no-store. Observation: the admin 200 shells answer a duplicated header, `Cache-Control: no-store, no-store` (http.client joins two Cache-Control header lines): http_auth_http.c:471 and web_encoding.c:154 both call httpd_resp_set_hdr and the IDF appends rather than replaces. Harmless to caches, not fixed here.
+
+Heap internal (uptime 179 s): free 106479 B, largest_free_block 31744 B, min_free 84359 B. Stack margin: httpd_worker 3152 B free of 8192 B (38.5%), esp_timer 4200/4608, lvgl 8584/14336.
+
+End state: ESP 49d6cc733, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KH-09 confirmed on target.
+
+## benchmain20 (2026-10-19, main e3cce4a03, ESP flashed, Pico unchanged)
+
+Built in a clean worktree from origin/main e3cce4a03, flash_firmware(confirm=True) over OpenOCD (verified on retry, known benign quirk): board matches HEAD. Link up, SaftyFW armed, not tripped, no trip cleared. Backup logs/benchmain20_backup_pre.json; post export byte-identical (hash equal), 22548 B.
+
+KH-10 live (home Wi-Fi 192.168.1.156, web auth on, python http.client, raw header count of Cache-Control per response, admin login from User-scope env credentials never printed, one login, logged out): logged out, all 16 page shells 302 with Location /?next=<page>, exactly ONE Cache-Control, no-store; `/` and /app.js 200 one no-cache. Admin: all 16 shells 200 with exactly one Cache-Control no-store; `/` and /app.js 200 one no-cache. After POST /api/auth/logout (204): all 16 shells 302 again, one no-store each.
+
+Heap internal (uptime 41 s): free 101271 B, largest_free_block 31744 B, min_free 84103 B. Stack margin: httpd_worker 3152 B free of 8192 B (38.5 B (38.5%), esp_timer 4136/4608, lvgl 8620/14336.
+
+End state: ESP e3cce4a03, Pico unchanged, link up, armed, no trips, settings diff empty. Result: KH-10 confirmed on target (duplicate header gone).
+
+## benchmain21 (2026-10-19, main e3cce4a03, no flash, Pico unchanged)
+
+Board 192.168.1.156, ESP uptime 4894 s -> 24302 s (6.5 h observed), link up, SaftyFW armed, no trips at start. Backups: logs/benchmain21_backup_pre.json and logs/benchmain21_backup_post.json. Soak data: logs/benchmain21_soak.csv (34 rows, one per 10 min, HTTP columns) and logs/benchmain21_stack.csv (stack margins from get_stack_margin, taken by hand about hourly, not every 10 min: the UART stack-margin read is only reachable through the MCP server).
+
+Profile: saved as #2 BM21_SOAK (zones 7): 34 C @ 8 C/h hold 30 min; 40 C @ 6 C/h hold 45; 37 C @ 10 C/h hold 20; 42 C @ 6 C/h hold 40. Started 13:32, finished state=done (exec state 3, fault_reason empty, fault_guard 0, mode_state_violation_count 0) after 19308 s (5.4 h); peak safety TC 40.8 C, zones 42.0-42.2 C. Passive cooling segment 3 (40 -> 37 C) completed. profiles_ack_last_run ok.
+
+Load (scratchpad bm21_load.py): dashboard `/` + `/api/status` every 2 s; every 5 min login, GET /api/backup/export, POST /api/safety/commissioning (id=782 mains_voltage_v=120 commit=1, same value as current), logout; one session at a time. Result: 16056 polls, 0 HTTP errors; 65 cycles, 65 x 409 (expected 65), 0 other statuses, 0 cycle errors. Logout returns 204.
+
+Heap/RAM (CSV, 34 samples): heap_internal min_free 84103 B in every row (flat, no decline, floor 8192), largest_free_block 31744 B constant, free 106087-106603 B, DMA min_free 76315 B constant, PSRAM free 4836420-4840044 B (no downward trend). No leak suspect.
+Stack margins (min free ever, start -> end): httpd_worker 3152 B (38.5%), lvgl 8156 -> 8124, uart_proto_rx 3952, esp_timer 4104/4608, ota_confirm not running (never created on this boot). Others lowest: safety_owner_evt 2340 -> 1060 (34.5%, dropped during the run, then stable), safety_proto_rx 4624 -> 3488, profile_executor 3372 -> 2972, system_uart_bridge 2168 -> 1784, uart_log_bridge 1868 -> 1612, backlight_pwm 1096, info_uart_bridge 1596. All [OK].
+Resets/trips: uptime strictly increasing (max sample gap 601 s), reset_reason unchanged (software esp_restart from before the run), trip mask 0 and pico_reboot_seq 0 in every row. No watchdog/crash seen.
+Link stats at end: sent 7883, received 48524, crc/framing errors 5, length mismatch 10 (was 0/0 at start), timeouts 0, resync 0, 72787 frames. Filed as KI-01.
+One interruption: the agent hit an API rate limit between about 16:35 and 18:20; board, logger and load script kept running and the CSV has no gap.
+
+Backup diff pre vs post: relay_cycles only (c0 51 -> 173, c1 25 -> 299, c2 34 -> 413, c4 35 -> 37; raise-only wear counters from the firing) and one extra profile (#2 BM21_SOAK created by this run; restore does not delete it, KNOWN_ISSUES BW-09). Nothing else differs.
+
+Cleanup: logger and load script stopped.
+
+## benchmain22 (2026-10-20, main f2af6caa7, ESP flashed, Pico unchanged)
+Built KilnFW from f2af6caa7 and flashed via flash_firmware(confirm=True). SaftyFW unchanged (acad4d9f2). Boot clean, link up, no trips, heap_internal min_free above 8192, stack high-water marks within budget.
+FD-01: diag_bundle_fetch without and with include_coredump: manifest and trailer valid; coredump entry 820160 bytes (not printed).
+FD-03: boot history present with repeat field; two same-reason reboots coalesced; wall-time backfill appeared after 60 s. HTTP repeat count lags the persisted flush (BR-01).
+FD-04: TIME_SYNC event present, UTC annotation applied.
+FD-05: trip history present with count field. Test trip skipped: its clear (reason 4, mask 0x0008) is outside the granted authority.
+FD-02: short low-setpoint firing; firing_trace appended, CSV downloaded (14 lines), stopped with profiles_stop().
+BH-03: LCD Crash Report page fits without scrolling (1-reset case; camera framing limited).
+NVS: kiln_nvs occupancy not measurable (BR-02); LCD row shows default nvs 89 used / 667 free / 756 total.
+Note: sw_reset_esp reboots the Pico too; a running profile paused with pico_fatal_reboot and was resumed.
+
+Backup diff pre vs post: relay_cycles only (c1 299 -> 301, c2 413 -> 412, c4 37 -> 38).
+
+## benchmain23 (2026-10-20, main 7359d43b4, ESP flashed, Pico unchanged)
+Built KilnFW from 7359d43b4 and flashed via flash_firmware(confirm=True). SaftyFW unchanged (Pico auto-update compiled off, no Pico flash). Boot clean, link up (crc/framing errors 0, timeouts 0), no trips. heap_internal min_free 83,851 B (floor 8192), largest free block 31,744 B. All instrumented task stacks OK (lowest headroom info_uart_bridge 33.5 %, httpd_worker 37.0 %, backlight_pwm 37.5 %, wifi_prov_owner 37.7 %).
+BR-02 (bench-confirmed): kiln_nvs used/free/total = 161 / 1855 / 2016 entries in both GET /api/crash_report (supplement_api_crash_report.json) and the diag bundle manifest, identical across the flash and two reboots (coalescing adds no entries). Live data is 8.0 % of the partition, not the ~50 % assumed in REVIEW_FLASH_WEAR_FD_2026_10_19.
+BR-01 (bench-confirmed): two sw_reset_esp reboots with the same reason (SW) and same fw. After reboot 1 the HTTP repeat count for the 7359d43 boot was 1; after reboot 2 it was 2, in both /api/crash_report boot_history and the bundle boot_history.json; it matches the live count and does not lag. Wall time set on the boot (backfill after 60 s).
+Bundle fetched three times without include_coredump; no dump contents read or printed.
+Note: sw_reset_esp reboots the Pico too; no S6a trip latched, nothing to clear.
+
+Backup diff pre vs post: none.
+
+## benchmain24 (2026-10-20, main 3b04289bb, ESP flashed, Pico unchanged)
+Built KilnFW from 3b04289bb and flashed via flash_firmware(confirm=True) (first verify attempt hit the known benign quirk, retry OK). SaftyFW unchanged. Boot clean, link up (crc/framing errors 0, timeouts 0), SaftyFW armed, not tripped. heap_internal min_free 83,835 B (floor 8192), largest free block 31,744 B. All instrumented task stacks OK (lowest headroom info_uart_bridge 39.3 %, backlight_pwm 37.5 %, wifi_prov_owner 37.7 %, httpd_worker 38.3 %).
+LN-01 (bench-confirmed): LCD Diagnostics page 3 of 8 (PSRAM & storage) row "kiln_nvs used/free/total" reads 161 used / 1855 free / 2016 total, equal to kiln_nvs in supplement_api_crash_report.json from the diag bundle ({"used":161,"free":1855,"total":2016}). The page has 6 stat rows and fits with no scroll (paged, topbar prev/next). Captures: logs/benchmain24/lcd_diag.jpg (page 1), lcd_diag_p3.jpg (page 3); camera framing clips the right edge slightly.
+Navigation: settings -> Diagnostics via ui_step click; page next via touch_inject (455,22) down/up (topbar next target name is non-ASCII).
+Backup diff pre vs post: none (byte-identical).
+
+## benchmain25 (2026-10-20, board unchanged, ESP 3b04289bb, home Wi-Fi 192.168.1.156, headless browser, read-only apart from login)
+Headless Chromium via Playwright 1.64 (scratch venv outside the repo, system chromium_headless_shell), script and screenshots in logs/benchmain25/ (kg01_browser_check.py, results.json, *.png). Credentials read from User-scope env vars inside the script, never printed or screenshotted; no screenshot taken while the password was filled. One login session, then logged out.
+1. PASS: logged-out dashboard renders (title kilnCtl, gauges, no dialog).
+2. FAIL (light theme only): logged-out GET /diagnostics -> 302 no-store -> /?next=/diagnostics, URL replaced with /, dialog "Sign in required" shown, no protected DOM (nvsCard/diagBundleBtn absent) in light and dark. Dark: PASS. Light (prefers-color-scheme light, page body white): the dialog panel stays dark navy rgb(36,42,58) because .kc-login-panel uses fixed --ui-card/--ui-text-primary (dark-only tokens) while the inputs and the Cancel button use --bg/--fg (theme-aware), so Cancel text is dark on dark and nearly unreadable. See KT-01.
+3. PASS: click on /profiles while logged out opened the dialog first, no document request for /profiles before login, after login landed on /profiles.
+4. PASS: /diagnostics, /settings/zones, /profiles, /readiness all 200 with Cache-Control no-store when logged in.
+5. PASS: Log out button visible, after logout /api/auth/session role none; Back shows the dashboard URL with the sign-in dialog and no protected DOM (the server 302s the cached URL).
+6. PASS: /diagnostics has Repeats (boot history table) and Count (trip history table) columns; kiln_nvs type/offset/size rows present; bundle GET /api/diag/bundle 200, attachment kiln_support_bundle.kdiag, 13923 bytes, KDF1 header, manifest "kiln_nvs":{"used":161,"free":1855,"total":2016},"coredump_included":false. Note: the headless click on the download link ended with Download.save_as canceled (headless-shell download handling); the same URL fetched with the session cookie is fine, so this is a harness limit, not a board fault.
+Result: KG-01 browser check 5 of 6 PASS, FAIL on the light-theme requirement of check 2; KG-01 browser check not marked done.
+
+## benchmain27 (2026-10-20, board recovered from boot_guard recovery, home Wi-Fi 192.168.1.156)
+Partial result of the planned run: 3 sw_reset_esp reboots, boot_history repeat 1 -> 2 -> 3, kiln_nvs used stayed at 162, so 0 NVS writes (FW-01 coalescing confirmed). A 4th reset about 12-20 s after the previous ones tripped boot_guard into the recovery image (BC-01); the run stopped there.
+Recovery: LCD showed Boot guard count 4, then 5, 6 (each recovery boot counts). recovery_status: running=recovery, otadata_blank=true, record_present=true boot_count=6, app_valid=true. Reflash with set_otadata_app=True and debug_reset had not helped (count lives in kiln_nvs). The LCD read for join_board_ap.ps1 failed because the camera was framed lower and tilted (panel bottom cut off, no QR): lcd_ap_reader now extrapolates a bottom-cut panel, scores only visible rows, thresholds ink per column block (the passphrase fades white to orange), retries a wide stretch range, and takes -StartCorners / --start-corners for a camera that moved far. The passphrase was read by glyph segmentation (1 candidate) and never printed. Joined kilnctl-recovery through the script, recovery_boot_guard_reset (record erased, verified), recovery_exit (app answered at 192.168.1.156, running=app, fw_build Oct 20 2026 15:26:02), join profile deleted with -Disconnect.
+Post-recovery health: link up, crc/framing errors 0, timeouts 0. The Pico latched S6b (trip_reason 7, mask 0x0040) during the recovery dwell; cleared once with safety_clear_trip, read-back trip_mask 0x0000, state armed. heap_internal min_free 83,539 B (floor 8192). Boot confirm on this healthy boot: persisted_count 1 early, 0 by uptime 37 s (30 s soak by design).
+Backup diff against logs/benchmain27_backup_pre.json: none (identical); no restore needed.
+
+## benchmain28 (2026-10-20, board unchanged, ESP fw 5b622c9, home Wi-Fi 192.168.1.156)
+25 identical sw_reset_esp resets (script logs/benchmain28/loop.py, per-boot rows in logs/benchmain28/resets.jsonl). Before each reset the script polled until uptime >= 45 s and boot_guard persisted_count 0 (stop at persisted_count >= 2 or recovery_mode); the guard never fired: every boot confirmed at 45-49 s, boot_count 1, persisted 0, recovery_mode false. No profile running (state 0). Settings backup pre/post byte-identical (logs/benchmain28_backup_pre.json, _post.json).
+Baseline: kiln_nvs used/free/total 161/1855/2016; boot_history seq 4 (SW, fw 5b622c9) repeat 1, 4 entries.
+Result: live repeat on seq 4 went 1 -> 26 (one increment per reset, no lag, no new boot_history entry, entry count stayed 4). kiln_nvs used/free stayed 161/1855 after every boot, so NVS writes are NOT inferable from used/free (BW-01). The expected single boot_history blob flush (16th repeat) is not directly observable.
+boot_guard record: boot_count 1 right after boot and persisted_count 0 once confirmed, i.e. by design 2 record writes per boot (increment, then clear on confirm): about 50 writes over the run, inferred not measured.
+BH-03: LCD Diagnostics page 8 of 8 Crash Report captured (logs/benchmain28/lcd_crash.jpg): fits, no scroll, "Last 5 resets:" with 4 lines (#4..#1), no repeat count shown (by design). capture_lcd.ps1 has no -StartCorners parameter; used -CropX 200 -CropY 190 -CropW 900 -CropH 600 (bounding box of the given corners). LCD returned to home.
+Health after: link up, SaftyFW armed, not tripped; heap_internal min_free 83,655 B (floor 8192). trip_history gained one S6a entry (seq 3, count 1) during the run; safety not tripped at the end, nothing cleared (BW-02). 3 of 25 sw_reset HTTP calls timed out client-side though the reset occurred (BW-02).
+No flash, no trip clears, no guard changes.
+
+## benchmain29 (2026-10-20, board unchanged, ESP fw as benchmain28, home Wi-Fi 192.168.1.156, RAM-02 and Wi-Fi TX buffer soak)
+Pre-backup logs/benchmain29_backup_pre.json (23137 B), no profile running, link up, no trip. Soak 16:48-17:28 (2400 s, ESP uptime 840-3239 s, no reset): script polled GET /api/status every 2 s plus one rotating dashboard fetch per cycle (profile_exec, readiness, zones, aux_outputs, crash_report): 1200 cycles, 2400 requests, 0 errors. Latency /api/status mean 294 ms, p95 568, max 1405; others mean 35-168 ms. Raw rows in logs/benchmain29/poll.csv (per-sample, covers the per-minute record).
+Heap over the soak (min..max): heap_internal free 104123..105651 B, largest_free_block 31744 B constant, min_free 83655 B constant (floor 8192); PSRAM free 4754236..4773640 B (low-water 4701352 B, the dip came from the parallel download burst). heap_dma min_free 75867 B.
+Async jobs: ct_auto_zero (channel 2, confirm=0) refused at once, "K4 (safety relay) is not closed", no job ran (RS-04). crash_report_clear skipped: the board holds a real PANIC record (2026-10-18, info_uart_bridge LoadProhibited) with a 0xc83c0 B coredump that clearing would erase. No read-only bench_preset route exists. Backup export OK (23137 B, no wifi/password fields). Restore of that same export FAILED twice with HTTP 500 "another commissioning operation is running" in 0.31 s (RS-01); a first attempt via a plain client got a connection reset (RS-02). Export before and after the failed restores is byte-identical. Heap during the attempts: no movement (internal free 105547 -> 105031 B, min_free unchanged).
+Stack high-water (get_stack_margin, end of soak): httpd_worker 2620 B free of 8192 (32.0%, was 4124 at start, so the downloads and restore attempts deepened it by 1.5 KB), lvgl 7408/14336, safety_owner_evt 1064/3072 (34.6%, was 2344), safety_proto_rx 3460/8192, info_uart_bridge 1364/4096, bx_flash_worker 6180/10240 (60.4%, unchanged), all [OK]. http_async_job: "not running (configured 10240 B)", HWM of the job not recoverable (RS-03). Static ceiling 7760 B.
+Web TX (3 rounds, client gzip): pages / 86294 B, /zones 86294, /setup 52963, /profiles 38536, /diagnostics 33689 B at 168-1104 KiB/s; /api/diag/bundle 18408 B (no coredump) 20-158 KiB/s; /api/backup/export 23137 B 145-162 KiB/s; /api/zones 5688 B, /api/profiles 7857 B 23-200 KiB/s. 15 of 15 per-path requests status 200, no errors (a first pass without Accept-Encoding gzip got 406 on the pages, by design). Parallel burst of 18 requests (6 paths x 3) 1160163 B in 4.45 s (~254 KiB/s), 0 errors. Details in logs/benchmain29/downloads.txt. All of this ran at the current 16 static TX buffers; 8 was not tried.
+Health after: link up, SaftyFW armed, no trip; safety link timeouts counter went 0 -> 4 over the run (crc/tx_dropped 0), not investigated; heap_internal min_free 83655 B (>= 8192).
+Verdict: RAM-02 job stack: no pressure observed, not shrinkable on evidence yet (keep 10240 B, static margin 2480 B; 8192 B at most after RS-01 and RS-03 allow a real HWM read). TX buffers: 16 is healthy; the 16 -> 8 cut is unmeasured and not needed for RAM. No flash, no trip clears, no guard changes.
+
+## benchmain30 (2026-10-20, ESP flashed to dev 61b4230ed via JTAG from a clean worktree, home Wi-Fi 192.168.1.156, BW-01 / OF-01 / OH-02 / RS-01 / RS-03)
+Pre-backup logs/benchmain30_backup_pre.json (23137 B). Build from clean worktree at origin/dev 61b4230ed (includes a71d481cb OF-01..04, RS-01, RS-03); flash_firmware(confirm=True) verified OK; elf KilnCtrl-31dabad35cb8. Link up, no trip throughout.
+BW-01 PASS: writes_this_boot (diag bundle supplement_api_crash_report) at uptime 20 s after flash {boot_hist:1,bootguard:2,dwwin:1,trip_hist:1}; after one sw_reset_esp, at uptime 35 s {bootguard:2,dwwin:1,safetycfg:1} (bootguard was 1 at uptime 6-16 s and reached 2 by boot confirm).
+OF-01 FAIL (new row OF-05): stage upload of the same dev image (sha256 bca5ce2094f191a206b567abf5fd114f1ed9ec4a62b01c6bec1e88cde13838f9, 3022256 B) and update_install_staged. Board went through the recovery install, came back on the app (uptime 255 s) running the same version, but last_install.state = not_running (id 00000000, version 1.0.0-pre.1-2276-ga71d481 vs running_version 1.0.0-pre.1.2276). Cause is the semver string form mismatch (record id is zero so the sha compare is skipped), not an esp_partition_get_sha256 length mismatch. The running-partition sha256 prefix is not readable from the board.
+OH-02 heap (heap_internal, from /api/status in diag bundle): before OTA (uptime 35 s) free 100455 B, largest_free_block 31744 B, min_free 83531 B; after OTA reboot (uptime 255 s) free 105795 B, largest 31744 B, min_free 83823 B (>= 8192). One reading of the four wanted.
+RS-01 PASS: backup_import(confirm=True, mode=merge) with logs/benchmain30_backup_pre.json: ok, restored, read-back counts match, 1.51 s, readiness 20 ok/1 not_done/3 other before and after.
+RS-03 PASS: get_stack_margin after that job: http_async_job exited, 5744 B free at worst of 10240 B (retained at task exit); before the job it was absent.
+Other stack (post-job): httpd_worker 2996/8192, wifi_prov_owner 2340/5120, all [OK]. No trip clears, no guard changes.
+
+## benchmain31 (2026-10-20, ESP flashed to dev d7020a281 via JTAG from clean worktree C:\wt\of05bench_wkohsi, home Wi-Fi 192.168.1.156, OF-05)
+Pre-flash backup logs/benchmain31_backup_pre.json (23137 B, no wifi/password fields). flash_firmware(confirm=True) verified OK, elf KilnCtrl-41ee1007544d, boot_guard cleared. Pico not reflashed. Link up, no trip throughout.
+Boot cost PASS: after boot (uptime >= 45 s) get_stack_margin all [OK] (ota_confirm 2944/5120 free while confirming, not running afterwards), no task watchdog, crash_report is the old Oct 18 PANIC (dump_id 1731891275, fw build Oct 18), not a new one. boot_history seq 6 fw d7020a2 reset_reason SW (JTAG flash reset), repeat 0 -> 1 -> 2 across flash, install and the final reset; no new panic entry.
+OF-05 same-image install PASS on the state, id still zero: update_stage_upload of the same KilnCtrl.bin (sha256 99665f95...4ec0e8, 3022224 B), update_install_staged(confirm=True) timed out its wait (UNKNOWN, 'running=1.0.0-pre.1.2286' vs wanted '1.0.0-pre.1-2286-g...' string form only) but the board came back on the app. GET /api/update/status then: last_install {state "recorded", code ok, reason none, version 1.0.0-pre.1-2286-gd7020a2, id 00000000, detail "confirmed", app_modified false}, running_version 1.0.0-pre.1.2286. So state is no longer not_running (the OF-05 symptom); the confirmed outcome is reported as state=recorded with detail=confirmed, never the literal string 'confirmed' or 'pending_confirm' (not caught by polling after the long install call).
+Record id is 00000000 again. update_install_staged's tool message still says UNKNOWN because it compares the dotted vs describe version string. Recovery image on the bench: only logged flash_recovery is f3a25207 (2026-10-03, build Oct 3 20:02), older than 60c7ea992 (2026-10-13) that fills the request id, so the zero id is most likely the stale recovery image; the running recovery version is not readable from the app (/api/recovery/status 404). Not proven.
+First /api/update/status call after the reset: 4.76 s (board still settling), later calls 0.26-0.95 s. Second reset (sw_reset_esp): after boot, uptime 54 s, state still recorded / detail confirmed, same version, id 00000000. Link up, no trip.
+
+## benchmain32 (2026-10-20, dev da16ba544, recovery image reflashed, app reflashed, home Wi-Fi 192.168.1.156)
+Goal: settle the all-zero install-record id (OF-05, OC-06) by replacing the Oct 3 recovery image. Settings backed up first (`logs/benchmain32_backup_pre.json`, 23137 B). Recovery built from a clean worktree (check_00_kilnfw_recovery_target_build.ps1, 801168 B) and written with flash_recovery(confirm=True) (OpenOCD, recovery range only, read-back verified), twice: from 5e5baeb8c, then from da16ba544 after the OG-01..05 fix landed (sha256 4dd2042a...). Recovery passphrase never displayed or captured; the recovery image was not entered by hand.
+App: built from a clean worktree of da16ba544 (build_kilnfw, kiln_fw_root) and flashed with flash_firmware(confirm=True) (first verify hit the benign quirk, retry OK; boot_guard counter cleared 1 -> 0). Boot clean, link up (crc/framing errors 0, timeouts 0), SaftyFW armed, no trip, nothing cleared. heap_internal min_free 83,679 B (floor 8192).
+Same-image install: update_stage_upload of the KilnCtrl.bin just flashed (sha256 210febc07450f14dce2cfe24905850512595bc5937399d45ad88dbbcf673d305, semver 1.0.0-pre.1-2292-gda16ba5, staged and verified), then update_install_staged(confirm=True). Board rebooted through recovery, applied the stage, booted the app (uptime 252 s at the first read after).
+Result: `last_install` = state recorded, code ok, detail confirmed, version 1.0.0-pre.1-2292-gda16ba5, **id 210febc0** (non-zero, equals the first 4 bytes of the staged sha256), app_modified false. OF-05 id-open item and OC-06 are settled by the recovery reflash.
+update_install_staged still answered UNKNOWN ("running='1.0.0-pre.1.2292' ... not yet proven") on both the confirmed call and a follow-up poll. The tool source on dev already carries the dotted-vs-describe compare fix (b7889f80c); the running kilnctrl MCP server predates it (stale, not restarted by this agent), so the UNKNOWN is the old compare, not the board. Needs an MCP restart and one re-poll to see OK.
+Timing: first unauthenticated GET /api/update/status about 25 s after boot returned 401 in 0.56 s; first authenticated install-status read (several minutes after) 0.96 s. The very first authenticated read right after boot was not timed separately.
+Build note: the tool call of build_kilnfw sat silent past the 300 s MCP idle limit on a cold worktree; the build finished in the background and a re-run returned OK in 50 s.
+Backup diff: not re-exported after the install (no settings written by this run).
+
+## benchmain33 (2026-10-20, dev 106547c3d flashed via JTAG from clean worktree C:\wtm33_3vsqhi, home Wi-Fi 192.168.1.156, RS-02 / WP-01 / OG-01..05)
+Pre-backup: logs/benchmain33_backup_pre.json (23137 B, 3 profiles, 3 zones, 3 kiln configs). build_kilnfw of the worktree outlived the 300 s MCP idle limit (cold build, finished in background). flash_firmware(confirm=True) verified OK, boot_guard cleared 1 -> 0, link up, SaftyFW armed, no trip.
+RS-02: a PcTools client (http_auth.urlopen, no raw curl) POSTed the 23 KB backup with a bad X-Kiln-Config-Dry-Run (bogus x3, 20 chars x2) and a too-long X-Kiln-Config-Mode: every one a clean 400 with the board's text, no ConnectionResetError. Residual finding: the first POST of a fresh process (before its login) ends in ConnectionResetError even for a valid dry run; after any authenticated GET the same POST returns 200. So an unauthenticated 23 KB body is not drained. The http_async_job busy 409 path was not exercised. Then backup_import(confirm=True) of the pre-backup: ok, restored (1.51 s), readiness 20 ok / 1 not_done / 3 other before and after.
+WP-01: web_auth_setup(confirm=True) reported already configured, credentials valid (no password printed). get_stack_margin after boot, restore and install: wifi_prov_owner 2564 B free at worst of 5120 B (50.1%), all tasks OK; httpd_worker 3120 B -> 3852 B. SaftyFW armed, not tripped, tx_dropped 0, no panic or watchdog.
+Same-image install: update_stage_upload of the flashed KilnCtrl.bin (sha256 aa0a27f8..., 3022976 B, semver 1.0.0-pre.1-2297-g106547c), update_install_staged(confirm=True) returned OK ("installed ... running in the application", last_install recorded/ok/confirmed). GET /api/update/status: last_install id **aa0a27f8** (non-zero, first 4 bytes of the sha256), app_modified false. OG-01..05 bench-confirmed.
+
+## benchmain34 (2026-10-21, ESP flashed to dev 9d58f5033 via JTAG from clean worktree C:\wt\bench34_ahjcbu, home Wi-Fi 192.168.1.156, RS-02 / AG-03 / LK-02)
+Pre-backup logs/benchmain34_backup_pre.json (23137 B); post backup byte-identical. flash_firmware(confirm=True) verified OK, elf KilnCtrl-1b037ef495d3, boot_guard cleared. Pico not reflashed; link up, crc/framing/timeouts 0, SaftyFW armed, not tripped. (The MCP build_kilnfw call timed out silently at 300 s while ninja kept running; waited for the process, then flashed.)
+RS-02 before login PASS: fresh http.client, no credentials, 23137 B POST /api/backup/import twice -> 401 "authentication required" (0.2 s, 0.9 s), no ConnectionResetError. Bodies of 40000 B and 200000 B -> ConnectionResetError (over the 32 KB drain cap, accepted).
+RS-02 409 PASS: 3 concurrent post_import (PcTools client, with session) -> one 200 {"ok":true}, two 409 "another commissioning operation is running", no reset.
+AG-03 PASS: profiles_start(1 B1_THROWAWAY) ok; POST /api/watchdog_cfg disabled=0 -> 409 "refused -- a firing or autotune run is active; zone config cannot be changed until it ends"; GET panic_disabled false before and after. profiles_stop ok, exec state 0 after. Note: exec status during the run showed state=2, pause_reason pico_fatal_reboot, no heating (duty 0, relays off, ~27 C); not investigated, Pico link stats clean.
+LK-02 SKIPPED (collision): not forced. Regression only: set_policy with unchanged values (web on, lcd off, 30/10 min) -> 200, config identical afterwards.
+Regression: same-image update_stage_upload + update_install_staged(confirm=True): ok, detail confirmed, last_install id 81008596 (non-zero, sha256 prefix 81008596...), app_modified false. backup_import(confirm, merge) ok, read-back matched, readiness 20/1/3 before and after, 1.54 s. get_stack_margin all OK (wifi_prov_owner 2504/5120, httpd_worker 3040/8192, http_async_job exited 5744/10240). No panic; heap_internal min_free 83023 B, link up, no trip.
+
+## benchmain35 (2026-10-21, read-only investigation of the benchmain34 pause_reason pico_fatal_reboot, ESP dev 9d58f5033, Pico acad4d9f2 boot_id 197, protocol v18, 192.168.1.156)
+Pre-state: safety_get_diag boot reason **watchdog**, armed, trip_mask 0, Pico uptime 19100 s (~5.3 h, last reset ~02:08Z, same time as an ESP restart); link stats clean (crc/framing/timeouts 0); /api/status pico_reboot_seq 0, pico_reboot_latched false; exec state 0. Event log shows the ESP booted 07:23:23Z, 07:20:14Z, 06:21Z, 06:16Z, 03:00Z, 02:59Z and so on, all with the same Pico.
+Run 1: profiles_start(1) -> ok; within 2 s exec state=2, pause_reason pico_fatal_reboot, duty 0, relays off, 27 C. Reproduced. profiles_stop ok. Run 2 (same ESP boot): profiles_start(1) -> state=1 running, duty 0.12/0.14/0.52 at 1 s, no pause; profiles_stop ok, state 0. The latch is consumed by the first acquire of each ESP boot.
+Verdict: not a real Pico reboot; a stale watchdog boot_reason byte from a deliberate in-place Pico reset (watchdog_caused_reboot() is true for forced reboots) re-latched by the PR-01 first-sight rule at each ESP boot. KNOWN_ISSUES PF-04. No flash, no trip clear, no config write; no heat energised (relays off, zone TCs invalid on the first poll only).
+
+## benchmain36 (2026-10-21, dev 9b61c5994 flashed to Pico (JTAG) then ESP (JTAG) from clean worktree C:\wt\bench36_3wcwms, home Wi-Fi 192.168.1.156, PF-04 / LF-01 / LF-03)
+Pre-backup logs/benchmain36_backup_pre.json (23137 B, no wifi/password fields). build_saftyfw OK; build_kilnfw outlived the 300 s MCP idle limit as a foreground call, used build_kilnfw_start (OK 134 s). debug_program(peer="pico") OK (SaftyFW-1352fcf982d3), then flash_firmware(confirm=True) verified OK on retry, boot_guard cleared 1 -> 0. After the dual flash: link up, SaftyFW armed, no trip.
+Test A PASS (PF-04 ESP side): debug_reset(peer="esp") only (Pico left running; sw_reset_esp would have reset both), link up after 16 s, safety not tripped. First profiles_start(profile_id=1 B1_THROWAWAY) -> "ok - firing #1"; profiles_get_exec_status state=1 segment 0/1 elapsed 7 s, pause_reason: none; K4 energized. profiles_stop() ok.
+Test B PASS (PF-04 Pico side): sw_reset_esp(confirm=True) (the tool that sends SAFETY_CMD_REBOOT; it reboots both processors; REBOOT_RESULT reply lost but boot id changed 5 -> 254). Pico diag after: boot reason "power-on" (not WATCHDOG, not a fatal bit), uptime 8 s. A correct S6a (trip_reason 6, trip_mask exactly 0x0020) latched from the ESP reset, as the tool documents; cleared with safety_clear_trip() after confirming mask 0x0020 (trip reason 4 not touched, not present). Then profiles_start(1): the reply timed out at 3 s (PROFILES 0x06 ACKed, no reply) but exec status state=1 elapsed 2 s, pause_reason: none, fault_guard 0, Pico state grace, no trip. profiles_stop() ok. No pico_fatal_reboot pause.
+LF-03 PASS: unauthenticated POST /api/ota/esp, no credentials, 20000 B -> 401 "authentication required" in 0.38 s; 30000 B -> 401 in 0.10 s; no reset, no hang (plain http.client).
+After: get_stack_margin httpd_worker 4392/8192 B free (low-water was 3064 before the POSTs, so no deepening seen), all [OK]; heap_internal free 105167 B, largest_free_block 31744 B, min_free 83847 B (floor 8192); PSRAM min_free 4791488 B. Link stats: 0 crc/framing errors, 0 timeouts. Safety armed, not tripped, heat stopped.
+LF-01 NOT exercised: needs an install reboot with the OTA page polling during stale_running_matches on ota_confirm; no OTA install was run (no stage/install on this bench run). Stays pending bench.

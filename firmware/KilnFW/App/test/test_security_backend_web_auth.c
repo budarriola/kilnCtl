@@ -33,6 +33,8 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 // ---- fakes ---------------------------------------------------------------------
 static web_auth_table_t s_table;
 web_auth_table_t *http_session_table(void) { return &s_table; }
+static int s_destroy_all_posts = 0; /* AX-02 */
+void http_session_destroy_all_request_post(void) { s_destroy_all_posts++; }
 
 static int f_force_lock_calls;
 void ui_lcd_lock_force_lock(void) { f_force_lock_calls++; }
@@ -243,6 +245,32 @@ static void test_set_lcd_pin(void)
     TEST_CHECK(web_auth_store_verify_pin(WEB_AUTH_ROLE_USER, "8765"), "previous user PIN still intact after the failed write");
 }
 
+static void test_set_policy_lk(void)
+{
+    TEST_SECTION("LK-01/LK-02 backend set_policy delegates the gate to the store (under its lock) and maps HAL_BUSY to BUSY");
+    reset_all();
+    seed_admin();
+    security_policy_t on = pol(true, false, 15, -1);
+    /* a wipe before the call: the gate (inside the store) sees no admin and refuses */
+    (void)web_auth_store_clear_all_credentials();
+    TEST_CHECK(vt->set_policy(&on) == SECURITY_ERR_INVALID_INPUT, "LK-01: no admin at write time -> refused");
+    web_auth_policy_t stored;
+    TEST_CHECK(web_auth_store_load_policy(&stored) != WEB_AUTH_LOAD_OK || !stored.web_enabled, "LK-01: nothing enabled stored");
+    char *src = test_read_source_anchored(__FILE__, "../drivers/http/security_backend_web_auth.c",
+                                          (const char *const[]){"../drivers/http/security_backend_web_auth.c",
+                                                                "App/drivers/http/security_backend_web_auth.c",
+                                                                "firmware/KilnFW/App/drivers/http/security_backend_web_auth.c"}, 3);
+    TEST_CHECK(src != NULL, "backend source readable");
+    if (src != NULL) {
+        TEST_CHECK(strstr(src, "web_auth_store_set_policy_checked(") != NULL, "LK-01: backend uses the in-lock checked setter");
+        TEST_CHECK(strstr(src, "web_auth_policy_check_transition(") == NULL, "LK-01: no check outside the lock in the backend");
+        char *busy = strstr(src, "status == HAL_BUSY");
+        char *stor = strstr(src, "return SECURITY_ERR_STORAGE;");
+        TEST_CHECK(busy != NULL && strstr(busy, "SECURITY_ERR_BUSY") != NULL && stor != NULL, "LK-02: HAL_BUSY maps to SECURITY_ERR_BUSY");
+        free(src);
+    }
+}
+
 static void test_set_policy(void)
 {
     TEST_SECTION("set_policy: one transition gate, minutes->seconds, sessions cleared only on a real enable edge, failed write clears nothing");
@@ -385,6 +413,35 @@ static void test_clear_all_credentials(void)
     }
 }
 
+/* RT-01: while the FS-02 storage-reset latch is held, bootstrap is 403 unless the physical gesture ran. */
+static void test_bootstrap_refused_while_storage_reset_latched(void)
+{
+    TEST_SECTION("RT-01: bootstrap_password 403 while the storage-reset latch is held, allowed after the gesture");
+    reset_all();
+    security_backend_web_auth_start();
+    TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "wifi_nvs up");
+    TEST_CHECK(!web_auth_store_storage_reset_evaluate(true), "fresh boot writes sentinel + mirror");
+    TEST_CHECK(hal_kv_erase_partition(NULL) == HAL_OK, "erase nvs");
+    TEST_CHECK(web_auth_store_storage_reset_evaluate(false), "latched");
+    f_web_enabled = true;
+    TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403, "RT-01: latched => 403");
+    TEST_CHECK(strstr(s_reply, "reset gesture") != NULL, "RT-01: 403 body names the recovery path");
+    TEST_CHECK(strstr(s_reply, "PIN") == NULL, "RX-01: 403 body does not advertise an LCD PIN recovery");
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "RT-01: nothing stored");
+    {
+        /* a valid web blob that is NOT the gesture result (admin record untouched, must_change false) */
+        uint8_t usalt[WEB_AUTH_SALT_LEN] = {7};
+        TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", PW, usalt, false) == HAL_OK, "seed user");
+        TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 403,
+                   "RT-01: a blob without the gesture marker is still 403");
+    }
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "physical gesture clear");
+    TEST_CHECK(web_auth_store_storage_reset_latched(), "still latched after the gesture");
+    TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 200, "RT-01: gesture done => bootstrap ok");
+    TEST_CHECK(!web_auth_store_storage_reset_latched(), "bootstrap clears the latch");
+    reset_all();
+}
+
 static void test_bootstrap_handler(void)
 {
     TEST_SECTION("POST /api/auth/bootstrap_password: only while bootstrap is needed, body validation, strength, one-shot");
@@ -416,6 +473,7 @@ static void test_bootstrap_handler(void)
 
     TEST_CHECK(post_bootstrap("username=admin&password=Cone6-Strong-262", 40) == 200, "valid body (split over several recv calls): 200");
     TEST_CHECK(strcmp(s_reply, "{\"ok\":true}") == 0, "ok reply");
+    TEST_CHECK(s_destroy_all_posts == 1, "AX-02: a successful bootstrap posts destroy-all (no pre-bootstrap session survives)");
     web_auth_password_record_t rec;
     TEST_CHECK(web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec) == WEB_AUTH_LOAD_OK && strcmp(rec.username, "admin") == 0 && !rec.must_change,
                "admin record written, must_change false");
@@ -432,10 +490,12 @@ int main(void)
     test_set_web_password();
     test_set_lcd_pin();
     test_set_policy();
+    test_set_policy_lk();
     test_get_config();
     test_invalidate_sessions();
     test_clear_all_credentials();
     test_bootstrap_handler();
+    test_bootstrap_refused_while_storage_reset_latched();
     printf("security_backend_web_auth: %d checks, %d failures\n", g_test_count, g_test_failures);
     return g_test_failures ? 1 : 0;
 }

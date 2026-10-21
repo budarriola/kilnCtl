@@ -134,6 +134,7 @@ void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_over
     s_stub_relay_cycles_last_type = type;
 }
 
+bool g_hop_stub_internal_stack = false; // shared by the other main-executable tests (kiln_cfg_store, dualwrite_window)
 static int s_stub_flash_worker_calls = 0;
 static esp_err_t s_stub_flash_worker_submit_err = ESP_OK; // returned instead of running the job, if != ESP_OK
 
@@ -144,7 +145,14 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
         return s_stub_flash_worker_submit_err; // simulates "worker not started" -- job never runs
     }
     if (fn) {
+        // PSRAM-stack write hop (flash_hop.h): when the test models the real worker, the job runs with
+        // hal_kv_write_safe_here() true (the worker's stack is internal) and the caller's value is restored.
+        bool prev_safe = hal_kv_write_safe_here();
+        if (g_hop_stub_internal_stack) {
+            fake_kv_set_write_safe_here(true);
+        }
         fn(arg);
+        fake_kv_set_write_safe_here(prev_safe);
     }
     return ESP_OK;
 }
@@ -328,10 +336,10 @@ static void test_index_for_id_finds_known_and_rejects_unknown(void)
     // Note that tools/run_all_checks.ps1 does NOT run this executable, so a
     // stale pin here is only visible to a direct build_host_tests.ps1 run.
     TEST_CHECK(index_for_id(0x0101) == 0, "first table row (tc_source) is index 0");
-    TEST_CHECK(index_for_id(0x0322) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
-               "last table row (zone_ct_channel[2]) is the last index");
-    TEST_CHECK(index_for_id(0x0321) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
-               "zone_ct_channel[1] is second-to-last");
+    TEST_CHECK(index_for_id(0x010B) == (int)(SAFETY_CFG_PARAM_COUNT - 1),
+               "last table row (tc_sheath_tau_s) is the last index");
+    TEST_CHECK(index_for_id(0x0322) == (int)(SAFETY_CFG_PARAM_COUNT - 2),
+               "zone_ct_channel[2] is second-to-last");
     TEST_CHECK(index_for_id(0xBEEF) == -1, "an id no CONFIG_REFERENCE.md section uses is not found");
     TEST_CHECK(safety_cfg_store_param_count() == SAFETY_CFG_PARAM_COUNT,
                "safety_cfg_store_param_count() matches the table size exactly");
@@ -883,6 +891,32 @@ static void test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry(v
     fake_kv_reset_all(); // leave the shared fake state as every other test in this binary expects
 }
 
+static void test_psram_stack_safety_cfg_writers_hop_to_worker(void)
+{
+    TEST_SECTION("save_safety_relay_type/save_ct_cal/save_rate_guard_meta -- from a PSRAM stack they hop to the "
+                 "flash worker; with the worker unusable they are refused, never written directly");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    fake_kv_set_write_safe_here(false);
+    s_stub_flash_worker_submit_err = ESP_ERR_INVALID_STATE;
+    TEST_CHECK(save_safety_relay_type() == ESP_ERR_INVALID_STATE && save_ct_cal() == ESP_ERR_INVALID_STATE &&
+                   save_rate_guard_meta() == ESP_ERR_INVALID_STATE,
+               "worker unusable: all three refuse");
+    s_stub_flash_worker_submit_err = ESP_OK;
+
+    g_hop_stub_internal_stack = true;
+    s_stub_flash_worker_calls = 0;
+    esp_err_t a = save_safety_relay_type();
+    esp_err_t b = save_ct_cal();
+    esp_err_t c = save_rate_guard_meta();
+    g_hop_stub_internal_stack = false;
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(a == ESP_OK && b == ESP_OK && c == ESP_OK, "worker modelled: all three persist from a PSRAM stack");
+    TEST_CHECK(s_stub_flash_worker_calls == 3, "each write went through the flash worker");
+    fake_kv_reset_all();
+}
+
 static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("nvs_save_store -- refuses (does not crash) when called with a PSRAM stack underneath it");
@@ -967,6 +1001,135 @@ static void test_version_refuse_older_layout_without_a_migration(void)
     TEST_CHECK(safety_cfg_store_get_by_index(stale_slot, &p) && !p.set,
                "nothing from the old layout leaked in at its old slot either");
 
+    fake_kv_reset_all();
+}
+
+// ---------------------------------------------------------------------------
+// v6 -> v7 migration (SR-31): three ids dropped from the middle of the table.
+// ---------------------------------------------------------------------------
+static void stage_raw_blob(const void *blob, size_t n)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "setup: stage handle opens");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAFETY_CFG, blob, n) == HAL_OK, "setup: blob stages");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: stage commits");
+    hal_kv_close(&h);
+}
+
+// Position of v7 row i in the v6 table: 0x0401 sat before 0x0402's row, 0x0404/0x0405 after 0x0403's.
+static size_t v6_pos_for_v7(size_t i)
+{
+    int r402 = index_for_id(0x0402), r403 = index_for_id(0x0403);
+    return i + ((int)i >= r402 ? 1u : 0u) + ((int)i > r403 ? 2u : 0u);
+}
+
+static void test_v6_blob_migrates_by_id_and_drops_removed_ids(void)
+{
+    TEST_SECTION("nvs_load_store -- a v6 blob migrates by param id, removed ids dropped");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    safety_cfg_store_blob_v6_t v6;
+    memset(&v6, 0, sizeof(v6));
+    v6.version = 6u;
+    v6.config_crc = 0x1234;
+    for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V6; j++) {
+        v6.entries[j].set = 1;
+        v6.entries[j].value.u16_val = (uint16_t)(1000u + j);
+    }
+    stage_raw_blob(&v6, sizeof(v6));
+
+    nvs_load_store();
+
+    TEST_CHECK(s_store.version == SAFETY_CFG_STORE_VERSION, "migrated store is stamped current");
+    TEST_CHECK(s_store.config_crc == 0x1234, "config_crc carried over as stored");
+    TEST_CHECK(s_has_data, "migrated cache counts as data");
+    size_t bad = 0;
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT_V7; i++) {
+        safety_cfg_param_t p;
+        TEST_CHECK(safety_cfg_store_get_by_index(i, &p), "row readable");
+        size_t j = v6_pos_for_v7(i);
+        if (!p.set || s_store.entries[i].value.u16_val != (uint16_t)(1000u + j)) {
+            bad++;
+        }
+    }
+    TEST_CHECK(bad == 0, "every surviving row holds its own v6 value, mapped by id");
+    TEST_CHECK(!s_store.entries[index_for_id(0x010B)].set, "0x010B (new in v8) stays unset");
+    TEST_CHECK(index_for_id(0x0401) < 0 &&
+                   index_for_id(0x0404) < 0 &&
+                   index_for_id(0x0405) < 0,
+               "removed ids are gone from the table");
+    fake_kv_reset_all();
+}
+
+static void test_v7_blob_migrates_by_id(void)
+{
+    TEST_SECTION("nvs_load_store -- a v7 blob migrates by param id, tc_sheath_tau_s left unset");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    safety_cfg_store_blob_v7_t v7;
+    memset(&v7, 0, sizeof(v7));
+    v7.version = 7u;
+    v7.config_crc = 0x4321;
+    for (size_t j = 0; j < SAFETY_CFG_PARAM_COUNT_V7; j++) {
+        v7.entries[j].set = 1;
+        v7.entries[j].value.u16_val = (uint16_t)(2000u + j);
+    }
+    stage_raw_blob(&v7, sizeof(v7));
+    nvs_load_store();
+    TEST_CHECK(s_store.version == SAFETY_CFG_STORE_VERSION && s_store.config_crc == 0x4321 && s_has_data,
+               "migrated v7 store is current, config_crc carried over");
+    size_t bad = 0;
+    for (size_t i = 0; i < SAFETY_CFG_PARAM_COUNT_V7; i++) {
+        if (!s_store.entries[i].set || s_store.entries[i].value.u16_val != (uint16_t)(2000u + i)) {
+            bad++;
+        }
+    }
+    TEST_CHECK(bad == 0, "every v7 row keeps its value at its own id");
+    TEST_CHECK(!s_store.entries[index_for_id(0x010B)].set, "0x010B stays unset until the next refetch");
+
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    stage_raw_blob(&v7, sizeof(v7) - sizeof(v7.entries[0]));
+    nvs_load_store();
+    TEST_CHECK(s_store.config_crc == 0 && !s_has_data, "a short v7 blob is unreadable");
+    fake_kv_reset_all();
+}
+
+static void test_v6_blob_wrong_size_is_unreadable(void)
+{
+    TEST_SECTION("nvs_load_store -- a wrong-size v6 blob is unreadable");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    safety_cfg_store_blob_v6_t v6;
+    memset(&v6, 0, sizeof(v6));
+    v6.version = 6u;
+    v6.config_crc = 0x1234;
+    v6.entries[0].set = 1;
+    stage_raw_blob(&v6, sizeof(v6) - sizeof(v6.entries[0]));
+    nvs_load_store();
+    TEST_CHECK(s_store.config_crc == 0 && !s_has_data, "short v6 blob leaves the empty default");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set, "nothing leaked in");
+    fake_kv_reset_all();
+}
+
+static void test_v5_blob_still_resets(void)
+{
+    TEST_SECTION("nvs_load_store -- a v5 blob still has no migration");
+    reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    safety_cfg_store_blob_v6_t v5;
+    memset(&v5, 0, sizeof(v5));
+    v5.version = 5u;
+    v5.config_crc = 0x1234;
+    v5.entries[0].set = 1;
+    stage_raw_blob(&v5, sizeof(v5) - 3u * sizeof(v5.entries[0]));
+    nvs_load_store();
+    TEST_CHECK(s_store.config_crc == 0 && !s_has_data, "v5 blob resets to the empty cache");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set, "nothing leaked in");
     fake_kv_reset_all();
 }
 
@@ -1532,10 +1695,15 @@ void run_test_safety_cfg_store(void)
     test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry();
     test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
+    test_psram_stack_safety_cfg_writers_hop_to_worker();
     test_unset_param_reports_set_false();
     test_lookup_by_id();
     test_version_refuse_newer_than_firmware();
     test_version_refuse_older_layout_without_a_migration();
+    test_v6_blob_migrates_by_id_and_drops_removed_ids();
+    test_v6_blob_wrong_size_is_unreadable();
+    test_v7_blob_migrates_by_id();
+    test_v5_blob_still_resets();
     test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache();
     test_safety_relay_type_defaults_to_contactor_and_pushes_to_relay_cycles();
     test_safety_relay_type_set_persists_and_roundtrips_after_reload();

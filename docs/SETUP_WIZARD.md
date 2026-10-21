@@ -121,7 +121,8 @@ Fields, by owner:
 **ESP `zones_cfg_t` (`persist/zones_config_json.h`, `ZONES_CFG_VERSION 23`), via `GET/POST /api/zones`:**
 - global: `thermo_count`, `relay_count`, `max_simultaneous_relays` (0 = unlimited),
   `continue_on_zone_trip`, `safety_tc_type`, `timing_profile_count` + `timing_profiles[]`
-- per zone: `name`, `thermo_mask`, `tc_type`, `cal_offset_c`, `relay_mask`,
+- per zone: `name`, `thermo_mask`, `tc_type`, `cal_offset_c`, `tc_sheath_tau_s`
+  (protection-tube lag, 0..600 s, 0 = off; `docs/TC_SHEATH_LAG_SIM.md`), `relay_mask`,
   `relay_type` (ssr/contactor/mercury), `ct_mask`, `control_mode`,
   `zone_type` (HEATER vs ON_OFF_DEVICE) + `failsafe_state`/`hyst_c`/`min_on_s`/`min_off_s`,
   `max_temp_c` (**0 = not set**), `min_temp_c`, `max_ramp_c_per_hr` (**0 = never
@@ -157,11 +158,11 @@ time zone (`/api/settings/tz`), units (`/api/unit_pref`), display power
 | 0 | Welcome / preflight | — | read-only | `/api/readiness`, `/api/status`, `/api/crash_report`. Refuse to start on an unacknowledged crash |
 | 1 | Network + time + units | — | `/provision`, `/api/settings/tz`, `/api/unit_pref` | Skippable if already on the LAN. Time matters: firing logs |
 | 2 | Zone count + thermocouple channels | 0 | `POST /api/zones` (`thermo_count`, per-zone `thermo_mask`) | Live per-channel readings shown so mis-wiring is visible immediately (`/api/status`, `/api/thermo/faults`) |
-| 3 | Thermocouple types + calibration offsets | 2 | `POST /api/zones` (`tc_type`, `cal_offset_c`) | `tc_type` sets the sensor ceiling that bounds step 7's `abs_max_temp_c`. Offsets may be deferred (`deliberately_off`) |
+| 3 | Thermocouple types + calibration offsets + sheath tau | 2 | `POST /api/zones` (`tc_type`, `cal_offset_c`, `z%u_sheath_tau`) | `tc_type` sets the sensor ceiling that bounds step 7's `abs_max_temp_c`. Offsets may be deferred (`deliberately_off`). Sheath tau is entered, not measured: the verify text says the lag is configured, never verified. Blank keeps the stored value |
 | 4 | Zone type: HEATER vs ON_OFF_DEVICE ◆ | 2 | `POST /api/zones` (`zone_type`, `failsafe_state`, `hyst_c`, `min_on_s`, `min_off_s`) | ON_OFF disables guards 1/2/3/4/9 and zeroes its coupling row/column (`d58492c9`, `172e3081`). Radio-card must say exactly that. Fail-safe default OFF, confirm-gated opt-in to ON |
 | 5 | Relays: count, per-zone mask, names, type, `max_simultaneous_relays` ◆ | 2, 4 | `POST /api/zones`, `zones_config_set_relay_name()` | Uses `/api/diagnostics/danger/relay` to click one relay at a time so the owner can *hear* which is which — dry contacts, heat disabled |
 | 6 | Zone commissioning limits ▲ | 2, 4 | `POST /api/zones` (`max_temp_c`, `min_temp_c`, `max_ramp_c_per_hr`, `sanity_rate_c_per_min`, `cross_zone_max_delta_c`) | **0 = uncommissioned, refuse to start.** Must render as NOT SET, never 0 |
-| 7 | Safety processor commissioning ▲◆ | 3, 6 | existing `/api/safety/commissioning` guided flow — **embed/link, do not reimplement** | Pico `abs_max_temp_c` ≥ ESP `max(max_temp_c)`; requires the ~60 s post-boot GRACE window and a power-cycle |
+| 7 | Safety processor commissioning ▲◆ | 3, 6 | existing `/api/safety/commissioning` guided flow — **embed/link, do not reimplement** | Pico `abs_max_temp_c` ≥ ESP `max(max_temp_c)`; requires the ~60 s post-boot GRACE window and a power-cycle. Asks whether the Pico TC is bare (tau 0) or in a protection tube (`tc_sheath_tau_s` id 267, default 60 s, 1..600) |
 | 8 | Current sensing: `ct_installed`, `ct_topology`, `ct_mask`, calibration ▲ | 5, 7 | `/api/safety/commissioning`, `/ct_cal`, `/ct_auto_zero` | Idle offset auto-zero requires **all relays off**. Answering "not installed" is a legitimate finish (S3/S4/S9/S14 report off) |
 | 9 | CT mapping verification 🔥◆ | 8 | `/api/zones/current_sweep/start` + `/status` | Energises one relay group at a time and watches the CT. Needs load. Explicit heat warning + abort button |
 | 10 | PID gains — autotune or by hand 🔥◆ | 2,3,5,6,7 | `/api/autotune/start`, `/matrix`, `/accept`; `POST /api/zones/pid` | **Multi-hour, one zone at a time.** Needs a *rested* kiln (all zones at ambient, not just the one under test). Refusals to surface verbatim from `autotune_engine.c`: no relay mask, no thermo mask, on/off zone, zone active in a firing, sweep active, OTA in progress, relay authority blocked, invalid zones cfg |

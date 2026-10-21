@@ -46,6 +46,14 @@ int update_semver_compare(const update_semver_t *a, const update_semver_t *b);
 // written (excluding NUL), or 0 if buf is too small / args NULL.
 size_t update_semver_format(const update_semver_t *v, char *buf, size_t buf_len);
 
+// Map a `git describe` firmware version (esp_app_desc_t::version) to a comparable semver string; see
+// update_semver.c. Writes "" and returns false when no valid base version can be read.
+bool update_semver_from_describe(const char *desc, char *out, size_t cap);
+// OG-01: the lossless identity form for "is this the same build" checks (not ordering): like the above but keeps
+// the "-dirty" flag ("+dirty") and the commit count past a release tag ("+c<N>", "+c<N>.dirty"), so a dev build
+// never equals the release. Needs a buffer of at least 48 bytes for the longest forms.
+bool update_semver_from_describe_strict(const char *desc, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -25,6 +25,11 @@
 
 #include "esp_err.h"
 #include "fake_kv.h"
+/* bx_worker_stub.h state lives in test_relay_cycles.c (this executable's other TU). */
+unsigned bx_stub_dispatches(void);
+void bx_stub_reset(void);
+void bx_stub_set_fail(bool f);
+void bx_stub_set_on_worker(bool f);
 
 int g_test_failures = 0;
 int g_test_count = 0;
@@ -278,8 +283,53 @@ static void test_legacy_erase_does_not_create_missing_namespace(void)
                "the erase did not create an empty namespace");
 }
 
+static void test_psram_stack_run_state_note_hops_to_flash_worker(void)
+{
+    TEST_SECTION("run_state_note -- from a PSRAM-stack task (executor, guard-9 watchdog) the write hops "
+                 "to the flash worker and persists; with the worker unusable it is refused, not lost silently");
+    reset_all();
+    TEST_CHECK(run_state_init() == ESP_OK, "fixture: run_state_init");
+    run_state_snapshot_t snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.profile_id = 3;
+    snap.zone_mask = 0x01;
+
+    bx_stub_reset();
+    bx_stub_set_fail(true);
+    fake_kv_set_write_safe_here(false);
+    run_state_note(RUN_STATE_PHASE_FAULTED, &snap);
+    fake_kv_set_write_safe_here(true);
+    hal_kv_handle_t h;
+    run_state_record_t rb;
+    size_t len = sizeof(rb);
+    bool present = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK &&
+                   hal_kv_get_blob(&h, NVS_KEY_RUN, &rb, &len) == HAL_OK;
+    TEST_CHECK(!present, "worker unusable: nothing written from the PSRAM stack");
+
+    bx_stub_reset();
+    fake_kv_set_write_safe_here(false);
+    run_state_note(RUN_STATE_PHASE_FAULTED, &snap);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(bx_stub_dispatches() == 1, "the write was dispatched to the flash worker exactly once");
+    len = sizeof(rb);
+    memset(&rb, 0, sizeof(rb));
+    bool ok = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK &&
+              hal_kv_get_blob(&h, NVS_KEY_RUN, &rb, &len) == HAL_OK;
+    TEST_CHECK(ok && rb.phase == RUN_STATE_PHASE_FAULTED, "the FAULTED record persisted via the worker");
+
+    /* Already on the worker: runs inline, no second dispatch (a self-dispatch deadlocks the board). */
+    bx_stub_reset();
+    bx_stub_set_on_worker(true);
+    fake_kv_set_write_safe_here(false);
+    run_state_note(RUN_STATE_PHASE_RUNNING, &snap);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(bx_stub_dispatches() == 0, "already on the worker: no dispatch");
+    bx_stub_reset();
+}
+
 void run_test_run_state(void)
 {
+    test_psram_stack_run_state_note_hops_to_flash_worker();
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
     test_migration_resurrects_without_legacy_erase_and_not_with();

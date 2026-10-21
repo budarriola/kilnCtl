@@ -198,11 +198,20 @@ static inline psa_status_t psa_hash_abort(psa_hash_operation_t *op)
 // output property. Reuses psa_stub_fake_mac() with a fixed, non-secret
 // "key" so this is a distinct mixing from the HMAC path above rather than a
 // second copy of the same function.
+/* AX-04: tests set this to make psa_hash_compute fail. */
+#if defined(_MSC_VER)
+__declspec(selectany) bool psa_stub_hash_fail = false; /* one definition across TUs */
+#else
+__attribute__((weak)) bool psa_stub_hash_fail = false;
+#endif
 static inline psa_status_t psa_hash_compute(psa_algorithm_t alg, const uint8_t *input,
                                              size_t input_length, uint8_t *hash, size_t hash_size,
                                              size_t *hash_length)
 {
     (void)alg;
+    if (psa_stub_hash_fail) {
+        return PSA_ERROR_GENERIC_ERROR;
+    }
     if (hash_size < 32) {
         return PSA_ERROR_GENERIC_ERROR;
     }

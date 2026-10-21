@@ -391,6 +391,8 @@ _ZONE_FIELD_FORM_KEY = {
     "relay_mask": "relay_mask",
     "thermo_mask": "thermo_mask",
     "cal_offset_c": "cal",
+    # ZONES_CFG_VERSION 27: protection-tube lag tau, 0..600 s (0 = off).
+    "tc_sheath_tau_s": "sheath_tau",
     "pid_kp": "kp",
     "pid_ki": "ki",
     "pid_kd": "kd",
@@ -545,6 +547,7 @@ _SRC_GROUP_NAMES = ("limits", "relaytiming", "control", "guards", "tc")
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
 _ZONE_INT_FIELDS = {
+    "tc_sheath_tau_s",  # uint16 seconds, parsed by zones_http_post_parse.c z%u_sheath_tau
     "relay_mask", "thermo_mask", "control_mode", "tc_type", "ct_mask", "timing_profile",
     "settings_source",
     # zone_type: enum (0=heater, 1=on/off device), posted with parse_u8_field()
@@ -859,7 +862,7 @@ def _encode_timing_profile(index: int, profile: dict) -> "dict[str, str]":
 #: fields); those are ignored here, not rejected, since config_presets.py's
 #: apply_preset() sends them over the CONTROL link separately.
 _PRESET_ZONE_OVERRIDE_FIELDS = {
-    "relay_mask", "control_mode", "cal_offset_c",
+    "relay_mask", "control_mode", "cal_offset_c", "tc_sheath_tau_s",
     "pid_kp", "pid_ki", "pid_kd", "max_ramp_c_per_hr",
     "max_temp_c", "min_temp_c",
     # 2026-08-28: heater_min_on_ms became a per-zone hardware-protection
@@ -1392,7 +1395,7 @@ ZONE_OMIT_PRESERVED_FLOAT_KEYS = (
 )
 ZONE_OMIT_PRESERVED_NONFLOAT_KEYS = (
     "tctype", "relaytype", "zonetype", "failsafe", "minons", "minoffs",
-    "settings_source",
+    "settings_source", "sheath_tau",
 )
 #: Keys that have a presence check but whose OMIT branch DEFAULTS rather than
 #: preserves (thermo_mask -> 1u << i, ct_mask -> 0). Never stripped: stripping

@@ -31,6 +31,10 @@ $allow = [ordered]@{
   "http/zone_aux_convert_http.c"    = @("op_mode_blocked")
   "http/dashboard_exec_http.c"      = @("profile_exec_start_post_handler")
   "http/dashboard_autotune_http.c"  = @("autotune_start_post_handler")
+  # HR-01 (restore write of zones/kiln-scope cfg files mid-run) and HR-02 (owner decision
+  # 2026-10-16: safety param, relay_type, CT cal/trim POSTs refuse 409 while firing/autotune).
+  "http/diagnostics_http.c"         = @("cfgfs_file_post_handler")
+  "http/safety_cfg_http.c"          = @("safety_cfg_mode_gate_refuse")
   "bridge/uart_bridge_ext_control.c" = @("control_zones_write_refused")
   "owners/kiln_io_owner.c"          = @("system_mode_gate_blocks_relay")
   "update/update_http.c"            = @("mode_gate_refuses","st_claim_begin")
@@ -100,7 +104,8 @@ $wiring = @(
   @("http/zone_aux_convert_http.c",    '\.mode_blocked\s*=\s*op_mode_blocked\b', 1),
   @("owners/kiln_io_owner.c",          'if\s*\(\s*system_mode_gate_blocks_relay\s*\(\s*\)', 2),
   @("bridge/uart_bridge_ext_control.c", 'if\s*\(\s*control_zones_write_refused\s*\(', 2),
-  @("update/update_http.c",            '\bmode_gate_refuses\s*\(\s*req\b', 3)
+  @("update/update_http.c",            '\bmode_gate_refuses\s*\(\s*req\b', 3),
+  @("http/safety_cfg_http.c",          'if\s*\(\s*safety_cfg_mode_gate_refuse\s*\(', 4)
 )
 
 $fail = @(); $checked = 0
@@ -125,6 +130,6 @@ Get-ChildItem $drivers -Recurse -Filter *.c | % {
   if ($rel -eq "safety/system_mode_gate.c" -or $allow.Contains($rel)) { return }
   if ((Strip (Get-Content $_.FullName -Raw)) -match 'system_mode_gate_check\s*\(') { $fail += "${rel}: calls system_mode_gate_check() but is not on the allowlist" }
 }
-if ($checked -ne 24) { $fail += "checked $checked allowlist entries, expected exactly 24: update the count deliberately when the allowlist changes" }
+if ($checked -ne 26) { $fail += "checked $checked allowlist entries, expected exactly 26: update the count deliberately when the allowlist changes" }
 if ($fail) { $fail | % { Write-Host "FAIL: $_" }; exit 1 }
 Write-Host "PASS: $checked gated handlers/helpers call system_mode_gate_check()"

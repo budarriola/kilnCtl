@@ -329,8 +329,11 @@ int main(void)
     // before any of this code ran. See src/boot_reason.c's header comment for
     // why scratch[0]/[1] (this firmware's own trip-reason latch) are
     // deliberately NOT scratch[4].
+    // PF-04: watchdog_caused_reboot() is true for a forced watchdog_reboot()
+    // too (SAFETY_CMD_REBOOT, update, rollback). Classify from the raw REASON
+    // register so only a TIMER (real timeout) reports WATCHDOG.
     saftyfw_boot_reason_t boot_reason =
-        boot_reason_read(watchdog_caused_reboot(), watchdog_enable_caused_reboot());
+        boot_reason_read_wd_reason(watchdog_hw->reason, watchdog_enable_caused_reboot());
 
     // TODO (Phase 8): report boot_reason (including, if trip_reason_valid,
     // "watchdog reset while tripped on <reason>") in the diagnostic frame --

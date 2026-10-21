@@ -580,15 +580,19 @@ esp_err_t safety_link_send_reboot(SafetyLinkClass *link, safety_link_reboot_outc
     if (out_outcome) *out_outcome = SAFETY_LINK_REBOOT_OUTCOME_NO_REPLY;
     return ESP_OK;
 }
+static int s_rb_send_calls = 0;
+static int s_rb_claim_held_during_send = 0;
+static int s_rb_state_in_progress_during_send = 0;
 esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollback_outcome_t *out_outcome,
                                         uint8_t *out_reason_code)
 {
     (void)link;
     (void)out_reason_code;
-    // Never actually invoked by any test in this file -- ota_pico_rollback_
-    // post_handler() is not exercised here (ota_http_safety stays NULL, same "must
-    // resolve, never called" role as the safety_link_get_status() stub
-    // above), so any fixed outcome is fine as a link-time stub.
+    /* OW-02: only the worker-body test calls this; it records that the claim and IN_PROGRESS state are
+     * still held while the attempt runs. */
+    s_rb_send_calls++;
+    s_rb_claim_held_during_send = (s_update_claim != OTA_UPDATE_NONE);
+    s_rb_state_in_progress_during_send = (ota_http_pico_rollback_async.state == OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS);
     if (out_outcome) *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
     return ESP_OK;
 }
@@ -1091,6 +1095,98 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
     s_update_claim = OTA_UPDATE_NONE;
 }
 
+static void test_pico_rollback_worker_is_created_once_and_rearmed(void)
+{
+    TEST_SECTION("OR-08: the Pico rollback worker is one static task created once; later POSTs only re-arm it");
+    s_test_sweep_active = false;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    /* create fails: 500, claim released, handle stays NULL, nothing notified */
+    s_ota_pico_rollback_task = NULL;
+    s_update_claim = OTA_UPDATE_NONE;
+    g_test_stub_static_task_fail = 1;
+    int gives0 = g_test_stub_notify_gives;
+    int xc0 = g_test_stub_xtaskcreate_calls;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    g_test_stub_static_task_fail = 0;
+    TEST_CHECK(strstr(s_last_resp_status, "500") != NULL, "OR-08: static create failure answers 500");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "OR-08: create failure releases the update claim");
+    TEST_CHECK(s_ota_pico_rollback_task == NULL, "OR-08: failed create leaves the handle NULL for a retry");
+    TEST_CHECK(g_test_stub_notify_gives == gives0, "OR-08: nothing notified after a failed create");
+
+    /* retry creates once and notifies */
+    int c0 = g_test_stub_static_task_creates;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_status, "202") != NULL, "OR-08: retry after a failed create is accepted");
+    TEST_CHECK(g_test_stub_static_task_creates == c0 + 1, "OR-08: worker created exactly once");
+    TEST_CHECK(g_test_stub_notify_gives == gives0 + 1, "OR-08: first POST notifies the worker");
+
+    /* second POST (claim released by the worker): no new create, notified again */
+    s_update_claim = OTA_UPDATE_NONE;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_status, "202") != NULL, "OR-08: second POST accepted");
+    TEST_CHECK(g_test_stub_static_task_creates == c0 + 1, "OR-08: second POST does not create another task");
+    TEST_CHECK(g_test_stub_notify_gives == gives0 + 2, "OR-08: second POST re-arms the same worker");
+    TEST_CHECK(g_test_stub_xtaskcreate_calls == xc0, "OR-08: no heap-stack xTaskCreate on the rollback path");
+
+    s_update_claim = OTA_UPDATE_NONE;
+    ota_http_safety = NULL;
+}
+
+static void test_pico_rollback_worker_body_runs_and_releases_claim(void)
+{
+    TEST_SECTION("OW-02: POST notifies the static worker; one run of the worker body stores the outcome, "
+                 "then releases the update claim");
+    s_test_sweep_active = false;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_ota_pico_rollback_task = NULL;
+    s_update_claim = OTA_UPDATE_NONE;
+    g_test_stub_notify_last = NULL;
+    s_last_resp_status[0] = '\0';
+    ota_pico_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_status, "202") != NULL, "OW-02: POST accepted");
+    TEST_CHECK(s_ota_pico_rollback_task != NULL && g_test_stub_notify_last == s_ota_pico_rollback_task,
+               "OW-02: the notify targets s_ota_pico_rollback_task");
+    TEST_CHECK(s_update_claim != OTA_UPDATE_NONE, "OW-02: claim held until the worker runs");
+
+    int calls0 = s_rb_send_calls;
+    ota_pico_rollback_run(); /* one worker-loop iteration (the loop body after ulTaskNotifyTake) */
+    TEST_CHECK(s_rb_send_calls == calls0 + 1, "OW-02: the worker body runs exactly one rollback attempt");
+    TEST_CHECK(s_rb_claim_held_during_send && s_rb_state_in_progress_during_send,
+               "OW-02: claim held and state IN_PROGRESS while the attempt runs");
+    TEST_CHECK(ota_http_pico_rollback_async.state == OTA_PICO_ROLLBACK_ASYNC_DONE &&
+                   ota_http_pico_rollback_async.outcome == SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN,
+               "OW-02: the run stores DONE and the outcome");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "OW-02: the claim is released after the run");
+
+    /* ordering: the outcome store precedes ota_http_update_end() inside ota_pico_rollback_run() */
+    const char *cands[] = {"../drivers/http/ota_http_pico.c", "App/drivers/http/ota_http_pico.c",
+                           "firmware/KilnFW/App/drivers/http/ota_http_pico.c"};
+    char *t = test_read_source_anchored(__FILE__, "../drivers/http/ota_http_pico.c", cands, 3);
+    TEST_CHECK(t != NULL, "OW-02: ota_http_pico.c readable for the ordering scan");
+    const char *body = t ? strstr(t, "static void ota_pico_rollback_run(void);") : NULL;
+    body = body ? strstr(body + 10, "static void ota_pico_rollback_run(void)") : NULL; /* the definition */
+    const char *store = body ? strstr(body, "ota_http_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE") : NULL;
+    const char *rel = body ? strstr(body, "ota_http_update_end();") : NULL;
+    TEST_CHECK(store != NULL && rel != NULL && store < rel,
+               "OW-02: the DONE/outcome store comes before ota_http_update_end() in the worker body");
+    free(t);
+
+    s_update_claim = OTA_UPDATE_NONE;
+    ota_http_safety = NULL;
+}
+
 static void test_reboot_handlers_reply_only_after_task_created(void)
 {
     TEST_SECTION("rollback / recovery_exit -- reply ok:true 'rebooting' only after the reboot task exists and "
@@ -1105,21 +1201,26 @@ static void test_reboot_handlers_reply_only_after_task_created(void)
     ota_http_safety = &s_rollback_test_safety;
     s_fake_rollback_possible = true;
     set_pico_rollback_headers_for(g_stub_ap_password);
-    g_test_stub_xtaskcreate_result = 0; /* pdFAIL */
+    s_stub_timer_start_once_result = ESP_FAIL; /* OR-03: timer arm fails */
     s_last_resp_status[0] = '\0';
     s_last_resp_body[0] = '\0';
     s_last_sendstr_body[0] = '\0';
     (void)ota_esp_rollback_post_handler(&req);
-    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "rollback with a failed task create answers 500");
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "rollback with a failed timer arm answers 500");
     TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL && strstr(s_last_sendstr_body, "\"ok\":true") == NULL,
-               "rollback never claims ok:true when no reboot task was created");
-    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "rollback releases the update claim when the task cannot start");
+               "rollback never claims ok:true when no reboot timer was armed");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "rollback releases the update claim when the timer cannot be armed");
 
     /* --- rollback: success path still replies ok:true rebooting --- */
-    g_test_stub_xtaskcreate_result = 1;
+    s_stub_timer_start_once_result = ESP_OK;
+    int timer_calls_before = s_stub_timer_start_once_calls;
+    int task_calls_before = g_test_stub_xtaskcreate_calls;
     s_last_resp_status[0] = '\0';
     s_last_resp_body[0] = '\0';
     (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(s_stub_timer_start_once_calls == timer_calls_before + 1, "OR-03: rollback arms exactly one one-shot timer");
+    TEST_CHECK(s_stub_timer_last_timeout_us == 500000u, "OR-03: rollback reboot delay stays 500 ms");
+    TEST_CHECK(g_test_stub_xtaskcreate_calls == task_calls_before, "OR-03: rollback creates no task");
     TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "rollback success replies rebooting");
     TEST_CHECK(s_last_resp_status[0] == '\0', "rollback success keeps the default 200 status");
     s_update_claim = OTA_UPDATE_NONE;
@@ -1151,6 +1252,84 @@ static void test_reboot_handlers_reply_only_after_task_created(void)
     TEST_CHECK(strstr(s_last_sendstr_body, "\"status\":\"rebooting\"") != NULL, "recovery_exit success replies rebooting");
     TEST_CHECK(s_last_resp_status[0] == '\0', "recovery_exit success keeps status 200");
     s_stub_recovery_mode = false;
+}
+
+/* ET-02: source scan. The esp_timer task is registered with stack_margin once at boot (main_network_http.c),
+ * never at rollback time (the rollback reboots 500 ms later so the row would never be readable). */
+static void test_esp_timer_stack_margin_registered_at_boot_et02(void)
+{
+    TEST_SECTION("ET-02: esp_timer task stack_margin registration happens at boot, not in the rollback path");
+    const char *c1[] = {"../main_network_http.c", "App/main_network_http.c", "firmware/KilnFW/App/main_network_http.c"};
+    char *boot = test_read_source_anchored(__FILE__, "../main_network_http.c", c1, 3);
+    TEST_CHECK(boot != NULL, "ET-02: main_network_http.c readable");
+    if (boot) {
+        const char *h = strstr(boot, "xTaskGetHandle(\"esp_timer\")");
+        const char *r = strstr(boot, "stack_margin_register(\"esp_timer\"");
+        TEST_CHECK(h != NULL && r != NULL && h < r, "ET-02: boot code resolves then registers the esp_timer task");
+        TEST_CHECK(r != NULL && strstr(r, "CONFIG_ESP_TIMER_TASK_STACK_SIZE") != NULL && strstr(r, "CONFIG_ESP_TIMER_TASK_STACK_SIZE") < r + 80,
+                   "ET-02: registered with CONFIG_ESP_TIMER_TASK_STACK_SIZE");
+        free(boot);
+    }
+    const char *c2[] = {"../drivers/http/ota_http_esp.c", "App/drivers/http/ota_http_esp.c",
+                        "firmware/KilnFW/App/drivers/http/ota_http_esp.c"};
+    char *esp = test_read_source_anchored(__FILE__, "../drivers/http/ota_http_esp.c", c2, 3);
+    TEST_CHECK(esp != NULL, "ET-02: ota_http_esp.c readable");
+    if (esp) {
+        TEST_CHECK(strstr(esp, "stack_margin_register(") == NULL && strstr(esp, "xTaskGetHandle(") == NULL,
+                   "ET-02: no rollback-time esp_timer registration remains");
+        free(esp);
+    }
+}
+
+static void test_rollback_timer_create_failure_and_rearm_et03(void)
+{
+    TEST_SECTION("ota_esp_rollback_post_handler -- ET-03: esp_timer_create failure answers 500 and releases "
+                 "the claim; a retry after a failed callback re-arms the same timer");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_test_sweep_active = false;
+    s_update_claim = OTA_UPDATE_NONE;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    s_fake_rollback_possible = true;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+
+    /* create failure: reset the lazily created static handle first */
+    s_ota_rollback_reboot_timer = NULL;
+    s_stub_timer_create_result = ESP_FAIL;
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    int starts_before = s_stub_timer_start_once_calls;
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "ET-03: esp_timer_create failure answers 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL && strstr(s_last_sendstr_body, "\"ok\":true") == NULL,
+               "ET-03: no ok:true when the timer could not be created");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "ET-03: create failure releases the OTA claim");
+    TEST_CHECK(s_ota_rollback_reboot_timer == NULL, "ET-03: create failure leaves the handle NULL");
+    TEST_CHECK(s_stub_timer_start_once_calls == starts_before, "ET-03: nothing is armed after a create failure");
+
+    /* create ok: arms once */
+    s_stub_timer_create_result = ESP_OK;
+    int creates_before = s_stub_timer_create_calls;
+    s_last_resp_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(s_stub_timer_create_calls == creates_before + 1, "ET-03: timer created on first successful use");
+    TEST_CHECK(s_stub_timer_start_once_calls == starts_before + 1, "ET-03: first request arms the timer");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "ET-03: success replies rebooting");
+
+    /* the callback fails (stub reboot returns ESP_FAIL) and releases the claim; a retry re-arms */
+    ota_rollback_reboot_timer_cb(NULL);
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "ET-03: failed callback released the claim");
+    s_last_resp_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(s_stub_timer_start_once_calls == starts_before + 2, "ET-03: retry after a failed callback re-arms");
+    TEST_CHECK(s_stub_timer_create_calls == creates_before + 1, "ET-03: re-arm reuses the existing timer handle");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "ET-03: retry replies rebooting");
+
+    s_update_claim = OTA_UPDATE_NONE;
+    s_fake_rollback_possible = false;
+    ota_http_safety = NULL;
 }
 
 static void test_pico_rollback_status_reports_idle_before_any_request(void)
@@ -3117,6 +3296,24 @@ static void test_heat_blocked_while_fetch_or_check_busy(void)
     ota_http_set_fetch_busy_probe(NULL);
 }
 
+// RW-02: an update check holds internal heap without claiming the update lock; the ESP OTA upload gate must
+// still refuse. Calls the evaluator the same way the real gate does and compares busy vs idle.
+static void test_check_interlocks_refuses_while_fetch_busy(void)
+{
+    TEST_SECTION("ota_http_check_interlocks -- refuses while an update fetch is busy (RW-02)");
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    s_test_sweep_active = false;
+    ota_http_set_fetch_busy_probe(fake_fetch_busy_probe);
+    s_fake_fetch_busy = true;
+    reason[0] = '\0';
+    ota_interlock_result_t busy = ota_http_check_interlocks(true, reason, sizeof(reason));
+    TEST_CHECK(busy != OTA_INTERLOCK_OK, "a busy update fetch refuses the OTA upload");
+    TEST_CHECK(strstr(reason, "update") != NULL || strstr(reason, "progress") != NULL,
+               "the refusal names the running update");
+    s_fake_fetch_busy = false;
+    ota_http_set_fetch_busy_probe(NULL);
+}
+
 static void test_ota_pico_do_stage_refuses_oversize_with_http_400(void)
 {
     TEST_SECTION("ota_pico_do_stage -- an oversize Content-Length is refused with HTTP 400, not 500 (N5)");
@@ -3153,6 +3350,16 @@ static void test_upload_deadline_helpers(void)
     TEST_CHECK(OTA_HTTP_UPLOAD_SLOW_CODE == 503, "deadline status must be 503, never 408 (browser auto-resend)");
     TEST_CHECK(strncmp(OTA_HTTP_UPLOAD_SLOW_STATUS_LINE, "503 ", 4) == 0, "deadline status line is 503");
     TEST_CHECK(strcmp(OTA_HTTP_UPLOAD_SLOW_ERROR, "upload_too_slow") == 0, "deadline error name");
+}
+
+static void test_rollback_reboot_failure_releases_claim_op02(void)
+{
+    TEST_SECTION("ota_rollback_reboot_timer_cb -- OP-02: a failed reboot call releases the OTA claim");
+    ota_http_update_end();
+    TEST_CHECK(ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP), "claim taken (as the rollback handler does)");
+    TEST_CHECK(ota_http_update_in_progress(NULL), "claim held before the task runs");
+    ota_rollback_reboot_timer_cb(NULL); /* stub esp_ota_mark_app_invalid_rollback_and_reboot returns ESP_FAIL */
+    TEST_CHECK(!ota_http_update_in_progress(NULL), "claim released after the reboot call failed");
 }
 
 void run_test_ota_http(void)
@@ -3209,7 +3416,12 @@ void run_test_ota_http(void)
     }
 
     test_pico_rollback_post_returns_pending_without_blocking();
+    test_pico_rollback_worker_is_created_once_and_rearmed();
+    test_pico_rollback_worker_body_runs_and_releases_claim();
     test_reboot_handlers_reply_only_after_task_created();
+    test_rollback_reboot_failure_releases_claim_op02();
+    test_rollback_timer_create_failure_and_rearm_et03();
+    test_esp_timer_stack_margin_registered_at_boot_et02();
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();
@@ -3257,6 +3469,7 @@ void run_test_ota_http(void)
     test_pico_img_stage_begin_refuses_oversize();
     test_ota_pico_do_stage_refuses_oversize_with_http_400();
     test_heat_blocked_while_fetch_or_check_busy();
+    test_check_interlocks_refuses_while_fetch_busy();
 }
 
 int main(void)

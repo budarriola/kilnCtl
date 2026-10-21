@@ -106,6 +106,11 @@ typedef struct {
 // current_task_get_snapshot() already is.
 bool current_task_ct_auto_zero_begin(uint8_t channel);
 
+// PN-03: drops any in-progress or finished measurement back to IDLE. Called
+// when a BEGIN is refused (heat possible / current flowing) so the ESP's
+// follow-up GET_CT_AUTO_ZERO poll reads IDLE rather than a stale DONE result.
+void current_task_ct_auto_zero_cancel(void);
+
 // Copies out the current accumulator state. Safe to call from any task.
 void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *out);
 

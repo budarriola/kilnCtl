@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "persist_scratch.h"
 
 #include "MAX31856.h"
 #include "relay_authority.h" /* relay_authority_reset_in_flight() -- zones_config_set_coupling_cell() */
@@ -138,6 +139,46 @@ bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
         return false;
     }
     if (!zones_config_set_cal_offset_no_save(zone_index, cal_offset_c)) {
+        return false;
+    }
+    return nvs_save() == ESP_OK;
+}
+
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s)
+{
+    if (!out_tau_s || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_tau_s = (float)s_zones.cfg.zones[zone_index].tc_sheath_tau_s;
+    return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_sheath_tau and validate enforce. */
+bool zones_config_set_tc_sheath_tau_no_save(uint8_t zone_index, float tau_s)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(tau_s) || tau_s < ZONE_TC_SHEATH_TAU_MIN_S || tau_s > ZONE_TC_SHEATH_TAU_MAX_S) {
+        return false;
+    }
+    zones_cfg_lock();
+    if (zones_config_is_undecided()) {
+        zones_cfg_unlock();
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].tc_sheath_tau_s = (uint16_t)lrintf(tau_s); /* whole seconds */
+    s_config_generation++;
+    zones_cfg_unlock();
+    return true;
+}
+
+bool zones_config_set_tc_sheath_tau(uint8_t zone_index, float tau_s)
+{
+    if (zones_config_is_undecided()) {
+        return false;
+    }
+    if (!zones_config_set_tc_sheath_tau_no_save(zone_index, tau_s)) {
         return false;
     }
     return nvs_save() == ESP_OK;
@@ -3100,6 +3141,7 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     F(F32, progress_band_c, 1)                                           \
     F(U8, zone_type, 1)                                                  \
     F(U8, failsafe_state, 1)                                             \
+    F(U16, tc_sheath_tau_s, 1)                                           \
     F(F32, hyst_c, 1)                                                    \
     F(U16, min_on_s, 1)                                                  \
     F(U16, min_off_s, 1)                                                 \
@@ -3418,6 +3460,42 @@ bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap
     uint8_t *p = out;
     encode_zones_cfg(&p, (const zones_cfg_t *)cfg);
     *out_len = (size_t)(p - out);
+    return true;
+}
+
+bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    /* The v26 canonical form is today's minus every zone's tc_sheath_tau_s (2 bytes each). Rather
+     * than a second field table, encode twice -- once as-is, once with every tau bit-flipped -- and
+     * drop the bytes that differ (exactly the tau bytes, since nothing else changed). */
+    if (!cfg || !out || !out_len || out_cap < zones_config_canonical_max_size()) {
+        return false;
+    }
+    zones_cfg_t *flipped = persist_scratch_alloc(sizeof(*flipped));
+    uint8_t *other = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    if (!flipped || !other) {
+        free(flipped);
+        free(other);
+        return false;
+    }
+    memcpy(flipped, cfg, sizeof(*flipped));
+    for (size_t i = 0; i < sizeof(flipped->zones) / sizeof(flipped->zones[0]); i++) {
+        flipped->zones[i].tc_sheath_tau_s ^= 0xFFFFu;
+    }
+    uint8_t *p = out;
+    encode_zones_cfg(&p, (const zones_cfg_t *)cfg);
+    size_t len = (size_t)(p - out);
+    uint8_t *q = other;
+    encode_zones_cfg(&q, flipped);
+    size_t kept = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (out[i] == other[i]) {
+            out[kept++] = out[i];
+        }
+    }
+    free(flipped);
+    free(other);
+    *out_len = kept;
     return true;
 }
 

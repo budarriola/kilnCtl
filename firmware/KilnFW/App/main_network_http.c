@@ -41,6 +41,7 @@
 #include "cfg_fs_format_http.h"
 #include "update_http.h"
 #include "update_install_http.h"
+#include "update_install_record.h"
 #include "update_settings.h"
 #include "update_settings_http.h"
 #include "factory_reset.h"
@@ -82,6 +83,7 @@
 #include "zones_http.h"
 
 #include "main_internal.h"
+#include "flash_xip_lock.h"
 #include "startup_faults.h"
 
 /* --- OTA rollback confirmation (UPDATE_PROTOCOL.md sec 3, TODO.md 9.2) ----
@@ -150,7 +152,8 @@ typedef struct {
 } main_ota_confirm_ctx_t;
 
 #define MAIN_OTA_CONFIRM_POLL_MS   500
-#define MAIN_OTA_CONFIRM_WARN_MS   10000
+/* BC-01: derived from the soak (boot_guard.h) plus a margin, never a bare constant below it. */
+#define MAIN_OTA_CONFIRM_WARN_MS   (BOOT_CONFIRM_SOAK_MS + 15000)
 
 /* stack_margin_register() target for the ota_confirm task; cleared by the task before it self-deletes. */
 static TaskHandle_t s_ota_confirm_task;
@@ -179,7 +182,9 @@ static bool main_ota_resample_nvs(void *c)
 static bool main_ota_mark_valid(void *c)
 {
     main_ota_confirm_step_ctx_t *sc = (main_ota_confirm_step_ctx_t *)c;
+    flash_xip_reader_enter(); /* mmap read_otadata + rewrite (REVIEW_FLASH_MMAP_SERIALIZATION) */
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    flash_xip_reader_exit();
     if (err == ESP_OK) {
         sc->rollback_cancel_ok = true;
         ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
@@ -201,7 +206,10 @@ static bool main_ota_read_valid(void *c)
     (void)c;
     const esp_partition_t *run = esp_ota_get_running_partition();
     esp_ota_img_states_t   state = ESP_OTA_IMG_UNDEFINED;
-    if (!run || esp_ota_get_state_partition(run, &state) != ESP_OK) {
+    flash_xip_reader_enter();
+    esp_err_t serr = run ? esp_ota_get_state_partition(run, &state) : ESP_FAIL;
+    flash_xip_reader_exit();
+    if (serr != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "ota state read-back failed -- will retry mark-valid");
         return false;
     }
@@ -294,10 +302,21 @@ static void main_ota_rollback_confirm_task(void *arg)
                 (void)update_http_stale_stage_check(st.mark_valid_done);
                 /* LOW-4: a leftover install request must not replay at a later recovery entry. */
                 (void)update_install_http_drop_stale_request();
+                /* OH-04: boot confirm done, so the recorded OK install is now confirmed. */
+                ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark before mark loop: %u bytes free of 5120",
+                         (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+                for (unsigned attempt = 0;; attempt++) {
+                    int mrc = update_install_http_mark_confirmed();
+                    uint32_t wait_ms = update_install_confirm_retry_delay_ms(attempt);
+                    if (mrc == 0 || mrc == UPD_INST_CONFIRM_NOT_RUNNING || mrc == UPD_INST_CONFIRM_UNVERIFIED || wait_ms == 0) {
+                        break; /* OC-01/OC-02: busy claim and write failures are retried with backoff */
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(wait_ms));
+                }
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
             }
-            s_ota_confirm_task = NULL;
+            stack_margin_task_exit(&s_ota_confirm_task); /* UB-01 */
             vTaskDelete(NULL);
             return;
         }
@@ -329,7 +348,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // bridge uses below.
     ctx->dash_err = dashboard_http_start(ctx->io_ready ? &ctx->kio : NULL,
                                           ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
-                                          ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+                                          ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     if (ctx->dash_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "dashboard_http_start failed: %s -- no dashboard this boot",
                  esp_err_to_name(ctx->dash_err));
@@ -418,7 +437,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // wiring) is still correct for whichever caller (MCP, a future retry)
     // reaches it.
     zones_http_set_hw(ctx->io_ready ? &ctx->kio : NULL, ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
-                      ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+                      ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     // The shipped Digital Fire schedule catalogue's persisted hidden-mask.
     // Must load before profiles_http_start() registers the read paths that
     // consult it, or the first listing after boot would show hidden entries.
@@ -485,7 +504,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // item in the same reset menu, for clearing stuck state (e.g. an S6a
     // trip) without JTAG. Same safety pointer as ota_http_start() above, so
     // the ANNOUNCE_REBOOT courtesy notice reaches the real link handle.
-    esp_err_t sw_reset_err = sw_reset_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+    esp_err_t sw_reset_err = sw_reset_http_start(ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     if (sw_reset_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "sw_reset_http_start failed: %s -- no sw-reset endpoint this boot",
                  esp_err_to_name(sw_reset_err));
@@ -623,7 +642,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // link_reply_us (HW_ABSTRACTION.md "Still open") reads safety_link_get_
     // stats() directly -- same safety pointer/NULL-tolerant convention as
     // dashboard_http_start() above.
-    esp_err_t diagnostics_err = diagnostics_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+    esp_err_t diagnostics_err = diagnostics_http_start(ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     if (diagnostics_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "diagnostics_http_start failed: %s -- no /diagnostics, /diagnostics/thermo "
                       "or /safety page this boot", esp_err_to_name(diagnostics_err));
@@ -764,7 +783,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // see the truth whether or not a profile happens to be running.
     esp_err_t ota_http_err = ota_http_start(ctx->io_ready ? &ctx->kio : NULL,
                                             ctx->thermo_bus.initialized ? &ctx->thermo_bus : NULL,
-                                            ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+                                            ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     if (ota_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "ota_http_start failed: %s -- OTA/factory-reset/sw-reset routes not registered this boot",
                  esp_err_to_name(ota_http_err));
@@ -792,7 +811,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
 
         main_ota_confirm_ctx_t *ota_ctx = calloc(1, sizeof(*ota_ctx));
         if (ota_ctx) {
-            ota_ctx->safety = (ctx->safety_err == ESP_OK) ? &ctx->safety : NULL;
+            ota_ctx->safety = (ctx->safety_err == ESP_OK) ? ctx->safety : NULL;
             ota_ctx->nvs_ok = nvs_ok;
             ota_ctx->web_ok = (ctx->dash_err == ESP_OK);
             ota_ctx->ota_ok = (ota_http_err == ESP_OK);
@@ -931,7 +950,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     }
     ct_leak_alarm_service_bind(ctx->io_ready ? &ctx->kio : NULL); /* H9 CT alarm: full relay shadow */
     esp_err_t safety_cfg_http_err =
-        safety_cfg_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL,
+        safety_cfg_http_start(ctx->safety_err == ESP_OK ? ctx->safety : NULL,
                                ctx->io_ready ? &ctx->kio : NULL);
     if (safety_cfg_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "safety_cfg_http_start failed: %s -- no /safety/commissioning this boot",
@@ -944,12 +963,12 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
      * docs/audits/saftyfw_live_stack_reporting_impl_2026-09-14.md). Its own
      * route, not folded into /safety/commissioning or /api/zones* -- this
      * is safety-processor task data, unrelated to either. Same
-     * `ctx->safety_err == ESP_OK ? &ctx->safety : NULL` link-or-null
+     * `ctx->safety_err == ESP_OK ? ctx->safety : NULL` link-or-null
      * pattern as safety_cfg_http_start() just above, for the same reason:
      * the route must exist and report link_up=false rather than vanish
      * when the isolated fault line failed to come up this boot. */
     esp_err_t safety_stack_margin_http_err =
-        safety_stack_margin_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL);
+        safety_stack_margin_http_start(ctx->safety_err == ESP_OK ? ctx->safety : NULL);
     if (safety_stack_margin_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "safety_stack_margin_http_start failed: %s -- no /api/saftyfw_stack_margin this boot",
                  esp_err_to_name(safety_stack_margin_http_err));
@@ -1006,7 +1025,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
          * needs a link to watch and will never get one) -- otherwise the
          * board sits with whatever the expander's power-on latch left
          * energized. Local UI/display bring-up continues below regardless. */
-        main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, &ctx->safety, ctx->safety_err == ESP_OK,
+        main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, ctx->safety, ctx->safety_err == ESP_OK,
                               SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
                               "the PC link UART could not be opened");
     } else {
@@ -1028,7 +1047,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     }
 
     if (uart_err == ESP_OK) {
-        uart_err = uart_protocol_init(&ctx->uart_proto, &ctx->uart_owner, UART_PROTO_DEVICE_ESP,
+        uart_err = uart_protocol_init(ctx->uart_proto, &ctx->uart_owner, UART_PROTO_DEVICE_ESP,
                                        UART_PROTOCOL_TASK_PRIORITY, UART_PROTOCOL_STACK_SIZE,
                                        tskNO_AFFINITY);
         if (uart_err != ESP_OK) {
@@ -1036,7 +1055,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
             /* Same reasoning as the uart_owner_init failure above: the port
              * exists but nothing can be addressed over it, so no host will
              * ever command these relays. */
-            main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, &ctx->safety, ctx->safety_err == ESP_OK,
+            main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, ctx->safety, ctx->safety_err == ESP_OK,
                                   SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
                                   "the PC link protocol stack could not be started");
         } else {
@@ -1045,8 +1064,18 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
              * internal-only, plain xTaskCreatePinnedToCore() stack, same
              * "PC-link instance only, not the safety-link one" caveat as
              * uart_owner above. */
-            stack_margin_register("uart_proto_rx", &ctx->uart_proto.rx_task_handle, UART_PROTOCOL_STACK_SIZE);
+            stack_margin_register("uart_proto_rx", &ctx->uart_proto->rx_task_handle, UART_PROTOCOL_STACK_SIZE);
         }
+    }
+
+    /* ET-02: the IDF-owned "esp_timer" task (CONFIG_ESP_TIMER_TASK_STACK_SIZE) exists since startup;
+     * register it once at boot so its high-water accumulates over every timer callback. */
+    static TaskHandle_t s_esp_timer_task_handle;
+    s_esp_timer_task_handle = xTaskGetHandle("esp_timer");
+    if (s_esp_timer_task_handle != NULL) {
+        stack_margin_register("esp_timer", &s_esp_timer_task_handle, CONFIG_ESP_TIMER_TASK_STACK_SIZE);
+    } else {
+        ESP_LOGW(MAIN_TAG, "esp_timer task not found; stack_margin row not registered");
     }
 
     main_heap_stage("uart_owner+proto");

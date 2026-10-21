@@ -122,11 +122,17 @@ bool fake_kv_handle_is_live(const hal_kv_handle_t *h);
  * comment on the counter itself for the motivating case. */
 unsigned fake_kv_get_call_count(void);
 
+/* Total hal_kv_set_blob() calls since the last reset (wear tests count NVS writes with it). */
+unsigned fake_kv_set_call_count(void);
+
 /* True if `partition` (NULL means the default partition, matching
  * hal_kv_open's shape) has at least one key whose pending write has not
  * been merged in by hal_kv_commit(). Returns false for a partition never
  * initialized via hal_kv_init_partition(). */
 bool fake_kv_has_uncommitted_writes(const char *partition);
+
+/* FS-02: script hal_kv_partition_was_auto_erased(partition) == true (cleared by fake_kv_reset_all). */
+void fake_kv_script_mark_auto_erased(const char *partition);
 
 /* Simulates a reboot/power-loss between set_* and commit(). Does not close
  * handles (matching real NVS: handles remain valid across a device reset).

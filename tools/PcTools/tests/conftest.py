@@ -455,3 +455,10 @@ def _no_outbound_network(request, monkeypatch):
     if attempts:
         pytest.fail(f"test attempted real outbound network connection(s): {attempts}",
                     pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_boot_soak_wait(monkeypatch):
+    """BC-01: reset tools wait for board uptime >= 35 s over HTTP; tests have no board."""
+    from kilnctrl import reset_probe
+    monkeypatch.setattr(reset_probe, "wait_for_boot_soak_http", lambda host: "")

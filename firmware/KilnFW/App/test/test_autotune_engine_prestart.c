@@ -479,6 +479,7 @@ static void reset_heat_enable_recorder(bool link_up)
 {
     s_req_enable_link_up = link_up;
     heat_enable_init((SafetyLinkClass *)0x1);
+    heat_enable_assume_boot_id_seen_for_host_tests();
     s_req_enable_true_calls = 0;
     s_req_enable_false_calls = 0;
 }
@@ -1893,6 +1894,46 @@ static void test_finalize_fit_uses_the_requested_rule(void)
     TEST_CHECK(s_at.proposed_gains.kp != simc_kp,
                "Cohen-Coon's Kp must differ from SIMC's Kp on the identical fitted model -- if this fails, "
                "autotune_finalize_fit() is still hardcoding one rule regardless of what was requested");
+}
+
+// CL-02: a valid model whose gain calculation is REFUSED (Cohen-Coon, dead time
+// below the minimum) must end ABORTED with the reason, never DONE with 0/0/0
+// gains; and accept must refuse a DONE result carrying a refusal.
+static void test_cl02_refused_gains_abort_and_accept_refuses(void)
+{
+    TEST_SECTION("CL-02: refused gain calculation -> ABORTED with reason; accept refuses unless refusal OK");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_COHEN_COON;
+    write_synthetic_fopdt_trace(25.0f, 50.0f, 200.0f, /*dead_time_s=*/0.0f, 1.0f, 60);
+    finalize_fit_then_flush_coupling();
+    TEST_CHECK(s_at.model.valid, "CL-02 setup: the fit itself is valid");
+    TEST_CHECK(s_at.proposed_gains.refusal != AUTOTUNE_REFUSAL_OK, "CL-02 setup: Cohen-Coon refuses the tiny dead time");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a refused gain calculation must end ABORTED, not DONE");
+    TEST_CHECK(strstr(s_at.abort_reason, "refused") != NULL, "the abort reason names the refusal");
+
+    /* accept on a DONE result that carries a refusal (defence in depth) */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 0.1f;
+    s_at.proposed_gains.refusal = AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL;
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    int model_calls_before = s_stub_set_model_call_count;
+    TEST_CHECK(!autotune_engine_accept(&(autotune_accept_opts_t){.ack_unsettled = true}, NULL),
+               "accept must refuse a result whose gain calculation was refused");
+    TEST_CHECK(s_stub_set_model_call_count == model_calls_before, "nothing may be written on a refused accept");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "refused accept leaves state alone");
+    s_stub_set_pid_result = false;
 }
 
 // 2026-08-30 (ZONES_CFG_VERSION 10->11): autotune_finalize_fit()'s new persist step
@@ -7565,6 +7606,7 @@ void run_test_autotune_engine_prestart(void)
     test_settle_detector_fires_with_dead_time_over_300s();
     test_settle_detector_ignores_two_quantum_dead_time_noise();
     test_autotune_engine_accept_gates_on_settled();
+    test_cl02_refused_gains_abort_and_accept_refuses();
     test_autotune_engine_accept_refused_by_mode_gate_while_running();
     test_autotune_engine_accept_refused_by_adaptive_write_and_run_claim();
     test_autotune_engine_accept_rechecks_gate_before_writes();

@@ -42,6 +42,7 @@ void run_test_thermo_inject_gate(void);
 void run_test_max31856_hal_spi(void);
 void run_test_link_diag_flags(void);
 void run_test_current_presence_policy(void);
+void run_test_ct_blind_policy(void);
 void run_test_discrete_pin_policy(void);
 void run_test_commissioning_gate(void);
 void run_test_safety_core_s8_wiring(void);
@@ -114,6 +115,7 @@ int main(void)
     run_test_max31856_hal_spi();
     run_test_link_diag_flags();
     run_test_current_presence_policy();
+    run_test_ct_blind_policy();
     run_test_discrete_pin_policy();
     run_test_commissioning_gate();
     run_test_safety_core_s8_wiring();

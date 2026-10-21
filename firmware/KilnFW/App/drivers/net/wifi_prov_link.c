@@ -526,13 +526,16 @@ static void try_drop_fallback_ap_after_join(void)
                  "keeping fallback AP up until they're gone");
         return;
     }
-    s_wifi.ap_pending_teardown = false;
-    s_wifi.ap_fallback_active = false;
     ESP_LOGI(WIFI_PROV_TAG, "station joined, dropping fallback AP");
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err != ESP_OK) {
-        ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+        /* BW-02: AP is still up; keep the flags so the tick retries. */
+        s_wifi.ap_pending_teardown = true;
+        ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s -- will retry", esp_err_to_name(err));
+        return;
     }
+    s_wifi.ap_pending_teardown = false;
+    s_wifi.ap_fallback_active = false;
 }
 
 void cancel_ap_fallback_timer(void)
@@ -766,13 +769,15 @@ void do_rescan_tick(void)
         if (ap_teardown_should_defer()) {
             return; /* still logged in / still a client on the AP -- try again next tick */
         }
-        s_wifi.ap_pending_teardown = false;
-        s_wifi.ap_fallback_active = false;
         ESP_LOGI(WIFI_PROV_TAG, "no user logged in (or no AP client) any more -- dropping deferred fallback AP");
         esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err != ESP_OK) {
-            ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+            /* BW-02: keep pending so the next tick retries. */
+            ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_mode(STA) failed: %s -- will retry", esp_err_to_name(err));
+            return;
         }
+        s_wifi.ap_pending_teardown = false;
+        s_wifi.ap_fallback_active = false;
         return;
     }
 

@@ -190,6 +190,10 @@ void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int coun
  * changes to take effect. */
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len);
 
+/* FW-03: non-atomic append of p1[n1] then p2[n2] to `rel_path` (created if missing), fsynced. Honors the
+ * writer fence. The caller must make a torn tail detectable (per-batch CRC). */
+esp_err_t cfg_fs_append(const char *rel_path, const void *p1, size_t n1, const void *p2, size_t n2);
+
 /* Factory-reset writer fence: while the predicate returns true, cfg_fs_write_atomic() returns
  * ESP_ERR_INVALID_STATE without touching the filesystem. main.c installs
  * relay_authority_reset_refuses_writer(); NULL (host, recovery image) refuses nothing. */

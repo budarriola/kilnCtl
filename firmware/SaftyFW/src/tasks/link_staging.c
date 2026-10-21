@@ -149,7 +149,11 @@ void link_peer_announce_record(link_peer_announce_t *peer, uint8_t announce_boot
                                uint16_t version)
 {
     if (peer != NULL) {
-        peer->version = version;
+        /* PL-01: within one ESP boot_id the recorded version never goes down (a later, lower or
+         * corrupt ANNOUNCE must not drop CLEAR_TRIP binding); only a boot_id change replaces it. */
+        if (!(peer->known && peer->boot_id == announce_boot_id && peer->version > version)) {
+            peer->version = version;
+        }
         peer->boot_id = announce_boot_id;
         peer->known = true;
     }

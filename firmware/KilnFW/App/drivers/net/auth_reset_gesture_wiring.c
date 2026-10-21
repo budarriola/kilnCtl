@@ -55,10 +55,10 @@ static bool s_singleton_initialized;
 static bool auth_reset_gesture_clear_all(void)
 {
     totp_wipe_request_post();
-    web_auth_table_destroy_all(http_session_table());
+    http_session_destroy_all_request_post(); // AZ-03: httpd applies it; table is unlocked
     bool web_ok = web_auth_store_clear_for_physical_reset();
     bool totp_ok = totp_config_clear();
-    web_auth_table_destroy_all(http_session_table());
+    http_session_destroy_all_request_post();
     totp_wipe_request_post();
     return web_ok && totp_ok;
 }

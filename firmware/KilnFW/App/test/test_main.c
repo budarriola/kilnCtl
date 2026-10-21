@@ -9,6 +9,8 @@ int g_test_count = 0;
 
 void run_test_pid(void);
 void run_test_thermal_guard(void);
+void run_test_tc_lag_comp(void);
+void run_test_tc_lag_sim(void);
 void run_test_on_off_trigger_decide(void);
 void run_test_heater_output(void);
 void run_test_closed_loop(void);
@@ -25,6 +27,7 @@ void run_test_login_backoff(void);
 void run_test_update_install_record(void);
 void run_test_update_semver(void);       // GITHUB_RELEASE_UPDATE_PLAN.md update/* (WP3)
 void run_test_update_stage_header(void);
+void run_test_stage_image_verify(void);
 void run_test_update_policy(void);
 void run_test_update_stage(void);
 void run_test_update_stale_stage(void);
@@ -51,6 +54,7 @@ void run_test_profile_plan_curve(void);
 // from this main().
 void run_test_backup_import(void);
 void run_test_ota_record(void);
+void run_test_diag_bundle(void);
 void run_test_uart_log_bridge(void);
 void run_test_safety_watchdog(void);
 void run_test_safety_link(void);
@@ -66,6 +70,7 @@ void run_test_readiness_safety_trip(void);
 void run_test_readiness_crash_report(void);
 void run_test_readiness_recovery_mode(void);
 void run_test_readiness_cfg_fs(void);
+void run_test_readiness_zones_storage_detail(void);
 void run_test_readiness_safety_context(void);
 void run_test_readiness_estop_verification(void);
 void run_test_readiness_uncalibrated_ct(void);
@@ -130,6 +135,7 @@ void run_test_iter_tune(void);
 void run_test_ramp_lock_onesided(void);
 void run_test_approach_rate_cap(void);
 void run_test_zone_sweep_relay_off_wiring(void);
+void run_test_lowlink_wiring(void);
 void run_test_safety_ceiling_policy(void);
 void run_test_http_auth_enforce(void);
 void run_test_http_session_iface(void);
@@ -152,6 +158,8 @@ int main(void)
 {
     run_test_pid();
     run_test_thermal_guard();
+    run_test_tc_lag_comp();
+    run_test_tc_lag_sim();
     run_test_on_off_trigger_decide();
     run_test_heater_output();
     run_test_closed_loop();
@@ -168,6 +176,7 @@ int main(void)
     run_test_update_install_record();
     run_test_update_semver();
     run_test_update_stage_header();
+    run_test_stage_image_verify();
     run_test_update_policy();
     run_test_update_stage();
     run_test_update_stale_stage();
@@ -191,6 +200,7 @@ int main(void)
     run_test_profile_plan_curve();
     run_test_backup_import();
     run_test_ota_record();
+    run_test_diag_bundle();
     run_test_uart_log_bridge();
     run_test_safety_watchdog();
     run_test_safety_link();
@@ -206,6 +216,7 @@ int main(void)
     run_test_readiness_crash_report();
     run_test_readiness_recovery_mode();
     run_test_readiness_cfg_fs();
+    run_test_readiness_zones_storage_detail();
     run_test_readiness_safety_context();
     run_test_readiness_estop_verification();
     run_test_readiness_uncalibrated_ct();
@@ -267,6 +278,7 @@ int main(void)
     run_test_ramp_lock_onesided();
     run_test_approach_rate_cap();
     run_test_zone_sweep_relay_off_wiring();
+    run_test_lowlink_wiring();
     run_test_safety_ceiling_policy();
     run_test_http_auth_enforce();
     run_test_http_session_iface();

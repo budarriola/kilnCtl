@@ -631,9 +631,31 @@ static bool update_task_persist_metadata(bootloader_metadata_t *meta, size_t lat
     meta->seq = meta->seq + 1u;
 
     update_metadata_write_args_t args;
-    args.next_write_slot = bootloader_metadata_next_write_slot(latest_slot_index);
-    args.needs_erase = bootloader_metadata_next_write_needs_erase(latest_slot_index);
-    args.backup_src_offset = bootloader_metadata_wrap_needs_backup(latest_slot_index)
+    // PS2-02: a target slot that is not erased (torn earlier write) takes the
+    // wrap path: verified backup of the newest record, erase, slot 0. An
+    // unreadable slot is not provably erased (fail closed).
+    bool target_erased = false;
+    {
+        size_t nxt = bootloader_metadata_next_write_slot(latest_slot_index);
+        uint8_t probe[BOOTLOADER_METADATA_RECORD_LEN];
+        if (hal_flash_read(&s_flash_region,
+                           BOOTLOADER_METADATA_FLASH_OFFSET +
+                               (uint32_t)nxt * BOOTLOADER_METADATA_RECORD_LEN,
+                           probe, sizeof(probe)) == HAL_OK) {
+            target_erased = true;
+            for (size_t i = 0; i < sizeof(probe); i++) {
+                if (probe[i] != 0xFFu) {
+                    target_erased = false;
+                    break;
+                }
+            }
+        }
+    }
+    bootloader_metadata_write_plan_t plan =
+        bootloader_metadata_plan_write(latest_slot_index, target_erased);
+    args.next_write_slot = plan.slot;
+    args.needs_erase = plan.needs_erase;
+    args.backup_src_offset = plan.needs_backup
                                  ? (uint32_t)latest_slot_index * BOOTLOADER_METADATA_RECORD_LEN
                                  : UPDATE_METADATA_NO_BACKUP;
     bootloader_metadata_pack(meta, args.record);

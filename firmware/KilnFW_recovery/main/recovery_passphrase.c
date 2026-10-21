@@ -7,7 +7,7 @@ void rpass_format(const uint8_t rnd[RPASS_LEN], char out[RPASS_LEN + 1])
 {
     static const char alphabet[] = RPASS_ALPHABET;
     for (size_t i = 0; i < RPASS_LEN; i++) {
-        out[i] = alphabet[rnd[i] & (RPASS_ALPHABET_LEN - 1u)];
+        out[i] = alphabet[rnd[i] % RPASS_ALPHABET_LEN];
     }
     out[RPASS_LEN] = '\0';
 }

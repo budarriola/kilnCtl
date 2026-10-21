@@ -653,7 +653,7 @@ class WriteScopeTest(RecoveryFlashBase):
     def test_exact_openocd_command(self):
         self.call()
         expected = (f'adapter serial {mf.MAIN_BOARD_JTAG_SERIAL}; '
-                    f'program_esp "{self.bin.replace(chr(92), "/")}" 0xa10000 verify reset exit')
+                    f'program_esp "{self.bin.replace(chr(92), "/")}" 0xa10000 verify no_clock_boost reset exit')
         self.assertEqual(self.tcl_calls, [expected])
 
     def test_boot_outcome_unreachable_and_recovery_are_reported(self):

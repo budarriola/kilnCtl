@@ -2378,6 +2378,90 @@
     });
   }
 
+  // KG-01 (owner 2026-10-19): the server never serves a protected page to a
+  // request without a session (http_auth_http.c send_page_gate_redirect(): 302 to
+  // "/?next=<page>"), so the sign-in dialog is raised on the DASHBOARD, first,
+  // and the page is only navigated to once it succeeds. Two entry points:
+  //  (1) kcHandleNextParam(): the dashboard was opened with ?next=<page>
+  //      (a redirect, a bookmark, a JS location change).
+  //  (2) kcInitDashboardLinkGate(): a click on a link to a protected page while
+  //      logged out opens the dialog before navigating; the page never loads.
+  // The strict pattern is the open-redirect guard: same-origin absolute path only.
+  var KC_NEXT_RE = /^\/[A-Za-z0-9_\/]*$/;
+  function kcSafeNextPath(s) {
+    if (typeof s !== 'string' || !KC_NEXT_RE.test(s)) return null;
+    if (s === '/' || s.indexOf('//') !== -1 || s.indexOf('/api/') === 0) return null;
+    return s;
+  }
+  // True for a same-origin link path that is a protected page (not the
+  // dashboard/login, not the unprovisioned Wi-Fi setup pages, not an asset
+  // or an /api/ download).
+  function kcPathIsProtectedPage(path) {
+    if (typeof path !== 'string' || path.charAt(0) !== '/') return false;
+    if (OPEN_WITHOUT_LOGIN_PATHS[path] || WIFI_SETUP_PATHS[path]) return false;
+    if (path.indexOf('/api/') === 0 || path.indexOf('.') !== -1) return false;
+    return true;
+  }
+  var nextParamHandled = false;
+  function kcHandleNextParam(role) {
+    if (nextParamHandled || !kcPageIsDashboard()) return;
+    nextParamHandled = true;
+    var m = /[?&]next=([^&#]*)/.exec(window.location.search || '');
+    if (!m) return;
+    var target = null;
+    try { target = kcSafeNextPath(decodeURIComponent(m[1])); } catch (e) { target = null; }
+    var hash = window.location.hash || '';
+    var go = function () { window.location.href = target + hash; };
+    if (target) {
+      if (role === 'admin' && !lastKnownBootstrapNeeded) {
+        // Already signed in. Loop guard: if the server still bounced us here
+        // for this very target once this tab session, do not navigate again.
+        var tried = false;
+        try {
+          // KH-02: the guard is "target|time" and only holds for a short window, so a
+          // later /?next=<same page> in this tab (bookmark) is not swallowed.
+          var prev = String(window.sessionStorage.getItem('kcNextTried') || '').split('|');
+          tried = prev[0] === target && (Date.now() - Number(prev[1] || 0)) < 15000;
+          window.sessionStorage.setItem('kcNextTried', target + '|' + Date.now());
+        } catch (e) { /* storage blocked: fall through and navigate once */ }
+        if (!tried) { go(); return; }
+      } else {
+        // May redirect to the bootstrap form (it reads the URL, so ?next= must
+        // still be present when it runs); otherwise opens the dialog.
+        ensureAdminLogin('Sign in required').then(function (ok) {
+          if (ok) {
+            try { window.sessionStorage.removeItem('kcNextTried'); } catch (e) { /* ignore */ }
+            go();
+          } else {
+            authPromptDeclined = true;
+          }
+        });
+      }
+    }
+    try { window.history.replaceState(null, '', '/'); } catch (e) { /* ignore */ }
+  }
+  function kcInitDashboardLinkGate() {
+    document.addEventListener('click', function (ev) {
+      if (!kcPageIsDashboard() || ev.defaultPrevented) return;
+      if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+      // Only once a poll has answered with a known signed-out/elevation-needed
+      // role; before that, or while bootstrap is needed, let the navigation
+      // through: the server's 302 to /?next= then reaches the same dialog
+      // (or the bootstrap form) without rendering the page.
+      if (lastKnownRole !== 'none' && lastKnownRole !== 'user') return;
+      if (lastKnownBootstrapNeeded) return;
+      var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
+      if (!a || (a.target && a.target !== '_self')) return;
+      var u;
+      try { u = new URL(a.href, window.location.href); } catch (e) { return; }
+      if (u.origin !== window.location.origin || !kcPathIsProtectedPage(u.pathname)) return;
+      ev.preventDefault();
+      ensureAdminLogin('Sign in required').then(function (ok) {
+        if (ok) window.location.href = u.pathname + u.search + u.hash;
+      });
+    }, true);
+  }
+
   function pollSession() {
     if (document.visibilityState === 'hidden') {
       sessionPollTimer = setTimeout(pollSession, SESSION_POLL_MS);
@@ -2397,6 +2481,7 @@
         lastKnownBootstrapNeeded = !!(st && st.bootstrap_needed);
         kcBootstrapRedirectIfPromptOpen();
         maybeGateThisPage(role);
+        kcHandleNextParam(role); // KG-01: dashboard opened via the server's page-gate 302
         // Transition from a real session to "none" -- the server has
         // actually expired it. Return to the Dashboard, per the plan's
         // wording ("the interface returns to the Dashboard"), not /login.
@@ -2411,6 +2496,11 @@
           }
         }
         lastKnownRole = role;
+        var prevSessionRole = window.kcSessionRole;
+        window.kcSessionRole = role; // AG-01: dashboard background polls gate on this
+        if (role === 'admin' && prevSessionRole !== 'admin') {
+          try { window.dispatchEvent(new CustomEvent('kc-admin-role')); } catch (e) { /* old browser */ }
+        }
 
         // Shows/hides nav.js's Log out control for the role this poll just
         // reported -- the SAME poll response, not a second fetch, so the
@@ -2450,6 +2540,7 @@
     pollHeartbeat();
     pollRecoveryMode();
     pollSetupOffer();
+    kcInitDashboardLinkGate();
     pollSession();
     recoveryPollTimer = setInterval(pollRecoveryMode, RECOVERY_POLL_MS);
     setupOfferPollTimer = setInterval(pollSetupOffer, SETUP_OFFER_POLL_MS);

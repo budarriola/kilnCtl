@@ -311,6 +311,16 @@ bool current_task_ct_auto_zero_begin(uint8_t channel)
     return ok;
 }
 
+void current_task_ct_auto_zero_cancel(void)
+{
+    taskENTER_CRITICAL();
+    s_auto_zero_state = CURRENT_TASK_AUTO_ZERO_IDLE;
+    s_auto_zero_sum = 0;
+    s_auto_zero_count = 0;
+    s_auto_zero_result_counts = 0;
+    taskEXIT_CRITICAL();
+}
+
 void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *out)
 {
     if (!out) {

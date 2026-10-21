@@ -954,7 +954,17 @@ typedef struct {
     // config_store.c) -- adding a field later is a struct/pack/unpack/
     // host-test change, not a layout change, same as metadata.h's own
     // signature/sig_required reservation.
-    uint8_t  reserved[264];
+    // Safety TC protection-tube (sheath) lag time constant, seconds, param
+    // 0x010B (TC sheath lag, 2026-10-16). 0 = bare TC, no compensation (the
+    // pre-existing behaviour, bit for bit). 1..CONFIG_PARAMS_TC_SHEATH_TAU_MAX_S
+    // runs the tc_lag_comp lead estimate in thermo_task; S1 and the overshoot
+    // guard then check raw + max(0, lead), the conservative of raw and
+    // compensated. Not fields_set-gated: 0 is the safe compiled default, and
+    // unpack decodes any stored value above the max (legacy 0xFFFF reserved
+    // fill) as 0. Carved from the front of the reserved tail.
+    uint16_t tc_sheath_tau_s;
+
+    uint8_t  reserved[262];
 } config_store_record_t;
 
 // config_store_effective_zone_ct_channel() -- THE single place "which CT
@@ -1209,6 +1219,13 @@ typedef struct {
                            // by config_store_find_latest*_ex() for the
                            // winning slot.
     float       tc_offset_stored_c; // pre-clamp value; valid iff tc_offset_clamped.
+    // PS2-03: independent of `rejected`. refused_any is set when ANY slot that
+    // scanned was refused (range rule, or a format version newer than this
+    // build); max_refused_seq is the highest seq among them. Unlike `rejected`
+    // these survive a successful load of an older valid record, so the caller
+    // can tell "a newer record exists that this build refused".
+    bool        refused_any;
+    uint32_t    max_refused_seq;
 } config_store_reject_info_t;
 
 // --- Record pack/unpack ---------------------------------------------------
@@ -1429,6 +1446,11 @@ typedef enum {
     // for one of the ARMED refusals above; the human-readable *out_reason
     // string still carries the specific hal/flash rc.
     CONFIG_STORE_WRITE_FLASH_FAILURE,
+    // PS2-04: ARMED, the change itself is a permitted narrow one, but the
+    // write needs a sector erase (log wrap or torn-slot fallback). The erase
+    // stalls core 1 (guards, relay owner) for up to ~400 ms, so it is refused
+    // while ARMED. Appended last so existing values keep their numbers.
+    CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE,
 } config_store_write_decision_t;
 
 // Pure decision: given whether the relay is currently ARMED (relay_owner's
@@ -1546,6 +1568,13 @@ uint8_t config_store_get_tc_type(void);
 // CONFIG_STORE_DEFAULT_TC_TYPE if called before config_store_boot_load().
 uint8_t config_store_get_persisted_tc_type(void);
 
+// The config_check_period_s that is PERSISTED ON FLASH (A7). The S16 RAM-integrity
+// check must not take its own period from the live RAM record it is checking: a
+// corrupted live 0 would disable it, a corrupted large value would defer it.
+// Same single-writer contract as config_store_get_persisted_tc_type(). Returns
+// false (and leaves *out untouched) before config_store_boot_load().
+bool config_store_get_persisted_check_period_s(uint32_t *out);
+
 // The cached tc_offset_c -- a calibration correction to be ADDED to the
 // safety board's own MAX31856 hot-junction reading (thermo_task.c is the one
 // caller, applied to reading.tc_temperature_c before anything else -- fault
@@ -1554,6 +1583,11 @@ uint8_t config_store_get_persisted_tc_type(void);
 // Same "safe to call from any task" contract as config_store_get_tc_type()
 // above.
 float config_store_get_tc_offset_c(void);
+
+// The cached safety TC sheath tau (param 0x010B), seconds. Returns 0 (no
+// compensation, the safe default) before config_store_boot_load(). Read by
+// thermo_task on every conversion.
+uint16_t config_store_get_tc_sheath_tau_s(void);
 
 // The commissioned E-stop input polarity (param 0x0212), one of
 // DISCRETE_PIN_POLICY_ESTOP_ACTIVE_HIGH/_LOW. Returns ACTIVE_HIGH -- the
@@ -1604,6 +1638,15 @@ bool config_store_is_config_rejected(void);
 // tc_offset_c was beyond +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C and was clamped
 // (2026-10-10 review LOW-A). The clamp is also logged on the console at boot.
 bool config_store_tc_offset_was_clamped(void);
+
+// PS2-03: true when a record with a seq above the loaded one was refused at
+// boot (format version too new after a rollback, or a range rule), so the
+// loaded record is OLDER than what the board last committed. Cleared once a
+// write lands (that record supersedes the refused one).
+bool config_store_newer_record_refused(void);
+// PS2-03: highest seq seen at boot among refused records (0 if none). The
+// next write's seq is always above this.
+uint32_t config_store_refused_seq_floor(void);
 
 // True iff the cached record's tc_type has actually been commissioned
 // (CONFIG_STORE_SET_TC_TYPE, see that bit's own comment) rather than merely

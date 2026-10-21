@@ -136,6 +136,13 @@ CONFIG_LV_USE_TJPGD=y
 # measures app_main at 6384 B (budget is 75% of the stack = 6144 B at 8192).
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 
+# ET-02 (REVIEW_OR03_TIMER_2026_10_18): the OR-03 rollback reboot runs on the esp_timer
+# task (otadata read/CRC/erase/write, ANNOUNCE frame, esp_restart shutdown handlers).
+# The IDF default is 3584 B, below the 4096 B on-demand task it replaced. main_network_http.c
+# registers the esp_timer stack_margin row using this macro. BENCH-PENDING: read the esp_timer
+# stack_margin row after one bench rollback and right-size.
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=4608
+
 # CONFIG_LWIP_MAX_SOCKETS: found the hard way 2026-08-20 auditing this file
 # after wifi_provision_http.c's `config.max_open_sockets = 13` fix (see that
 # file's comment at the same line, added the same pass) -- this project's
@@ -560,6 +567,13 @@ CONFIG_IDF_TARGET="esp32s3"
 # clean worktree quietly regenerate the larger, unproven pair.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_RX_BA_WIN=6
+
+# RW-01: the Wi-Fi TX buffers are STATIC here (CONFIG_ESP_WIFI_TX_BUFFER_TYPE=0; the DYNAMIC_TX_BUFFER_NUM symbol is
+# not even visible, kconfgen ignores it), so they are a fixed 16 x ~1.6 KB allocated at esp_wifi_init() and already
+# inside the heap_internal baseline: a socket storm cannot grow them (see App/drivers/common/dram_margin.h for the
+# 2026-08-22 13-socket case). Pin type and count so a changed IDF default cannot switch to the IDF's 32 dynamic.
+CONFIG_ESP_WIFI_TX_BUFFER_TYPE=0
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=16
 
 # CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS: IDF's lwip/Kconfig defaults this to 0 (not
 # 4) under the same SPIRAM_TRY_ALLOCATE_WIFI_LWIP condition above; per that

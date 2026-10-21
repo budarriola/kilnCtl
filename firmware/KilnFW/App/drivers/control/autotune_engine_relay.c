@@ -107,7 +107,7 @@ void finalize_relay_fit(void)
 
     s_at.proposed_gains = pid_autotune_tune_from_relay(&s_at.relay, s_at.relay_rule);
     force_relays_off();
-    if (autotune_reject_if_blocked_during_measure()) {
+    if (autotune_reject_if_blocked_during_measure() || autotune_reject_if_gains_refused()) {
         return;
     }
     s_at.state = AUTOTUNE_ENGINE_DONE;

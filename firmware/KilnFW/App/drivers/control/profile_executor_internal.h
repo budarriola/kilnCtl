@@ -39,6 +39,7 @@
  * there even though it's fine in the normal separate-TU firmware build. */
 
 #include "profile_executor.h"
+#include "tc_lag_comp.h" /* zone_runtime_t::tc_lag */
 
 #include <math.h>    /* isfinite() */
 #include <stdbool.h>
@@ -619,6 +620,19 @@ typedef struct {
     /* AUDIT_CONTROL_EXECUTOR LOW-3: true while the zone had no valid sensor; the first valid tick afterwards
      * re-bases the PID derivative (pid_reseed_derivative) instead of differencing across the outage. */
     bool  pid_sensor_outage;
+    /* TC protection-tube (sheath) lag compensation, 2026-10-16. tc_lag is
+     * the filter state (cleared as one unit by tc_lag_comp_reset(), and with
+     * the rest of zone_runtime_t by the run-start memset). actual_cal_c is
+     * the calibrated reading BEFORE compensation (raw + cal_offset_c), kept
+     * so the raw-domain value stays visible; actual_c holds the compensated
+     * estimate when tc_sheath_tau_s > 0, else exactly actual_cal_c.
+     * tc_lag_corr_c = actual_c - actual_cal_c, fed to the thermal guards as
+     * thermal_guard_input_t::lead_c. A filter reset that throws away a
+     * non-zero correction sets pid_sensor_outage so the PID derivative is
+     * re-based against the new (un-led) value -- the reset-one-side pair. */
+    tc_lag_comp_state_t tc_lag;
+    float actual_cal_c;
+    float tc_lag_corr_c;
     float on_off_actuated_held_s;
 
     /* TODO.md 6A.7's max_ramp_c_per_hr re-check (see reload_zone_config()):
@@ -771,6 +785,7 @@ typedef struct {
 
     uint8_t segment_index;
     bool dwelling;
+    bool dwell_arrived_hot;      /* CL-03: dwell began with a zone above target+band (descending segment) */
     float target_c;              /* shared setpoint, stepped incrementally each tick */
     uint32_t segment_elapsed_s;  /* shared; only advances while ramp-lock is satisfied */
     /* Sub-second carry (0..999 ms) behind segment_elapsed_s/total_elapsed_s: the whole-second
@@ -1612,6 +1627,19 @@ float ramp_assist_dwell_credit_total_spend_s(const s_exec_state_t *ex, float ent
  * accrual and lag-detection gates elsewhere in this file. A run with no
  * active zones returns true (nothing to wait on). */
 bool ramp_assist_dwell_target_reached(const s_exec_state_t *ex);
+
+/* CL-03 (KNOWN_ISSUES): true while a DESCENDING segment's dwell has started
+ * (the shared setpoint jumps to the segment target at once when
+ * ramp_c_per_hr == 0) but some driving zone is still hotter than target_c by
+ * more than the ramp-lock band. The dwell timer (not the setpoint) is held
+ * for as long as this is true, so the hold cannot elapse before the kiln has
+ * physically come down to target. False when dwell_arrived_hot is false, so
+ * rising and flat segments are unchanged. */
+bool ramp_assist_dwell_too_hot(const s_exec_state_t *ex);
+
+/* Pure predicate behind it: any active, unfaulted, non-monitor zone with a valid reading above target_c by
+ * more than the ramp-lock band. Evaluated once at dwell entry to set dwell_arrived_hot. */
+bool ramp_assist_zones_above_band(const s_exec_state_t *ex);
 
 /* ---- history ring buffer unpack (profile_executor.c; history_pack()/the
  * pack-temp/unpack-temp helpers stay static there, only used by the same

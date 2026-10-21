@@ -126,6 +126,7 @@ GROUP_OVERRIDES = {
     "find_crash_elf_for_coredump": "debug",
     "find_safty_crash_elf": "debug",
     "read_esp_coredump": "debug",
+    "diag_bundle_fetch": "debug",
     "sw_reset_esp": "ota",
     # LVGL page interaction, plus the web UI's own served-page structure.
     "list_buttons": "ui",
@@ -304,6 +305,8 @@ KEYWORDS = {
     "read_esp_coredump": ("coredump", "core dump", "panic", "crash", "partition",
                           "esp_partition_read", "chunk", "http", "no jtag",
                           "read-only", "espcoredump", "fetch", "download"),
+    "diag_bundle_fetch": ("support bundle", "diagnostic bundle", "diag bundle", "field debug", "fd-01",
+                          "event log", "coredump", "crash report", "download"),
     "sw_reset_esp": ("reboot", "reset both", "restart", "grace window",
                      "config_store", "commission while armed"),
     "saleae_capture": ("logic", "analyzer", "trace", "waveform", "timing"),

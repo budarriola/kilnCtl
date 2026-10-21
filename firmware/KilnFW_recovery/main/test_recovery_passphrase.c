@@ -3,6 +3,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "recovery_passphrase.h"
 
@@ -20,10 +21,12 @@ static int g_pass, g_fail;
 
 static void test_alphabet(void)
 {
-    CHECK(strlen(RPASS_ALPHABET) == RPASS_ALPHABET_LEN, "alphabet length is 32");
-    CHECK(RPASS_LEN >= 10 && RPASS_LEN <= 12, "passphrase length 10..12");
+    CHECK(strlen(RPASS_ALPHABET) == RPASS_ALPHABET_LEN, "alphabet length is 26");
+    // RE-03: >= 60 bits of min-entropy (worst symbol hit by 10 of 256 byte values).
+    CHECK((double)RPASS_LEN * log2(256.0 / 10.0) >= 60.0, "passphrase has >= 60 bits");
+    CHECK(RPASS_LEN >= 10 && RPASS_LEN <= 16, "passphrase length 10..16");
     // No ambiguous symbols, no duplicates.
-    const char *bad = "0O1lIoi";
+    const char *bad = "0O1lIoi5S2Z8B";
     for (const char *b = bad; *b; b++) {
         CHECK(strchr(RPASS_ALPHABET, *b) == NULL, "ambiguous symbol absent from alphabet");
     }
@@ -37,7 +40,7 @@ static void test_alphabet(void)
 static void test_every_byte_maps_into_alphabet(void)
 {
     // Every possible random byte, in every position, yields a valid symbol,
-    // and all 32 symbols are reachable (uniform: each hit exactly 8 times).
+    // and all 26 symbols are reachable (each hit by 9 or 10 byte values).
     int hits[256] = {0};
     for (int v = 0; v < 256; v++) {
         uint8_t rnd[RPASS_LEN];
@@ -54,7 +57,7 @@ static void test_every_byte_maps_into_alphabet(void)
         if (hits[c] > 0) {
             reached++;
         }
-        CHECK(hits[c] == 8, "no modulo bias: each symbol from exactly 8 byte values");
+        CHECK(hits[c] == 9 || hits[c] == 10, "bias bounded: each symbol from 9 or 10 byte values");
     }
     CHECK(reached == (int)RPASS_ALPHABET_LEN, "all symbols reachable");
 }
@@ -76,15 +79,21 @@ static void test_validator(void)
 {
     CHECK(!rpass_is_valid(NULL), "NULL invalid");
     CHECK(!rpass_is_valid(""), "empty invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKL"), "too short invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKLMN"), "too long invalid");
-    CHECK(rpass_is_valid("ABCDEFGHJKLM"), "12 good symbols valid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKL0"), "digit 0 invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKLO"), "letter O invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKL1"), "digit 1 invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKLl"), "letter l invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKLI"), "letter I invalid");
-    CHECK(!rpass_is_valid("ABCDEFGHJKLa"), "lowercase invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMN"), "too short invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNPQ"), "too long invalid");
+    CHECK(rpass_is_valid("ACDEFGHJKLMNP"), "13 good symbols valid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMN0"), "digit 0 invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNO"), "letter O invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMN1"), "digit 1 invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNl"), "letter l invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNI"), "letter I invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMN5"), "digit 5 invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNS"), "letter S invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMN2"), "digit 2 invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNZ"), "letter Z invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMN8"), "digit 8 invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNB"), "letter B invalid");
+    CHECK(!rpass_is_valid("ACDEFGHJKLMNa"), "lowercase invalid");
 }
 
 int main(void)

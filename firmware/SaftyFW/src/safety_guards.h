@@ -333,6 +333,9 @@ typedef struct {
 typedef struct {
     bool     tc_valid;
     float    tc_c;         /* NaN when !tc_valid */
+    float    tc_lead_c;    /* TC sheath lag lead (0x010B), degC; 0 = none. S1 and the overshoot
+                            * guard check tc_c + max(0, tc_lead_c): the conservative of raw and
+                            * compensated. Zero-init keeps every guard on raw. */
     float    cj_c;         /* NaN when !tc_valid */
     bool     cj_invalid;   /* true when the cold junction reading is not valid (thermo_snapshot_t.cj_valid
                             * false). Inverted sense so a zero-initialised input means "valid". Guard
@@ -600,6 +603,9 @@ typedef struct {
      * defaulting the reading to 0.0f and reading 0 < i_normal_a as fine. */
     float amps[3];
     bool  amps_valid[3];
+    /* PN-05: channel's ADC average is at the clip threshold; its amps read LOW, so S14 treats a clipped
+     * fitted channel as over the overcurrent threshold. */
+    bool  clipped[3];
     bool  relay_commanded_now_for_ct[3];
 
     /* S14 (summed topology only)/S15. Per-ZONE commanded-now facts,
@@ -642,6 +648,10 @@ typedef struct {
 
     /* S1: consecutive valid over-ceiling readings. */
     uint8_t s1_over_ceiling_streak;
+    /* SR-33: last good reading and the consecutive TCRANGE reads that follow one near the ceiling. */
+    float   s1_last_valid_c;
+    bool    s1_last_valid_known;
+    uint8_t s1_tcrange_near_ceiling_streak;
 
     /* S5: consecutive-bad-read count and cumulative bad time (both must
      * clear before WARN; the same running elapsed timer continues past
@@ -669,6 +679,7 @@ typedef struct {
      * non-timed) cj_warn_c crossing. */
     bool  s12_warn;
     float s12_over_max_elapsed_s;
+    float s12_cj_unknown_elapsed_s; /* PN-04: sustained unknown CJ (CJRANGE / stale) -> S12 trip */
 
     /* S8: baseline-sample-and-hold rate-of-rise window. s8_window_start_c is
      * the reading at the start of the current rate_window_s window;

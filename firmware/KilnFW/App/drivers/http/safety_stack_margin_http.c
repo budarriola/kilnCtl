@@ -17,6 +17,7 @@
  * ceiling. The JSON below carries this as an explicit field
  * (floor_not_worst_case:true) rather than only in a comment, so a
  * caller/renderer cannot miss it. */
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "safety_stack_margin_http.h"
 
 #include <stdio.h>
@@ -157,7 +158,7 @@ static esp_err_t api_stack_margin_get_handler(httpd_req_t *req)
         link_up = (link_result == ESP_OK);
     }
 
-    static char json[STACK_MARGIN_JSON_MAX];
+    static EXT_RAM_BSS_ATTR char json[STACK_MARGIN_JSON_MAX];
     size_t len = safety_stack_margin_build_json(link_up, link_result, link_up ? &margin : NULL,
                                                  json, sizeof(json));
     if (len == 0) {

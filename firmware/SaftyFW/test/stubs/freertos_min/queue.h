@@ -9,6 +9,7 @@ typedef void *QueueHandle_t;
 
 QueueHandle_t xQueueCreate(UBaseType_t num_items, UBaseType_t item_size);
 BaseType_t    xQueueSend(QueueHandle_t queue, const void *item, TickType_t ticks_to_wait);
+BaseType_t    xQueueSendToFront(QueueHandle_t queue, const void *item, TickType_t ticks_to_wait);
 BaseType_t    xQueueReceive(QueueHandle_t queue, void *out_item, TickType_t ticks_to_wait);
 
 #endif // SAFTYFW_TEST_STUB_QUEUE_H

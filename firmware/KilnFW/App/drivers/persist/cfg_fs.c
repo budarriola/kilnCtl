@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "cfg_fs.h"
 #include "persist_scratch.h"
 
@@ -291,7 +292,7 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists)
 
 #define CFG_FS_DEGRADED_MAX 40
 #define CFG_FS_DEGRADED_NAME_MAX 48
-static char s_degraded[CFG_FS_DEGRADED_MAX][CFG_FS_DEGRADED_NAME_MAX];
+static EXT_RAM_BSS_ATTR char s_degraded[CFG_FS_DEGRADED_MAX][CFG_FS_DEGRADED_NAME_MAX];
 static portMUX_TYPE s_degraded_mux = portMUX_INITIALIZER_UNLOCKED;
 
 void cfg_fs_degraded_set(const char *name, bool degraded)
@@ -502,6 +503,18 @@ void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int coun
 }
 #endif
 
+/* Cold, non-inlined so the log call's varargs frame is not folded into cfg_fs_read()'s own frame (stack-budget:
+ * cfg_fs_read sits on the httpd and bx_worker deepest paths). */
+#if defined(_MSC_VER)
+#define CFG_FS_NOINLINE __declspec(noinline)
+#else
+#define CFG_FS_NOINLINE __attribute__((noinline))
+#endif
+static CFG_FS_NOINLINE void cfg_fs_log_fopen_unknown(const char *rel_path, int e)
+{
+    ESP_LOGW("cfg_fs", "fopen('%s') failed: errno %d -- file state unknown", rel_path, e);
+}
+
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len)
 {
     if (!rel_path || !buf || cap == 0) {
@@ -522,7 +535,15 @@ esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_l
     }
     FILE *f = fopen(path, "rb");
     if (!f) {
-        return ESP_ERR_NOT_FOUND;
+        /* persmed MED-A: only a genuinely missing file is NOT_FOUND ("never saved"). Any other fopen failure
+         * (EIO, EACCES, ENOMEM, a directory at the path, ...) means the file may exist: ESP_FAIL, so callers
+         * treat its state as unknown and never as absent. */
+        int e = errno;
+        if (e == ENOENT || e == ENOTDIR) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        cfg_fs_log_fopen_unknown(rel_path, e);
+        return ESP_FAIL;
     }
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
@@ -883,4 +904,38 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
     free(sc);
     *out_count = (count < max_out) ? count : max_out;
     return ESP_OK;
+}
+
+/* FW-03: append two parts (e.g. batch header + records) to an EXISTING file in one open/sync/close.
+ * Not atomic: a power cut can tear the tail, so callers must carry their own per-record integrity
+ * (firing_trace's per-batch CRC32). The path buffer is on the heap (stack budgets). */
+esp_err_t cfg_fs_append(const char *rel_path, const void *p1, size_t n1, const void *p2, size_t n2)
+{
+    bool (*refuse)(void) = s_write_refuse_fn;
+    if (refuse && refuse()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!rel_path || (!p1 && n1 > 0) || (!p2 && n2 > 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!cfg_fs_is_available()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char *path = persist_scratch_alloc(CFG_FS_PATH_MAX);
+    if (!path) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (!path_join_ok(path, CFG_FS_PATH_MAX, s_base_dir, rel_path)) {
+        free(path);
+        return ESP_ERR_INVALID_ARG;
+    }
+    FILE *f = fopen(path, "ab");
+    free(path);
+    if (!f) {
+        return ESP_FAIL;
+    }
+    bool ok = (n1 == 0 || fwrite(p1, 1, n1, f) == n1) && (n2 == 0 || fwrite(p2, 1, n2, f) == n2) &&
+              fflush(f) == 0 && cfg_fs_fsync(f) == 0;
+    int rc = fclose(f);
+    return (ok && rc == 0) ? ESP_OK : ESP_FAIL;
 }

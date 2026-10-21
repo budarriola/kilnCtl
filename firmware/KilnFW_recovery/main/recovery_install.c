@@ -8,6 +8,7 @@
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_ota_ops.h"
 #include "nvs.h"
 
 #include "recovery_apply_esp.h"
@@ -221,6 +222,14 @@ static void load_last(void)
     uint8_t buf[UPD_INST_RES_SIZE];
     size_t n = 0;
     s_have_last = kv_read(UPD_INST_KEY_RES, buf, sizeof(buf), &n) == 0 && update_install_res_decode(buf, n, &s_last);
+    // MED-3: a last OK whose app image the bootloader aborted (never confirmed) is not an OK install.
+    const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+    if (s_have_last && bad && strcmp(bad->label, "app") == 0 && update_install_res_apply_rollback(&s_last, true)) {
+        uint8_t nb[UPD_INST_RES_SIZE];
+        if (update_install_res_encode(&s_last, nb) == UPD_INST_RES_SIZE) {
+            (void)kv_write(UPD_INST_KEY_RES, nb, sizeof(nb)); // best effort; the in-memory view is already corrected
+        }
+    }
 }
 
 static void show_failure(uint8_t reason)
@@ -261,10 +270,16 @@ static void recover_task(void *arg)
         act = update_install_after_fail(s_recover.reason, s_recover.app_modified, verifies, request_attempts_left());
     }
     // The verify took seconds: an operator apply or a Pico relay may have started meanwhile. Never switch or reset under it.
-    if (recovery_apply_busy() || recovery_pico_busy()) {
+    if (recovery_apply_busy() || recovery_pico_busy() || recovery_http_restart_pending()) {
         act = UPD_INST_AFTER_STAY;
     }
     if (act == UPD_INST_AFTER_EXIT_APP) {
+        // RC-01: re-check the app-writer claim immediately before selecting app.
+        if (recovery_apply_busy() || recovery_http_restart_pending()) {
+            ESP_LOGW(TAG, "app write in progress or restart pending; not selecting app");
+            vTaskDelete(NULL);
+            return;
+        }
         // Same order as /api/recovery/exit: boot_guard (verified) first, then drop the request (the FAIL
         // result stays for the application to read), then the boot target.
         if (recovery_http_boot_guard_clear() == 0 && kv_clear(UPD_INST_KEY_REQ) == 0 &&
@@ -276,6 +291,11 @@ static void recover_task(void *arg)
     } else if (act == UPD_INST_AFTER_RESTART) {
         ESP_LOGW(TAG, "install failed with the app modified; restarting for the bounded retry");
         vTaskDelay(pdMS_TO_TICKS(RECOVER_RESTART_DELAY_MS));
+        if (recovery_apply_busy() || recovery_pico_busy() || recovery_http_restart_pending()) { // RC-01: re-check right before the restart
+            ESP_LOGW(TAG, "app write in progress; restart skipped");
+            vTaskDelete(NULL);
+            return;
+        }
         esp_restart();
     } else {
         ESP_LOGW(TAG, "install failed (%s); staying in recovery", update_install_reason_name(s_recover.reason));

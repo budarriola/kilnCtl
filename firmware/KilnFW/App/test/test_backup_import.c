@@ -586,6 +586,20 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
     return g_stub_ota_ack_no_safety;
 }
 
+// RS-02: refusal drain seam. Counts the bytes the handler asked to drain.
+int g_stub_drain_calls = 0;
+static uint8_t s_stub_drain_buf[64];
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
+{
+    g_stub_drain_calls++;
+    return req->content_len > 0 ? ESP_OK : ESP_FAIL;
+}
+uint8_t *ota_http_esp_chunk_buf(size_t *cap)
+{
+    *cap = sizeof(s_stub_drain_buf);
+    return s_stub_drain_buf;
+}
+
 // Records the reason the code under test actually handed to the refusal
 // sender, so a test can prove a specific interlock reason (e.g. the zone
 // sweep's) reaches the response unmodified rather than only that the
@@ -643,6 +657,8 @@ typedef struct {
     uint8_t ct_mask;
     bool set_cal_called;
     float cal_offset_c;
+    bool set_sheath_called;
+    float tc_sheath_tau_s;
     bool set_ramp_called;
     float max_ramp_c_per_hr;
     bool set_sanity_called;
@@ -789,6 +805,9 @@ extern int g_relay_type_push_calls;
  * zones config holds after the import -- committed batch or rolled-back
  * snapshot. Defined below next to the guard_raise() fake. */
 static int g_apply_lower_calls;
+/* RS-01: guard owner observed when the Pico-write stubs run. */
+static safety_cfg_writer_t g_stub_lower_owner = SAFETY_CFG_WRITER_NONE;
+static safety_cfg_writer_t g_stub_pairs_owner = SAFETY_CFG_WRITER_NONE;
 static float g_apply_lower_last_max[STUB_ZONE_COUNT];
 static int g_total_write_calls;
 static int g_profile_save_calls;
@@ -1070,6 +1089,7 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
 {
     (void)link;
     g_apply_lower_calls++;
+    g_stub_lower_owner = safety_cfg_writer_owner();
     for (size_t i = 0; i < n && i < STUB_ZONE_COUNT; i++) {
         g_apply_lower_last_max[i] = new_max_temp_c[i];
     }
@@ -1107,6 +1127,7 @@ bool safety_cfg_write_apply_pairs(SafetyLinkClass *link, const safety_cfg_post_p
                                    safety_ceiling_refusal_class_t *out_class)
 {
     (void)link;
+    g_stub_pairs_owner = safety_cfg_writer_owner();
     g_stub_safety_cfg_write_n_pairs = n_pairs;
     g_stub_safety_cfg_write_commit_arg = commit;
     int n_copy = (n_pairs < 8) ? n_pairs : 8;
@@ -1677,6 +1698,20 @@ bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_cal_called = true;
     s_writes[zone_index].cal_offset_c = cal_offset_c;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s)
+{
+    if (!out_tau_s || zone_index >= STUB_ZONE_COUNT) return false;
+    *out_tau_s = s_writes[zone_index].tc_sheath_tau_s;
+    return true;
+}
+bool zones_config_set_tc_sheath_tau_no_save(uint8_t zone_index, float tau_s)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_sheath_called = true;
+    s_writes[zone_index].tc_sheath_tau_s = tau_s;
     g_total_write_calls++;
     return true;
 }
@@ -2516,9 +2551,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     return true;
 }
 
+static int g_profile_delete_calls;
 bool profiles_http_delete(uint8_t id)
 {
     (void)id;
+    g_profile_delete_calls++;
     return false;
 }
 
@@ -2584,6 +2621,7 @@ static void reset_backup_import_post_stubs(void)
     g_stub_ota_last_refusal_reason[0] = '\0';
     s_post_last_status[0] = '\0';
     s_post_last_body[0] = '\0';
+    g_stub_drain_calls = 0;
 }
 
 // Proves the ordering fix itself, not just its presence in the source: the
@@ -2702,6 +2740,50 @@ static bool header_case_refused_400(void)
     s_hdr_dry_trunc = s_hdr_mode_trunc = s_hdr_ack_trunc = false;
     reset_backup_import_post_stubs();
     return r;
+}
+
+// RS-02: a refusal sent before the body is read must drain the body (else the close carries
+// unread RX data, lwIP sends RST, and a Windows client sees WinError 10054 instead of the status).
+static void test_backup_import_post_refusals_drain_unread_body(void)
+{
+    TEST_SECTION("RS-02: backup_import_post_handler drains the unread body after an early refusal");
+    httpd_req_t req;
+
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 23000;
+    esp_err_t err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_OK && strncmp(s_post_last_status, "409", 3) == 0, "mode-gate 409 still sent");
+    TEST_CHECK(g_stub_drain_calls == 1, "mode-gate refusal drains the 23 KB body");
+
+    reset_backup_import_post_stubs();
+    g_stub_ota_interlock_result = OTA_INTERLOCK_REFUSED;
+    req.content_len = 23000;
+    err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_OK && g_stub_drain_calls == 1, "interlock refusal drains the body");
+
+    reset_backup_import_post_stubs();
+    s_hdr_dry = "x";
+    req.content_len = 23000;
+    g_test_get_hdr_hook = test_hdr_hook;
+    err = backup_import_post_handler(&req);
+    g_test_get_hdr_hook = NULL;
+    s_hdr_dry = NULL;
+    TEST_CHECK(err == ESP_OK && g_stub_drain_calls == 1, "bad-header 400 drains the body");
+
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    req.content_len = BACKUP_BODY_MAX + 1;
+    err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_FAIL && g_stub_drain_calls == 0, "an oversized body is not drained: httpd closes instead");
+
+    reset_backup_import_post_stubs();
+    s_test_profile_running_for_mode_gate = true;
+    req.content_len = 0;
+    err = backup_import_post_handler(&req);
+    TEST_CHECK(err == ESP_OK && g_stub_drain_calls == 0, "no body: nothing to drain");
+    reset_backup_import_post_stubs();
 }
 
 static void test_group_a_header_fail_closed(void)
@@ -3063,6 +3145,43 @@ static void test_overlong_zone_name_rejected(void)
 // build: a v2 body that never had the sentinel (what this build now
 // exports), and a v2 body that DOES still carry it (what firmware already
 // live on the bench exported before this fix, and may still be handed to
+
+/* ZONES_CFG v27: tc_sheath_tau_s is optional on import (older backups have
+ * none and leave the live value alone), committed when present, and refused
+ * out of range (0..600 s) before anything is written. */
+static void test_sheath_tau_optional_and_bounded(void)
+{
+    TEST_SECTION("backup_import_apply -- tc_sheath_tau_s optional, committed, 0..600 s");
+    static const char fmt[] =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1.5,\"pid_ki\":0.2,\"pid_kd\":0.05,"
+        "\"name\":\"Top\",\"relay_mask\":1,\"thermo_mask\":1,"
+        "\"cal_offset_c\":0,%s\"max_ramp_c_per_hr\":100,\"sanity_rate_c_per_min\":0,\"control_mode\":0,"
+        "\"max_temp_c\":1300,\"min_temp_c\":-20,\"heater_window_ms\":1000,"
+        "\"heater_min_on_ms\":0,\"heater_min_off_ms\":0,"
+        "\"guard_wrong_dir_window_s\":0,\"guard_wrong_dir_rate_c_per_min\":0,\"guard_off_settle_s\":0,"
+        "\"guard_runaway_rate_c_per_min\":0,\"guard_runaway_margin_c\":0,\"guard_drift_period_s\":0,"
+        "\"guard_sensor_fault_debounce_ticks\":0,\"guard_frozen_window_s\":0,"
+        "\"cross_zone_max_delta_c\":0}]}";
+    const char *cases[] = {"", "\"tc_sheath_tau_s\":240,", "\"tc_sheath_tau_s\":601,",
+                           "\"tc_sheath_tau_s\":-1,", "\"tc_sheath_tau_s\":600,"};
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_stub_state();
+        char body[1400];
+        snprintf(body, sizeof(body), fmt, cases[i]);
+        char err[160] = "";
+        bool ok = test_backup_import_apply(body, err, sizeof(err));
+        if (i == 0) {
+            TEST_CHECK(ok && !s_writes[0].set_sheath_called, "absent tc_sheath_tau_s imports and leaves it alone");
+        } else if (i == 1 || i == 4) {
+            TEST_CHECK(ok && s_writes[0].set_sheath_called, "in-range tc_sheath_tau_s is committed");
+            TEST_CHECK_NEAR(s_writes[0].tc_sheath_tau_s, i == 1 ? 240.0 : 600.0, 1e-6, "committed value exact");
+        } else {
+            TEST_CHECK(!ok && g_total_write_calls == 0, "out-of-range tc_sheath_tau_s refused with nothing written");
+        }
+    }
+}
+
 // this build as a restore file).
 static void test_v2_body_without_sentinel_imports(void)
 {
@@ -3685,6 +3804,30 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
 // comment in backup_http.c.
 // ---------------------------------------------------------------------------
 
+static void test_bw04_malformed_present_coupling_cell_refuses_import(void)
+{
+    TEST_SECTION("BW-04 -- a coupling cell key that is present but not a valid number refuses the whole import");
+    static const char *bad_vals[] = { "null", "\"3.3\"", "\"0.3x\"" };
+    static const char *keys[] = { "coupling_c0", "coupling_tau_c0", "coupling_dead_time_c0" };
+    for (unsigned k = 0; k < 3; k++) {
+        for (unsigned v = 0; v < 3; v++) {
+            reset_stub_state();
+            char body[400];
+            snprintf(body, sizeof(body),
+                     "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+                     "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+                     "\"%s\":%s,\"coupling_c2\":3.332,\"settings_source\":0}]}",
+                     keys[k], bad_vals[v]);
+            char err[160];
+            err[0] = 0;
+            bool ok = test_backup_import_apply(body, err, sizeof(err));
+            TEST_CHECK(!ok, "BW-04: malformed present coupling cell is refused, not silently kept");
+            TEST_CHECK(strstr(err, keys[k]) != NULL, "BW-04: the refusal names the cell key");
+            TEST_CHECK(!s_writes[1].set_coupling_cell_called[2], "BW-04: nothing of that entry was committed");
+        }
+    }
+}
+
 static void test_v4_new_fields_round_trip_distinct_values(void)
 {
     TEST_SECTION("backup_import_apply -- fuzzy_strength_pct/coupling_c0../settings_source all set to "
@@ -4289,6 +4432,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(zones_config_set_thermo_mask(1, 0x02), "seed zone 1 thermo_mask");
     TEST_CHECK(zones_config_set_ct_mask(1, 0x02), "seed zone 1 ct_mask");
     TEST_CHECK(zones_config_set_cal_offset(1, 0.75f), "seed zone 1 cal_offset_c");
+    s_writes[1].tc_sheath_tau_s = 120.0f; /* get_tc_sheath_tau reads this stub field */
     test_stub_zones_set_max_ramp(1, true, 150.0f); /* export's get_max_ramp is this hook, not the setter below */
     TEST_CHECK(zones_config_set_sanity_rate(1, 2.5f), "seed zone 1 sanity_rate_c_per_min");
     TEST_CHECK(zones_config_set_control_mode(1, 3), "seed zone 1 control_mode (PID_FUZZY)");
@@ -4328,6 +4472,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(strstr(s_export_body, "\"relay_mask\":2,\"thermo_mask\":2,\"ct_mask\":2") != NULL,
               "zone 1's masks are emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"cal_offset_c\":0.75,") != NULL, "zone 1's cal_offset_c is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"tc_sheath_tau_s\":120,") != NULL, "zone 1's tc_sheath_tau_s is emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"max_ramp_c_per_hr\":150,") != NULL,
               "zone 1's max_ramp_c_per_hr is emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"sanity_rate_c_per_min\":2.5,") != NULL,
@@ -4737,6 +4882,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     zones_config_set_thermo_mask(1, 0x02);
     zones_config_set_ct_mask(1, 0x02);
     zones_config_set_cal_offset(1, 0.75f);
+    s_writes[1].tc_sheath_tau_s = 180.0f; /* protection tube, ZONES_CFG v27 */
     test_stub_zones_set_max_ramp(1, true, 150.0f);
     zones_config_set_sanity_rate(1, 2.5f);
     zones_config_set_control_mode(1, 3);
@@ -4782,6 +4928,8 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK(s_writes[1].relay_mask == 0x02 && s_writes[1].thermo_mask == 0x02 && s_writes[1].ct_mask == 0x02,
               "masks round-trip");
     TEST_CHECK_NEAR(s_writes[1].cal_offset_c, 0.75, 1e-6, "cal_offset_c round-trips");
+    TEST_CHECK(s_writes[1].set_sheath_called, "tc_sheath_tau_s is committed on import");
+    TEST_CHECK_NEAR(s_writes[1].tc_sheath_tau_s, 180.0, 1e-6, "tc_sheath_tau_s round-trips");
     TEST_CHECK_NEAR(s_writes[1].sanity_rate_c_per_min, 2.5, 1e-6, "sanity_rate_c_per_min round-trips");
     TEST_CHECK(s_writes[1].control_mode == 3, "control_mode round-trips");
     TEST_CHECK_NEAR(s_writes[1].max_temp_c, 1250.0, 1e-6, "max_temp_c round-trips");
@@ -5816,6 +5964,73 @@ static void test_safety_i_normal_a_write_failure_aborts_whole_import(void)
               "since the safety write happens before the per-zone commit loop");
 }
 
+/* RS-01: the real job path. http_async_job_try_start() takes SAFETY_CFG_WRITER_ASYNC_JOB before the job runs, and
+ * the job's own Pico writes used to try_claim(HTTP_SYNC) against that single-owner guard and fail every restore
+ * ("another commissioning operation is running"). The RX-02 test below once modelled the job's own claim as a
+ * foreign holder and called backup_import_apply() directly, so it asserted the broken behaviour. */
+static void test_rs01_job_under_async_job_claim_writes_pico_and_other_writers_still_refused(void)
+{
+    TEST_SECTION("RS-01: backup_import_job under the ASYNC_JOB claim performs its Pico writes; a different "
+                 "writer holding the guard still refuses");
+    static const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":9.0,\"pid_ki\":0,\"pid_kd\":0,\"safety_i_normal_a\":3.0}]}";
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    g_stub_pairs_owner = g_stub_lower_owner = SAFETY_CFG_WRITER_NONE;
+    g_apply_lower_calls = 0;
+    s_post_last_status[0] = '\0';
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "setup: the async job claim, as try_start takes it");
+    run_backup_import_job_with_body(body);
+    TEST_CHECK(g_stub_safety_cfg_write_n_pairs > 0, "RS-01: the job staged its safety_i_normal_a pairs");
+    TEST_CHECK(strncmp(s_post_last_status, "500", 3) != 0 && strncmp(s_post_last_status, "400", 3) != 0,
+               "RS-01: the restore does not fail with a 4xx/5xx");
+    TEST_CHECK(g_stub_pairs_owner == SAFETY_CFG_WRITER_ASYNC_JOB, "RS-01: the pair write ran under the job's own claim");
+    TEST_CHECK(g_apply_lower_calls > 0 && g_stub_lower_owner == SAFETY_CFG_WRITER_ASYNC_JOB,
+               "RS-01: the ceiling lower ran under the job's own claim");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_ASYNC_JOB,
+               "RS-01: the job did not release the claim it does not own (run_job releases it)");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
+
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_SWEEP, SAFETY_CFG_WRITER_SWAP,
+                                           SAFETY_CFG_WRITER_RECONCILE, SAFETY_CFG_WRITER_HTTP_SYNC };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        reset_stub_state();
+        zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+        TEST_CHECK(safety_cfg_writer_try_claim(others[i]), "setup: a different writer holds the guard");
+        char err[256];
+        bool ok = test_backup_import_apply(body, err, sizeof(err));
+        TEST_CHECK(!ok, "RS-01: a different writer holding the guard still refuses the restore");
+        TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1, "RS-01: no pairs staged under a foreign holder");
+        TEST_CHECK(safety_cfg_writer_owner() == others[i], "RS-01: the foreign holder's claim is untouched");
+        (void)safety_cfg_writer_release(others[i]);
+    }
+}
+
+static void test_safety_i_normal_a_import_refuses_while_writer_guard_held(void)
+{
+    TEST_SECTION("RX-02: backup import claims the Pico writer guard around its i_normal_a stage+commit; "
+                 "a held guard refuses the import with no Pico traffic");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    s_pico_i_normal_a_known[1] = true;
+    s_pico_i_normal_a[1] = 7.6543f;
+    TEST_CHECK(run_export() == ESP_OK, "export must succeed");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP), "another writer holds the guard");
+    char err[256];
+    bool ok = test_backup_import_apply(s_export_body, err, sizeof(err));
+    TEST_CHECK(!ok, "RX-02: import refused while a bench_preset-style writer holds the guard");
+    TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1, "RX-02: no pairs staged");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWEEP, "RX-02: the holder claim is untouched");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP);
+    ok = test_backup_import_apply(s_export_body, err, sizeof(err));
+    TEST_CHECK(ok, "RX-02: import succeeds once the guard is free");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "RX-02: import released the guard");
+}
+
 static void test_safety_i_normal_a_absent_key_never_calls_write(void)
 {
     TEST_SECTION("backup_import_apply -- a backup with NO safety_i_normal_a key at all makes ZERO calls "
@@ -6020,6 +6235,33 @@ static void mirror_ack_test_setup(int32_t *nonactive_count_out)
         }
     }
     *nonactive_count_out = nonactive;
+}
+
+// BENCH soakmain finding (KNOWN_ISSUES BW-07): a restore never deletes firing profiles. MERGE/MIRROR and
+// X-Kiln-Config-Ack-Delete concern kiln_configs[] SLOTS only; a profile that exists on the board but not in the
+// backup survives both modes, and the ack count only gates slot deletions.
+static void test_restore_never_deletes_board_only_firing_profile(void)
+{
+    TEST_SECTION("backup_import_apply -- a firing profile present on the board but absent from the backup is "
+                 "kept by MERGE and by MIRROR (with a slot-delete ack of 1): profiles are never deleted by restore");
+    for (int pass = 0; pass < 2; pass++) {
+        reset_stub_state();
+        g_profile_delete_calls = 0;
+        profile_t extra;
+        memset(&extra, 0, sizeof(extra));
+        strncpy(extra.name, "SOAK_P", sizeof(extra.name) - 1);
+        test_stub_profiles_set(5, &extra);
+        const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
+        kiln_cfg_plan_t plan;
+        memset(&plan, 0, sizeof(plan));
+        bool partial_write = false;
+        char err[160] = {0};
+        bool ok = backup_import_apply(body, pass == 0 ? KILN_CFG_RESTORE_MERGE : KILN_CFG_RESTORE_MIRROR, false, 1,
+                                      true, &plan, &partial_write, err, sizeof(err));
+        TEST_CHECK(ok, "restore of a backup without that profile succeeds (no kiln_configs key: nothing to delete)");
+        TEST_CHECK(g_profile_delete_calls == 0, "restore never calls profiles_http_delete");
+        TEST_CHECK(s_profile_present[5], "the board-only profile is still present after the restore");
+    }
 }
 
 static void test_mirror_delete_absent_ack_refuses_and_writes_nothing(void)
@@ -6456,6 +6698,13 @@ static void test_update_settings_http_post(void)
     wp9_http_post("repo=other%2Frepo%00");
     TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "a trailing %00 is refused");
     TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "%00 requests change nothing");
+
+    // Restore fence (backup-import LOW-3): refused 409 while a restore/config change is in flight.
+    backup_import_config_change_set(true);
+    wp9_http_post("repo=fenced%2Frepo");
+    backup_import_config_change_set(false);
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "a POST during a restore is refused, setting unchanged");
+    TEST_CHECK(strncmp(s_post_last_status, "409", 3) == 0, "a POST during a restore gets 409");
 
     // Missing field / empty / oversized body: plain 400 via httpd_resp_send_err.
     wp9_http_post("other=1");
@@ -7642,6 +7891,7 @@ void run_test_backup_import(void)
     test_group_a_pass1_range_checks();
     test_group_a_prefs_bool_exact();
     test_group_a_header_fail_closed();
+    test_backup_import_post_refusals_drain_unread_body();
     test_wrong_kind_refused();
     test_unknown_version_refused();
     test_fractional_and_huge_version_refused();
@@ -7650,6 +7900,7 @@ void run_test_backup_import(void)
     test_out_of_range_model_rejected();
     test_overlong_zone_name_rejected();
     test_v2_body_without_sentinel_imports();
+    test_sheath_tau_optional_and_bounded();
     test_v2_body_with_stale_sentinel_still_imports();
     test_overlong_profile_name_rejected();
     test_profile_name_at_limit_accepted();
@@ -7668,6 +7919,8 @@ void run_test_backup_import(void)
     test_import_pass1b_parse_failure_is_not_a_partial_write();
 
     test_v4_new_fields_round_trip_distinct_values();
+
+    test_bw04_malformed_present_coupling_cell_refuses_import();
     test_coupling_diag_k_dc_round_trips_distinct_value();
     test_v2_body_imports_new_fields_default_floats_zero_source_custom();
     test_v3_fuzzy_strength_out_of_range_rejected();
@@ -7718,11 +7971,14 @@ void run_test_backup_import(void)
     test_safety_i_normal_a_round_trips_through_export_import();
     test_safety_i_normal_a_write_failure_aborts_whole_import();
     test_safety_i_normal_a_absent_key_never_calls_write();
+    test_safety_i_normal_a_import_refuses_while_writer_guard_held();
+    test_rs01_job_under_async_job_claim_writes_pico_and_other_writers_still_refused();
 
     test_export_never_contains_credential_markers();
 
     test_mirror_delete_absent_ack_refuses_and_writes_nothing();
     test_mirror_delete_wrong_count_refuses_and_writes_nothing();
     test_mirror_delete_correct_count_proceeds_and_keeps_active_slot();
+    test_restore_never_deletes_board_only_firing_profile();
     test_kiln_configs_partial_write_set_on_mid_pass_create_failure();
 }

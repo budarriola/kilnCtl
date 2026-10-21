@@ -782,6 +782,7 @@ static void arm_heat_enable_as_if_running(void)
 {
     g_request_enable_link_up = true;
     heat_enable_init((SafetyLinkClass *)0x1);
+    heat_enable_assume_boot_id_seen_for_host_tests();
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     g_request_enable_true_calls = 0;
     g_request_enable_false_calls = 0;
@@ -791,6 +792,17 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c)
 {
     (void)zone_index;
     return raw_c;
+}
+
+/* Sheath tau 0 (no protection tube): tc_lag_comp is an exact passthrough,
+ * so this executable's expectations are unchanged by the lag compensation. */
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s)
+{
+    (void)zone_index;
+    if (out_tau_s) {
+        *out_tau_s = 0.0f;
+    }
+    return true;
 }
 
 uint32_t zones_config_generation(void)
@@ -1399,6 +1411,7 @@ bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
  * same busy-modeling stub test_adaptive_tune.c uses regardless -- see
  * stubs/bx_worker_stub.h's own header comment -- since it is still correct
  * to model the worker faithfully even though this path cannot trip it. */
+#include "fake_kv.h" /* before the stub: its dispatch then models the worker's internal stack (write-safe) */
 #include "bx_worker_stub.h"
 
 #ifdef _WIN32
@@ -2291,6 +2304,44 @@ static void test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone(void
     TEST_CHECK(ramp_assist_dwell_target_reached(&ex), "a cold monitor-only zone must NOT block the dwell");
     TEST_CHECK(ramp_assist_dwell_credit_peek_min_s(&ex) == 100.0f,
                "a monitor-only zone must NOT floor the shared dwell credit");
+}
+
+static void test_ramp_assist_dwell_too_hot_holds_descending_dwell_timer(void)
+{
+    TEST_SECTION("ramp_assist_dwell_too_hot() -- CL-03: a descending segment's dwell timer waits while a driving "
+                 "zone is still hotter than target by more than the ramp-lock band");
+    static s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.dwelling = true;
+    ex.dwell_arrived_hot = true;
+    ex.target_c = 500.0f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = true;
+    ex.zones[0].actual_c = 900.0f; /* free-cooling from 900 C to a 500 C hold */
+    TEST_CHECK(ramp_assist_dwell_too_hot(&ex), "900 C vs 500 C target on a descending dwell holds the timer");
+    ex.zones[0].actual_c = 500.0f + EXEC_RAMP_LOCK_BAND_C(0);
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "exactly at the band edge releases the timer");
+    ex.zones[0].actual_c = 900.0f;
+    TEST_CHECK(ramp_assist_zones_above_band(&ex), "zones_above_band sees the hot zone (dwell-entry predicate)");
+    ex.dwell_arrived_hot = false;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "a dwell that did not arrive hot is never held (mid-hold overshoot unchanged)");
+    ex.dwell_arrived_hot = true;
+    ex.dwelling = false;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "not yet dwelling: the ramp itself is untouched");
+    ex.dwelling = true;
+    ex.zones[0].monitor_only = true;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "a monitor-only zone cannot hold the timer");
+    ex.zones[0].monitor_only = false;
+    ex.zones[0].faulted = true;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "a faulted zone cannot hold the timer");
+    ex.zones[0].faulted = false;
+    ex.zones[0].actual_valid = false;
+    TEST_CHECK(!ramp_assist_dwell_too_hot(&ex), "an invalid reading is the ramp lock's business, not this hold's");
+    ex.zones[0].actual_valid = true;
+    ex.zones[1].active = true;
+    ex.zones[1].actual_valid = true;
+    ex.zones[1].actual_c = 500.0f;
+    TEST_CHECK(ramp_assist_dwell_too_hot(&ex), "one hot zone among several still holds the timer");
 }
 
 static void test_pause_keeps_claim_resume_reclaims_it(void)
@@ -9743,6 +9794,49 @@ static void fs_fresh_mounted(void)
     (void)cfg_fs_init(FS_SCRATCH_BASE, NULL);
 }
 
+static void test_firing_stats_persist_hops_from_psram_stack(void)
+{
+    TEST_SECTION("firing_stats_persist() -- from a PSRAM-stack task (the executor) the write hops to the "
+                 "flash worker and persists; with the worker unusable it is refused and not lost silently");
+    fs_fresh_mounted();
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 41;
+    strncpy(rec.profile_name, "HopFire", sizeof(rec.profile_name) - 1);
+    rec.duration_s = 4242;
+    rec.zone_mask = 0x01;
+    rec.zones[0].active = true;
+
+    s_stub_dispatch_fail = true;
+    unsigned before = s_stub_dispatch_count;
+    fake_kv_set_write_safe_here(false);
+    firing_stats_persist(&rec);
+    fake_kv_set_write_safe_here(true);
+    profile_firing_run_record_t out[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH];
+    memset(out, 0, sizeof(out));
+    TEST_CHECK(profile_executor_get_firing_history(41, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) == 0,
+               "worker unusable: no record persisted from the PSRAM stack");
+    s_stub_dispatch_fail = false;
+
+    before = s_stub_dispatch_count;
+    fake_kv_set_write_safe_here(false);
+    firing_stats_persist(&rec);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(s_stub_dispatch_count == before + 1, "the persist was dispatched to the flash worker once");
+    memset(out, 0, sizeof(out));
+    size_t n = profile_executor_get_firing_history(41, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+    TEST_CHECK(n == 1 && out[0].duration_s == 4242, "the record persisted via the worker and reads back");
+
+    before = s_stub_dispatch_count;
+    fake_kv_set_write_safe_here(false);
+    esp_err_t er = firing_stats_erase(41);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(er == ESP_OK && s_stub_dispatch_count == before + 1, "the erase was dispatched to the flash worker once");
+    memset(out, 0, sizeof(out));
+    TEST_CHECK(profile_executor_get_firing_history(41, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) == 0,
+               "the erase via the worker removed the history");
+}
+
 static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
 {
     TEST_SECTION("firing_stats_persist()/profile_executor_get_firing_history() -- round-trips a run record "
@@ -10107,6 +10201,7 @@ static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram
     rec.duration_s = 4242;
     rec.zone_mask = 0x01;
 
+    s_stub_dispatch_fail = true; // worker unusable: the hop cannot happen, so the write is refused
     fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
     firing_stats_persist(&rec); // void -- success/failure is only observable via the store
@@ -10120,6 +10215,7 @@ static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram
                "bug (an NVS write reached from a PSRAM-stack task) this net exists to catch "
                "before a future relocation of profile_executor makes it reachable for real");
 
+    s_stub_dispatch_fail = false;
     fake_kv_set_write_safe_here(true); // leave shared stub state as every other test expects
     fake_kv_reset_all();
 }
@@ -13178,9 +13274,11 @@ static void test_firing_stats_persist_refusal_abandons_shadow_firing(void)
     memset(&rec, 0, sizeof(rec));
     rec.profile_id = 12;
     rec.zone_mask = 0x02;
+    s_stub_dispatch_fail = true;
     fake_kv_set_write_safe_here(false);
     firing_stats_persist(&rec);
     fake_kv_set_write_safe_here(true);
+    s_stub_dispatch_fail = false;
 
     firing_shadow_status_t st1;
     TEST_CHECK(firing_shadow_get_status(&st1), "shadow status after the refused persist");
@@ -13233,6 +13331,7 @@ void run_test_profile_executor_prestart(void)
     test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted();
     test_escalate_guard_trip_monitor_only_zone_excluded_from_all_faulted();
     test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone();
+    test_ramp_assist_dwell_too_hot_holds_descending_dwell_timer();
     test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run();
     test_pause_keeps_claim_resume_reclaims_it();
     test_resume_restarts_thermal_guard_windows();
@@ -13401,6 +13500,7 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_normalized_iae_is_length_invariant();
     test_firing_stats_zone_tick_feeds_shadow_with_real_zone_index();
     test_firing_stats_persist_refusal_abandons_shadow_firing();
+    test_firing_stats_persist_hops_from_psram_stack();
     test_firing_stats_persist_load_round_trip_and_ring_depth();
     test_firing_stats_load_migrates_known_old_size_blob();
     test_firing_stats_load_discards_unknown_size_blob();
@@ -14117,6 +14217,7 @@ static void safetyfx7_wd_case(uint8_t diag_state, profile_exec_state_t *state_ou
     s_exec.last_tick_tick = xTaskGetTickCount();
     safetyfx7_set_diag(60000u, diag_state);
     g_stub_safety_st.diag_trip_reason = 1;
+    g_stub_safety_st.pico_boot_id_ever_seen = true; /* PR-04: an unseen boot id now pauses a held claim */
     BaseType_t saved_take = g_test_stub_semaphore_take_default;
     g_test_stub_semaphore_take_default = pdTRUE;
     g_task_delay_budget = 1;
@@ -14126,6 +14227,7 @@ static void safetyfx7_wd_case(uint8_t diag_state, profile_exec_state_t *state_ou
     g_task_delay_budget = -1;
     g_test_stub_semaphore_take_default = saved_take;
     *state_out = s_exec.state;
+    g_stub_safety_st.pico_boot_id_ever_seen = false;
     safetyfx7_clear_diag();
     profile_executor_halt();
     s_exec.state = PROFILE_EXEC_IDLE;

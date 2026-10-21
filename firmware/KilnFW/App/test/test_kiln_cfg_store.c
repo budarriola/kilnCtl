@@ -81,6 +81,21 @@ static void *kiln_cfg_store_test_malloc(size_t n)
     }
     return malloc(n);
 }
+// PS-01 seam: fail the Nth persist_scratch_alloc() of an exact size (the real
+// allocator otherwise). Included first so the #define below only redirects calls
+// made from kiln_cfg_store.c.
+#include "../drivers/persist/persist_scratch.h"
+static size_t s_ps_fail_size = 0;
+static int s_ps_fail_nth = 0;
+static int s_ps_seen = 0;
+static void *kcs_test_scratch_alloc(size_t n)
+{
+    if (s_ps_fail_nth > 0 && n == s_ps_fail_size && ++s_ps_seen == s_ps_fail_nth) {
+        return NULL;
+    }
+    return persist_scratch_alloc(n);
+}
+#define persist_scratch_alloc kcs_test_scratch_alloc
 #define malloc kiln_cfg_store_test_malloc
 
 #include "../drivers/persist/kiln_cfg_store.c"
@@ -210,6 +225,17 @@ bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap
     size_t n = s_stub_blob_size <= out_cap ? s_stub_blob_size : out_cap;
     memcpy(out, cfg, n);
     *out_len = n;
+    return true;
+}
+
+// Pre-v27 canonical form stub: the real one drops tc_sheath_tau_s; here it drops the last byte
+// so the legacy and current forms differ and hash differently.
+bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!zones_config_export_canonical(cfg, out, out_cap, out_len) || *out_len == 0) {
+        return false;
+    }
+    *out_len -= 1;
     return true;
 }
 
@@ -1671,6 +1697,28 @@ static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
     fake_kv_reset_all();
 }
 
+extern bool g_hop_stub_internal_stack; // test_safety_cfg_store.c's flash-worker stub model (main executable)
+
+static void test_nvs_save_store_hops_from_psram_stack(void)
+{
+    TEST_SECTION("nvs_save_store -- from a PSRAM-stack task (kiln_cfg_swap worker) the cfg write hops to the "
+                 "flash worker and persists; without the worker context it stays refused");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    fake_kv_set_write_safe_here(false);
+    g_hop_stub_internal_stack = false;
+    TEST_CHECK(nvs_save_store() == HAL_NOT_READY, "no worker context: refused");
+    uint32_t rev_before = s_kiln_cfg_rev;
+    g_hop_stub_internal_stack = true;
+    hal_status_t err = nvs_save_store();
+    g_hop_stub_internal_stack = false;
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(err == HAL_OK, "through the worker the PSRAM-stack save succeeds");
+    TEST_CHECK(s_kiln_cfg_rev == rev_before + 1, "the cfg file revision advanced: the write really landed");
+    cfg_fs_deinit();
+    fake_kv_reset_all();
+}
+
 // ---------------------------------------------------------------------------
 // kiln_cfg_store_cfg_fs.c coverage -- the `cfg` LittleFS read-through/
 // dual-write bridge for the WHOLE saved-configs store (one document, one
@@ -1888,6 +1936,33 @@ static void med3_run_case(const char *label, size_t len, uint8_t version_or_0, b
     (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
 }
 
+static esp_err_t ps02_failing_write(const char *path, const void *data, size_t len)
+{
+    (void)path; (void)data; (void)len;
+    return ESP_FAIL;
+}
+
+static void test_ps02_failed_bad_copy_is_not_claimed(void)
+{
+    TEST_SECTION("PS-02: a failed .bad preserve says the copy could NOT be kept");
+    const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    memset(s_med3_file, 0x5A, sizeof(s_med3_file));
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, s_med3_file, full - 3) == ESP_OK, "setup: bad file");
+    kiln_cfg_store_cfg_fs_set_write_fn(ps02_failing_write);
+    nvs_load_store_with_cfg_fs();
+    kiln_cfg_store_cfg_fs_set_write_fn(NULL);
+    char reason[192];
+    reason[0] = 0;
+    TEST_CHECK(kiln_cfg_store_is_quarantined(reason, sizeof(reason)), "quarantined");
+    TEST_CHECK(strstr(reason, "could NOT be kept") != NULL, "PS-02: reason says no .bad copy exists");
+    TEST_CHECK(strstr(reason, "copy kept as .bad") == NULL, "PS-02: reason does not claim a copy was kept");
+    size_t bgot = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", s_med3_file, sizeof(s_med3_file), &bgot) == ESP_ERR_NOT_FOUND,
+               "PS-02: no .bad file really exists");
+}
+
 static void test_med3_unusable_file_quarantines_never_absent(void)
 {
     const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
@@ -1918,6 +1993,160 @@ static void test_med3_unusable_file_quarantines_never_absent(void)
     kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &valid);
     TEST_CHECK(valid, "the file is now a valid empty store (rewritten only after the operator confirmed)");
     (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+}
+
+// persmed MED-C: a cfg file written by an OLDER layout (v1/v2) is migrated, never rejected -- otherwise the next
+// version bump would lock the store. MED-B: quarantine_clear keeps a .bad copy of what it discards.
+static void persmed_write_old_file(int ver)
+{
+    size_t blob_sz = (ver == 1) ? sizeof(kiln_cfg_store_blob_v1_t) : sizeof(kiln_cfg_store_blob_v2_t);
+    uint8_t *f = (uint8_t *)calloc(1, 4 + blob_sz);
+    TEST_CHECK(f != NULL, "alloc old-layout file");
+    f[0] = 9; /* rev 9 */
+    if (ver == 1) {
+        kiln_cfg_store_blob_v1_t *b = (kiln_cfg_store_blob_v1_t *)(f + 4);
+        b->version = 1;
+        b->active_id = 5;
+        b->next_id = 6;
+        b->entries[0].in_use = 1;
+        b->entries[0].id = 5;
+        strcpy(b->entries[0].name, "oldv1");
+    } else {
+        kiln_cfg_store_blob_v2_t *b = (kiln_cfg_store_blob_v2_t *)(f + 4);
+        b->version = 2;
+        b->active_id = 5;
+        b->next_id = 6;
+        b->entries[0].in_use = 1;
+        b->entries[0].id = 5;
+        strcpy(b->entries[0].name, "oldv2");
+    }
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, f, 4 + blob_sz) == ESP_OK, "setup: older-layout file");
+    free(f);
+}
+
+// PS-01: a transient failure while migrating a GOOD older file must not quarantine it as unmigratable or keep a
+// .bad copy; the file stays byte-identical so the next boot migrates it.
+static void test_ps01_transient_migration_failure_keeps_file(void)
+{
+    TEST_SECTION("PS-01: scratch alloc failure during migration -> file kept, no .bad, retry-next-boot reason");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    persmed_write_old_file(2);
+    uint8_t before[4 + sizeof(kiln_cfg_store_blob_v2_t)];
+    size_t blen = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH, before, sizeof(before), &blen) == ESP_OK, "read back setup file");
+    size_t cap = 4 + sizeof(kiln_cfg_store_blob_t);
+    if (4 + sizeof(kiln_cfg_store_blob_v1_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v1_t);
+    }
+    if (4 + sizeof(kiln_cfg_store_blob_v2_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v2_t);
+    }
+    s_ps_fail_size = cap;
+    s_ps_fail_nth = 1;
+    s_ps_seen = 0;
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    s_ps_fail_nth = 0;
+    TEST_CHECK(s_ps_seen == 1, "the migration raw-buffer allocation was reached");
+    char why[128];
+    TEST_CHECK(kiln_cfg_store_is_quarantined(why, sizeof(why)), "transient failure still refuses writes this boot");
+    TEST_CHECK(strstr(why, "transient") != NULL && strstr(why, "cannot migrate") == NULL,
+               "reason says transient/retry, not 'cannot migrate'");
+    uint8_t after[4 + sizeof(kiln_cfg_store_blob_v2_t)];
+    size_t alen = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH, after, sizeof(after), &alen) == ESP_OK && alen == blen &&
+                   memcmp(before, after, blen) == 0,
+               "the good file is left byte-identical");
+    size_t badlen = 0;
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", after, sizeof(after), &badlen) == ESP_ERR_NOT_FOUND,
+               "no .bad copy is written for a transient failure");
+
+    /* second transient shape: raw read fine, the v2 conversion buffer allocation fails */
+    memset(&s_store, 0, sizeof(s_store));
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
+    s_ps_fail_size = sizeof(kiln_cfg_store_blob_v2_t);
+    s_ps_fail_nth = 1;
+    s_ps_seen = 0;
+    nvs_load_store_with_cfg_fs();
+    s_ps_fail_nth = 0;
+    TEST_CHECK(s_ps_seen == 1, "the v2 conversion buffer allocation was reached");
+    TEST_CHECK(kiln_cfg_store_is_quarantined(why, sizeof(why)) && strstr(why, "transient") != NULL,
+               "conversion-buffer failure is also transient");
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", after, sizeof(after), &badlen) == ESP_ERR_NOT_FOUND,
+               "no .bad copy for a conversion-buffer failure either");
+
+    /* next boot (no failure) migrates the same file */
+    memset(&s_store, 0, sizeof(s_store));
+    s_quarantined = false;
+    s_quarantine_reason[0] = '\0';
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(!kiln_cfg_store_is_quarantined(NULL, 0) && kiln_cfg_store_get_active_id() == 5,
+               "the retry boot migrates the same file");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+}
+
+static void test_persmed_older_file_migrates_and_clear_keeps_copy(void)
+{
+    for (int ver = 1; ver <= 2; ver++) {
+        TEST_SECTION(ver == 1 ? "persmed MED-C: a v1-layout cfg file migrates (not rejected)"
+                              : "persmed MED-C: a v2-layout cfg file migrates (not rejected)");
+        reset_state_cfg_fs();
+        TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+        persmed_write_old_file(ver);
+        memset(&s_store, 0, sizeof(s_store));
+        nvs_load_store_with_cfg_fs();
+        char nm[KILN_CFG_NAME_MAX_LEN + 1];
+        TEST_CHECK(!kiln_cfg_store_is_quarantined(NULL, 0), "MED-C: not quarantined");
+        TEST_CHECK(kiln_cfg_store_get_active_id() == 5, "MED-C: active id survived the migration");
+        TEST_CHECK(kiln_cfg_store_get_name(5, nm, sizeof(nm)) && strncmp(nm, "oldv", 4) == 0,
+                   "MED-C: entry survived the migration");
+        kiln_cfg_store_blob_t raw;
+        uint32_t rev = 0;
+        bool valid = false;
+        kiln_cfg_store_cfg_fs_load_raw(&raw, &rev, &valid);
+        TEST_CHECK(valid && raw.version == KILN_CFG_STORE_VERSION && rev == 10,
+                   "MED-C: the file was rewritten in the current layout at rev+1");
+        char reason[96];
+        int32_t id = -1;
+        TEST_CHECK(kiln_cfg_store_save_current("after", -1, &id, reason, sizeof(reason)),
+                   "MED-C: saves work after the migration");
+    }
+
+    TEST_SECTION("persmed MED-B: quarantine_clear keeps .bad copies of the file and the NVS blob");
+    reset_state_cfg_fs();
+    TEST_CHECK(cfg_fs_init(KCFG_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    char reason[96];
+    int32_t id = -1;
+    TEST_CHECK(kiln_cfg_store_save_current("keepme", -1, &id, reason, sizeof(reason)), "setup: a store");
+    kcfg_stage_legacy_nvs(&s_store, 7);
+    memset(s_med3_file, 0x77, sizeof(s_med3_file));
+    s_med3_file[0] = 3;
+    s_med3_file[1] = s_med3_file[2] = s_med3_file[3] = 0;
+    memcpy(s_med3_file + 4, &s_store, sizeof(kiln_cfg_store_blob_t));
+    ((kiln_cfg_store_blob_t *)(s_med3_file + 4))->version = (uint8_t)(KILN_CFG_STORE_VERSION + 1);
+    const size_t full = 4 + sizeof(kiln_cfg_store_blob_t);
+    TEST_CHECK(cfg_fs_write_atomic(KILN_CFG_STORE_FILE_PATH, s_med3_file, full) == ESP_OK, "setup: NEWER file");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+    (void)cfg_fs_delete(KILN_CFG_STORE_NVS_BAD_PATH);
+    memset(&s_store, 0, sizeof(s_store));
+    nvs_load_store_with_cfg_fs();
+    TEST_CHECK(kiln_cfg_store_is_quarantined(NULL, 0), "quarantined on a NEWER file");
+    size_t got = 0;
+    static uint8_t back[sizeof(s_med3_file)];
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", back, sizeof(back), &got) == ESP_ERR_NOT_FOUND,
+               "precondition: a NEWER file has no .bad copy yet");
+    char op[192];
+    TEST_CHECK(kiln_cfg_store_quarantine_clear(true, op, sizeof(op)), "operator confirms the discard");
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_FILE_PATH ".bad", back, sizeof(back), &got) == ESP_OK && got == full &&
+                   memcmp(back, s_med3_file, full) == 0,
+               "MED-B: the discarded cfg file is kept byte-for-byte as .bad");
+    TEST_CHECK(cfg_fs_read(KILN_CFG_STORE_NVS_BAD_PATH, back, sizeof(back), &got) == ESP_OK &&
+                   got == sizeof(kiln_cfg_store_blob_t),
+               "MED-B: the discarded legacy NVS blob is kept as .nvs.bad");
+    (void)cfg_fs_delete(KILN_CFG_STORE_FILE_PATH ".bad");
+    (void)cfg_fs_delete(KILN_CFG_STORE_NVS_BAD_PATH);
 }
 
 // 4. Saves and deletes each advance the shared whole-document rev, in the
@@ -2957,6 +3186,160 @@ static void test_import_refuses_abs_max_temp_c_tighter_than_zone_max(void)
     uint8_t after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
     TEST_CHECK(after == before, "no slot was allocated on refusal");
 
+    free(json);
+}
+
+// BW-06 (SR-31): a pre.4 package carries the retired Pico ids 0x0401/0x0404/0x0405. The hash covers
+// the original bytes; import skips the retired ids. A truly unknown id is still refused. The
+// validate-only seam (backup dry run) must give the same verdict as the real import.
+static bool bw06_build(char *json, size_t cap, const uint16_t *ids, uint8_t n, size_t *out_len)
+{
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = (uint16_t)(n + 1);
+    pico.entries[0].param_id = 0x0104u; // abs_max_temp_c, required set by the 5.3 ceiling rule
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = 1300.0f;
+    pico.entries[0].value_bits = conv.bits;
+    for (uint8_t i = 0; i < n; i++) {
+        pico.entries[i + 1].param_id = ids[i];
+        pico.entries[i + 1].type = KILNLINK_PARAM_TYPE_U16;
+        pico.entries[i + 1].flags = KILN_PKG_PARAM_FLAG_SET;
+        pico.entries[i + 1].value_bits = 5;
+    }
+    uint32_t hash = 0;
+    if (!kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash)) {
+        return false;
+    }
+    return kiln_package_export_json("Pre4", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, hash,
+                                    0x11223344u, json, cap, out_len);
+}
+
+// BW-06 follow-up: a package exported before zones v27 hashed the canonical form without
+// tc_sheath_tau_s. It must still import (and be re-hashed in the current form); a tampered one
+// must not; a stale stored slot hash is refreshed so main's own export re-imports.
+static bool bw06fx_build_v26(char *json, size_t cap, bool tamper_after_hash, size_t *out_len)
+{
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.version = 26;
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = 1200.0f;
+    s_stub_blob_size = sizeof(cand);
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    pico.count = 1;
+    pico.entries[0].param_id = 0x0104u;
+    pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+    union { uint32_t bits; float f; } conv;
+    conv.f = 1300.0f;
+    pico.entries[0].value_bits = conv.bits;
+    uint32_t hash = 0;
+    if (!kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand) - 1, &pico, &hash)) {
+        return false;
+    }
+    if (tamper_after_hash) {
+        cand.zones[0].max_temp_c = 1100.0f;
+    }
+    return kiln_package_export_json("Pre27", 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, hash,
+                                    0x11223344u, json, cap, out_len);
+}
+
+static void test_bw06fx_pre_v27_package_imports_and_rehashes(void)
+{
+    TEST_SECTION("BW-06 follow-up: pre-v27 package imports, tampered one is refused, stale slot hash refreshed");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    char reason[200] = {0};
+    int32_t id = -1;
+
+    TEST_CHECK(bw06fx_build_v26(json, KILN_PKG_JSON_MAX_LEN, true, &len), "setup: tampered v26 package");
+    TEST_CHECK(!kiln_cfg_store_import_package_json(json, &id, reason, sizeof(reason)),
+               "tampered pre-v27 package is refused");
+    TEST_CHECK(strstr(reason, "hash") != NULL, "refusal names the hash");
+
+    reason[0] = '\0';
+    TEST_CHECK(bw06fx_build_v26(json, KILN_PKG_JSON_MAX_LEN, false, &len), "setup: genuine v26 package");
+    TEST_CHECK(kiln_cfg_store_import_package_json(json, &id, reason, sizeof(reason)), "pre-v27 package imports");
+    int idx = find_index_by_id(id);
+    TEST_CHECK(idx >= 0, "imported slot exists");
+    if (idx >= 0) {
+        uint32_t stored = s_store.entries[idx].pkg_hash;
+        char *json2 = (char *)malloc(KILN_CFG_EXPORT_JSON_MAX_LEN);
+        size_t len2 = 0;
+        TEST_CHECK(json2 && kiln_cfg_store_export_package_json(id, json2, KILN_CFG_EXPORT_JSON_MAX_LEN, &len2,
+                                                               reason, sizeof(reason)),
+                   "re-export of the imported slot");
+        char *nm = json2 ? strstr(json2, "\"name\":\"Pre27\"") : NULL;
+        TEST_CHECK(nm != NULL, "found name to change");
+        if (nm) {
+            nm[strlen("\"name\":\"Pre2")] = '8';
+            int32_t id2 = -1;
+            TEST_CHECK(kiln_cfg_store_import_package_json(json2, &id2, reason, sizeof(reason)),
+                       "main's own export of the migrated slot re-imports");
+        }
+        free(json2);
+
+        s_store.entries[idx].pkg_hash = stored ^ 0x5A5A5A5Au;
+        rehash_all_slots_in_ram();
+        TEST_CHECK(s_store.entries[idx].pkg_hash == stored, "load-time re-hash restores the current-form hash");
+    }
+    free(json);
+}
+
+static void test_import_skips_retired_sr31_ids_refuses_unknown(void)
+{
+    TEST_SECTION("kiln_cfg_store_import_package_json -- BW-06: retired SR-31 ids 0x0401/0x0404/0x0405 are "
+                 "skipped, an unknown id is refused, validate-only matches import");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    char reason[200] = {0};
+    char vname[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t vsch = 0;
+    uint32_t vhash = 0;
+
+    const uint16_t retired[] = {0x0401u, 0x0404u, 0x0405u};
+    TEST_CHECK(bw06_build(json, KILN_PKG_JSON_MAX_LEN, retired, 3, &len), "setup: pre.4-shaped package");
+    bool v = kiln_cfg_store_validate_package_json(json, vname, sizeof(vname), &vsch, &vhash, reason, sizeof(reason));
+    TEST_CHECK(v, "validate-only (dry run) accepts retired ids");
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    bool ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(ok, "import accepts retired ids");
+    TEST_CHECK(ok == v, "dry run and import agree (accept)");
+    if (ok) {
+        kiln_pkg_safety_t pico;
+        uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+        uint16_t blen = 0;
+        memset(&pico, 0, sizeof(pico));
+        TEST_CHECK(kiln_cfg_store_get_full_package(new_id, blob, sizeof(blob), &blen, &pico, reason, sizeof(reason)),
+                   "stored package reads back");
+        TEST_CHECK(pico.count == 1 && pico.entries[0].param_id == 0x0104u, "retired ids were skipped, not stored");
+    }
+
+    const uint16_t unknown[] = {0x0401u, 0x7E7Eu};
+    TEST_CHECK(bw06_build(json, KILN_PKG_JSON_MAX_LEN, unknown, 2, &len), "setup: package with unknown id");
+    v = kiln_cfg_store_validate_package_json(json, vname, sizeof(vname), &vsch, &vhash, reason, sizeof(reason));
+    TEST_CHECK(!v, "validate-only refuses unknown id");
+    reason[0] = '\0';
+    new_id = -1;
+    ok = kiln_cfg_store_import_package_json(json, &new_id, reason, sizeof(reason));
+    TEST_CHECK(!ok && ok == v, "import refuses unknown id, same as dry run");
+    TEST_CHECK(strstr(reason, "32382") != NULL, "reason names the unknown id");
     free(json);
 }
 
@@ -4327,6 +4710,8 @@ void run_test_kiln_cfg_store(void)
     test_save_current_captures_pico_half_and_hash();
     test_save_current_unfetched_cache_is_not_marked_populated();
     test_get_package_identity_unknown_id_and_migrated_slot();
+    test_import_skips_retired_sr31_ids_refuses_unknown();
+    test_bw06fx_pre_v27_package_imports_and_rehashes();
     test_apply_refuses_half_package();
     test_corrupt_store_quarantines_and_blocks_writes();
     test_nvs_load_store_migrates_v1_blob_at_full_size();
@@ -4339,6 +4724,7 @@ void run_test_kiln_cfg_store(void)
     test_nvs_load_store_current_version_full_size_happy_path();
     test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
+    test_nvs_save_store_hops_from_psram_stack();
 
     test_cfg_fs_partition_absent_falls_through_to_nvs_only();
     test_cfg_fs_mount_failed_falls_through_to_nvs_only();
@@ -4350,6 +4736,9 @@ void run_test_kiln_cfg_store(void)
     test_cfg_fs_stale_delete_not_resurrected();
     test_cfg_fs_interrupted_write_leaves_old_or_new();
     test_med3_unusable_file_quarantines_never_absent();
+    test_ps01_transient_migration_failure_keeps_file();
+    test_ps02_failed_bad_copy_is_not_claimed();
+    test_persmed_older_file_migrates_and_clear_keeps_copy();
 
     test_export_import_new_slot_round_trip();
     test_export_package_json_never_contains_or_disturbs_credential();

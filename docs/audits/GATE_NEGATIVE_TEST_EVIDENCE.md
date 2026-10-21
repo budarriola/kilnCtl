@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 210.
+Gate rows: 212.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 198 |
+| NEGATIVE-TESTED | 200 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
@@ -182,6 +182,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_nvs_key_length.ps1` | NEGATIVE-TESTED | 09-16 | 17-character NVS key literal added to adaptive_tune.h | RED, names file, line, literal; hand-restored; PASS |
 | `tools/check_nvs_write_guard_coverage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | kiln_cfg_store.c quarantine_clear: guard `if (caller_stack_is_external())` -> `if (0)` (a first try in relay_cycles.c persist_snapshot was GREEN: that function writes via cfg-fs, not NVS) | RED; check returned to PASS on restore; 10-08 hardening: relay_cycles.c persist_snapshot `if (0 && caller_stack_is_external())` PASSED, now rejected, negtest CAUGHT |
 | `tools/check_ota_esp_refuses_running_target.ps1` | NEGATIVE-TESTED | 10-07 | guard kept as text but defeated: if (0 && !...), negation dropped, goto cleanup removed | PASSED (call located by position only): WEAK, fixed by matching the whole refusing if-block; all three now RED (re-run by the opus review); Pico mutations RED as before; 10-08 hardening: ota_http_util.c `return target != NULL;` PASSED, comparison now pinned in source, negtest CAUGHT |
+| `tools/check_page_gate.ps1` | NEGATIVE-TESTED | 10-19 | 5 check-script mutations (KG-01, f39d5a9d5) via negtest.ps1 -Preset check | 5/5 CAUGHT |
 | `tools/check_page_js_tests.ps1` | NEGATIVE-TESTED | 10-02 | delete-count filter loosened in backup_page.html | RED naming test_backup_page.js (36/37); restored |
 | `tools/check_psram_task_stacks.ps1` | NEGATIVE-TESTED | 10-14 | mutations to the PSRAM task-stack allowlist/registration rules (psramstk, commits a6c671e49 / 715ffc0ea) | 5/5 CAUGHT |
 | `tools/check_zone_omit_preserved_drift.ps1` | NEGATIVE-TESTED | benchfx13 2026-10-12 (tools\negtest.ps1 -Preset check) | zones_http_client.py: ZONE_OMIT_PRESERVED_FLOAT_KEYS: dropped "debounce" | RED (drift test names the missing key); real tree unchanged |
@@ -249,3 +250,4 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_app_hold_registration.ps1` | NEGATIVE-TESTED | negtest 2026-10-12 (`-Preset check -PresetArg tools/check_app_hold_registration.ps1`) | (1) main.c: `profile_executor_note_external_app_hold();` -> `(void)0;`; (2) main_control_bringup.c: same removal; (3) main.c: call renamed to `profile_executor_note_external_app_hold_x()` | CAUGHT all three (exit 1): `FAIL: main.c:183: APP-capable fault-source assert (fault_sources) not preceded by profile_executor_note_external_app_hold()`, `FAIL: main_control_bringup.c:109: ... (ctx->boot_fault_sources) ...`; baseline PASS each run |
 | `tools/check_internal_alloc_allowlist.ps1` | NEGATIVE-TESTED | 10-13 | negtest 2026-10-13 (`-Preset check -PresetArg tools/check_internal_alloc_allowlist.ps1`) | (1) `malloc(64)` helper added to unlisted-count file http/dashboard_exec_http.c; (2) `calloc(1, 64)` added to safety/safety_cfg_store.c (an allowlisted file, count raised) | CAUGHT both (exit 1): `FAIL: NEW plain alloc/task-create site(s) in drivers/http/dashboard_exec_http.c (1)` and `... drivers/safety/safety_cfg_store.c (1)`; baseline PASS |
 | `firmware/KilnFW_recovery/main/check_recovery_status_fragments.ps1` | NEGATIVE-TESTED | 10-13 | negtest 2026-10-13 (`-Preset check -PresetArg firmware/KilnFW_recovery/main/check_recovery_status_fragments.ps1`) | (1) frag[200] shrunk to 140; (2) last_install merged back into numeric fragment; (3) supersede call dropped; (4) supersede result not reported; (5) supersede moved after boot set | CAUGHT 5/5 (exit 1, each a distinct FAIL line); baseline PASS |
+| `tools/check_stage_chip_rev_kconfig.ps1` | NEGATIVE-TESTED | negtest 2026-10-18 (OF-02) | KilnFW_recovery Kconfig `KILNCTL_STAGE_CHIP_REV_CHECK` default set to `n` while the app default stays `y` | CAUGHT (exit 1): app/recovery default mismatch reported |

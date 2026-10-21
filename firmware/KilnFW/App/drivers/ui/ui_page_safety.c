@@ -18,8 +18,10 @@
 
 // LCD Safety / Alarm page, TODO.md sec 0.5.
 //
-// Owner decisions 2026-10-07: viewing (current trip state + last trip) is
-// dashboard-level, no PIN. Clear Trip needs an LCD admin login
+// Owner decision 2026-10-09 (supersedes 2026-10-07): opening this page needs a
+// USER PIN (ui_lcd_lock_run_gated, LCD_PIN_ROLE_USER). Both entry points enforce
+// it: ui_page_home.c (trip strip) and ui_page_config.c (safety_nav_cb). Do not
+// remove either gate. Clear Trip needs an LCD admin login
 // (ui_lcd_lock_run_gated). A trip cleared anywhere else (web, MCP, UART) must
 // make this page's alarm go away too.
 //

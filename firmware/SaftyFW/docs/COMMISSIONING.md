@@ -181,11 +181,11 @@ value in the wrong field with the right type tag and no error anywhere.
 | `0x0310`–`0x0312` | `ct_cal[0..2].gain` | F32 |
 | `0x0313`–`0x0315` | `ct_cal[0..2].offset` | F32 |
 | `0x0316`–`0x0318` | `ct_cal[0..2].calibrated` | BOOL |
-| `0x0401` | `context_max_age_s` | U16 |
+| `0x0401` | `context_max_age_s` | U16  reserved (SR-31: SET refused, GET reads) |
 | `0x0402` | `link_timeout_s` | U16 |
 | `0x0403` | `link_dead_hard_s` | U16 |
-| `0x0404` | `mainfault_debounce_ms` | U16 |
-| `0x0405` | `telemetry_period_ms` | U16 |
+| `0x0404` | `mainfault_debounce_ms` | U16  reserved (SR-31: SET refused, GET reads) |
+| `0x0405` | `telemetry_period_ms` | U16  reserved (SR-31: SET refused, GET reads) |
 | `0x0501` | `startup_grace_s` | U16 |
 | `0x0502` | `estop_debounce_ms` | U16 |
 | `0x0503` | `watchdog_timeout_ms` | U16 |

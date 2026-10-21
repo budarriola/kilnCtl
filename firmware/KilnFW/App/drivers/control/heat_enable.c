@@ -1,5 +1,6 @@
 #include "heat_enable.h"
 
+#include "esp_attr.h" /* RTC_NOINIT_ATTR: PF-04 acted-on Pico boot id */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -72,6 +73,9 @@ static const char *TAG = "heat_enable";
  * frame of the NEW boot. Until one arrives the cause is undecided and heat is
  * withheld (no timeout fallback: a late fatal DIAG must still hold). */
 
+/* SR-11: a second benign Pico reboot inside this window is held as fatal. */
+#define HE_BENIGN_REBOOT_WINDOW_MS (15u * 60u * 1000u)
+
 typedef struct {
     SemaphoreHandle_t lock;
     SafetyLinkClass  *safety;
@@ -103,6 +107,44 @@ typedef struct {
      * reboot_hold. Cleared only when an acquire consumes it, or by init (never by a newer reboot). */
     bool              reboot_verdict_pending;
     bool              reboot_fatal_latched;
+    /* PF-01/PF-02/PF-03 (INVESTIGATE_PICO_FATAL_REBOOT_2026_10_17). boot_id_unseen: no frame carrying a
+     * Pico boot id has arrived since the ESP booted, so no reboot baseline exists and heat is withheld.
+     * latch_lost_trip_only: the standing latch came ONLY from the claimless lost-trip rule (no fatal boot
+     * bit), so an operator clear on the same boot can expire it (latch_seq/latch_tripped_seen).
+     * hold_lost_trip_only: the current reboot_hold came from such a latch (distinct pause reason). */
+    bool              boot_id_unseen;
+    bool              boot_id_first_sight_done; /* PQ-01: the PR-01 first-sight rule ran this ESP boot */
+    bool              latch_lost_trip_only;
+    bool              latch_tripped_seen;
+    uint32_t          latch_seq;
+    bool              hold_lost_trip_only;
+    bool              hold_repeated_benign; /* BT-02: current reboot_hold is a second benign reboot inside the window */
+    /* PF-04: the Pico's current boot id and whether it booted before this ESP (fed each tick). verdict_first_sight:
+     * the pending verdict is the PR-01 first-sight one (cleared by a live reboot seq change). latch_first_sight /
+     * hold_first_sight: the standing fatal latch / reboot_hold came from that verdict (distinct pause text). */
+    bool              pico_id_valid;
+    uint8_t           pico_boot_id;
+    bool              pico_older_than_esp;
+    bool              verdict_first_sight;
+    bool              latch_first_sight;
+    bool              hold_first_sight;
+    /* PR-02: trip bits (trip_mask | 1<<(reason-1)) of the last TRIPPED DIAG, the bits of the trip lost across
+     * the reboot being classified, whether a claim was held (or taken) while that verdict was pending, and the
+     * expiry state of a standing claimless latch: it may expire only when the trips an operator cleared on the
+     * new boot cover latch_lost_bits (nonzero). A latch made with a claim held never expires. */
+    uint32_t          trip_bits_now;
+    uint32_t          last_pico_trip_bits;
+    uint32_t          reboot_lost_bits;
+    bool              reboot_had_claim;
+    bool              latch_expirable;
+    uint32_t          latch_lost_bits;
+    uint32_t          latch_cleared_bits;
+    /* SR-11: the RP2040 cannot tell a brownout from a clean power-on (both set
+     * CHIP_RESET HAD_POR), so a brownout reports as POWERON and would classify
+     * benign. Bound it: a benign reboot within HE_BENIGN_REBOOT_WINDOW_MS of the
+     * previous benign one is treated as fatal. Deliberately survives release/pause
+     * (a pause/resume must not wash the history); cleared only by init. 0 = none. */
+    uint32_t          last_benign_reboot_ms;
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -143,6 +185,7 @@ typedef struct {
 } heat_enable_ctx_t;
 
 static heat_enable_ctx_t s_he;
+static void he_record_acted_locked(void); /* PF-04, defined with the RTC record below */
 
 static uint32_t claim_bit(heat_enable_claimant_t who)
 {
@@ -212,6 +255,26 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.reboot_was_tripped = false;
     s_he.reboot_verdict_pending = false;
     s_he.reboot_fatal_latched = false;
+    s_he.boot_id_first_sight_done = false;
+    s_he.pico_id_valid = false;
+    s_he.pico_older_than_esp = false;
+    s_he.verdict_first_sight = false;
+    s_he.latch_first_sight = false;
+    s_he.hold_first_sight = false;
+    s_he.boot_id_unseen = true; /* PR-03/PQ-02: fail closed until the guard reports a boot id */
+    s_he.latch_lost_trip_only = false;
+    s_he.latch_tripped_seen = false;
+    s_he.latch_seq = 0u;
+    s_he.hold_lost_trip_only = false;
+    s_he.hold_repeated_benign = false;
+    s_he.trip_bits_now = 0u;
+    s_he.last_pico_trip_bits = 0u;
+    s_he.reboot_lost_bits = 0u;
+    s_he.reboot_had_claim = false;
+    s_he.latch_expirable = false;
+    s_he.latch_lost_bits = 0u;
+    s_he.latch_cleared_bits = 0u;
+    s_he.last_benign_reboot_ms = 0u;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -323,7 +386,9 @@ static bool send_enable(const char *why)
          * Review-2 LOW-1: a fatal-reboot hold was set while this send was in flight; the Pico now holds
          * an enable we must not keep. Record nothing as granted and owe the wire a release. */
         s_he.granted = false;
-        s_he.pending = false;
+        /* HF-01: with only an undecided classification (no fatal hold) the claim still stands; keep
+         * pending so reconcile re-requests heat once, after a benign verdict. */
+        s_he.pending = !s_he.reboot_hold;
         s_he.warned_pending = false;
         s_he.release_pending = true;
         s_he.enable_sends++;
@@ -467,6 +532,7 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
             /* MED-5: a verdict that was pending (or fatal) when the previous claim ended is
              * re-armed for this one, so resume/start cannot launder an undecided reboot. */
             if (s_he.reboot_verdict_pending) {
+                s_he.reboot_had_claim = true; /* PR-02 */
                 s_he.reboot_classify_pending = true;
                 if (s_he.reboot_classify_since_ms == 0u) {
                     s_he.reboot_classify_since_ms = 1u;
@@ -475,9 +541,15 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
             if (s_he.reboot_fatal_latched) {
                 s_he.reboot_fatal_latched = false;
                 s_he.reboot_hold = true;
+                s_he.hold_first_sight = s_he.latch_first_sight; /* PF-04 */
+                s_he.latch_first_sight = false;
+                he_record_acted_locked();
+                s_he.hold_lost_trip_only = s_he.latch_lost_trip_only;
+                s_he.latch_lost_trip_only = false;
+                s_he.latch_expirable = false;
             }
         }
-        withheld = s_he.reboot_classify_pending || s_he.reboot_hold;
+        withheld = s_he.reboot_classify_pending || s_he.reboot_hold || s_he.boot_id_unseen;
         if (withheld && !s_he.granted) {
             s_he.pending = true; /* reconcile re-requests once the verdict is benign */
         }
@@ -574,6 +646,9 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         he_k4_reset_locked();
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
+        s_he.hold_lost_trip_only = false;
+        s_he.hold_repeated_benign = false;
+        s_he.hold_first_sight = false;
         /* reboot_verdict_pending / reboot_fatal_latched / reboot_was_tripped deliberately
          * survive (MED-5, review saftyfx6 F8). */
         if (had_request) {
@@ -740,6 +815,61 @@ bool heat_enable_grant_unconfirmed(void)
     return u;
 }
 
+/* PF-04: the Pico boot id this ESP last ACTED ON (its boot reason resolved benign, or its fatal verdict became a
+ * hold/pause). RTC_NOINIT survives software resets (the ESP restarts the Pico does not see) and is garbage after
+ * power-on; the magic + complement check makes garbage read as "never acted", which is the old fail-safe latch
+ * behaviour. No NVS write. A byte id collides 1 in 256, which is why the rule also needs the Pico to be older. */
+#define HE_ACTED_MAGIC 0x50463034u
+typedef struct {
+    uint32_t magic;
+    uint32_t id_word; /* id | ~id << 8 */
+} he_acted_t;
+RTC_NOINIT_ATTR static he_acted_t s_acted;
+
+static uint32_t he_acted_word(uint8_t id)
+{
+    return (uint32_t)id | ((uint32_t)(uint8_t)~id << 8);
+}
+
+static bool he_acted_matches(uint8_t id)
+{
+    return s_acted.magic == HE_ACTED_MAGIC && s_acted.id_word == he_acted_word(id);
+}
+
+static void he_record_acted_locked(void)
+{
+    if (!s_he.pico_id_valid) {
+        return;
+    }
+    s_acted.id_word = he_acted_word(s_he.pico_boot_id);
+    s_acted.magic = HE_ACTED_MAGIC;
+}
+
+void heat_enable_note_pico_boot_identity(bool id_valid, uint8_t boot_id, bool pico_older_than_esp)
+{
+    bool taken = he_lock();
+    s_he.pico_id_valid = id_valid;
+    s_he.pico_boot_id = boot_id;
+    s_he.pico_older_than_esp = pico_older_than_esp;
+    he_unlock(taken);
+}
+
+bool heat_enable_reboot_hold_first_sight(void)
+{
+    bool taken = he_lock();
+    bool h = s_he.reboot_hold && s_he.held_mask != 0u && s_he.hold_first_sight;
+    he_unlock(taken);
+    return h;
+}
+
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
+void heat_enable_forget_acted_boot_id_for_host_tests(void)
+{
+    s_acted.magic = 0u;
+    s_acted.id_word = 0u;
+}
+#endif
+
 void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
                                 uint32_t now_ms)
 {
@@ -748,6 +878,12 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
     bool log_benign = false;
     bool log_lost_trip = false;
     bool log_claimless_lost_trip = false;
+    bool repeated_benign = false;
+    if (s_he.boot_id_unseen) {
+        /* PF-01: no boot id frame yet -> no baseline, no reboot rule. Heat stays withheld (acquire). */
+        he_unlock(taken);
+        return;
+    }
     if (!s_he.reboot_seq_known) {
         s_he.reboot_seq_known = true;
         s_he.seen_reboot_seq = reboot_seq;
@@ -762,33 +898,99 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
          * only when a verdict resolves, never by a claim release. */
         s_he.reboot_was_tripped = (s_he.reboot_verdict_pending && s_he.reboot_was_tripped) ||
                                   s_he.last_pico_tripped;
+        s_he.reboot_lost_bits = (s_he.reboot_verdict_pending ? s_he.reboot_lost_bits : 0u) |
+                                (s_he.last_pico_tripped ? s_he.last_pico_trip_bits : 0u);
+        s_he.reboot_had_claim = (s_he.reboot_verdict_pending && s_he.reboot_had_claim) || s_he.held_mask != 0u;
         s_he.reboot_verdict_pending = true;  /* MED-5: survives release/pause */
         /* Firing audit 2 MED-1: an unconsumed fatal_latched is NOT downgraded by a newer reboot (a
          * double count of one reboot, or a fatal reboot followed by a benign one, must not erase it);
          * only an acquire consumes it (heat_enable_acquire) or init clears it. */
         s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
+        s_he.verdict_first_sight = false; /* PF-04: a live reboot, not the ESP-boot first sight */
         if (s_he.held_mask != 0u) {
             s_he.reboot_classify_pending = true;
+            /* HH-02: the old boot's grant is void; do not report it (is_granted / second acquire)
+             * before this boot's DIAG verdict. Reconcile re-requests once the verdict is benign. */
+            if (s_he.granted) {
+                s_he.granted = false;
+                s_he.pending = true;
+            }
         }
     }
+    /* PF-04: the first-sight verdict of an ESP boot must not latch a fatal bit this ESP already acted on in an
+     * earlier boot for the SAME Pico boot (the Pico did not reboot; its reason byte is fixed for its whole
+     * uptime). Needs: same RTC-persisted boot id AND a Pico older than this ESP. Anything else (new boot id,
+     * unknown id, younger Pico, no RTC record) keeps PR-01: a Pico reset while the ESP was down still latches. */
+    bool stale_ignored = false;
+    {
+        const uint8_t stale_fatal = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
+                                    SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW | SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
+                                    SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
+        if (s_he.verdict_first_sight && s_he.pico_id_valid && s_he.pico_older_than_esp &&
+            he_acted_matches(s_he.pico_boot_id) && (boot_reason & stale_fatal) != 0u) {
+            stale_ignored = true;
+            boot_reason = (uint8_t)(boot_reason & (uint8_t)~stale_fatal);
+        }
+    }
+    bool log_stale = false;
     if (s_he.held_mask == 0u) {
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
         if (s_he.reboot_verdict_pending && diag_since_reboot) {
+            log_stale = stale_ignored;
             const uint8_t fatal_u = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
                                     SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
                                     SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
                                     SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
             s_he.reboot_verdict_pending = false;
             log_claimless_lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal_u) == 0u;
-            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
-                                          s_he.reboot_fatal_latched;
+            {
+                bool fatal_bits = (boot_reason & fatal_u) != 0u;
+                /* PF-02: only a latch made purely by the lost-trip rule may expire later. */
+                if (fatal_bits || (s_he.reboot_fatal_latched && !s_he.latch_lost_trip_only)) {
+                    s_he.latch_lost_trip_only = false;
+                    s_he.latch_expirable = false;
+                } else if (s_he.reboot_was_tripped) {
+                    /* PR-02: expirable only if no claim was involved, the lost reason is known, and any
+                     * latch already standing was itself expirable. */
+                    bool prev_ok = !s_he.reboot_fatal_latched || s_he.latch_expirable;
+                    uint32_t prev_bits = (s_he.reboot_fatal_latched && s_he.latch_expirable) ? s_he.latch_lost_bits : 0u;
+                    s_he.latch_lost_bits = prev_bits | s_he.reboot_lost_bits;
+                    s_he.latch_expirable = prev_ok && !s_he.reboot_had_claim && s_he.latch_lost_bits != 0u;
+                    s_he.latch_lost_trip_only = true;
+                    s_he.latch_seq = s_he.seen_reboot_seq;
+                    s_he.latch_tripped_seen = false;
+                    s_he.latch_cleared_bits = 0u;
+                }
+                s_he.reboot_lost_bits = 0u;
+                s_he.reboot_had_claim = false;
+            }
+            /* HH-01: a benign reboot with no claim still enters the SR-11 window (AP-01: not the
+             * since_ms == 1 first-sight sentinel). The next benign reboot inside it, with a claim, holds. */
+            if ((boot_reason & fatal_u) == 0u && !s_he.reboot_was_tripped && s_he.reboot_classify_since_ms > 1u) {
+                s_he.last_benign_reboot_ms = s_he.reboot_classify_since_ms;
+            }
+            {
+                const bool prev_latched = s_he.reboot_fatal_latched;
+                s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
+                                              s_he.reboot_fatal_latched;
+                if (s_he.reboot_fatal_latched) {
+                    /* PF-04: first-sight only if every cause folded into the latch was a first-sight verdict. */
+                    s_he.latch_first_sight = (!prev_latched || s_he.latch_first_sight) && s_he.verdict_first_sight;
+                } else {
+                    s_he.latch_first_sight = false;
+                    he_record_acted_locked(); /* benign: this Pico boot is acted on */
+                }
+            }
             s_he.reboot_was_tripped = false;
         }
     } else if (s_he.reboot_classify_pending) {
         if (diag_since_reboot) {
+            log_stale = stale_ignored;
             s_he.reboot_classify_pending = false;
             s_he.reboot_verdict_pending = false;
+            s_he.reboot_lost_bits = 0u;
+            s_he.reboot_had_claim = false;
             const uint8_t fatal = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
                                   SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
                                   SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
@@ -799,8 +1001,29 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
              * latched trip was lost, not cleared by an operator. Withholds heat only. */
             bool lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal) == 0u;
             s_he.reboot_was_tripped = false;
-            if ((boot_reason & fatal) != 0u || lost_trip) {
+            /* SR-11: repeated "benign" reboots are a sagging rail, not luck. */
+            uint32_t this_ms = s_he.reboot_classify_since_ms;
+            /* AP-01: since_ms == 1 is the first-sight / re-arm sentinel, not a real reboot time; it must
+             * neither count as nor seed the repeated-benign window. */
+            if ((boot_reason & fatal) == 0u && !lost_trip && this_ms != 1u) {
+                if (s_he.last_benign_reboot_ms != 0u &&
+                    (uint32_t)(this_ms - s_he.last_benign_reboot_ms) < HE_BENIGN_REBOOT_WINDOW_MS) {
+                    repeated_benign = true;
+                }
+                s_he.last_benign_reboot_ms = this_ms;
+            }
+            if ((boot_reason & fatal) != 0u || lost_trip || repeated_benign) {
+                /* BX-02: a hold already standing for a stronger cause (fatal / lost trip) is never
+                 * relabelled repeated-benign by a later benign reboot; only a standing
+                 * repeated-benign hold (or a fresh hold) takes the new label. */
+                const bool was_hold = s_he.reboot_hold;
                 s_he.reboot_hold = true;
+                s_he.hold_lost_trip_only = false; /* real reboot during a claim keeps the fatal text */
+                s_he.hold_first_sight = s_he.verdict_first_sight && (boot_reason & fatal) != 0u && !lost_trip &&
+                                        !repeated_benign && (!was_hold || s_he.hold_first_sight);
+                he_record_acted_locked(); /* PF-04 */
+                s_he.hold_repeated_benign = repeated_benign && (boot_reason & fatal) == 0u && !lost_trip &&
+                                            (!was_hold || s_he.hold_repeated_benign);
                 log_lost_trip = lost_trip;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
                 if (s_he.granted || s_he.pending) {
@@ -814,6 +1037,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                 log_hold = true;
             } else {
                 log_benign = true;
+                he_record_acted_locked(); /* PF-04 */
             }
         }
         /* No timeout fallback (Opus review MED): until a DIAG of the NEW boot arrives the
@@ -822,6 +1046,10 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
          * condition and the operator resumes or stops. */
     }
     he_unlock(taken);
+    if (log_stale) {
+        ESP_LOGW(TAG, "Pico boot id already acted on in an earlier ESP boot and the Pico is older than this ESP "
+                      "-- ignoring its stale fatal boot reason (PF-04), no reboot latched");
+    }
     if (log_claimless_lost_trip) {
         ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x), no heat claim held "
                       "-- latching the reboot fatal; heat stays withheld until an operator clears it",
@@ -831,6 +1059,10 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x) during a "
                       "heat claim -- NOT re-requesting heat; K4 stays open until an operator resumes",
                  (unsigned)boot_reason);
+    } else if (log_hold && repeated_benign) {
+        ESP_LOGE(TAG, "Pico rebooted again within %u s of the previous benign reboot (possible brownout, "
+                      "which reports as power-on) during a heat claim -- NOT re-requesting heat; K4 stays open "
+                      "until an operator resumes", (unsigned)(HE_BENIGN_REBOOT_WINDOW_MS / 1000u));
     } else if (log_hold) {
         ESP_LOGE(TAG, "Pico rebooted with a fatal cause (boot_reason 0x%02x) during a heat claim -- "
                       "NOT re-requesting heat; K4 stays open until an operator resumes",
@@ -852,6 +1084,93 @@ bool heat_enable_reboot_undecided(void)
     return u;
 }
 
+void heat_enable_note_boot_id_seen(bool seen)
+{
+    bool taken = he_lock();
+    /* PQ-01: key on the first sight this ESP boot, not the unseen->seen edge: boot_id_unseen once started false and
+     * the guard's first tick is 2 s after start, so a boot id that arrived first never produced the edge. */
+    if (seen && !s_he.boot_id_first_sight_done) {
+        s_he.boot_id_first_sight_done = true;
+        /* PR-01: first boot id after an ESP boot. No lost-trip input (the TRIPPED state before it says nothing
+         * about this boot), but the fatal-boot-bit rule still applies: the next DIAG of this boot decides. */
+        s_he.reboot_was_tripped = false;
+        s_he.reboot_lost_bits = 0u;
+        s_he.reboot_verdict_pending = true;
+        s_he.verdict_first_sight = true; /* PF-04 */
+        if (s_he.reboot_classify_since_ms == 0u) {
+            s_he.reboot_classify_since_ms = 1u;
+        }
+        /* PZ-02: a claim held while the boot id was unseen (PR-03) is classified by this boot's DIAG
+         * before reconcile may grant it; acquire's was_empty re-arm never runs for an already-held claim. */
+        if (s_he.held_mask != 0u) {
+            s_he.reboot_had_claim = true;
+            s_he.reboot_classify_pending = true;
+        }
+    }
+    s_he.boot_id_unseen = !seen;
+    he_unlock(taken);
+}
+
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
+void heat_enable_assume_boot_id_seen_for_host_tests(void)
+{
+    /* Host fixtures only: the pre-PR-03 starting point (boot id known, first sight already consumed). */
+    bool taken = he_lock();
+    s_he.boot_id_unseen = false;
+    s_he.boot_id_first_sight_done = true;
+    he_unlock(taken);
+}
+#endif
+
+bool heat_enable_boot_id_unseen_blocked(void)
+{
+    bool taken = he_lock();
+    bool b = s_he.boot_id_unseen && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return b;
+}
+
+void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask)
+{
+    bool taken = he_lock();
+    s_he.trip_bits_now = (uint32_t)trip_mask;
+    if (trip_reason >= 1u && trip_reason <= 31u) {
+        s_he.trip_bits_now |= 1u << (trip_reason - 1u);
+    }
+    he_unlock(taken);
+}
+
+bool heat_enable_reboot_hold_repeated_benign(void)
+{
+    bool taken = he_lock();
+    bool h = s_he.reboot_hold && s_he.held_mask != 0u && s_he.hold_repeated_benign;
+    he_unlock(taken);
+    return h;
+}
+
+bool heat_enable_reboot_hold_lost_trip_only(void)
+{
+    bool taken = he_lock();
+    bool h = s_he.reboot_hold && s_he.held_mask != 0u && s_he.hold_lost_trip_only;
+    he_unlock(taken);
+    return h;
+}
+
+void heat_enable_get_reboot_state(uint32_t *seq, bool *fatal_latched, bool *lost_trip_only)
+{
+    bool taken = he_lock();
+    if (seq) {
+        *seq = s_he.seen_reboot_seq;
+    }
+    if (fatal_latched) {
+        *fatal_latched = s_he.reboot_fatal_latched || s_he.reboot_hold;
+    }
+    if (lost_trip_only) {
+        *lost_trip_only = s_he.latch_lost_trip_only || (s_he.reboot_hold && s_he.hold_lost_trip_only);
+    }
+    he_unlock(taken);
+}
+
 bool heat_enable_reboot_hold(void)
 {
     bool taken = he_lock();
@@ -869,6 +1188,29 @@ void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed,
                          diag_state == SAFETY_LINK_DIAG_STATE_WARN;
     if (fresh) {
         s_he.last_pico_tripped = (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+        if (s_he.last_pico_tripped) {
+            s_he.last_pico_trip_bits = s_he.trip_bits_now;
+        }
+        /* PF-02: a claimless lost-trip latch expires once the SAME Pico boot (no newer reboot seq, no
+         * verdict pending) shows TRIPPED and then ARMED (an operator clear). A real lost trip reboots into
+         * ARMED without ever showing TRIPPED, so it never expires this way. A hold made with a claim held
+         * is reboot_hold, not a latch, and is untouched. */
+        if (s_he.reboot_fatal_latched && s_he.latch_lost_trip_only && s_he.latch_expirable && s_he.held_mask == 0u &&
+            !s_he.reboot_verdict_pending && s_he.seen_reboot_seq == s_he.latch_seq) {
+            if (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+                s_he.latch_tripped_seen = true;
+                s_he.latch_cleared_bits |= s_he.trip_bits_now;
+            } else if (diag_state == SAFETY_LINK_DIAG_STATE_ARMED && s_he.latch_tripped_seen) {
+                /* PR-02: only a clear of the trip(s) that were lost expires the latch. */
+                if ((s_he.latch_cleared_bits & s_he.latch_lost_bits) == s_he.latch_lost_bits) {
+                    s_he.reboot_fatal_latched = false;
+                    s_he.latch_lost_trip_only = false;
+                    s_he.latch_expirable = false;
+                }
+                s_he.latch_tripped_seen = false;
+                s_he.latch_cleared_bits = 0u;
+            }
+        }
     }
     if (s_he.held_mask == 0u) {
         he_k4_reset_locked();
@@ -947,7 +1289,7 @@ void heat_enable_reconcile(void)
 
     bool taken = he_lock();
     bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted &&
-                      !s_he.reboot_hold && !s_he.reboot_classify_pending;
+                      !s_he.reboot_hold && !s_he.reboot_classify_pending && !s_he.boot_id_unseen;
     he_unlock(taken);
 
     if (!want_retry) {

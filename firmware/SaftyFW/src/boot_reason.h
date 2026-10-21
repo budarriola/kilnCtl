@@ -45,6 +45,19 @@ typedef struct {
 // TODO.md Phase 8) report boot_reason without a new coupling.
 saftyfw_boot_reason_t boot_reason_read(bool wd_caused_reboot, bool wd_enable_caused_reboot);
 
+// PF-04: the RP2040 WATCHDOG.REASON register has a TIMER bit (0, a real
+// watchdog timeout) and a FORCE bit (1, a TRIGGER-driven reset). pico-sdk's
+// watchdog_reboot(0,0,0) (hal_wdt_reboot: SAFETY_CMD_REBOOT, update,
+// rollback) calls _watchdog_enable(0) which sets CTRL.TRIGGER, so it lands
+// as FORCE only, yet watchdog_caused_reboot() is just `reason != 0` and
+// reports both. This wrapper takes the raw REASON register and reports
+// watchdog_caused_reboot only when TIMER is set, so a deliberate reset is
+// benign on the wire (Frame B boot_reason POWERON, not WATCHDOG).
+#define SAFTYFW_WD_REASON_TIMER_BIT 0x1u
+#define SAFTYFW_WD_REASON_FORCE_BIT 0x2u
+saftyfw_boot_reason_t boot_reason_read_wd_reason(uint32_t wd_reason_reg,
+                                                  bool sdk_enable_caused_reboot);
+
 // Returns whatever the one boot_reason_read() call this boot passed in,
 // zeroed/false in every field if boot_reason_read() has not run yet (should
 // not happen in practice -- main.c calls it at step 3, before any task that

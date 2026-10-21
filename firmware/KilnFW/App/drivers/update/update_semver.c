@@ -235,3 +235,107 @@ size_t update_semver_format(const update_semver_t *v, char *buf, size_t buf_len)
     }
     return (size_t)n;
 }
+
+// BM-02: a dev build has no release tag, but its esp_app_desc version is `git describe` output
+// ("1.0.0-pre.1-201-g2071348", optionally "-dirty"). Map it to a comparable semver:
+//  - no "-N-g<hex>" suffix: the text itself (a build exactly on a tag), if it parses;
+//  - base has a prerelease: append ".N" ("1.0.0-pre.1.201"), which sorts after the tag and before
+//    the next prerelease ("pre.2") exactly as N commits past the tag should;
+//  - base is a release: the base (a numeric build counter cannot be expressed above a release), so a
+//    candidate equal to it still needs force and a lower one is still a downgrade.
+// Returns false (out = "") when the base is not a valid semver, so such a build stays unknown.
+// RB-02: esp_app_desc_t.version is a fixed 32-byte field in the IDF image ABI (UPDATE_STAGE_APP_DESC_VERSION_OFFSET
+// and the bootloader read it), so it cannot be widened; a describe longer than 31 chars arrives truncated and
+// parses as unknown (fail-safe: an update then needs force, never a silent downgrade).
+static bool from_describe_impl(const char *desc, char *out, size_t cap, bool strict)
+{
+    if (out == NULL || cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (desc == NULL) {
+        return false;
+    }
+    char buf[SEMVER_MAX_LEN + 1];
+    size_t n = 0;
+    while (n <= SEMVER_MAX_LEN && desc[n] != '\0') {
+        n++;
+    }
+    if (n == 0 || n > SEMVER_MAX_LEN) {
+        return false;
+    }
+    memcpy(buf, desc, n);
+    buf[n] = '\0';
+    static const char dirty[] = "-dirty";
+    bool is_dirty = false;
+    if (n > sizeof(dirty) - 1 && strcmp(buf + n - (sizeof(dirty) - 1), dirty) == 0) {
+        is_dirty = true;
+        n -= sizeof(dirty) - 1;
+        buf[n] = '\0';
+    }
+    // Trailing "-<digits>-g<hex>".
+    size_t commits = 0;
+    bool has_suffix = false;
+    size_t g = n;
+    while (g > 0 && ((buf[g - 1] >= '0' && buf[g - 1] <= '9') || (buf[g - 1] >= 'a' && buf[g - 1] <= 'f'))) {
+        g--;
+    }
+    if (g >= 4 && n - g >= 4 && buf[g - 1] == 'g' && buf[g - 2] == '-') {
+        size_t d_end = g - 2;
+        size_t d = d_end;
+        while (d > 0 && buf[d - 1] >= '0' && buf[d - 1] <= '9') {
+            d--;
+        }
+        if (d < d_end && d > 0 && buf[d - 1] == '-' && d_end - d <= 6) {
+            for (size_t k = d; k < d_end; k++) {
+                commits = commits * 10u + (size_t)(buf[k] - '0');
+            }
+            has_suffix = true;
+            n = d - 1;
+            buf[n] = '\0';
+        }
+    }
+    update_semver_t v;
+    if (!update_semver_parse_n(buf, n, &v)) {
+        return false;
+    }
+    if (has_suffix && commits > 0 && v.has_pre) {
+        char tail[16];
+        int tn = snprintf(tail, sizeof(tail), ".%u", (unsigned)commits);
+        size_t pl = strlen(v.pre);
+        if (tn < 0 || pl + (size_t)tn > UPDATE_SEMVER_PRE_MAX) {
+            return false;
+        }
+        memcpy(v.pre + pl, tail, (size_t)tn + 1);
+    }
+    size_t fl = update_semver_format(&v, out, cap);
+    if (fl == 0) {
+        return false;
+    }
+    if (strict) {
+        // OG-01: keep what the ordering form drops, as build metadata (ignored by compare, kept by strcmp):
+        // "+c<N>" for N commits past a release tag, "+dirty" for a dirty tree, "+c<N>.dirty" for both.
+        bool rel_commits = has_suffix && commits > 0 && !v.has_pre;
+        int w = 0;
+        if (rel_commits) {
+            w = snprintf(out + fl, cap - fl, "+c%u%s", (unsigned)commits, is_dirty ? ".dirty" : "");
+        } else if (is_dirty) {
+            w = snprintf(out + fl, cap - fl, "+dirty");
+        }
+        if (w < 0 || (size_t)w >= cap - fl) {
+            out[0] = '\0';
+            return false;
+        }
+    }
+    return true;
+}
+
+bool update_semver_from_describe(const char *desc, char *out, size_t cap)
+{
+    return from_describe_impl(desc, out, cap, false);
+}
+
+bool update_semver_from_describe_strict(const char *desc, char *out, size_t cap)
+{
+    return from_describe_impl(desc, out, cap, true);
+}

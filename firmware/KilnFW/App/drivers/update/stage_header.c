@@ -37,7 +37,7 @@ static uint32_t get_u32(const uint8_t *p)
 
 static bool state_valid(uint32_t s)
 {
-    return s == STAGE_STATE_WRITING || s == STAGE_STATE_VERIFIED || s == STAGE_STATE_APPLYING;
+    return s == STAGE_STATE_WRITING || s == STAGE_STATE_VERIFIED;
 }
 static bool source_valid(uint32_t s)
 {
@@ -223,8 +223,7 @@ bool stage_header_is_installable(const stage_header_t *h)
 
 bool stage_header_transition_allowed(stage_state_t from, stage_state_t to)
 {
-    return (from == STAGE_STATE_WRITING && to == STAGE_STATE_VERIFIED) ||
-           (from == STAGE_STATE_VERIFIED && to == STAGE_STATE_APPLYING);
+    return from == STAGE_STATE_WRITING && to == STAGE_STATE_VERIFIED;
 }
 
 bool stage_header_sha256_matches(const stage_header_t *h, const uint8_t computed[STAGE_SHA256_LEN])
@@ -264,7 +263,6 @@ const char *stage_state_name(stage_state_t s)
     switch (s) {
     case STAGE_STATE_WRITING: return "writing";
     case STAGE_STATE_VERIFIED: return "verified";
-    case STAGE_STATE_APPLYING: return "applying";
     }
     return "unknown";
 }

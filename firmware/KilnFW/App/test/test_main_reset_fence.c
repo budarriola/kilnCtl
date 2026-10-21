@@ -19,7 +19,7 @@ int g_test_count = 0;
 #define MAIN_INTERNAL_H
 #include <stdbool.h>
 #include <stdint.h>
-typedef struct { int unused; } main_boot_ctx_t;
+typedef struct { void *safety; void *uart_proto; } main_boot_ctx_t; // pointer members: main.c points them at its PSRAM statics (RAM-03)
 // Likewise kiln_io.h / safety_link.h / profile_executor.h drag in uart_protocol.h; main.c only passes these types
 // through main_kiln_enter_safe_state(), which this test never calls.
 #define KILN_IO_H
@@ -45,6 +45,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx);
 void main_bridges_bringup(main_boot_ctx_t *ctx);
 
 // The real file under test.
+esp_err_t flash_xip_lock_install(void); /* host: header declares it only under ESP_PLATFORM; stub below */
 #include "../main.c"
 
 static bool (*s_hook_pref)(void);
@@ -76,6 +77,7 @@ void main_network_http_bringup(main_boot_ctx_t *c) { (void)c; phase(); }
 void main_bridges_bringup(main_boot_ctx_t *c) { (void)c; phase(); }
 
 uint32_t safety_link_get_fault_sources(SafetyLinkClass *link) { (void)link; return 0; }
+esp_err_t flash_xip_lock_install(void) { return ESP_OK; }
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io) { (void)io; return ESP_OK; }
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *l, uint32_t s, bool on) { (void)l; (void)s; (void)on; return ESP_OK; }
 void profile_executor_note_external_app_hold(void) {}

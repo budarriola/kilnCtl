@@ -15,6 +15,7 @@
 #include "esp_log.h"
 
 #include "adaptive_tune.h"
+#include "firing_trace.h" /* FD-02 */
 #include "heat_enable.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
@@ -117,6 +118,7 @@ void profile_executor_halt(void)
     xSemaphoreGive(s_exec.lock);
 
     if (fs_need_persist) {
+        firing_trace_end(); /* FD-02: final synchronous flush of this firing's trace */
         firing_stats_persist(&fs_rec);
         /* PID_EXPANSION_PLAN.md Phase 7d: `clean` is always false here --
          * every run finalized on THIS path (see the comment above) is
@@ -557,6 +559,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
             if (!z->active) continue;
             zo->actual_c = z->actual_c;
             zo->actual_valid = z->actual_valid;
+            zo->tc_lag_corr_cc = (int16_t)lrintf(isfinite(z->tc_lag_corr_c) ? z->tc_lag_corr_c * 100.0f : 0.0f);
             zo->relay_commanded_on = z->relay_commanded_on;
             zo->duty = z->duty;
             zo->control_mode = (uint8_t)z->control_mode;

@@ -756,12 +756,16 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
          * TRIP_EVENT was lost. Mirrored in test_dashboard_json.c's render_worst_case_status_json(). */
         /* TRIPFX4 LOW-1: also bound to the latched TRIP_EVENT: it must exist, say reason 4 (TEST), and carry the
          * same trip_seq the DIAG describes -- so a real trip after a cleared TEST (new seq, other reason) or a
-         * cleared trip (DIAG not TRIPPED) cannot read as a test trip while the DIAG is stale. */
+         * cleared trip (DIAG not TRIPPED) cannot read as a test trip while the DIAG is stale.
+         * TRIPFX5 LOW-1: and the live STATUS frame must not say ARMED (SAFETY_FLAG_ENABLED): after a CLEAR_TRIP
+         * the cached DIAG/TRIP_EVENT still describe the cleared TEST for up to one DIAG period, but STATUS
+         * (fast) already reads armed, so the flag drops at once. Unknown STATUS leaves the other terms in charge. */
         APPEND(",\"trip_is_test\":%s",
                (ds->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED && ds->diag_trip_reason == 4u &&
                 ds->trip_event_ever_received && ds->trip_reason == 4u && ds->diag_trip_seq_known &&
                 ds->diag_trip_seq == ds->trip_last_seq && ds->diag_since_reboot &&
-                ds->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS) ? "true" : "false");
+                ds->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS &&
+                !(ds->safety_relay_known && ds->safety_heating_enabled)) ? "true" : "false");
         /* 2026-09-09: raw boot_reason byte plus three decoded booleans for
          * the fatal-fault bits specifically (SAFETY_LINK_DIAG_BOOT_STACK_
          * OVERFLOW/_MALLOC_FAILED/_ASSERT_FAILED, safety_link.h) -- this is
@@ -979,6 +983,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds->heap_spiram_free, (unsigned long)ds->heap_spiram_largest_free_block,
            (unsigned long)ds->heap_spiram_min_free, (unsigned long)ds->heap_spiram_total);
+    APPEND(",\"persist_scratch_fallbacks\":%lu", (unsigned long)ds->persist_scratch_fallbacks);
+    APPEND(",\"pico_reboot_seq\":%lu,\"pico_reboot_latched\":%s,\"pico_reboot_lost_trip_only\":%s",
+           (unsigned long)ds->pico_reboot_seq, ds->pico_reboot_latched ? "true" : "false",
+           ds->pico_reboot_lost_trip_only ? "true" : "false");
     APPEND(",\"heap_dma\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds->heap_dma_free, (unsigned long)ds->heap_dma_largest_free_block,
            (unsigned long)ds->heap_dma_min_free, (unsigned long)ds->heap_dma_total);

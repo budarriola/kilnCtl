@@ -1988,7 +1988,7 @@ static void zone_sweep_task(void *arg)
      * ordering, same reason, as ota_pico_rollback_task() (ota_http_pico.c).
      * A reader that fetched the handle just before this line is benign:
      * the task is still alive until vTaskDelete() below. */
-    s_sweep.task = NULL;
+    stack_margin_task_exit(&s_sweep.task); /* UB-01 */
     /* Release the safety-config writer guard taken in
      * zones_current_sweep_start(): this task's last Pico write (the pushes
      * above) is finished, and releasing BEFORE s_sweep.active drops keeps the

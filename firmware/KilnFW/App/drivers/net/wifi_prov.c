@@ -733,7 +733,7 @@ esp_err_t wifi_prov_start(void)
     /* PSRAM stack (2026-10-14, AUDIT_INTERNAL_RAM_XIP.md): NVS writes no longer
      * freeze the cache under XIP and nothing here reaches an mmap call.
      * Pinned by tools/check_psram_task_stacks.ps1. */
-    BaseType_t task_created = xTaskCreatePinnedToCoreWithCaps(owner_task, "wifi_prov_owner", 4096, NULL, 5,
+    BaseType_t task_created = xTaskCreatePinnedToCoreWithCaps(owner_task, "wifi_prov_owner", 5120, NULL, 5,
                                                               &s_owner_task_handle, tskNO_AFFINITY,
                                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (task_created != pdPASS) {
@@ -742,7 +742,7 @@ esp_err_t wifi_prov_start(void)
         s_wifi_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    stack_margin_register("wifi_prov_owner", &s_owner_task_handle, 4096);
+    stack_margin_register("wifi_prov_owner", &s_owner_task_handle, 5120);
 
     err = esp_wifi_start();
     if (err != ESP_OK) {

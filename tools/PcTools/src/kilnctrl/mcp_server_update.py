@@ -30,6 +30,7 @@ Credentials never appear here; every request goes through http_auth.urlopen().
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from typing import Optional
@@ -675,11 +676,45 @@ def _stale_id(li: dict, pend: dict) -> bool:
     return bool(rid and pend.get("id") and rid != pend["id"])
 
 
+# OH-04: last_install.state is "recorded" once the new app confirmed its boot (30 s soak), "pending_confirm"
+# for an ok result not yet confirmed (a reset inside the soak still rolls it back to recovery, result
+# FAIL/rolled_back). A board that predates OH-04 reports "recorded" at once.
+# OF-02: not_running = record names another image. OG-01: unverified = the board cannot prove which image the record names.
+_SETTLED_STATES = ("recorded", "pending_confirm", "not_running", "unverified")
+
+
+_DESCRIBE_RE = re.compile(r"^v?(?P<base>.+?)-(?P<n>\d+)-g[0-9a-f]+(?P<dirty>-dirty)?$")
+
+
+def _canon_version(v: Optional[str]) -> Optional[str]:
+    """One comparable form for the board's version strings.
+
+    The staged header carries the git-describe form (`1.0.0-pre.1-2286-gabc1234[-dirty]`) while the running
+    application reports the dotted form (`1.0.0-pre.1.2286`). Map describe to dotted so the install wait can match them;
+    other strings only lose a leading `v`.
+    """
+    if not v:
+        return v
+    m = _DESCRIBE_RE.match(v)
+    if not m:
+        return v[1:] if v[:1] == "v" else v
+    base, n, dirty = m.group("base"), m.group("n"), m.group("dirty") or ""
+    return f"{base}.{n}{dirty}" if "-" in base else f"{base}+c{n}{dirty}"
+
+
+def _same_version(a: Optional[str], b: Optional[str]) -> bool:
+    return bool(a) and bool(b) and _canon_version(a) == _canon_version(b)
+
+
+def _pending_confirm(li: dict) -> bool:
+    return li.get("state") == "pending_confirm" and li.get("code") == "ok"
+
+
 def _ok_is_new(host: str, st: dict, pend: dict, deadline: Optional[float] = None) -> bool:
     """Is a matching `ok` record evidence of THIS install (not a stale one)?"""
     li = st.get("last_install") or {}
     want = pend["want"]
-    if not (st.get("running_version") == want and li.get("state") == "recorded" and li.get("code") == "ok"):
+    if not (_same_version(st.get("running_version"), want) and li.get("state") == "recorded" and li.get("code") == "ok"):
         return False
     if _stale_id(li, pend):
         return False
@@ -688,7 +723,7 @@ def _ok_is_new(host: str, st: dict, pend: dict, deadline: Optional[float] = None
         return True  # an ok record for this image that was not there before the POST
     if not pend["post_unknown"]:
         return True  # the POST was answered: the board accepted this request
-    if pend["before_running"] != want:
+    if not _same_version(pend["before_running"], want):
         return True  # the running version changed from an older one to the requested one
     return _reboot_proven(host, pend, deadline)
 
@@ -723,6 +758,24 @@ def _staged_id(host: str) -> str:
     return ""
 
 
+def _legacy_install_status(host: str) -> Optional[dict]:
+    """Precheck fallback for firmware that predates GET /api/update/status (404).
+
+    Reads GET /api/update/stage instead and reports staged=True only when the board says
+    the stage is not busy and its header state is exactly 'verified'. Any read failure or
+    other state returns None (caller refuses). running_version is unknown on such a board.
+    """
+    try:
+        sg = uhc.get_stage_status(host)
+    except uhc.UpdateHttpError:
+        return None
+    ok = (sg.get("staged") is True and not sg.get("busy")
+          and str(sg.get("state", "")).lower() == "verified")
+    return {"running_version": "unknown", "stage_busy": bool(sg.get("busy")), "staged": ok,
+            "staged_version": sg.get("semver") or None,
+            "last_install": {"state": "none", "code": "none", "reason": "none"}, "legacy_precheck": True}
+
+
 def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: float) -> str:
     t0 = time.monotonic()
     # Whole call (initial GET, POST, settle sleep and polling) stays under the
@@ -732,7 +785,11 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
     try:
         before = uhc.get_install_status(resolved)
     except uhc.UpdateHttpError as exc:
-        return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
+        before = None
+        if exc.status == 404:
+            before = _legacy_install_status(resolved)
+        if before is None:
+            return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
     if confirm is not True:
         pend = _PENDING_INSTALL.get(resolved)
         if pend is not None and time.monotonic() - pend["t_pre"] > _PENDING_TTL_S:
@@ -748,6 +805,19 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
             if _failure_is_this(li, pend):
                 _PENDING_INSTALL.pop(resolved, None)
                 return f"FAILED: install recorded a failure: {_install_line(before)} (host={resolved})"
+            if _pending_confirm(li):
+                return (f"UNKNOWN: install of {pend['want']!r} is recorded ok but pending_confirm (the new image has "
+                        f"not finished its 30 s boot confirm; a reset now rolls it back): {_install_line(before)}; "
+                        f"poll again with update_install_staged(confirm=False) (host={resolved})")
+            if li.get("state") == "unverified" and li.get("code") == "ok":
+                return (f"UNKNOWN: the board's ok record for {pend['want']!r} cannot be matched to the running image "
+                        f"(state unverified: an image id is missing, so the board never marks it confirmed): "
+                        f"{_install_line(before)}; compare running_version with the version you meant to install "
+                        f"(host={resolved})")
+            if li.get("state") == "not_running" and li.get("code") == "ok":
+                return (f"UNKNOWN: the board's ok record for {pend['want']!r} names a different image than the one "
+                        f"running (state not_running; it will never confirm): {_install_line(before)} "
+                        f"(host={resolved})")
             return (f"UNKNOWN: an earlier install of {pend['want']!r} is still pending, not yet proven: "
                     f"{_install_line(before)}; poll again with update_install_staged(confirm=False) "
                     f"(host={resolved})")
@@ -758,7 +828,7 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
                     f"(last_install.state=unreadable), so whether an install happened is not provable "
                     f"from here: {_install_line(before)}; compare running_version with the version you "
                     f"meant to install via update_status (host={resolved})")
-        if lost is None and not before.get("staged") and bli0.get("state") != "recorded":
+        if lost is None and not before.get("staged") and bli0.get("state") not in _SETTLED_STATES:
             # Plain status read: nothing staged, no install ever recorded, no record of ours.
             return (f"ok - nothing staged and no install recorded (read-only, nothing sent): "
                     f"{_install_line(before)} (host={resolved})")
@@ -801,7 +871,7 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
     want = before.get("staged_version")
     inst_id = _staged_id(resolved)
     bli = before.get("last_install") or {}
-    before_ok_id = _id_of(bli) if (bli.get("state") == "recorded" and bli.get("code") == "ok") else ""
+    before_ok_id = _id_of(bli) if (bli.get("state") in _SETTLED_STATES and bli.get("code") == "ok") else ""
     before_up = _read_uptime(resolved)
     t_pre = time.monotonic()  # after the read returned: transit time must not count as board time
     post_unknown = False
@@ -885,8 +955,11 @@ def _install_confirmed(resolved: str, before: dict, deadline: float) -> str:
     else:
         tail = "board never answered the application API"
     note = " The install POST got no HTTP answer (possibly applied)." if post_unknown else ""
+    if last and _pending_confirm(last.get("last_install") or {}):
+        note += (" The result is pending_confirm: installed, but the new image has not finished its 30 s boot "
+                 "confirm yet, so it is not final (a reset now rolls it back).")
     if (post_unknown and last and (last.get("last_install") or {}).get("code") == "ok"
-            and last.get("running_version") == want):
+            and _same_version(last.get("running_version"), want)):
         note += (" The board shows an `ok` install for this version but no reboot is proven (uptime did not drop),"
                  " so it may be a stale result from an earlier install, not this one.")
     return (f"UNKNOWN: install may still be running, not confirmed within this call's wait: board not confirmed on "

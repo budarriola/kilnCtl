@@ -51,6 +51,11 @@ typedef struct {
     // register itself faulted -- those cases are genuinely indistinguishable
     // from "chip not converting" and must stay NaN.
     bool     cj_valid;
+    // TC sheath lag (param 0x010B): the tc_lag_comp lead estimate for tc_c,
+    // degC (compensated - raw). Exactly 0 when tau is 0 (bare TC), when the
+    // reading is invalid, and on any injected snapshot. Guards use only its
+    // positive part, on top of raw tc_c (never in place of it).
+    float    tc_lead_c;
 } thermo_snapshot_t;
 
 // current_snapshot_t -- current_task / adc_owner (docs/ARCHITECTURE.md
@@ -348,6 +353,38 @@ static inline bool context_borrowed_sample_counter_advancing(const context_snaps
         *last_counter = z->sample_counter;
         *last_counter_known = true;
         return advancing;
+    }
+    return false;
+}
+
+// PN-01: the borrowed zone's reading as a guard temperature input. True (and
+// *out_c / *out_fault_bits filled) only when the context is valid, the zone is
+// present, flagged MEASURED_VALID and its measured_c is finite
+// (a stalled sample_counter is deliberately NOT checked here: S13 owns that,
+// graduated WARN then trip). Anything else -> false, and
+// the caller must present the reading as invalid (S5 then handles blindness).
+static inline bool context_borrowed_guard_reading(const context_snapshot_t *ctx, bool context_valid,
+                                                  bool have_index, uint8_t borrowed_zone_index,
+                                                  float *out_c, uint8_t *out_fault_bits)
+{
+    if (!context_valid || !have_index || ctx == NULL) {
+        return false;
+    }
+    uint8_t n = ctx->zone_count;
+    if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
+        n = CONTEXT_SNAPSHOT_MAX_ZONES;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        const context_zone_t *z = &ctx->zones[i];
+        if (z->zone_index != borrowed_zone_index) {
+            continue;
+        }
+        if ((z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) == 0u || !isfinite(z->measured_c)) {
+            return false;
+        }
+        *out_c = z->measured_c;
+        *out_fault_bits = z->tc_fault;
+        return true;
     }
     return false;
 }

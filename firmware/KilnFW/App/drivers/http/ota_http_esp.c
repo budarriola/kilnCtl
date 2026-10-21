@@ -1,5 +1,6 @@
 #include "ota_http.h"
 #include "ota_http_internal.h"
+#include "flash_xip_lock.h"
 #include "ota_http_util.h"
 #include "ota_esp_image_header.h"
 
@@ -32,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
@@ -96,20 +98,18 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 // already sized against the largest existing handler's *smaller* buffers
 // (zones_post_handler's 2561-byte body, see that file's comment on the hang/
 // reset it caused before being bumped); a 4 KB buffer on top of that same
-// stack would eat half of it just for this one variable. Safe as a single
-// shared buffer (also borrowed by ota_http_pico.c and update_http.c via
-// ota_http_esp_chunk_buf()) because every user is an OTA/update handler and
-// they all run on the single httpd task, so two handlers can never execute
-// at once. That single-task property is the real safety reason; NOTHING
-// enforces it (s_update_claim serialises transfers, it does not protect this
-// buffer). If httpd ever gets more than one worker task, this buffer needs a
-// lock or per-transfer storage.
+// stack would eat half of it just for this one variable. Shared
+// (also borrowed by ota_http_pico.c, update_http.c and update_install_http.c via
+// ota_http_esp_chunk_buf()). It is NOT httpd-only (LK-05): stale_running_matches
+// used to hash through it on the ota_confirm task. LF-01: that now has its own temporary
+// PSRAM buffer, so the unclaimed stage status GET / app_stage_info readers (LK-05b) no longer race it.
+// The rule: use the chunk only while holding the update claim (ota_http_update_try_begin) or as a
+// stage-status scratch on httpd. Refusal drains use their own small buffer (ota_http_refusal_drain).
 #define OTA_ESP_CHUNK_SIZE 4096
 static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 
 // Shared with update_http.c (the WP4 stage upload/status), which needs the same
-// internal-SRAM, DMA-safe 4 KB buffer. Safe to share: every user is an httpd
-// handler and httpd is a single task, so two handlers never overlap.
+// internal-SRAM, DMA-safe 4 KB buffer. Claim-holders only; see the LK-05 note above.
 uint8_t *ota_http_esp_chunk_buf(size_t *cap)
 {
     if (cap != NULL) {
@@ -352,7 +352,9 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
 
     esp_progress_set(OTA_HTTP_ESP_PHASE_FINALIZING, 100);
     {
+        flash_xip_reader_enter(); /* esp_image_verify via mmap (REVIEW_FLASH_MMAP_SERIALIZATION) */
         esp_err_t rc = esp_ota_end(handle);
+        flash_xip_reader_exit();
         // esp_ota_end() frees the handle regardless of its result (see its
         // own doc comment) -- ota_began must go false here either way so
         // the cleanup block below never calls esp_ota_abort() on a handle
@@ -485,13 +487,13 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
         // 850-859). Returning ESP_FAIL instead skips that purge (httpd_uri.c
         // ~line 367, httpd_sess.c ~lines 428-431) but closes the socket with
         // unread RX data, which makes lwIP send a RST and the client can lose
-        // the status. ota_http_refusal_drain() reads the rest in 4 KB chunks
+        // the status. ota_http_refusal_drain() reads the rest in 512 B chunks (own buffer, LK-05)
         // with vTaskDelay(1) between reads (30 s cap) and returns ESP_OK only
         // after a complete drain, ESP_FAIL (close) on error or cap.
         // httpd_sess_trigger_close() is NOT a substitute: it only queues a
         // close and httpd_req_delete() would still purge first.
         (void)ota_http_send_interlock_refusal(req, gate, reason);
-        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk));
+        return ota_http_refusal_drain(req);
     }
 
     // 4. Single update mutex -- claimed before any body byte is read, so a
@@ -502,7 +504,7 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk)); // see the comment above
+        return ota_http_refusal_drain(req); // see the comment above
     }
 
     // From here, the mutex is held and ota_esp_do_transfer() owns releasing
@@ -511,7 +513,7 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
     // Failure (response already sent, body possibly partly unread) -> bounded
     // drain, ESP_FAIL only if the drain itself fails; success -> ESP_OK.
     if (ota_esp_do_transfer(req, ip)) {
-        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk));
+        return ota_http_refusal_drain(req);
     }
     return ESP_OK;
 }
@@ -698,21 +700,26 @@ esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// File-scope (not handler-local) so ota_rollback_reboot_task() below can
-// null it itself on its (never-taken-in-practice) failure fallthrough --
-// see that task's own comment on why. DRAM_PSRAM_PLAN.md Phase 0 (4.2):
-// stack_margin_register() target.
-static TaskHandle_t s_ota_rollback_reboot_task;
+// OR-03: the rollback reboot runs from a one-shot esp_timer (static handle,
+// created on first use) instead of an on-demand 4096 B task, so the reboot needs
+// no task stack from the scarce internal heap. The 500 ms timeout keeps the
+// JSON reply ahead of the reboot (factory_reset.c reboot_task() pattern).
+// Timer callbacks run on the esp_timer service task and must stay short: this
+// one sends one best-effort ANNOUNCE_REBOOT frame, then calls the IDF rollback
+// (which does not return on success). ET-01: it DOES wait, with bounded waits:
+// safety_link_send_announce_reboot() takes the uart tx_lock (portMAX_DELAY) and
+// flash_xip_reader_enter() takes the flash XIP mutex (portMAX_DELAY), each bounded
+// by its holder (one UART frame; one LittleFS/NVS erase or write). While it waits,
+// other esp_timer callbacks (lv tick, dram_watch, Wi-Fi timers) stall. Accepted:
+// nothing on esp_timer is a watchdog or control loop, and the board reboots right
+// after. ET-02: the esp_timer task stack is set explicitly (sdkconfig.defaults
+// CONFIG_ESP_TIMER_TASK_STACK_SIZE) and registered with stack_margin once at boot (main_network_http.c).
+static esp_timer_handle_t s_ota_rollback_reboot_timer;
+#define OTA_ROLLBACK_REBOOT_DELAY_US (500 * 1000)
 
-// --- POST /api/ota/esp/rollback -- see ota_http.h's doc comment above this
-// section for the full contract. Runs on its own short-lived task (same
-// factory_reset.c reboot_task() pattern) so the JSON response already
-// queued by the handler has a chance to reach the client before the
-// connection is torn down by the reboot.
-static void ota_rollback_reboot_task(void *arg)
+static void ota_rollback_reboot_timer_cb(void *arg)
 {
     (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(500));
 
     // KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
     // reboots" line: this call to esp_ota_mark_app_invalid_rollback_and_
@@ -733,26 +740,35 @@ static void ota_rollback_reboot_task(void *arg)
     }
 
     ESP_LOGW(OTA_HTTP_TAG, "OTA rollback: rebooting now into the previous image");
+    flash_xip_reader_enter(); /* read_otadata + rewrite; released only if no reboot */
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+    flash_xip_reader_exit();
     // Only reached if the call itself failed to even start the reboot --
     // on success this line never runs, the board is already restarting.
     ESP_LOGE(OTA_HTTP_TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
                   "board NOT rebooted, still running the current image",
              esp_err_to_name(err));
-    // This fallback (the call itself failing to even start the reboot) is
-    // the only path in this task that falls off the end of the function --
-    // on success esp_restart() never returns and this line is unreached.
-    // With CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y, a task function that
-    // returns is NOT quietly torn down: vPortTaskWrapper (IDF
-    // components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c) logs
-    // "FreeRTOS Task ... should not return, Aborting now!" and calls
-    // abort(), which panics the board. Null the handle first so
-    // stack_margin_read() (stack_margin.c), which treats a non-NULL handle
-    // as alive and calls uxTaskGetStackHighWaterMark() on it, does not read
-    // back "alive" for a task that is about to be deleted, then delete the
-    // task explicitly so the function never actually returns.
-    s_ota_rollback_reboot_task = NULL;
-    vTaskDelete(NULL);
+    // OP-02: the client was already told "rebooting"; release the OTA claim taken by the handler so
+    // a failed reboot does not leave heat and updates refused until a manual reboot.
+    ota_http_update_end();
+}
+
+/* Arm the one-shot rollback reboot timer (created once). Returns ESP_OK when armed. */
+static esp_err_t ota_rollback_reboot_schedule(void)
+{
+    if (s_ota_rollback_reboot_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = ota_rollback_reboot_timer_cb,
+            .arg = NULL,
+            .name = "ota_rollback_reboot",
+        };
+        esp_err_t err = esp_timer_create(&args, &s_ota_rollback_reboot_timer);
+        if (err != ESP_OK) {
+            s_ota_rollback_reboot_timer = NULL;
+            return err;
+        }
+    }
+    return esp_timer_start_once(s_ota_rollback_reboot_timer, OTA_ROLLBACK_REBOOT_DELAY_US);
 }
 esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 {
@@ -789,7 +805,10 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // explicitly rather than calling esp_ota_mark_app_invalid_rollback_and_
     // reboot() blind and letting it discover there is nothing -- refuses
     // cleanly, naming the reason, same as every other interlock in this file.
-    if (!esp_ota_check_rollback_is_possible()) {
+    flash_xip_reader_enter();
+    bool rollback_possible = esp_ota_check_rollback_is_possible();
+    flash_xip_reader_exit();
+    if (!rollback_possible) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA esp rollback from %s: refused, no previous valid image to roll back to", ip);
         ota_http_update_end();
         httpd_resp_set_status(req, "409 Conflict");
@@ -820,33 +839,26 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     int n = snprintf(body, sizeof(body), "{\"ok\":true,\"status\":\"rebooting\",\"version_before\":\"%s\"}",
                       version_before);
 
-    // The mutex is intentionally left held across the reboot -- there is no
+    // The claim is intentionally left held on the success path -- there is no
     // "release it after the transfer" moment here the way ota_esp_do_
     // transfer()'s cleanup path has, because the board is about to reboot
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
-    // is nothing left to release.
+    // is nothing left to release. On the failure path (reboot timer not
+    // armed, below) it IS released (OP-02) so the board is not wedged.
     //
-    // The reply is sent only AFTER the reboot task exists (campaign 9b LOW):
-    // the task waits 500 ms before rebooting, so the response still goes out
+    // The reply is sent only AFTER the reboot timer is armed (campaign 9b LOW):
+    // the timer fires after 500 ms before rebooting, so the response still goes out
     // first, but a creation failure is now reported as 500 instead of an
     // "ok / rebooting" the board will never act on.
-    dram_watch_log_task("ota_rollback_reboot", "before-create");
-    bool task_started = dram_watch_task_after("ota_rollback_reboot",
-                                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 4096, NULL,
-                                                          tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task)) == pdPASS;
-    /* Registered unconditionally, success or not -- stack_margin_register()
-     * reads *task_handle_slot fresh at report time, so a creation failure
-     * just reads back alive=false rather than needing a second branch here.
-     * 4096 must match the xTaskCreate() literal above. */
-    stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 4096);
+    bool task_started = ota_rollback_reboot_schedule() == ESP_OK;
     if (!task_started) {
-        ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
+        ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to arm the reboot timer -- "
                       "board will NOT reboot, still running the current image", ip);
         ota_http_update_end();
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to start the reboot task; the board was not rebooted\"}");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to arm the reboot timer; the board was not rebooted\"}");
         return ESP_OK;
     }
     httpd_resp_set_type(req, "application/json");

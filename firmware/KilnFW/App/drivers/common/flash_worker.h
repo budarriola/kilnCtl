@@ -108,6 +108,12 @@ esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), voi
  * must surface a refusal as a real "busy, try again" outcome, not silence. */
 esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg));
 
+/* FY-01: a SECOND, independent non-blocking post slot, owned by the FD-02 firing trace
+ * (persist/firing_trace_glue.c). Identical semantics and return codes to the function above,
+ * but separate state: a post here never affects, and is never refused because of, the safety
+ * recapture's slot, and vice versa. Do not use it for anything but the firing trace. */
+esp_err_t uart_bridge_ext_post_trace_on_flash_worker(void (*fn)(void *arg));
+
 /* Creates the flash-worker reservation lock (static storage, cannot fail)
  * and installs the save-section hooks (pref_cfg_fs_set_save_section_hooks())
  * that every cfg save lock calls, so a save section reserves the worker

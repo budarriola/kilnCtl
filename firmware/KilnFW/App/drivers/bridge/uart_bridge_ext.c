@@ -350,6 +350,15 @@ static SemaphoreHandle_t s_bx_post_lock;
  * and repeated, never silent. */
 static bx_job_fn         s_bx_post_owner_fn;
 
+/* FY-01 (2026-10-19): the FD-02 firing trace's own posted slot. The slot above is
+ * single-poster by design and is owned by safety_link_poll's Pico-half recapture, so
+ * the trace must never post there (whichever fn posted first would lock the other out
+ * for the whole boot). This slot has the same non-blocking, coalescing semantics and
+ * the same one-poster tripwire, but is entirely independent state. Guarded by
+ * s_bx_post_lock like the first one; serviced right after it in bx_worker_iteration(). */
+static bx_job_fn         s_bx_trace_fn;
+static bx_job_fn         s_bx_trace_owner_fn;
+
 /* Claims the posted job, if any, and clears the slot. s_bx_post_lock is
  * held ONLY across the pointer swap, never across the job itself -- this
  * repo's standing "never hold a lock across a producer or blocking call"
@@ -366,6 +375,21 @@ static bx_job_fn bx_take_posted_job(void)
     }
     bx_job_fn fn = s_bx_posted_fn;
     s_bx_posted_fn = NULL;
+    xSemaphoreGive(s_bx_post_lock);
+    return fn;
+}
+
+/* Same as bx_take_posted_job() for the firing-trace slot. */
+static bx_job_fn bx_take_trace_job(void)
+{
+    if (!s_bx_post_lock) {
+        return NULL;
+    }
+    if (xSemaphoreTake(s_bx_post_lock, portMAX_DELAY) != pdTRUE) {
+        return NULL;
+    }
+    bx_job_fn fn = s_bx_trace_fn;
+    s_bx_trace_fn = NULL;
     xSemaphoreGive(s_bx_post_lock);
     return fn;
 }
@@ -400,6 +424,10 @@ static void bx_worker_iteration(void)
         bx_job_fn posted = bx_take_posted_job();
         if (posted) {
             posted(NULL);
+        }
+        bx_job_fn trace = bx_take_trace_job();
+        if (trace) {
+            trace(NULL);
         }
         xSemaphoreGiveRecursive(s_bx_lock);
     }
@@ -784,6 +812,33 @@ esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg))
     } else {
         s_bx_post_owner_fn = fn;
         s_bx_posted_fn = fn;
+        err = ESP_OK;
+    }
+    xSemaphoreGive(s_bx_post_lock);
+    return err;
+}
+
+/* FY-01: non-blocking post into the firing trace's own slot. See the comment on
+ * s_bx_trace_fn. Same return codes as uart_bridge_ext_post_on_flash_worker(). */
+esp_err_t uart_bridge_ext_post_trace_on_flash_worker(void (*fn)(void *arg))
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_bx_post_lock || !s_bx_started) {
+        return ESP_FAIL;
+    }
+    if (xSemaphoreTake(s_bx_post_lock, 0) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err;
+    if (s_bx_trace_fn) {
+        err = ESP_ERR_INVALID_STATE; /* previous trace post not yet picked up */
+    } else if (s_bx_trace_owner_fn && s_bx_trace_owner_fn != fn) {
+        err = ESP_ERR_NOT_SUPPORTED; /* trace slot has exactly one poster */
+    } else {
+        s_bx_trace_owner_fn = fn;
+        s_bx_trace_fn = fn;
         err = ESP_OK;
     }
     xSemaphoreGive(s_bx_post_lock);

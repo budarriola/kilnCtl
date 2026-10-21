@@ -352,6 +352,32 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_RUNAWAY, "reason is RUNAWAY");
     }
 
+    /* SR-10: positive duty rendered as relay OFF for the window arms guard 3;
+     * the same rise with relay_held_off=false (relay really pulsing) must not. */
+    {
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        for (int held = 0; held < 2; held++) {
+            thermal_guard_state_t s;
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.commanded_duty = 0.05f;
+            in.relay_held_off = held != 0;
+            in.measurement_c = 200.0f;
+            bool tripped = false;
+            for (int i = 0; i < 40 && !tripped; i++) {
+                in.measurement_c += 3.0f;
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            if (held) {
+                TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_RUNAWAY,
+                           "SR-10 guard 3 trips on rise with positive duty but relay held off");
+            } else {
+                TEST_CHECK(!tripped || s.reason != THERMAL_GUARD_TRIP_RUNAWAY,
+                           "SR-10 guard 3 stays disarmed at positive duty when relay is not held off");
+            }
+        }
+    }
+
     /* Guard 3: heat off and temperature holding steady never trips. */
     {
         thermal_guard_state_t s;

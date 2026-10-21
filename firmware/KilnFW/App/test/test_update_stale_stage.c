@@ -258,9 +258,9 @@ static void test_header_states_keep(void)
                "corrupt header");
     TEST_CHECK(g_f.clears == 0 && g_f.app_reads == 0, "corrupt: nothing else touched");
 
-    // WRITING and APPLYING are valid headers but not installable.
-    stage_state_t states[2] = { STAGE_STATE_WRITING, STAGE_STATE_APPLYING };
-    for (int i = 0; i < 2; i++) {
+    // WRITING is a valid header but not installable.
+    stage_state_t states[1] = { STAGE_STATE_WRITING };
+    for (int i = 0; i < 1; i++) {
         make_world(ELF);
         stage_header_t h;
         TEST_CHECK(stage_header_decode(g_stage, STAGE_HEADER_SIZE, ST_CAP, &h) == STAGE_HDR_OK, "fixture decodes");

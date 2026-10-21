@@ -94,6 +94,15 @@ typedef enum {
     EVENT_CODE_TUNE_STARTED = 16,
     EVENT_CODE_TUNE_DONE = 17,
     EVENT_CODE_TUNE_ABORTED = 18,
+
+    /* FD-04: SYSTEM source. arg = UTC epoch seconds (uint32 bits stored in the int32) at the
+     * SNTP sync. The record's uptime_s is stamped when the telemetry task emits it, up to ~1-2 s
+     * AFTER the sync (task tick), so a decoder's utc = arg + (uptime_s' - uptime_s) runs
+     * 1-2 s ahead of true UTC. Wall time is display only. */
+    EVENT_CODE_SYS_TIME_SYNC = 32,
+    /* FQ-01: SYSTEM source, first record of each boot. arg = boot_history seq (0 if unknown).
+     * Decoders start a new boot segment here even if uptime did not decrease. */
+    EVENT_CODE_SYS_BOOT = 33,
 } event_log_code_t;
 
 /* 0xFF in the `zone` field means "not zone-specific" (a global/run-level

@@ -96,18 +96,18 @@ try {
     $passCount = [int]$Matches[1]
     if ($passCount -lt 300) { throw "only $passCount assertions ran -- test looks gutted." }
 
-    # Modulo bias: a % 31 mapping must be caught by the exact-8-hits check.
-    Test-Mutant -File "recovery_passphrase.c" -Needle "rnd[i] & (RPASS_ALPHABET_LEN - 1u)" `
-        -Replacement "rnd[i] % 31u" -Others @() -Tag "bias"
+    # Modulo bias: a % 25 mapping must be caught by the reachability check.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "rnd[i] % RPASS_ALPHABET_LEN" `
+        -Replacement "rnd[i] % 25u" -Others @() -Tag "bias"
     # Reduced reach: only 16 symbols reachable.
-    Test-Mutant -File "recovery_passphrase.c" -Needle "rnd[i] & (RPASS_ALPHABET_LEN - 1u)" `
+    Test-Mutant -File "recovery_passphrase.c" -Needle "rnd[i] % RPASS_ALPHABET_LEN" `
         -Replacement "rnd[i] & 15u" -Others @() -Tag "reach"
     # Every position must use its own random byte.
     Test-Mutant -File "recovery_passphrase.c" -Needle "alphabet[rnd[i]" -Replacement "alphabet[rnd[0]" `
         -Others @() -Tag "position"
     # Ambiguous symbols (0, O, 1, I) must stay out of the alphabet actually used.
     Test-Mutant -File "recovery_passphrase.c" -Needle "static const char alphabet[] = RPASS_ALPHABET;" `
-        -Replacement 'static const char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUV";' -Others @() -Tag "alphabet"
+        -Replacement 'static const char alphabet[] = "0123456789ABCDEFGHIJKLMNOP";' -Others @() -Tag "alphabet"
     # Validator: length must be enforced.
     Test-Mutant -File "recovery_passphrase.c" -Needle "strlen(p) != RPASS_LEN" -Replacement "strlen(p) < 1" `
         -Others @() -Tag "vlen"

@@ -358,6 +358,16 @@ static void test_stage_routes_extra(void)
         expect_claim_balanced("dirty upload");
     }
 
+    // BX-07: the app wires esp_image_verify into upload_finish; a failing verify must not stage
+    g_fr_image_verify_n = 0;
+    g_fr_image_verify_fail = true;
+    upload(g_img, IMG_LEN);
+    code = run_upload();
+    CHECK(g_fr_image_verify_n >= 1, "BX-07: upload_finish calls the image_verify hook");
+    CHECK(code != 200 && !stage_staged(), "BX-07: a failing image verify stages nothing");
+    g_fr_image_verify_fail = false;
+    expect_claim_balanced("image verify failure");
+
     // status GET reports a staged image, and clear removes it
     upload(g_img, IMG_LEN);
     CHECK(run_upload() == 200, "good upload still stages after the refusals");

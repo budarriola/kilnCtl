@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 #include "esp_log.h"
+#include "../http/http_auth_http.h"
 
 /* The uncompressed (no Content-Encoding) body sent to a client that
  * explicitly refused gzip. Deliberately tiny -- flash is at 5% free. */
@@ -148,5 +149,7 @@ void web_set_asset_cache_headers(httpd_req_t *req)
     /* See web_encoding.h for why this exists and why it is no-cache rather
      * than no-store. httpd_resp_set_hdr() does not copy the value, so the
      * string must outlive the response -- a string literal does. */
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    /* KH-09: a signed-in page shell stays no-store; the prehandler decided that, this
+     * single set_hdr call applies it (httpd_resp_set_hdr appends, so a second write would send the header twice, KH-10). */
+    httpd_resp_set_hdr(req, "Cache-Control", http_auth_req_wants_no_store(req) ? "no-store" : "no-cache");
 }

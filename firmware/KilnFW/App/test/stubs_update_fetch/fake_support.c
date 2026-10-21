@@ -11,6 +11,7 @@
 #include "update_fetch.h"
 #include "update_http_internal.h"
 
+#include "bootloader_common.h"
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -52,6 +53,8 @@ bool g_fr_flash_write_block;
 volatile long g_fr_wr_wait_after_wedge;
 volatile long g_fr_flash_blocked_n;
 int g_fr_flash_erase_n, g_fr_flash_write_n;
+int g_fr_image_verify_n;
+bool g_fr_image_verify_fail;
 static HANDLE s_flash_ev;
 bool g_fr_wr_missed_give;
 volatile long g_fr_wr_give_dropped;
@@ -122,8 +125,10 @@ void fr_reset(void)
     g_fr_flash_write_fail = false;
     g_fr_flash_write_block = false;
     g_fr_wr_wait_after_wedge = 0;
-    g_fr_sem_idle_waiters = 0;
+    // g_fr_sem_idle_waiters is NOT reset: the persistent writer (UW-01) stays parked in its idle wait across tests
     g_fr_flash_erase_n = g_fr_flash_write_n = 0;
+    g_fr_image_verify_n = 0;
+    g_fr_image_verify_fail = false;
     if (s_flash_ev == NULL) {
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
     }
@@ -240,6 +245,7 @@ size_t strlcpy(char *dst, const char *src, size_t size)
 typedef struct {
     TaskFunction_t fn;
     void *arg;
+    int counted; // 0 for the persistent update_fetch_wr task (UW-01): it never exits, so it is not a "live" job task
 } thr_t;
 
 static unsigned __stdcall thr_main(void *p)
@@ -247,7 +253,9 @@ static unsigned __stdcall thr_main(void *p)
     thr_t t = *(thr_t *)p;
     free(p);
     t.fn(t.arg);
-    InterlockedDecrement(&g_fr_live_tasks);
+    if (t.counted) {
+        InterlockedDecrement(&g_fr_live_tasks);
+    }
     return 0;
 }
 
@@ -262,7 +270,10 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
     thr_t *t = malloc(sizeof(*t));
     t->fn = fn;
     t->arg = arg;
-    InterlockedIncrement(&g_fr_live_tasks);
+    t->counted = !(name != NULL && strcmp(name, "update_fetch_wr") == 0);
+    if (t->counted) {
+        InterlockedIncrement(&g_fr_live_tasks);
+    }
     unsigned tid = 0;
     uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, &tid);
     if (h != 0 && name != NULL && strcmp(name, "update_fetch_wr") == 0) {
@@ -270,7 +281,9 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
         s_wr_done_h = s_last_binary; // wr_start() creates wr_req, then wr_done, then this task
     }
     if (h == 0) {
-        InterlockedDecrement(&g_fr_live_tasks);
+        if (t->counted) {
+            InterlockedDecrement(&g_fr_live_tasks);
+        }
         free(t);
         return pdFAIL;
     }
@@ -286,6 +299,21 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t task, const char *name, unsign
 {
     (void)stack; (void)prio; (void)core;
     return task_create(task, name, arg, out);
+}
+volatile long g_fr_static_task_creates; // xTaskCreateStaticPinnedToCore() calls that succeeded (UR-01)
+TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t task, const char *name, unsigned long stack, void *arg,
+                                           UBaseType_t prio, StackType_t *stack_buf, StaticTask_t *tcb, BaseType_t core)
+{
+    (void)stack; (void)prio; (void)core;
+    if (stack_buf == NULL || tcb == NULL) {
+        return NULL; // a static task needs caller-owned memory, exactly like FreeRTOS
+    }
+    TaskHandle_t h = NULL;
+    if (task_create(task, name, arg, &h) != pdPASS) {
+        return NULL;
+    }
+    InterlockedIncrement(&g_fr_static_task_creates);
+    return h;
 }
 BaseType_t xTaskCreatePinnedToCoreWithCaps(TaskFunction_t task, const char *name, unsigned long stack, void *arg,
                                            UBaseType_t prio, TaskHandle_t *out, BaseType_t core, uint32_t caps)
@@ -813,9 +841,17 @@ bool ota_http_update_in_progress(ota_http_context_t *out)
     (void)out;
     return g_fr_claim_held;
 }
+static bool (*s_busy_probe_fwd)(void);
 ota_interlock_result_t ota_http_check_interlocks(bool ack, char *reason, size_t cap)
 {
     (void)ack;
+    // Mirrors ota_http.c RW-02: a running update fetch counts as an update in progress.
+    if (g_fr_interlock_result == 0 && s_busy_probe_fwd != NULL && s_busy_probe_fwd()) {
+        if (reason != NULL && cap > 0) {
+            snprintf(reason, cap, "update_in_progress");
+        }
+        return (ota_interlock_result_t)1;
+    }
     if (g_fr_interlock_result != 0 && reason != NULL && cap > 0) {
         snprintf(reason, cap, "fake interlock");
     }
@@ -827,12 +863,16 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
     return false;
 }
 static bool (*s_busy_probe)(void);
-void ota_http_set_fetch_busy_probe(bool (*probe)(void)) { s_busy_probe = probe; }
+void ota_http_set_fetch_busy_probe(bool (*probe)(void)) { s_busy_probe = probe; s_busy_probe_fwd = probe; }
+void http_async_job_set_admission_busy_probe(bool (*probe)(void)) { (void)probe; }
+void http_async_job_set_largest_block_probe(size_t (*probe)(void)) { (void)probe; }
 void ota_http_get_client_ip(httpd_req_t *req, char *out, size_t n)
 {
     (void)req;
     snprintf(out, n, "127.0.0.1");
 }
+bool backup_import_restore_in_flight(void) { return false; }
+
 void relay_authority_heat_run_active(bool *profile, bool *autotune)
 {
     *profile = g_fr_heat_profile;
@@ -844,10 +884,22 @@ void time_sync_get_status(time_sync_status_t *out)
     out->ever_synced = g_fr_clock_synced;
     out->now_epoch = (time_t)g_fr_now_epoch;
 }
+bool stack_margin_retain_exit(const char *name, uint32_t free_bytes)
+{
+    (void)name; (void)free_bytes;
+    return true;
+}
+
 bool stack_margin_register(const char *name, void *slot, uint32_t bytes)
 {
     (void)name; (void)slot; (void)bytes;
     return true;
+}
+void stack_margin_task_exit(void *slot)
+{
+    if (slot) {
+        *(void **)slot = NULL;
+    }
 }
 bool update_settings_repo_copy(char *out, size_t cap)
 {
@@ -1047,9 +1099,9 @@ esp_err_t ota_http_send_json_clamped(httpd_req_t *req, const char *buf, int n, s
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
-esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap)
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
 {
-    (void)req; (void)buf; (void)cap;
+    (void)req;
     return ESP_OK;
 }
 uint8_t *ota_http_esp_chunk_buf(size_t *cap)
@@ -1062,4 +1114,29 @@ uint8_t *ota_http_esp_chunk_buf(size_t *cap)
 uint64_t hal_time_now_us(void)
 {
     return 0; /* update_http.c upload deadline: frozen clock never trips it */
+}
+
+/* OP-01 / RX-11: update_http.c's io_image_verify calls stage_image_verify over the stage (the real
+ * walker has its own test, test_stage_image_verify.c); the fetch/refusal tests never reach
+ * upload_finish with a real image, so a fixed answer is enough here. */
+#include "stage_image_verify.h"
+stage_image_result_t stage_image_verify(const stage_image_io_t *io, uint32_t avail, uint32_t *out_len)
+{
+    (void)io;
+    g_fr_image_verify_n++;
+    if (g_fr_image_verify_fail) {
+        return STAGE_IMG_BAD_HASH;
+    }
+    if (out_len != NULL) {
+        *out_len = avail;
+    }
+    return STAGE_IMG_OK;
+}
+
+esp_err_t bootloader_common_check_chip_validity(const esp_image_header_t *img_hdr, esp_image_type type)
+{
+    (void)type;
+    uint32_t mn = img_hdr->min_chip_rev_full;
+    uint32_t mx = img_hdr->max_chip_rev_full;
+    return (1u >= mn && 1u <= mx) ? ESP_OK : ESP_FAIL;
 }

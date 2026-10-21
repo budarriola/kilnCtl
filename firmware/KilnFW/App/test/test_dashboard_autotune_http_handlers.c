@@ -264,6 +264,21 @@ static void test_abort_accept(void)
     TEST_CHECK(f_acc_ack && f_acc_adopt, "'true' accepted for both flags");
     post_ok(autotune_accept_post_handler, "ack_unsettled=0&adopt_ceiling=yes");
     TEST_CHECK(!f_acc_ack && !f_acc_adopt, "0 / yes do not opt in");
+    /* HR-04: oversized body and failed read -> 400, engine never reached. */
+    reset();
+    {
+        char big[128];
+        memset(big, 'a', sizeof(big) - 1);
+        big[sizeof(big) - 1] = '\0';
+        TEST_CHECK(post(autotune_accept_post_handler, big, 100, (size_t)-1, 0) == 400 && f_accept_calls == 0,
+                   "accept: body of 96+ bytes -> 400, engine not called");
+        TEST_CHECK(post(autotune_accept_post_handler, "ack_unsettled=1", 15, 3, -1) == 400 && f_accept_calls == 0,
+                   "accept: failed body read -> 400, engine not called");
+        TEST_CHECK(post(autotune_accept_post_handler, "ack_unsettled=1", 15, 3, 0) == 400 && f_accept_calls == 0,
+                   "accept: peer closes mid-body -> 400, engine not called");
+    }
+    reset();
+    f_accept_result = true;
     post_ok(autotune_accept_post_handler, "adopt_ceiling=1");
     TEST_CHECK(!f_acc_ack && f_acc_adopt, "adopt only");
     {

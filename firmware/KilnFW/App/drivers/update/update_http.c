@@ -10,6 +10,8 @@
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "bootloader_common.h"
+#include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -19,6 +21,7 @@
 #include "psa/crypto.h"
 
 #include "hal_time.h"
+#include "flash_xip_lock.h"
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "ota_http.h"
 #include "ota_http_internal.h"
@@ -29,6 +32,7 @@
 #include "update_http_internal.h"
 #include "update_policy.h"
 #include "update_stage.h"
+#include "stage_image_verify.h"
 #include "update_stale_stage.h"
 #include "wifi_provision_http.h"
 
@@ -48,6 +52,64 @@ static bool s_sha_active;
 // Result of the one boot-time stale-stage check (update_http_stale_stage_check()). BOOT-scoped: set once per
 // boot, never reset by a later upload or clear, so GET reports it as boot_auto_clear. One enum, a few bytes of .bss.
 static update_stale_result_t s_last_auto_clear;
+
+// OP-01 / RX-11: verify the staged image (runs in upload_finish, before the VERIFIED header).
+// Not esp_image_verify(): it checks mapped-segment alignment against the ABSOLUTE flash offset,
+// and the stage image at stage+4 KB is never 64 KB aligned (stage_image_verify.h).
+typedef struct {
+    psa_hash_operation_t op;
+    bool active;
+} iv_sha_t;
+static int iv_read(void *c, uint32_t off, void *buf, uint32_t len)
+{
+    (void)c;
+    return esp_partition_read(s_part, STAGE_IMAGE_OFFSET + off, buf, len) == ESP_OK ? 0 : -1;
+}
+static int iv_sha_begin(void *c)
+{
+    iv_sha_t *h = c;
+    h->op = psa_hash_operation_init();
+    h->active = psa_hash_setup(&h->op, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    return h->active ? 0 : -1;
+}
+static int iv_sha_update(void *c, const void *d, uint32_t n)
+{
+    iv_sha_t *h = c;
+    return (h->active && psa_hash_update(&h->op, d, n) == PSA_SUCCESS) ? 0 : -1;
+}
+static int iv_sha_finish(void *c, uint8_t out[32])
+{
+    iv_sha_t *h = c;
+    if (!h->active) {
+        return -1;
+    }
+    size_t n = 0;
+    psa_status_t st = psa_hash_finish(&h->op, out, 32, &n);
+    if (st != PSA_SUCCESS) {
+        psa_hash_abort(&h->op);
+    }
+    h->active = false;
+    return (st == PSA_SUCCESS && n == 32) ? 0 : -1;
+}
+static int iv_chip_ok(void *c, const uint8_t hdr[24])
+{
+    (void)c;
+    return bootloader_common_check_chip_validity((const esp_image_header_t *)hdr, ESP_IMAGE_APPLICATION) == ESP_OK ? 0 : -1;
+}
+static volatile uint32_t s_last_verify_us; // 0 = no verify run since boot
+static int io_image_verify(void *ctx, uint32_t image_len)
+{
+    (void)ctx;
+    static iv_sha_t h; // RY-02: off the 4096 B update_fetch_wr stack; upload_finish is serialized by the stage claim
+    memset(&h, 0, sizeof(h));
+    const stage_image_io_t io = {.ctx = &h, .read = iv_read, .sha_begin = iv_sha_begin,
+                                 .sha_update = iv_sha_update, .sha_finish = iv_sha_finish, .chip_ok = iv_chip_ok};
+    uint32_t len = 0;
+    const int64_t t0 = (int64_t)hal_time_now_us();
+    const bool ok = (stage_image_verify(&io, image_len, &len) == STAGE_IMG_OK && len <= image_len);
+    s_last_verify_us = (uint32_t)((int64_t)hal_time_now_us() - t0); // RX-06 measurement hook
+    return ok ? 0 : -1;
+}
 
 static int io_erase(void *ctx, uint32_t off, uint32_t len)
 {
@@ -434,7 +496,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
 
     esp_err_t ret = ESP_OK;
     if (refused || failed_mid_body) {
-        ret = ota_http_refusal_drain(req, buf, buf_cap);
+        ret = ota_http_refusal_drain(req);
     }
     return ret;
 }
@@ -477,12 +539,12 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     }
     // semver is validated charset (digits, '.', '-', '+', alnum) and commit is
     // lowercase hex, by stage_header_decode(); no escaping needed.
-    char json[608];
+    char json[640];
     int n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"phase\":\"%s\",\"busy\":%s,\"bytes_done\":%u,\"bytes_total\":%u,"
                      "\"staged\":%s,\"reason\":\"%s\",\"header\":\"%s\",\"capacity\":%u,"
                      "\"image_length\":%u,\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\","
-                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s}",
+                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s,\"last_verify_us\":%u}",
                      update_stage_phase_name(info.phase), info.busy ? "true" : "false",
                      (unsigned)info.bytes_done, (unsigned)info.bytes_total, info.staged ? "true" : "false",
                      info.reason ? info.reason : "", stage_hdr_status_name(info.hdr_status),
@@ -490,7 +552,7 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
                      hdr_ok ? stage_state_name(info.state) : "", hdr_ok ? info.semver : "",
                      hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u,
                      update_stale_result_name(s_last_auto_clear),
-                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false");
+                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false", (unsigned)s_last_verify_us);
     return ota_http_send_json_clamped(req, json, n, sizeof(json));
 }
 
@@ -703,6 +765,7 @@ esp_err_t update_http_start(void)
         .sha_update = io_sha_update,
         .sha_finish = io_sha_finish,
         .sha_abort = io_sha_abort,
+        .image_verify = io_image_verify,
         .lock = io_lock,
         .unlock = io_unlock,
         .yield = io_yield,

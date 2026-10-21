@@ -140,6 +140,7 @@ static int s_reg_n;
 static int s_reg_fail_at;
 static httpd_handle_t s_server_handle = (httpd_handle_t)1;
 httpd_handle_t wifi_provision_http_get_server(void) { return s_server_handle; }
+esp_err_t diag_bundle_http_register(void *server_handle) { (void)server_handle; return ESP_OK; } /* FD-01 route: own test is test_diag_bundle.c */
 esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri)
 {
     (void)server;
@@ -183,6 +184,10 @@ const uint8_t safety_page_html_gz_end[1] = {0};
 #include "adaptive_tune.h"
 #include "profile_executor.h"
 #include "zones_config_cfg_fs.h"
+
+// FD-03: real boot_history.c is linked (fake_kv backed) so GET /api/crash_report emits real rows.
+#include "../drivers/persist/boot_history.h"
+#include "../drivers/persist/trip_history.h" /* FD-05 */
 
 // crash_report
 static bool g_cr_present;
@@ -380,6 +385,9 @@ static dashboard_relay_result_t g_dm_relay_rr = DASHBOARD_RELAY_OK;
 static uint8_t g_dm_relay_arg;
 static bool g_dm_relay_on;
 static int g_dm_relay_calls;
+/* HR-01: controllable run state for the cfgfs file POST mode gate. */
+static bool g_run_profile, g_run_autotune;
+void relay_authority_heat_run_active(bool *profile, bool *autotune) { *profile = g_run_profile; *autotune = g_run_autotune; }
 bool danger_mode_active(void) { return g_dm_active; }
 bool danger_mode_get_heat_requested(void) { return false; }
 bool danger_mode_get_relay_status(bool *e, bool *h) { *e = true; *h = false; return true; }
@@ -470,6 +478,8 @@ static httpd_req_t s_req;
 
 static void world_reset(void)
 {
+    g_run_profile = false;
+    g_run_autotune = false;
     resp_reset();
     s_post_len = 0;
     s_post_body[0] = '\0';
@@ -524,6 +534,41 @@ static void test_crash_report(void)
     world_reset();
     crash_report_get_handler(&s_req);
     TEST_CHECK(s_status == 200 && body_has("\"present\":false"), "crash_report GET absent: present:false");
+    TEST_CHECK(body_has("\"boot_history\":[]"), "crash_report GET absent: empty boot_history array on a fresh ring");
+    TEST_CHECK(body_has("\"trip_history\":[]"), "crash_report GET absent: empty trip_history array on a fresh ring");
+
+    /* FD-05: trip history rows ride on the same route, newest first. */
+    world_reset();
+    hal_kv_init_partition("kiln_nvs");
+    {
+        trip_history_entry_t te;
+        memset(&te, 0, sizeof(te));
+        te.reason = 6; te.pico_trip_seq = 1; te.pico_uptime_ms = 1000; te.esp_uptime_s = 50;
+        te.zone = TRIP_HISTORY_ZONE_UNKNOWN; te.safety_tc_c = 1250.5f; te.threshold = 1200.0f; te.boot_seq = 3; te.utc = 1700000000u;
+        trip_history_note(&te);
+        te.reason = 2; te.pico_trip_seq = 2; te.pico_uptime_ms = 2000; te.zone = 1;
+        trip_history_note(&te);
+        trip_history_flush();
+    }
+    crash_report_get_handler(&s_req);
+    TEST_CHECK(s_status == 200 && body_has("\"trip_history\":[{\"seq\":2,\"reason\":2,\"mask\":2,\"zone\":1,") &&
+                   body_has("{\"seq\":1,\"reason\":6,\"mask\":32,\"zone\":-1,\"safety_tc_c\":1250.5,\"threshold\":1200.0,"
+                            "\"pico_uptime_ms\":1000,\"esp_uptime_s\":50,\"utc\":1700000000,\"boot_seq\":3,\"count\":1}"),
+               "crash_report GET: trip_history rows newest-first with mask, zone -1 unknown, stamps");
+    TEST_CHECK(body_has("\"trip_history_dropped\":0"), "TH-03: dropped counter exposed");
+    TEST_CHECK(body_has("\"count\":1}") , "FV-INFO: trip count exposed");
+
+    /* FD-03: boot history rides on the same route, present or absent crash record. */
+    world_reset();
+    hal_kv_init_partition("kiln_nvs");
+    boot_history_record_boot(4, true, 345u, 77u, true, "v1-2-gabc1234", 0u);
+    boot_history_record_boot(1, false, 0u, 0u, false, "v1-3-gdef5678", 0u);
+    crash_report_get_handler(&s_req);
+    TEST_CHECK(s_status == 200 && body_has("\"present\":false") &&
+                   body_has("\"boot_history\":[{\"seq\":2,\"reset_reason\":\"POWERON\"") &&
+                   body_has("{\"seq\":1,\"reset_reason\":\"PANIC\",\"prev_uptime_s\":345,\"prev_uptime_known\":true,\"dump_id\":77") &&
+                   body_has("\"fw\":\"abc1234\""),
+               "crash_report GET: boot_history rows newest-first with reason name, uptime, dump_id, fw");
 
     world_reset();
     g_cr_present = true;
@@ -687,6 +732,17 @@ static void test_watchdog_ramp(void)
     s_recv_fail = true;
     watchdog_cfg_post_handler(&s_req);
     TEST_CHECK(s_status == 400 && g_wd_set_calls == 0, "watchdog POST: recv failure -> 400");
+
+    /* AG-03: 409 (system_mode_gate) while a firing or autotune is active; nothing written. */
+    for (int mode = 0; mode < 2; mode++) {
+        world_reset();
+        g_run_profile = (mode == 0);
+        g_run_autotune = (mode == 1);
+        set_body("disabled=1");
+        watchdog_cfg_post_handler(&s_req);
+        TEST_CHECK(s_status == 409 && g_wd_set_calls == 0 && !g_wd_disabled,
+                   "watchdog POST (AG-03): 409 while a firing/autotune run is active, nothing written");
+    }
 
     const char *bad[] = {"x=1", "disabled=", "disabled=2", "disabled=true", "disabled=01", "disabled=-1", NULL};
     for (int i = 0; bad[i]; i++) {
@@ -1027,6 +1083,18 @@ static void test_cfgfs(void)
     TEST_CHECK(s_status == 200 && g_chk_raw && g_cfg_write_calls == 1 && g_cfg_write_len == 4 &&
                strcmp(g_cfg_write_name, "zones.json") == 0, "cfgfs file POST: raw=1 reaches the validator and the write lands");
     TEST_CHECK(g_worker_calls == 1, "cfgfs file POST: write dispatched through the flash worker");
+
+    /* HR-01: refused 409 (system_mode_gate) while a firing or autotune is active; nothing validated or written. */
+    for (int mode = 0; mode < 2; mode++) {
+        world_reset();
+        g_run_profile = (mode == 0);
+        g_run_autotune = (mode == 1);
+        set_query("name=zones.json&raw=1");
+        set_body("data");
+        cfgfs_file_post_handler(&s_req);
+        TEST_CHECK(s_status == 409 && g_cfg_write_calls == 0 && g_chk_calls == 0 && g_worker_calls == 0,
+                   "cfgfs file POST (HR-01): 409 while a firing/autotune run is active, nothing written");
+    }
 
     world_reset();
     set_query("name=zones.json&raw=10");

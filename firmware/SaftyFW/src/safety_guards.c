@@ -34,6 +34,7 @@
 #define UNDERCURRENT_TIME_S_DEFAULT   30.0f   /* S15 */
 #define RATE_WINDOW_S_DEFAULT         60.0f   /* S8 -- SAFETY_MODEL.md section 4 */
 
+#define S1_TCRANGE_NEAR_CEILING_MARGIN_C 100.0f /* SR-33: last good reading this close to abs_max */
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
 
 /* S8. Consecutive WINDOW EVALUATIONS (each rate_window_s long, not ticks)
@@ -100,6 +101,17 @@ void safety_guards_clear(safety_guard_state_t *state)
 #define S8_POST_MIN_S 5.0f
 #define S8_POST_WIN_MIN_S 60.0f
 #define S8_POST_WIN_MAX_S 600.0f
+
+/* TC sheath lag (param 0x010B): the over-temperature reading S1 and S2
+ * check. raw + max(0, lead) is the conservative of raw and compensated: a
+ * positive lead (heating behind a protection tube) makes them react sooner,
+ * a negative lead (cooling) never delays them. tc_lead_c is 0 when the
+ * sheath tau is 0, so a bare TC sees exactly in->tc_c. */
+static float guard_hot_c(const safety_guard_input_t *in)
+{
+    float lead = in->tc_lead_c;
+    return (lead > 0.0f) ? (in->tc_c + lead) : in->tc_c; /* NaN lead compares false */
+}
 
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
@@ -318,7 +330,7 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                 * (REVIEW_SAFTYFW_TRIP_PATH T1: the S1 debounce counts exactly
                                 * this level; refusing here never loosens the guard). */
         /* Review saftyfx6 F4: an unknown reading (bad TC) is not a pass -- refuse. */
-        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || in->tc_c > cfg->abs_max_temp_c);
+        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || guard_hot_c(in) > cfg->abs_max_temp_c);
     case SAFETY_TRIP_RATE: /* S8 -- see s8_clear_refuse(); strict = a real RATE trip is latched */
         return s8_clear_refuse(cfg, in, state, true);
     case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
@@ -326,7 +338,7 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
                /* A8 (guard audit 2026-10-14): an unknown reading is not a pass -- refuse, as S1 does. */
                (!in->tc_valid ||
-                in->tc_c > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT));
+                guard_hot_c(in) > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT));
     case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 -- current still present with nothing commanded on */
         return in->context_valid && in->any_current_present && !in->relay_commanded_recently;
     case SAFETY_TRIP_FROZEN_SENSOR: /* S11 -- reading still sitting at the value that tripped it.
@@ -510,7 +522,18 @@ static bool s12_evaluate(safety_guard_state_t *state, const safety_guard_cfg_t *
              * guard_condition_still_immediate() refuses to clear an S12
              * trip while cj is unknown. */
             state->s12_warn = true;
+            /* PN-04 (owner 2026-10-16): an unknown CJ that persists longer than
+             * cj_time_s is a repeated sensor fault, not a warning forever: the TC
+             * value's cold-junction compensation is invalid too, so escalate to an
+             * S12 trip. The accumulator for the over-max case is still held. */
+            state->s12_cj_unknown_elapsed_s += in->dt_s;
+            if (state->s12_cj_unknown_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
+                trip(state, SAFETY_TRIP_ENCLOSURE_TEMP, "cold junction unknown for %.0fs >= cj_time_s",
+                     (double)state->s12_cj_unknown_elapsed_s);
+                return true;
+            }
         } else if (in->cj_c > cj_max) {
+            state->s12_cj_unknown_elapsed_s = 0.0f;
             state->s12_warn = true;
             state->s12_over_max_elapsed_s += in->dt_s;
             if (state->s12_over_max_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
@@ -519,9 +542,11 @@ static bool s12_evaluate(safety_guard_state_t *state, const safety_guard_cfg_t *
                 return true;
             }
         } else if (in->cj_c > cj_warn) {
+            state->s12_cj_unknown_elapsed_s = 0.0f;
             state->s12_warn = true;
             state->s12_over_max_elapsed_s = 0.0f;
         } else {
+            state->s12_cj_unknown_elapsed_s = 0.0f;
             state->s12_warn = false;
             state->s12_over_max_elapsed_s = 0.0f;
         }
@@ -751,7 +776,10 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
              * energize/ARM path has no way to observe this field at all. */
         }
         float soft = effective_f(cfg->link_timeout_s, LINK_TIMEOUT_S_DEFAULT);
-        if (state->s6b_link_down_elapsed_s >= soft && in->any_current_present) {
+        /* SR-30: on a CT-less board any_current_present is forced false, so use the K4 software
+         * mirror (relay energized) as the heat evidence. This only adds trips. */
+        bool heat_evidence = in->any_current_present || (in->current_sensing_disabled && !in->relay_deenergized);
+        if (state->s6b_link_down_elapsed_s >= soft && heat_evidence) {
             if (!in->reboot_grace_active) {
                 trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_timeout_s %.1fs) with current present",
                      (double)state->s6b_link_down_elapsed_s, (double)soft);
@@ -793,6 +821,24 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             state->s5_bad_streak++;
         }
         state->s5_bad_elapsed_s += in->dt_s;
+
+        /* SR-33: TCRANGE right after a good reading within S1_TCRANGE_NEAR_CEILING_MARGIN_C of
+         * abs_max_temp_c means the converter ran out of range going UP; treat it as S1 (same streak)
+         * instead of waiting blind_grace_s. The SPI/OPEN/OVUV paths are unchanged. */
+        if (cfg->abs_max_temp_c > 0.0f && !in->spi_failed && state->s1_last_valid_known &&
+            (in->fault_bits & SAFETY_THERMO_FAULT_TCRANGE) != 0u &&
+            state->s1_last_valid_c >= cfg->abs_max_temp_c - S1_TCRANGE_NEAR_CEILING_MARGIN_C) {
+            if (state->s1_tcrange_near_ceiling_streak < UINT8_MAX) {
+                state->s1_tcrange_near_ceiling_streak++;
+            }
+            if (state->s1_tcrange_near_ceiling_streak >= S1_OVER_CEILING_STREAK_TO_TRIP) {
+                trip(state, SAFETY_TRIP_OVERTEMP, "TCRANGE after %.1fC (ceiling %.1fC): converter range exceeded near the ceiling",
+                     (double)state->s1_last_valid_c, (double)cfg->abs_max_temp_c);
+                return true;
+            }
+        } else {
+            state->s1_tcrange_near_ceiling_streak = 0;
+        }
 
         uint16_t count_th = effective_u16(cfg->bad_read_count_threshold, BAD_READ_COUNT_DEFAULT);
         float time_th = effective_f(cfg->bad_read_time_s, BAD_READ_TIME_S_DEFAULT);
@@ -850,7 +896,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* T4: the cold junction is a separate MAX31856 register, usually still
          * valid on the commonest fault (open TC). Run S12 on a valid CJ so the
          * enclosure guard is not blind; S5 is untouched. */
-        if (!in->cj_invalid && !isnan(in->cj_c) && s12_evaluate(state, cfg, in)) {
+        if (s12_evaluate(state, cfg, in)) { /* PN-04: also runs on an unknown CJ */
             return true;
         }
         /* A11 (guard audit 2026-10-14): keep the S8 window's wall-clock honest across
@@ -864,6 +910,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         goto context_guards;
     }
 
+    state->s1_last_valid_c = in->tc_c;
+    state->s1_last_valid_known = true;
+    state->s1_tcrange_near_ceiling_streak = 0;
     state->s5_bad_streak = 0;
     state->s5_bad_elapsed_s = 0.0f;
     state->s5_warn = false;
@@ -882,13 +931,13 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * has been removed. */
         float ceiling = cfg->abs_max_temp_c;
 
-        if (in->tc_valid && in->tc_c > ceiling) {
+        if (in->tc_valid && guard_hot_c(in) > ceiling) {
             if (state->s1_over_ceiling_streak < UINT8_MAX) {
                 state->s1_over_ceiling_streak++;
             }
             if (state->s1_over_ceiling_streak >= S1_OVER_CEILING_STREAK_TO_TRIP) {
                 trip(state, SAFETY_TRIP_OVERTEMP, "%.1fC > ceiling %.1fC for %u consecutive valid readings",
-                     (double)in->tc_c, (double)ceiling, (unsigned)state->s1_over_ceiling_streak);
+                     (double)guard_hot_c(in), (double)ceiling, (unsigned)state->s1_over_ceiling_streak);
                 return true;
             }
         } else {
@@ -1078,13 +1127,13 @@ context_guards:
         } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
-            if (in->tc_c > in->max_zone_setpoint_c + margin) {
+            if (guard_hot_c(in) > in->max_zone_setpoint_c + margin) {
                 state->s2_over_elapsed_s += in->dt_s;
                 float time_th = effective_f(cfg->overshoot_time_s, OVERSHOOT_TIME_S_DEFAULT);
                 if (state->s2_over_elapsed_s >= time_th) {
                     trip(state, SAFETY_TRIP_OVER_SETPOINT,
                          "%.1fC > max setpoint %.1fC + overshoot_margin_c %.1fC for %.0fs",
-                         (double)in->tc_c, (double)in->max_zone_setpoint_c, (double)margin,
+                         (double)guard_hot_c(in), (double)in->max_zone_setpoint_c, (double)margin,
                          (double)state->s2_over_elapsed_s);
                     return true;
                 }
@@ -1259,7 +1308,7 @@ context_guards:
                 } else {
                     uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
                     float threshold_a = expected_sum_a * (float)pct / 100.0f;
-                    if (in->amps[ch] > threshold_a) {
+                    if (in->amps[ch] > threshold_a || in->clipped[ch]) {
                         state->s14_over_elapsed_s[ch] += in->dt_s;
                         float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
                         state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
@@ -1313,7 +1362,7 @@ context_guards:
                 }
                 uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
                 float threshold_a = cfg->i_normal_a[ch] * (float)pct / 100.0f;
-                if (in->amps[ch] > threshold_a) {
+                if (in->amps[ch] > threshold_a || in->clipped[ch]) {
                     state->s14_over_elapsed_s[ch] += in->dt_s;
                     float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
                     state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
@@ -1368,7 +1417,7 @@ context_guards:
             } else {
                 uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
                 float threshold_a = expected_sum_a * (float)pct / 100.0f;
-                if (in->amps[CT_SUMMED_CHANNEL] > threshold_a) {
+                if (in->amps[CT_SUMMED_CHANNEL] > threshold_a || in->clipped[CT_SUMMED_CHANNEL]) {
                     state->s14_over_elapsed_s[CT_SUMMED_CHANNEL] += in->dt_s;
                     float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
                     state->s14_warn[CT_SUMMED_CHANNEL] =

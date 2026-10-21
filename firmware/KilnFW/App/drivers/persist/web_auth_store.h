@@ -232,6 +232,8 @@ bool web_auth_store_verify_password(web_auth_role_t role, const char *password);
 // Used by item 11's "enabling auth is refused unless a credential exists"
 // gate and by nothing else -- it is not itself an auth check.
 bool web_auth_store_password_configured(web_auth_role_t role);
+// AZ-01: bootstrap predicate input; true for UNREADABLE (fail closed).
+bool web_auth_store_admin_configured_or_unreadable(void);
 
 // Sets role's password. Caller supplies `salt` (WEB_AUTH_SALT_LEN
 // caller-generated random bytes -- see this header's randomness note) and
@@ -277,6 +279,45 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out);
 // web_auth_store_pin_configured() above; this setter just persists whatever
 // it is given.
 hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy);
+
+// AU-02: persistent "auth was ever enabled" marker (key auth_ever, outside the
+// policy record). Set (read-back verified) by set_policy whenever either
+// interface is enabled. load_policy reports UNREADABLE (fail closed) when the
+// policy record is absent but this marker is set. Recovery is unchanged: an
+// administrator logs in and re-saves the policy.
+bool web_auth_store_ever_enabled(void);
+
+// FS-02: boot-time decision "login storage reset vs factory-fresh". Call once
+// at boot after the default nvs and wifi_nvs partitions are up.
+// `setup_evidence_elsewhere` = Wi-Fi STA credentials (or other surviving cfg
+// state) exist. Reset = nvs sentinel missing AND (wifi_nvs mirror present OR
+// (hal_kv_partition_was_auto_erased("nvs") AND setup_evidence_elsewhere)) AND
+// no policy/marker present. When reset: latches; load_policy() then reads
+// UNREADABLE (fail closed: enabled, admin unconfigured => bootstrap offered
+// through the existing bootstrap flow); setting the admin web password clears
+// the latch and persists an enabled policy. Factory-fresh: writes the
+// sentinel (+mirror), returns false (auth off as before).
+bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere);
+bool web_auth_store_storage_reset_latched(void);
+// RT-01: false while latched unless the physical reset gesture ran in this episode
+// (persisted: valid web blob, admin unconfigured + must_change). True when not latched.
+// Recovery while refused: only the physical gesture (E-stop + four corners); an LCD PIN cannot be set while latched.
+bool web_auth_store_storage_reset_bootstrap_allowed(void);
+// LCD banner text for the latched state.
+const char *web_auth_store_storage_reset_banner_text(void);
+// F2-01: after a storage-reset recovery the LCD lock stays ON with no admin PIN (LCD gated). True
+// while that holds (LCD lock enabled, no admin PIN); ends when an admin PIN is set or the LCD lock
+// is disabled in settings. Cached, recomputed at boot and after PIN/policy writes.
+bool web_auth_store_lcd_pin_pending(void);
+const char *web_auth_store_lcd_pin_pending_banner_text(void);
+// RV-04: policy record lost on a provisioned board (load_policy UNREADABLE, not the FS-02 latch).
+bool web_auth_store_policy_lost(void);
+const char *web_auth_store_policy_lost_banner_text(void);
+
+// Erases the policy record AND the marker (read-back verified). On a board with no credential
+// record this is the fresh open state. Since AU-02, with credentials present load_policy reads
+// UNREADABLE (fail closed) instead. No production caller (RF2-08).
+bool web_auth_store_clear_policy_and_marker(void);
 
 // --- Auth-off / first-boot / field-upgrade collapse (plan item 11) ---------
 
@@ -334,6 +375,14 @@ typedef enum {
     WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL,
     WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL,
 } web_auth_policy_transition_t;
+
+// LK-01: set_policy with the enable-gate transition check made INSIDE the store lock (a credential wipe holds
+// the same lock, so it cannot land between check and write). Returns HAL_INVALID_ARG with *transition_out set
+// when the transition is refused, HAL_BUSY when the lock wait timed out (LK-02: callers report busy/retry),
+// otherwise the write result. The clear_* outputs are set only on HAL_OK. Any output pointer may be NULL.
+hal_status_t web_auth_store_set_policy_checked(const web_auth_policy_t *requested,
+                                               web_auth_policy_transition_t *transition_out,
+                                               bool *clear_web_sessions, bool *clear_lcd_session);
 
 web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_policy_t *current,
                                                                 const web_auth_policy_t *requested,

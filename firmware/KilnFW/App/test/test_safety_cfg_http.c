@@ -102,6 +102,7 @@ static char s_stub_last_httpd_resp[512];
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
+    if (buf && buf_len < 0) { buf_len = (long long)strlen(buf); } /* HTTPD_RESP_USE_STRLEN */
     if (buf && buf_len > 0 && (size_t)buf_len < sizeof(s_stub_last_httpd_resp)) {
         memcpy(s_stub_last_httpd_resp, buf, (size_t)buf_len);
         s_stub_last_httpd_resp[buf_len] = '\0';
@@ -828,8 +829,18 @@ bool safety_link_take_stashed_commit_rejected(SafetyLinkClass *link, uint16_t *o
 // Tests
 // ---------------------------------------------------------------------------
 
+/* HR-02: controllable run state for the four POST handlers' system_mode_gate. */
+static bool s_stub_run_profile, s_stub_run_autotune;
+void relay_authority_heat_run_active(bool *profile, bool *autotune)
+{
+    *profile = s_stub_run_profile;
+    *autotune = s_stub_run_autotune;
+}
+
 static void reset_all(void)
 {
+    s_stub_run_profile = false;
+    s_stub_run_autotune = false;
     s_stub_last_httpd_err[0] = '\0';
     s_stub_httpd_err_calls = 0;
     memset(s_stub_params, 0, sizeof(s_stub_params));
@@ -2892,6 +2903,84 @@ static void test_sync_writers_refused_409_while_any_other_writer_holds_guard(voi
     }
 }
 
+static bool s_stub_restore_in_flight;
+bool backup_import_restore_in_flight(void) { return s_stub_restore_in_flight; }
+
+/* RT-02/RT-03/RT-04: rate_guard/auto, commissioning/bench_preset and ct_auto_zero 409 while a run is active;
+ * ct_auto_zero also 409 during a backup restore. Nothing staged, no writer claim. */
+static void test_rt_posts_refused_409(void)
+{
+    TEST_SECTION("RT-02/03/04: rate_guard_auto, bench_preset, ct_auto_zero -- 409 while running; ct_auto_zero 409 in restore");
+    const sync_writer_fn_t handlers[] = { rate_guard_auto_post_handler, bench_preset_post_handler,
+                                          ct_auto_zero_post_handler };
+    for (size_t h = 0; h < 3; h++) {
+        for (int mode = 0; mode < 2; mode++) {
+            reset_all();
+            s_stub_restore_in_flight = false;
+            s_stub_last_status[0] = '\0';
+            s_stub_run_profile = (mode == 0);
+            s_stub_run_autotune = (mode == 1);
+            httpd_req_t req = { .content_len = 0 };
+            TEST_CHECK(handlers[h](&req) == ESP_OK, "refusal is a normal handler return");
+            TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "RT: status is 409 Conflict");
+            TEST_CHECK(strstr(s_stub_last_httpd_resp, "firing or autotune run is active") != NULL,
+                       "RT: body names the run-active gate reason");
+            TEST_CHECK(s_stub_set_param_calls == 0 && s_stub_commit_calls == 0, "RT: nothing staged or committed");
+            TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "RT: writer guard never claimed");
+        }
+    }
+    reset_all();
+    s_stub_last_status[0] = '\0';
+    s_stub_restore_in_flight = true;
+    httpd_req_t req2 = { .content_len = 0 };
+    TEST_CHECK(ct_auto_zero_post_handler(&req2) == ESP_OK, "RT-04: restore refusal returns normally");
+    TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "RT-04: restore in flight is 409");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "restore") != NULL, "RT-04: body names the restore");
+    s_stub_restore_in_flight = false;
+
+    /* RX-02: the fence is in the shared gate, so every Pico param writer refuses during a restore. */
+    const sync_writer_fn_t all[] = { rate_guard_auto_post_handler, bench_preset_post_handler, ct_auto_zero_post_handler,
+                                     commissioning_post_handler, relay_type_post_handler, ct_cal_post_handler,
+                                     ct_trim_post_handler };
+    for (size_t h = 0; h < sizeof(all) / sizeof(all[0]); h++) {
+        reset_all();
+        s_stub_last_status[0] = '\0';
+        s_stub_restore_in_flight = true;
+        httpd_req_t rq = { .content_len = 0 };
+        TEST_CHECK(all[h](&rq) == ESP_OK, "RX-02: restore refusal returns normally");
+        TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "RX-02: restore in flight is 409");
+        TEST_CHECK(s_stub_set_param_calls == 0 && s_stub_commit_calls == 0, "RX-02: nothing staged or committed");
+        TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "RX-02: writer guard never claimed");
+    }
+    s_stub_restore_in_flight = false;
+}
+
+static void test_safety_posts_refused_409_while_run_active(void)
+{
+    TEST_SECTION("HR-02: param/relay_type/ct_cal/ct_trim POSTs -- 409 system_mode_gate while a firing or "
+                 "autotune is active, nothing staged");
+    const sync_writer_fn_t handlers[] = { commissioning_post_handler, relay_type_post_handler, ct_cal_post_handler,
+                                          ct_trim_post_handler };
+    for (size_t h = 0; h < sizeof(handlers) / sizeof(handlers[0]); h++) {
+        for (int mode = 0; mode < 2; mode++) {
+            reset_all();
+            s_stub_last_status[0] = '\0';
+            s_stub_run_profile = (mode == 0);
+            s_stub_run_autotune = (mode == 1);
+            httpd_req_t req = { .content_len = 0 };
+            TEST_CHECK(handlers[h](&req) == ESP_OK, "refusal is a normal handler return");
+            TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "status is 409 Conflict");
+            TEST_CHECK(strstr(s_stub_last_httpd_resp, "firing or autotune run is active") != NULL,
+                       "body names the run-active gate reason");
+            TEST_CHECK(s_stub_set_param_calls == 0 && s_stub_commit_calls == 0 &&
+                           s_stub_set_safety_relay_type_calls == 0 && s_stub_set_ct_cal_input_calls == 0 &&
+                           s_stub_set_ct_cal_trim_calls == 0,
+                       "nothing staged, committed or written");
+            TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "writer guard never claimed");
+        }
+    }
+}
+
 static void test_sync_writers_release_guard_on_every_return_path(void)
 {
     TEST_SECTION("sync SET_PARAM writers -- hold HTTP_SYNC across the write and release it on every return "
@@ -3254,6 +3343,8 @@ int main(void)
     test_bench_preset_post_handler_refuses_without_link();
 
     test_sync_writers_refused_409_while_any_other_writer_holds_guard();
+    test_safety_posts_refused_409_while_run_active();
+    test_rt_posts_refused_409();
     test_sync_writers_release_guard_on_every_return_path();
 
     // 2026-09-25 fix-then-push re-review, item 2 -- MUST STAY LAST: all

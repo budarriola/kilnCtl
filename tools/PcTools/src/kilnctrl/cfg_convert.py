@@ -17,7 +17,7 @@ changes firmware migration behaviour.
 SCOPE. The document this module converts is the BACKUP document -- the
 top-level "version" field is BACKUP_FORMAT_VERSION (currently 7, see
 backup_http_internal.h), not ZONES_CFG_VERSION (the on-flash per-zone schema
-version, currently 26). The two are different numbers for a reason: most of
+version, currently 27). The two are different numbers for a reason: most of
 the fields ZONES_CFG_VERSION bumps added to the on-flash struct were folded
 into the backup document as purely-additive, presence-gated optional keys
 with NO BACKUP_FORMAT_VERSION bump at all (backup_import.c's own comments say
@@ -149,7 +149,7 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     "coupling_tau_c", "coupling_dead_time_c", "coupling_diag_k_dc", "settings_source_g",
     "ease_off_window_mult", "approach_rate_cap_c_per_hr", "error_band_c", "rate_band_c_per_s",
     "relay_type", "progress_band_c", "zone_type", "model_fit_temp_c", "model_fit_ambient_c",
-    "coil_power_w", "autotune_baseline_k_dc", "adaptive_tune_enabled", "tuning_valid",
+    "coil_power_w", "autotune_baseline_k_dc", "tc_sheath_tau_s", "adaptive_tune_enabled", "tuning_valid",
     "tuning_method", "tuning_rule", "tuning_settled", "tuning_extrapolation_converged",
     "tuning_tau_consistent", "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
     "tuning_rise_inf_c", "normal_current_a", "safety_i_normal_a",

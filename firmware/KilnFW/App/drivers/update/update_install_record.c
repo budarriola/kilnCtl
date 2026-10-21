@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "ota_image_crc.h"
+#include "update_semver.h"
 
 #define REQ_MAGIC 0x31524955u // "UIR1"
 #define RES_MAGIC 0x31535255u // "URS1"
@@ -74,7 +75,7 @@ size_t update_install_res_encode(const update_install_res_t *r, uint8_t out[UPD_
     }
     memset(out, 0, UPD_INST_RES_SIZE);
     put_u32(out, RES_MAGIC);
-    out[4] = (uint8_t)REC_VERSION;
+    out[4] = (uint8_t)(r->reason >= UPD_INST_REASON_ROLLED_BACK ? UPD_INST_RES_VERSION_2 : UPD_INST_RES_VERSION_1);
     out[5] = r->code;
     out[6] = r->reason;
     out[7] = (uint8_t)((r->detail & UPD_INST_DETAIL_CODE_MASK) | (r->app_modified ? UPD_INST_DETAIL_MODIFIED_BIT : 0u));
@@ -89,7 +90,7 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
     if (!buf || !out || len != UPD_INST_RES_SIZE) {
         return false;
     }
-    if (get_u32(buf) != RES_MAGIC || buf[4] != REC_VERSION) {
+    if (get_u32(buf) != RES_MAGIC || (buf[4] != UPD_INST_RES_VERSION_1 && buf[4] != UPD_INST_RES_VERSION_2)) {
         return false;
     }
     if (get_u32(buf + UPD_INST_RES_SIZE - 4) != ota_image_crc32(buf, UPD_INST_RES_SIZE - 4)) {
@@ -106,8 +107,159 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
     if (r.code > UPD_INST_RES_FAIL || r.reason >= UPD_INST_REASON_COUNT || !semver_terminated(r.semver)) {
         return false;
     }
+    if (buf[4] == UPD_INST_RES_VERSION_1 && r.reason >= UPD_INST_REASON_ROLLED_BACK) {
+        return false; // a v1 writer cannot have produced a v2 reason
+    }
     *out = r;
     return true;
+}
+
+bool update_install_res_apply_rollback(update_install_res_t *res, bool app_rolled_back)
+{
+    if (!res || !app_rolled_back || res->code != UPD_INST_RES_OK || res->detail == UPD_INST_DETAIL_CONFIRMED) {
+        return false;
+    }
+    res->code = UPD_INST_RES_FAIL;
+    res->reason = UPD_INST_REASON_ROLLED_BACK;
+    return true;
+}
+
+bool update_install_res_mark_confirmed(update_install_res_t *res)
+{
+    if (!res || res->code != UPD_INST_RES_OK || res->detail == UPD_INST_DETAIL_CONFIRMED) {
+        return false;
+    }
+    res->detail = UPD_INST_DETAIL_CONFIRMED;
+    return true;
+}
+
+const char *update_install_res_state_name(const update_install_res_t *res)
+{
+    return (res && res->code == UPD_INST_RES_OK && res->detail != UPD_INST_DETAIL_CONFIRMED) ? "pending_confirm"
+                                                                                           : "recorded";
+}
+
+static bool id_is_zero(const uint8_t id[UPD_INST_ID_LEN])
+{
+    for (size_t i = 0; i < UPD_INST_ID_LEN; i++) {
+        if (id[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* OF-05: the record keeps the staged header string (git describe, "1.0.0-pre.1-2276-ga71d481") while the running
+ * identity is the converted form ("1.0.0-pre.1.2276"). Compare both in the converted form; a string that is already
+ * canonical (or not a describe) passes through unchanged. */
+static void semver_canon(const char *in, char *out, size_t cap)
+{
+    /* OG-01: the strict form keeps "-dirty" and the commit count past a release tag, so a dev build never equals the
+     * release. A string that does not parse (truncated, recovery name) compares as its raw text: record and running
+     * strings come from the same 32-byte esp_app_desc field, so equal builds still match (OG-05). */
+    if (in == NULL || !update_semver_from_describe_strict(in, out, cap)) {
+        out[0] = '\0';
+        if (in != NULL) {
+            strncpy(out, in, cap - 1);
+            out[cap - 1] = '\0';
+        }
+    }
+}
+
+/* OG-01: three-way match. YES only when version AND id both agree and both ids are known. A definite difference in
+ * either is NO. A record id of zero (legacy/unknown), an unknown running id, or a missing version string cannot
+ * prove anything: UNVERIFIED, which never confirms. */
+update_install_match_t update_install_res_match(const update_install_res_t *res, const char *running_semver,
+                                                const uint8_t *running_id)
+{
+    if (res == NULL) {
+        return UPD_INST_MATCH_NO;
+    }
+    char a[UPD_INST_SEMVER_LEN + 24], b[UPD_INST_SEMVER_LEN + 24];
+    bool have_ver = res->semver[0] != '\0' && running_semver != NULL && running_semver[0] != '\0';
+    if (have_ver) {
+        semver_canon(res->semver, a, sizeof(a));
+        semver_canon(running_semver, b, sizeof(b));
+        if (strcmp(a, b) != 0) {
+            return UPD_INST_MATCH_NO;
+        }
+    }
+    bool ids_known = running_id != NULL && !id_is_zero(running_id) && !id_is_zero(res->id);
+    if (ids_known && memcmp(res->id, running_id, UPD_INST_ID_LEN) != 0) {
+        return UPD_INST_MATCH_NO;
+    }
+    return (have_ver && ids_known) ? UPD_INST_MATCH_YES : UPD_INST_MATCH_UNVERIFIED;
+}
+
+bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
+                                        const uint8_t *running_id)
+{
+    return update_install_res_match(res, running_semver, running_id) == UPD_INST_MATCH_YES;
+}
+
+const char *update_install_res_state(const update_install_res_t *res, const char *running_semver,
+                                     const uint8_t *running_id)
+{
+    if (res != NULL && res->code == UPD_INST_RES_OK && res->detail != UPD_INST_DETAIL_CONFIRMED) {
+        update_install_match_t m = update_install_res_match(res, running_semver, running_id);
+        if (m == UPD_INST_MATCH_NO) {
+            return "not_running"; /* OF-02: the record names another image; it will never be confirmed by this one */
+        }
+        if (m == UPD_INST_MATCH_UNVERIFIED) {
+            return "unverified"; /* OG-01: cannot tell which image this is (id unknown); never confirmed */
+        }
+    }
+    return update_install_res_state_name(res);
+}
+
+bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver,
+                                         const uint8_t *running_id, bool running_valid)
+{
+    if (!running_valid || !update_install_res_matches_running(res, running_semver, running_id)) {
+        return false;
+    }
+    return update_install_res_mark_confirmed(res);
+}
+
+uint32_t update_install_confirm_retry_delay_ms(unsigned attempt)
+{
+    if (attempt < 120u) {
+        return 5000u;
+    }
+    return attempt < 180u ? 60000u : 0u;
+}
+
+int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver,
+                                  const uint8_t *running_id)
+{
+    if (!ops || !ops->res_read || !ops->res_write) {
+        return -1;
+    }
+    uint8_t buf[UPD_INST_RES_SIZE];
+    size_t n = 0;
+    int rc = ops->res_read(ops->ctx, buf, sizeof(buf), &n);
+    if (rc > 0) {
+        return 0; // no result
+    }
+    update_install_res_t res;
+    if (rc < 0 || !update_install_res_decode(buf, n, &res)) {
+        return -1;
+    }
+    if (res.code != UPD_INST_RES_OK || res.detail == UPD_INST_DETAIL_CONFIRMED) {
+        return 0;
+    }
+    update_install_match_t m = update_install_res_match(&res, running_semver, running_id);
+    if (m == UPD_INST_MATCH_NO) {
+        return UPD_INST_CONFIRM_NOT_RUNNING; // OC-03: the record names another image
+    }
+    if (m == UPD_INST_MATCH_UNVERIFIED) {
+        return UPD_INST_CONFIRM_UNVERIFIED; // OG-01: version or id unknown on one side: never write confirmed
+    }
+    if (!update_install_res_mark_confirmed(&res)) {
+        return 0;
+    }
+    size_t w = update_install_res_encode(&res, buf);
+    return (w == UPD_INST_RES_SIZE && ops->res_write(ops->ctx, buf, w) == 0) ? 0 : -1;
 }
 
 void update_install_id_hex(const uint8_t id[UPD_INST_ID_LEN], char out[UPD_INST_ID_HEX_LEN])
@@ -125,7 +277,7 @@ const char *update_install_reason_name(uint8_t reason)
     static const char *const names[UPD_INST_REASON_COUNT] = {
         "none",         "record_bad",   "clear_failed",    "stage_not_ready",   "size_mismatch",
         "sha_mismatch", "apply_failed", "nvs_unavailable", "result_write_failed",
-        "attempts_exceeded", "counter_failed", "outcome_unknown_do_not_power_cycle",
+        "attempts_exceeded", "counter_failed", "outcome_unknown_do_not_power_cycle", "rolled_back",
     };
     return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
 }
@@ -155,6 +307,7 @@ const char *update_install_detail_name(uint8_t detail)
     case UPD_INST_DETAIL_START_NO_APP: return "start_no_app";
     case UPD_INST_DETAIL_START_BUSY: return "start_busy";
     case UPD_INST_DETAIL_START_FAILED: return "start_failed";
+    case UPD_INST_DETAIL_CONFIRMED: return "confirmed";
     default: return "unknown";
     }
 }
@@ -255,6 +408,45 @@ int update_install_drop_stale(bool claimed, int (*req_erase)(void))
         return -1;
     }
     return req_erase() == 0 ? 0 : -1;
+}
+
+int update_install_drop_stale_recorded(bool claimed, const update_install_ops_t *ops,
+                                       bool (*running_matches)(void *ctx, const update_install_req_t *req),
+                                       void *match_ctx)
+{
+    if (!claimed) {
+        return 1;
+    }
+    if (!ops || !ops->req_read || !ops->req_clear) {
+        return -1;
+    }
+    uint8_t blob[UPD_INST_REQ_SIZE];
+    size_t len = sizeof(blob);
+    int rr = ops->req_read(ops->ctx, blob, sizeof(blob), &len);
+    if (rr == 1) {
+        return 0; // no request: nothing to drop
+    }
+    if (rr == 0) {
+        update_install_req_t req;
+        if (update_install_req_decode(blob, len, &req)) {
+            // OF-01: recovery already left a specific FAIL result for this image (e.g. BAD_CHIP_REV, app
+            // untouched): keep it, only clear the request.
+            bool keep = false;
+            if (ops->res_read) {
+                uint8_t rb[UPD_INST_RES_SIZE];
+                size_t rl = sizeof(rb);
+                update_install_res_t old;
+                keep = ops->res_read(ops->ctx, rb, sizeof(rb), &rl) == 0 && update_install_res_decode(rb, rl, &old) &&
+                       old.code == UPD_INST_RES_FAIL && memcmp(old.id, req.sha256, UPD_INST_ID_LEN) == 0;
+            }
+            bool match = !keep && running_matches != NULL && running_matches(match_ctx, &req);
+            if (!keep)
+            (void)update_install_record_result(ops, match ? UPD_INST_RES_OK : UPD_INST_RES_FAIL,
+                                               match ? UPD_INST_REASON_NONE : UPD_INST_REASON_OUTCOME_UNKNOWN,
+                                               req.semver, req.sha256);
+        }
+    }
+    return ops->req_clear(ops->ctx) == 0 ? 0 : -1;
 }
 
 static update_install_boot_outcome_t refuse_ex(const update_install_ops_t *ops, uint8_t reason, uint8_t detail,
@@ -370,6 +562,10 @@ bool update_install_prepare(const update_install_app_ops_t *ops, char *msg, size
         http_status = &dummy;
     }
     *http_status = 409;
+    if (ops != NULL && ops->running_unconfirmed != NULL && ops->running_unconfirmed(ops->ctx)) {
+        set_msg(msg, cap, "the running image has not confirmed yet; wait for boot confirm to finish, or if it never completes reset the board (an unconfirmed image rolls back to recovery)");
+        return false;
+    }
     if (ops == NULL || ops->kv_write_safe == NULL || ops->stage_info == NULL || ops->res_erase == NULL ||
         ops->req_write == NULL) {
         *http_status = 500;

@@ -284,6 +284,40 @@ bool heat_enable_grant_unconfirmed(void);
 void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
                                 uint32_t now_ms);
 bool heat_enable_reboot_hold(void);
+// PF-01: tell heat_enable whether a frame carrying a Pico boot id has arrived since the ESP booted. While
+// false, note_pico_boot takes no baseline and acquire is withheld (fail closed).
+void heat_enable_note_boot_id_seen(bool seen);
+// PF-04: feed every tick (before note_pico_boot): the Pico's current boot id (valid only while known) and whether
+// the Pico booted before this ESP (DIAG uptime greater than ESP uptime). When the PR-01 first-sight verdict of an
+// ESP boot sees the SAME boot id this ESP already acted on in an earlier boot (RTC-persisted, no NVS write), its
+// boot-reason byte is stale news and does not latch a fatal reboot. A different or unknown boot id, or a Pico
+// younger than the ESP, still latches (Pico watchdog reset while the ESP was down).
+void heat_enable_note_pico_boot_identity(bool id_valid, uint8_t boot_id, bool pico_older_than_esp);
+// PF-04: true when the current reboot hold is a fatal boot reason found at the ESP's first sight of the Pico (the
+// Pico reset before this ESP boot), not a live reboot; the executor pauses with "pico_fatal_before_esp_boot".
+bool heat_enable_reboot_hold_first_sight(void);
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
+// Host tests only: forget the RTC-persisted acted-on Pico boot id (simulates a power-on of the ESP).
+void heat_enable_forget_acted_boot_id_for_host_tests(void);
+#endif
+// PF-03: true when the current reboot hold came from a claimless lost-trip latch, not a fatal reboot.
+bool heat_enable_reboot_hold_lost_trip_only(void);
+// BT-02: true when the current reboot hold is a second benign Pico reboot inside the repeat window (not fatal).
+bool heat_enable_reboot_hold_repeated_benign(void);
+// PR-04: true while a claim is held but no Pico boot id has arrived (heat withheld, fail closed); the executor
+// pauses with reason "pico_boot_id_unseen" so the run shows why.
+bool heat_enable_boot_id_unseen_blocked(void);
+
+// Host tests only: mark the boot id as seen and its first sight consumed. Production never calls this
+// (heat_enable_init starts with the boot id unseen, PR-03).
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
+void heat_enable_assume_boot_id_seen_for_host_tests(void);
+#endif
+// PR-02: the DIAG's trip reason/mask (call before note_pico_state, only meaningful for the current boot's DIAG).
+// A claimless lost-trip latch expires only when the trips cleared on the new boot cover the lost trip's reason.
+void heat_enable_note_pico_trip_info(uint8_t trip_reason, uint16_t trip_mask);
+// PF-03: observability for /api/status (any pointer may be NULL).
+void heat_enable_get_reboot_state(uint32_t *seq, bool *fatal_latched, bool *lost_trip_only);
 // True while a Pico reboot with a claim held is still unclassified (no DIAG of
 // the new boot yet): heat is withheld, the cause is unknown. The profile
 // executor shows it as pause_reason "pico_reboot_undecided" while RUNNING.

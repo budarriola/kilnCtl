@@ -34,7 +34,9 @@ static int g_fail = 0, g_checks = 0;
 
 #define REPO "budarriola/kilnCtl"
 #define BASE "https://github.com/budarriola/kilnCtl/releases/download/"
-#define API_URL "https://api.github.com/repos/" REPO "/releases/latest"
+#define API_URL "https://api.github.com/repos/" REPO "/releases?per_page=15"
+#define API_URL5 "https://api.github.com/repos/" REPO "/releases?per_page=5"
+#define LATEST_URL "https://api.github.com/repos/" REPO "/releases/latest"
 #define MAN_URL BASE "v1.2.3/release.json"
 #define APP_URL BASE "v1.2.3/KilnCtrl-v1.2.3.bin"
 #define COMMIT "0123456789abcdef0123456789abcdef01234567"
@@ -86,6 +88,13 @@ static void make_docs(const char *sha, uint32_t api_size)
              "{\"name\":\"KilnCtrl-v1.2.3.bin\",\"size\":%u,\"browser_download_url\":\"" APP_URL "\"},"
              "{\"name\":\"release.json\",\"size\":900,\"browser_download_url\":\"" MAN_URL "\"}]}",
              (unsigned)api_size);
+    {   // AUP-02: both channels read the releases LIST, so the fixture body is a one-element array
+        const size_t n = strlen(g_api);
+        memmove(g_api + 1, g_api, n);
+        g_api[0] = '[';
+        g_api[n + 1] = ']';
+        g_api[n + 2] = '\0';
+    }
     snprintf(g_man, sizeof(g_man),
              "{\"schema\":1,\"tag\":\"v1.2.3\",\"channel\":\"stable\",\"published\":\"2026-10-05T00:00:00Z\","
              "\"repo\":\"" REPO "\",\"commit\":\"" COMMIT "\",\"dirty\":false,\"build_date\":\"x\","
@@ -209,6 +218,29 @@ static void test_download_happy(void)
     CHECK(stage_staged(), "image staged and verified");
     CHECK(g_fr_claim_begin_n == 1, "download took the claim once");
     expect_claim_balanced("happy download");
+}
+
+static HANDLE g_hold_ev;
+static void hold_job(void) { WaitForSingleObject(g_hold_ev, 20000); }
+
+// BT-01: the download handler must not refuse itself through the RW-02 interlock (which counts a running fetch),
+// yet a second fetch beside a running one is still refused.
+static void test_download_not_self_blocked(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(POST("/api/update/download", NULL) == 202, "BT-01: idle download is 202, not self-blocked");
+    wait_idle();
+    expect_claim_balanced("BT-01 idle download");
+    fixture(g_sha_hex, IMG_LEN);
+    g_hold_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
+    g_fr_routes[0].on_read = hold_job;
+    CHECK(POST("/api/update/download", NULL) == 202, "BT-01: first download accepted");
+    CHECK(POST("/api/update/download", NULL) == 409, "BT-01: second download beside a running fetch refused");
+    CHECK(POST("/api/update/check", NULL) == 409, "BT-01: check beside a running fetch refused");
+    POST("/api/update/fetch/cancel", NULL);
+    SetEvent(g_hold_ev);
+    wait_idle();
+    expect_claim_balanced("BT-01 refused beside running");
 }
 
 // Gap 1: a body that ends before the advertised Content-Length must abort the stage, not finish it.
@@ -345,7 +377,7 @@ static void hop_dma_at_need(void)
 static void drop_heap_low(void) { g_fake_heap_free_internal = 8000; }
 static void drop_heap_one_under_abort(void) { g_fake_heap_free_internal = FETCH_HEAP_ABORT_BELOW - 1; }
 static void set_heap_hop_ok(void) { heap_idle_pair(FETCH_HOP_DOWNLOAD_HEAP_MIN); g_fake_heap_largest_internal = 7680; }
-static void set_heap_hop_low(void) { heap_idle_pair(27855); }
+static void set_heap_hop_low(void) { heap_idle_pair(25000); }
 
 static void run_job_and_result(const char *uri)
 {
@@ -363,7 +395,7 @@ static void test_heap_admission_updfx2(void)
     CHECK(strcmp(g_error, "low_heap_free") == 0, "22910 B refuses a check");
     expect_claim_balanced("check low free");
 
-    // check admitted with a 4096 B block; download refused LOW_BLOCK
+    // UR-01: both kinds need only the TLS block (FETCH_CHECK_BLOCK_MIN); the writer-stack block gate is gone.
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fake_heap_largest_internal = 4096;
@@ -373,7 +405,12 @@ static void test_heap_admission_updfx2(void)
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fake_heap_largest_internal = 4096;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_error, "low_heap_block") == 0, "download refused on 4096 B block");
+    CHECK(strcmp(g_error, "low_heap_block") != 0, "UR-01: download admitted on a 4096 B block (no writer-stack gate)");
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_fake_heap_largest_internal = FETCH_CHECK_BLOCK_MIN - 1u;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_block") == 0, "download refused below the TLS block floor");
     expect_claim_balanced("download low block");
 
     // bench idle reading admits a full download
@@ -398,10 +435,10 @@ static void test_heap_admission_updfx2(void)
     expect_claim_balanced("midrun edge");
 
     // UPDFX7 LOW-2: the DMA need is derived, not a literal: hop need minus the RTC heap measured at the start
-    // (30192 - 7788 = 22404 B). Judged at the hop, where DMA can move independently of the start reading.
+    // (25696 - 7788 = 17908 B). Judged at the hop, where DMA can move independently of the start reading.
     // (At the first admission both readings are one sample, so the DMA gate cannot disagree with the internal one.)
     const uint32_t dma_hop_need = update_fetch_heap_dma_need(true, true, T_RTC);
-    CHECK(dma_hop_need == 22404u, "derived DMA hop need is 22404 B on the bench");
+    CHECK(dma_hop_need == 17908u, "derived DMA hop need is 17908 B on the bench");
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_app_route->status = 302;
@@ -428,7 +465,7 @@ static void test_heap_admission_updfx2(void)
     expect_claim_balanced("admission edge refused");
 
     // per-hop admission: asset URL redirects to a second URL; heap low at the hop refuses it,
-    // the hop need (30192 B) admits it, 27855 B does not.
+    // the hop need (25696 B) admits it, 25000 B does not.
     fixture(g_sha_hex, IMG_LEN);
     g_app_route->status = 302;
     g_app_route->location = "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin";
@@ -517,7 +554,7 @@ static void test_heap_admission_updfx3(void)
     CHECK(strcmp(g_error, "low_heap_free") != 0, "start admitted once the previous call's residual clears");
     CHECK(g_fake_heap_recover_reads == 0, "the settle loop re-sampled the heap");
 
-    // LOW-5 M8: a check allocates no internal scratch; a download allocates one.
+    // LOW-5 M8 / UR-01: neither a check nor a download allocates internal heap (writer stack/TCB and scratch are static).
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fr_internal_mallocs = 0;
@@ -527,7 +564,20 @@ static void test_heap_admission_updfx3(void)
     heap_idle_pair(BENCH_IDLE_FREE);
     g_fr_internal_mallocs = 0;
     run_job_and_result("/api/update/download");
-    CHECK(g_fr_internal_mallocs >= 1, "a download job allocates the internal stager scratch");
+    CHECK(g_fr_internal_mallocs == 0 && g_fr_static_task_creates >= 1, "UR-01: a download job allocates no internal heap for the scratch");
+
+    // UW-01/UW-02: the writer is one persistent static task; consecutive downloads reuse it (create exactly once).
+    {
+        const long creates_before = g_fr_static_task_creates;
+        for (int i = 0; i < 2; i++) {
+            fixture(g_sha_hex, IMG_LEN);
+            heap_idle_pair(BENCH_IDLE_FREE);
+            run_job_and_result("/api/update/download");
+            CHECK(strcmp(g_state, "done") == 0, "UW-02: consecutive download completes");
+        }
+        CHECK(g_fr_static_task_creates == creates_before, "UW-02: two consecutive downloads create no further writer task");
+        CHECK(g_fr_static_task_creates == 1, "UW-01: the writer was created exactly once for the module lifetime");
+    }
 
     // LOW-5 M12: DMA low at the redirect hop refuses
     fixture(g_sha_hex, IMG_LEN);
@@ -720,13 +770,104 @@ static void test_heap_admission_updfx3(void)
     CHECK(g_fr_delay_calls == 0, "no settle wait on a LOW_BLOCK verdict");
     expect_claim_balanced("block starved");
 
-    // pre-release-only repo: /releases/latest 404 is a clear no_stable_release, not a generic http_status
+    // AUP-02: the allow_prerelease flag reaches the list pick: a list holding only a pre-release is
+    // no_release with pre-releases off and is picked with them on.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        char *pr = strstr(g_api, "\"prerelease\":false");
+        CHECK(pr != NULL, "fixture release has a prerelease flag");
+        if (pr != NULL) {
+            memcpy(pr, "\"prerelease\":true ", 18);
+        }
+        g_fr_routes[0].body_len = strlen(g_api);
+    }
+    add_route(LATEST_URL, "", 0)->status = 404;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "no_stable_release") == 0, "pre-release only, pre-releases off, /latest 404: no_stable_release");
+    POST("/api/update/check", "allow_prerelease=1");
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "no_release") != 0, "pre-release only, pre-releases on: picked");
+    // FA-01: 15 pre-releases fill the first list page; the stable release is found through /releases/latest.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char single[sizeof(g_api)];
+        static char many[sizeof(g_api) * 3];
+        size_t n = strlen(g_api);
+        memcpy(single, g_api + 1, n - 2);  // strip the [ ] of the one-element list
+        single[n - 2] = '\0';
+        char *p = many;
+        *p++ = '[';
+        for (int i = 0; i < 15; i++) {
+            p += snprintf(p, sizeof(many) - (size_t)(p - many),
+                          "%s{\"tag_name\":\"v1.3.%d-pre.1\",\"draft\":false,\"prerelease\":true,\"assets\":[]}",
+                          i ? "," : "", i);
+        }
+        *p++ = ']';
+        *p = '\0';
+        static char many_buf[sizeof(many)];
+        memcpy(many_buf, many, sizeof(many));
+        g_fr_routes[0].body = many_buf;
+        g_fr_routes[0].body_len = strlen(many_buf);
+        add_route(LATEST_URL, single, strlen(single));
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0,
+          "15 pre-releases on the list page: stable found through /releases/latest");
+    // GF-02: a list body over the 256 KiB cap fails too_large on the list; the stable channel still falls back to /latest.
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char single2[sizeof(g_api)];
+        size_t n2 = strlen(g_api);
+        memcpy(single2, g_api + 1, n2 - 2);
+        single2[n2 - 2] = '\0';
+        static char big[300u * 1024u];
+        memset(big, ' ', sizeof(big) - 1);
+        big[sizeof(big) - 1] = '\0';
+        g_fr_routes[0].body = big;
+        g_fr_routes[0].body_len = strlen(big);
+        add_route(API_URL5, big, strlen(big));
+        add_route(LATEST_URL, single2, strlen(single2));
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "too_large") != 0 && strcmp(g_error, "no_release") != 0 && strcmp(g_error, "no_stable_release") != 0,
+          "oversized list page (also at per_page=5): stable found through /releases/latest (GF-02)");
+    // GP-02: the 15-release list overflows but a per_page=5 retry fits: the release comes from the retried list
+    // (highest semver), /releases/latest is never read (no route registered for it, so reading it would fail).
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char big2[300u * 1024u];
+        memset(big2, ' ', sizeof(big2) - 1);
+        big2[sizeof(big2) - 1] = '\0';
+        g_fr_routes[0].body = big2;
+        g_fr_routes[0].body_len = strlen(big2);
+        add_route(API_URL5, g_api, strlen(g_api));
+    }
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_state, "done") == 0 && g_error[0] == 0,
+          "oversized 15-release list: per_page=5 retry supplies the release without /releases/latest (GP-02)");
+    // GD-03: pre-releases allowed: an oversized list stays a hard too_large failure (no per_page=5 retry, no /latest).
+    fixture(g_sha_hex, IMG_LEN);
+    {
+        static char big3[300u * 1024u];
+        memset(big3, ' ', sizeof(big3) - 1);
+        big3[sizeof(big3) - 1] = '\0';
+        g_fr_routes[0].body = big3;
+        g_fr_routes[0].body_len = strlen(big3);
+        add_route(API_URL5, g_api, strlen(g_api));
+        add_route(LATEST_URL, g_api + 1, strlen(g_api) - 2);
+    }
+    POST("/api/update/check", "allow_prerelease=1");
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "too_large") == 0, "oversized list with pre-releases allowed stays too_large (GD-03)");
+    // AUP-02: a 404 on the list endpoint is a plain http_status on either channel; /releases/latest is never read.
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 404;
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "no_stable_release") == 0, "404 on releases/latest -> no_stable_release");
+    CHECK(strcmp(g_error, "http_status") == 0, "404 on the list endpoint (pre-releases off) -> http_status");
     fixture(g_sha_hex, IMG_LEN);
-    add_route("https://api.github.com/repos/" REPO "/releases?per_page=15", "{}", 2)->status = 404;
+    g_fr_routes[0].status = 404;
     POST("/api/update/check", "allow_prerelease=1");
     wait_idle();
     job_result();
@@ -990,9 +1131,6 @@ static void test_redirect_hop_frees_first_client(void)
     expect_claim_balanced("redirect hop");
 }
 
-static HANDLE g_hold_ev;
-static void hold_job(void) { WaitForSingleObject(g_hold_ev, 20000); }
-
 static void test_handler_refusals(void)
 {
     fixture(g_sha_hex, IMG_LEN);
@@ -1037,7 +1175,7 @@ static void test_handler_refusals(void)
     g_fr_routes[0].on_read = hold_job;
     CHECK(POST("/api/update/download", NULL) == 202, "job started and parked in its first read");
     CHECK(POST("/api/update/check", NULL) == 409 && resp_has("fetch_busy"), "check while busy -> 409 fetch_busy");
-    CHECK(POST("/api/update/download", NULL) == 409 && resp_has("fetch_busy"), "download while busy -> 409");
+    CHECK(POST("/api/update/download", NULL) == 409, "download while busy -> 409 (RW-02 interlock sees the running fetch)");
     CHECK(POST("/api/update/fetch/cancel", NULL) == 200 && resp_has("\"cancelling\":true"), "cancel while busy");
     SetEvent(g_hold_ev);
     wait_idle();
@@ -1357,6 +1495,7 @@ int main(void)
 
     test_check_happy();
     test_download_happy();
+    test_download_not_self_blocked();
     test_short_body_http_layer();
     test_short_body_chunked();
     test_sha_mismatch();

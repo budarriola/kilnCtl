@@ -10,6 +10,8 @@
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_routes below */
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "http_auth_enforce.h"
 #include "http_origin_check.h"
@@ -191,6 +193,15 @@ bool http_auth_extract_session_token(httpd_req_t *req, char *out, size_t out_len
     return matched;
 }
 
+/* AX-03: volatile wipe of bearer-token stack copies so the compiler cannot elide it. */
+static void auth_wipe(void *p, size_t n)
+{
+    volatile uint8_t *q = (volatile uint8_t *)p;
+    while (n-- > 0u) {
+        *q++ = 0u;
+    }
+}
+
 static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_role, char *out_token,
                                       size_t out_token_len) {
     char token[128];
@@ -209,6 +220,7 @@ static void resolve_role_for_request(httpd_req_t *req, http_auth_role_t *out_rol
             out_token[0] = '\0';
         }
     }
+    auth_wipe(token, sizeof(token)); /* AY-01 */
 }
 
 // Fix for the OPEN-tier build-identity leak on GET /api/ota/esp/status
@@ -239,6 +251,14 @@ bool http_auth_caller_is_admin(httpd_req_t *req) {
     return role == HTTP_AUTH_ROLE_ADMIN;
 }
 
+// SUPERSEDED by KG-01 (owner 2026-10-19): the paragraphs below record the
+// 2026-09-24/09-28 lazy-login design, which served the static shell of a denied
+// page-shell GET and let app.js pop the login over it. That leaked the page
+// content and rendered the page before the login. A denied page-shell GET now
+// gets a 302 to "/?next=<uri>" (send_page_gate_redirect()) and the dashboard
+// shows the sign-in dialog first; the list, the tiers and the /api/ gate are
+// unchanged.
+//
 // Owner report, 2026-09-24 (verbatim): "When I open the webpage, don't show
 // the login until I do something that would require it ... a pop-up ... that
 // allows me to cancel the action." The previous behaviour (see the removed
@@ -280,8 +300,49 @@ static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
 // purged at 32 B per read on the CPU0 httpd task: ESP_FAIL makes httpd close
 // the socket instead (httpd_uri.c ~line 367, httpd_sess.c ~lines 428-431),
 // at the cost of a possible RST for that client.
-static esp_err_t refusal_result(const httpd_req_t *req) {
-    return http_auth_refusal_should_close(req->content_len) ? ESP_FAIL : ESP_OK;
+//
+// RS-02 (benchmain33): for an unauthenticated 23 KB POST the old code returned ESP_OK and let httpd purge
+// at 32 B per read; the purge did not finish before the close and the client saw a reset instead of the
+// 401. Now a body up to HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES is drained HERE, after the status was sent, into a
+// small own static buffer (never the shared OTA chunk, LK-05), hard-capped by bytes and by
+// HTTP_AUTH_REFUSAL_DRAIN_MAX_MS so an unauthenticated client cannot hold the single httpd worker. A
+// complete drain returns ESP_OK; a cap or socket error returns ESP_FAIL (close).
+// LF-02: the time cap is checked between reads only; one httpd_req_recv can still block for
+// recv_wait_timeout (3 s, wifi_provision_http.c), so the real worst hold is about 2 s + 3 s = 5 s.
+// LF-03: yield (vTaskDelay(1)) once per AUTH_REFUSAL_YIELD_BYTES, not per read, so 32 KB fits inside the cap.
+#define AUTH_REFUSAL_DRAIN_BUF_SIZE 256
+#define AUTH_REFUSAL_YIELD_BYTES 4096
+EXT_RAM_BSS_ATTR static uint8_t s_auth_refusal_drain_buf[AUTH_REFUSAL_DRAIN_BUF_SIZE]; /* PSRAM: DRAM .bss budget */ /* httpd task only */
+
+static esp_err_t refusal_result(httpd_req_t *req) {
+    if (http_auth_refusal_should_close(req->content_len)) {
+        return ESP_FAIL;
+    }
+    if (req->content_len == 0) {
+        return ESP_OK;
+    }
+    const TickType_t start = xTaskGetTickCount();
+    size_t total = 0;
+    size_t since_yield = 0;
+    for (;;) {
+        int ret = httpd_req_recv(req, (char *)s_auth_refusal_drain_buf, sizeof(s_auth_refusal_drain_buf));
+        if (ret > 0) {
+            total += (size_t)ret;
+            since_yield += (size_t)ret;
+        }
+        uint32_t elapsed_ms = (uint32_t)((xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+        http_auth_drain_step_t step = http_auth_refusal_drain_step(ret, total, elapsed_ms);
+        if (step == HTTP_AUTH_DRAIN_DONE) {
+            return ESP_OK;
+        }
+        if (step == HTTP_AUTH_DRAIN_ABORT) {
+            return ESP_FAIL;
+        }
+        if (since_yield >= AUTH_REFUSAL_YIELD_BYTES) {
+            since_yield = 0;
+            vTaskDelay(1); /* let IDLE0 feed the task watchdog */
+        }
+    }
 }
 
 // MED-1 (ROUTE_TIER_REVIEW_2026-10-09): refuse a cross-origin state-changing
@@ -309,7 +370,35 @@ static bool request_host_refused(httpd_req_t *req) {
     return http_origin_request_host_refused(req, origin_hdr_len, origin_hdr_str, name);
 }
 
+// KG-01 (owner 2026-10-19): the ONE page gate. A page-shell GET that http_auth_check()
+// denied is never served: 302 to the dashboard carrying the wanted page, where app.js
+// shows the sign-in dialog first and navigates on success. Both DENY branches below call
+// this, so a new page route (a kPageShellUris row) is gated without per-handler code.
+static esp_err_t send_page_gate_redirect(httpd_req_t *req, const kiln_http_route_ctx_t *ctx) {
+    char loc[64];
+    if (!http_auth_page_gate_location(ctx->uri, loc, sizeof(loc))) {
+        strcpy(loc, "/");
+    }
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", loc);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, NULL, 0);
+    return refusal_result(req);
+}
+
+// KH-09: the request whose page-shell response must be no-store. web_set_asset_cache_headers()
+// (web_encoding.c) is the single Cache-Control writer for allowed responses; it asks
+// http_auth_req_wants_no_store() rather than the prehandler also writing the header (esp_http_server
+// appends headers, it does not replace them: two writes send the header twice, KH-10). esp_http_server runs handlers on one task; the prehandler clears
+// this on every request, so a reused req pointer never inherits a stale mark.
+static const httpd_req_t *s_no_store_req;
+
+bool http_auth_req_wants_no_store(const httpd_req_t *req) {
+    return req != NULL && req == s_no_store_req;
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
+    s_no_store_req = NULL;
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
     // registered directly instead of through kiln_http_register(), which
@@ -396,7 +485,10 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     // this can never revive an already-expired session (see its own
     // comment) -- the server, not this call site, is what makes the
     // expiry real.
-    if (token[0] != '\0' && http_auth_decision_counts_as_activity(ctx->tier, decision)) {
+    // AG-01: background timer polls (X-Kiln-Background) must not keep an idle session alive.
+    if (token[0] != '\0' && http_auth_request_touches_session(ctx->tier, decision,
+                                         httpd_req_get_hdr_value_len(req, "X-Kiln-Background") != 0,
+                                         (httpd_method_t)req->method)) {
         // Finding 3 fix (2026-09-17 review): http_auth_session_touch() now
         // enforces the same IP binding http_auth_session_resolve() already
         // does, so it needs the caller's address too -- re-extract it the
@@ -412,6 +504,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
         http_auth_session_touch(token, ip, on_ap);
     }
+    auth_wipe(token, sizeof(token)); /* AX-03 */
     switch (decision) {
         case HTTP_AUTH_DECISION_ALLOW:
             // Restore the ORIGINAL user_ctx before calling into the real
@@ -420,6 +513,12 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // dispatch time, and the real handler has no idea this wrapper
             // exists; it still expects whatever it was registered with.
             req->user_ctx = ctx->real_user_ctx;
+            // KH-01: a signed-in page shell must not be restored from history/bfcache after logout.
+            // KH-10: only MARK it; web_set_asset_cache_headers() is the single Cache-Control writer
+            // for allowed responses (httpd_resp_set_hdr appends, so a second write duplicates it).
+            if (http_auth_page_shell_needs_no_store(ctx->uri, ctx->method, web_enabled, ctx->tier)) {
+                s_no_store_req = req;
+            }
             return ctx->real_handler(req);
         case HTTP_AUTH_DECISION_DENY_NO_SESSION:
             // Owner report, 2026-09-24 (see is_page_shell_get() above):
@@ -439,8 +538,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // still never a separate "authentication required" page, and
             // Cancel still returns to the dashboard.
             if (is_page_shell_get(ctx)) {
-                req->user_ctx = ctx->real_user_ctx;
-                return ctx->real_handler(req);
+                return send_page_gate_redirect(req, ctx); /* KG-01: never serve the shell */
             }
             httpd_resp_set_status(req, "401 Unauthorized");
             httpd_resp_send(req, "authentication required", HTTPD_RESP_USE_STRLEN);
@@ -452,8 +550,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             // dashboard with admin_required=<uri> -- the page's own fetches
             // are what raise the modal, in place, the moment one is tried.
             if (is_page_shell_get(ctx)) {
-                req->user_ctx = ctx->real_user_ctx;
-                return ctx->real_handler(req);
+                return send_page_gate_redirect(req, ctx); /* KG-01: never serve the shell */
             }
             // AJAX/API path:
             // ordinary 403, tagged with X-Kiln-Auth-Reason so a client can

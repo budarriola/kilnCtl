@@ -64,6 +64,22 @@ void run_test_pid(void)
         TEST_CHECK_NEAR(s.integral, 0.0f, 1e-6, "integrator held (untouched) outside pid_range_c");
     }
 
+    /* CL-04: a stale integral (and D filter) must not survive an out-of-range
+     * excursion into re-entry. */
+    {
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 25.0f};
+        pid_reset(&s);
+        for (int i = 0; i < 20; i++) (void)pid_update(&s, &cfg, 1000.0f, 990.0f, 1.0f, 0.0f, 0.0f);
+        TEST_CHECK(s.integral > 50.0f, "CL-04 setup: hold integral built in range");
+        s.d_filtered = 0.5f;
+        (void)pid_update(&s, &cfg, 600.0f, 1000.0f, 1.0f, 0.0f, 0.0f); /* cool out of range */
+        TEST_CHECK_NEAR(s.integral, 0.0f, 1e-6, "CL-04: integral cleared while out of range");
+        TEST_CHECK_NEAR(s.d_filtered, 0.0f, 1e-6, "CL-04: D filter cleared with it (paired state)");
+        float u = pid_update(&s, &cfg, 600.0f, 610.0f, 1.0f, 0.0f, 0.0f); /* re-enter, 10C hot */
+        TEST_CHECK(u <= 0.0f + 1e-6f, "CL-04: re-entry does not overdrive from a stale integral");
+    }
+
     /* Conditional-integration anti-windup: saturating error should not let
      * the integral run away to a huge number while output is pinned. */
     {

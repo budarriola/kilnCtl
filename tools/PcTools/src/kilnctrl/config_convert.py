@@ -77,7 +77,7 @@ ZONES_CFG_T / KILN_PACKAGE (landed 2026-09-24, see the "zones_blob store" and
 "kiln_package store" section comments below for the full derivation):
   - "zones_blob" (kind "kilnctl_zones_blob"): the ESP's raw zones_cfg_t
     NVS/blob record (firmware/KilnFW/App/drivers/persist/
-    zones_config_json.h, ZONES_CFG_VERSION, currently 26). STAGE 1:
+    zones_config_json.h, ZONES_CFG_VERSION, currently 27). STAGE 1:
     decodes/encodes the CURRENT version byte-exactly (offsets cross-checked
     against zone_cfg_v25_t's real `_Static_assert`s, and pinned field by
     field by a firmware-generated golden: KilnFW's host test
@@ -943,7 +943,7 @@ def convert_safety_config_blob(blob: bytes, target_version: int) -> "tuple[bytes
 
 # ---------------------------------------------------------------------------
 # zones_blob store -- mirrors firmware/KilnFW/App/drivers/persist/
-# zones_config_json.h's CURRENT (ZONES_CFG_VERSION 26) zone_cfg_t/
+# zones_config_json.h's CURRENT (ZONES_CFG_VERSION 27) zone_cfg_t/
 # zone_timing_profile_t/zones_cfg_t layout byte-for-byte, little-endian
 # (Xtensa/ESP32-S3 is little-endian), natural C alignment (no #pragma pack
 # anywhere in that header).
@@ -994,7 +994,7 @@ def convert_safety_config_blob(blob: bytes, target_version: int) -> "tuple[bytes
 # and v1..v6 predate crc32).
 # ---------------------------------------------------------------------------
 
-ZONES_CFG_VERSION = 26  # zones_config_json.h ZONES_CFG_VERSION
+ZONES_CFG_VERSION = 27  # zones_config_json.h ZONES_CFG_VERSION
 ZONE_NAME_MAX_LEN = 15  # zones_config_accessors.h ZONE_NAME_MAX_LEN
 TIMING_PROFILE_NAME_MAX_LEN = 7  # zones_config_accessors.h TIMING_PROFILE_NAME_MAX_LEN
 SRC_GROUP_COUNT = 5  # zones_config_accessors.h SRC_GROUP_COUNT
@@ -1031,7 +1031,10 @@ _ZONE_V21_FMT = (
 # (version that ADDED the segment, struct fmt of the segment, fields it adds)
 _ZONE_TAIL_SEGMENTS = (
     (22, "f", ("progress_band_c",)),
-    (23, "BB2xfHH", ("zone_type", "failsafe_state", "hyst_c", "min_on_s", "min_off_s")),
+    # v27 put tc_sheath_tau_s (uint16) into the 2 padding bytes v23 left after
+    # failsafe_state; for v23..v26 those bytes are padding and are zeroed
+    # after decode (see _ZONE_PAD_FIELDS), never trusted.
+    (23, "BBHfHH", ("zone_type", "failsafe_state", "tc_sheath_tau_s", "hyst_c", "min_on_s", "min_off_s")),
     (24, "ff", ("model_fit_temp_c", "model_fit_ambient_c")),
     (25, "f", ("coil_power_w",)),
     (26, "f", ("autotune_baseline_k_dc",)),
@@ -1047,9 +1050,14 @@ def _zone_struct_for_version(version: int) -> "struct.Struct":
     return struct.Struct(fmt)
 
 
+# Fields a later bump placed into existing padding: (field, version that added it).
+# A blob older than that version carries padding there, so the field reads 0.
+_ZONE_PAD_FIELDS = (("tc_sheath_tau_s", 27),)
+
+
 def _zone_added_fields_after(version: int) -> "list[str]":
     """Zone fields a blob at `version` does not carry (added by a later bump)."""
-    out = []
+    out = [f for f, added in _ZONE_PAD_FIELDS if added > version]
     for added, _fmt, names in _ZONE_TAIL_SEGMENTS:
         if added > version:
             out.extend(names)
@@ -1057,7 +1065,7 @@ def _zone_added_fields_after(version: int) -> "list[str]":
 _ZONE_CFG_STRUCT = struct.Struct(_ZONE_CFG_FMT)
 assert _ZONE_CFG_STRUCT.size == 248, f"zone_cfg_t layout must be 248 bytes, computed {_ZONE_CFG_STRUCT.size}"
 # Frozen historical zone sizes (zones_config_json.h _Static_asserts).
-_ZONE_SIZE_BY_VERSION = {21: 216, 22: 220, 23: 232, 24: 240, 25: 244, 26: 248}
+_ZONE_SIZE_BY_VERSION = {21: 216, 22: 220, 23: 232, 24: 240, 25: 244, 26: 248, 27: 248}
 for _v, _sz in _ZONE_SIZE_BY_VERSION.items():
     assert _zone_struct_for_version(_v).size == _sz, f"zone_cfg_v{_v}_t must be {_sz} bytes"
 
@@ -1130,6 +1138,7 @@ def _decode_zone_cfg(raw: bytes) -> dict:
     out["progress_band_c"] = vals.pop(0)
     out["zone_type"] = vals.pop(0)
     out["failsafe_state"] = vals.pop(0)
+    out["tc_sheath_tau_s"] = vals.pop(0)
     out["hyst_c"] = vals.pop(0)
     out["min_on_s"] = vals.pop(0)
     out["min_off_s"] = vals.pop(0)
@@ -1156,7 +1165,7 @@ def _encode_zone_cfg(z: dict) -> bytes:
     args += [z["tuning_seq"], z["adaptive_tune_enabled"]]
     args += [z[f] for f in ("coupling_diag_k_dc", "ease_off_window_mult", "approach_rate_cap_c_per_hr",
                              "error_band_c", "rate_band_c_per_s")]
-    args += [z["relay_type"], z["progress_band_c"], z["zone_type"], z["failsafe_state"]]
+    args += [z["relay_type"], z["progress_band_c"], z["zone_type"], z["failsafe_state"], z["tc_sheath_tau_s"]]
     args += [z["hyst_c"], z["min_on_s"], z["min_off_s"], z["model_fit_temp_c"], z["model_fit_ambient_c"],
              z["coil_power_w"], z["autotune_baseline_k_dc"]]
     return _ZONE_CFG_STRUCT.pack(*args)
@@ -1235,7 +1244,11 @@ def _decode_zones_blob_any(blob: bytes) -> "tuple[int, dict, list]":
     off += _ZONES_HEADER_STRUCT.size
     zones = []
     for _ in range(THERMO_CHANNEL_COUNT):
-        zones.append(_decode_zone_cfg(blob[off: off + zst.size] + b"\x00" * pad))
+        z = _decode_zone_cfg(blob[off: off + zst.size] + b"\x00" * pad)
+        for f, added in _ZONE_PAD_FIELDS:
+            if version < added:
+                z[f] = 0  # padding before this version, like firmware's migration
+        zones.append(z)
         off += zst.size
     (timing_profile_count,) = _ZONES_TAIL_STRUCT.unpack_from(blob, off)
     off += _ZONES_TAIL_STRUCT.size

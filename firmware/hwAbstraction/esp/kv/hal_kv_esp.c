@@ -106,6 +106,7 @@
 #include "nvs_flash.h"
 
 #include "hal_esp_common.h"
+#include "../common/hal_kv_wstat_impl.h" /* BW-01 */
 
 static const char *TAG = "hal_kv_esp";
 
@@ -267,6 +268,9 @@ hal_status_t hal_kv_set_blob(hal_kv_handle_t *h, const char *key,
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_blob(impl->handle, key, buf, len);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -297,6 +301,9 @@ hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key,
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_str(impl->handle, key, value);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -324,6 +331,9 @@ hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_u32(impl->handle, key, value);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -351,6 +361,9 @@ hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value) {
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_u8(impl->handle, key, value);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
 }
 
@@ -379,7 +392,37 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key) {
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_erase_key(impl->handle, key);
+    if (err == ESP_OK) {
+        hal_kv_wstat_note(impl->partition, key); /* BW-01 */
+    }
     return hal_kv_esp_err_to_status(err);
+}
+
+#define HAL_KV_AUTO_ERASE_TRACK 8
+static char s_auto_erased[HAL_KV_AUTO_ERASE_TRACK][16];
+
+static void note_auto_erased(const char *partition)
+{
+    for (int i = 0; i < HAL_KV_AUTO_ERASE_TRACK; i++) {
+        if (s_auto_erased[i][0] == '\0') {
+            strncpy(s_auto_erased[i], partition, sizeof(s_auto_erased[i]) - 1);
+            return;
+        }
+        if (strcmp(s_auto_erased[i], partition) == 0) {
+            return;
+        }
+    }
+}
+
+bool hal_kv_partition_was_auto_erased(const char *partition)
+{
+    const char *name = partition ? partition : "nvs";
+    for (int i = 0; i < HAL_KV_AUTO_ERASE_TRACK; i++) {
+        if (s_auto_erased[i][0] != '\0' && strcmp(s_auto_erased[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 hal_status_t hal_kv_init_partition(const char *partition) {
@@ -400,6 +443,9 @@ hal_status_t hal_kv_init_partition(const char *partition) {
          * not also silence it. */
         ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
                  partition, esp_err_to_name(err));
+        ESP_LOGE(TAG, "!!! NVS partition '%s' AUTO-ERASED (%s): all data in it is LOST this boot !!!",
+                 partition, esp_err_to_name(err));
+        note_auto_erased(partition);
         err = nvs_flash_erase_partition(partition);
         if (err == ESP_OK) {
             err = nvs_flash_init_partition(partition);

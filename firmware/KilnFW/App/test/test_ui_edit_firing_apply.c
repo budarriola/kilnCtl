@@ -17,6 +17,7 @@ int g_test_count = 0;
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hal_kv.h"
@@ -646,6 +647,65 @@ static void test_apply_refused_after_web_edit(void)
                "working copy still holds the web edit");
 }
 
+/* Read a driver source next to this test (host tests cannot run the LVGL page; LU-03/LU-04 are
+ * pinned by a source pattern, negtest mutates the same text). */
+static char *read_driver_source(const char *rel)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s", __FILE__);
+    char *slash = strrchr(path, '\\');
+    char *slash2 = strrchr(path, '/');
+    if (slash2 && (!slash || slash2 > slash)) slash = slash2;
+    if (!slash) return NULL;
+    snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "../drivers/ui/%s", rel);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = calloc(1, 200000);
+    if (buf) (void)fread(buf, 1, 199999, f);
+    fclose(f);
+    return buf;
+}
+
+static void test_lu03_lu04_source_pins(void)
+{
+    TEST_SECTION("LU-03 fork_out not read after free; LU-04 connect password wiped after the save");
+    char *a = read_driver_source("ui_edit_firing_apply.c");
+    TEST_CHECK(a != NULL, "read ui_edit_firing_apply.c");
+    if (a) {
+        char *fr = strstr(a, "heap_caps_free(fork_out)");
+        TEST_CHECK(fr != NULL, "fork_out freed");
+        TEST_CHECK(fr && !strstr(fr, "fork_out ? \"fork failed\""), "no read of fork_out after its free");
+        TEST_CHECK(strstr(a, "fork_alloc_ok ? \"fork failed\"") != NULL, "bool taken before the free is used");
+        free(a);
+    }
+    char *k = read_driver_source("ui_lcd_keypad.c");
+    TEST_CHECK(k != NULL, "read ui_lcd_keypad.c");
+    if (k) {
+        /* LU-01: the PBKDF2 verify must run on a worker, never inline on the LVGL task. */
+        TEST_CHECK(strstr(k, "lcd_keypad_state_submit(") == NULL, "keypad never calls the inline submit");
+        TEST_CHECK(strstr(k, "lcd_keypad_state_submit_begin(") != NULL, "keypad runs the begin half");
+        TEST_CHECK(strstr(k, "ui_worker_submit_front(pin_verify_worker_task") != NULL,
+                   "RB-01: verify runs on a worker task at the queue front");
+        TEST_CHECK(strstr(k, "lv_async_call(pin_verify_done_async") != NULL, "result posted back to the LVGL task");
+        char *w = strstr(k, "static void pin_verify_worker_task");
+        char *v = w ? strstr(w, "lcd_keypad_state_verify(") : NULL;
+        char *f = strstr(k, "static void pin_verify_done_async");
+        char *fin = f ? strstr(f, "lcd_keypad_state_submit_finish(") : NULL;
+        TEST_CHECK(v != NULL && fin != NULL, "verify in the worker, finish in the async callback");
+        free(k);
+    }
+    char *n = read_driver_source("ui_page_network_manage.c");
+    TEST_CHECK(n != NULL, "read ui_page_network_manage.c");
+    if (n) {
+        char *w = strstr(n, "static void connect_worker_task");
+        char *end = w ? strstr(w, "\n}") : NULL;
+        char *add = w ? strstr(w, "wifi_prov_add_network(") : NULL;
+        char *wipe = w ? strstr(w, "memset(s_connect_job_password, 0, sizeof(s_connect_job_password))") : NULL;
+        TEST_CHECK(w && end && add && wipe && wipe > add && wipe < end, "worker wipes password after the save");
+        free(n);
+    }
+}
+
 int main(void)
 {
     // fake_kv.c needs every partition initialized before hal_kv_open();
@@ -665,6 +725,7 @@ int main(void)
     test_apply_builtin_origin();
     test_apply_stale_foreign_origin_record_never_borrowed();
     test_poll();
+    test_lu03_lu04_source_pins();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

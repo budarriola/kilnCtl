@@ -18,7 +18,7 @@
  * console via esp_log_set_vprintf()). The esp_timer callback only samples
  * and records; every log line comes from dram_watch_service(), run by
  * telemetry_log_task(), so nothing heavy runs on the shared esp_timer task
- * (3584 B stack, CONFIG_ESP_TIMER_TASK_STACK_SIZE) or delays other timers.
+ * (4608 B stack, CONFIG_ESP_TIMER_TASK_STACK_SIZE) or delays other timers.
  *
  * The tracker below is pure (host-tested in test_dram_watch.c); everything
  * that needs ESP-IDF is behind ESP_PLATFORM, with no-op stand-ins on the host

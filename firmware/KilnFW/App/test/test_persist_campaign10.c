@@ -20,6 +20,7 @@
 #include "backup_json.h"
 #include "touch_cal_store.h"
 #include "ct_verify_store.h"
+#include "persist_scratch.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -49,6 +50,23 @@ static void disarm_oom(void)
 {
     persist_scratch_test_fail_nth = 0;
     persist_scratch_test_seen = 0;
+}
+
+/* FA-05: the shared fallback counter round-trips through a forced PSRAM-fail
+ * fallback (host heap_caps_malloc stub succeeds, so the hook injects the NULL). */
+static void test_persist_scratch_fallback_counter(void)
+{
+    TEST_SECTION("persist_scratch FA-05 fallback counter increments per fallback");
+    uint32_t base = persist_scratch_fallback_count();
+    void *a = persist_scratch_alloc(4321);
+    TEST_CHECK(a != NULL && persist_scratch_fallback_count() == base, "normal alloc does not count");
+    free(a);
+    heap_caps_malloc_test_set_fail_spiram(true);
+    void *b = persist_scratch_alloc(4321);
+    heap_caps_malloc_test_set_fail_spiram(false);
+    TEST_CHECK(b != NULL, "fallback still returns memory");
+    TEST_CHECK(persist_scratch_fallback_count() == base + 1u, "one fallback counted");
+    free(b);
 }
 
 /* ======================= backup_json ======================= */
@@ -701,6 +719,17 @@ static void test_med1_rejected_file_never_overwritten(void)
     TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "MED-1: path marked rev-unknown");
     TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_ERR_INVALID_STATE,
                "MED-1: saves refused while the rejected file stands");
+    TEST_CHECK(pref_cfg_fs_discard_rejected("other.bin") == ESP_ERR_INVALID_STATE,
+               "persmed MED-D: discard refuses a path that is not rejected");
+    TEST_CHECK(pref_cfg_fs_discard_rejected("small.bin") == ESP_OK && !pref_cfg_fs_rev_unknown("small.bin") &&
+                   read_raw_file("small.bin", got, sizeof(got)) == (size_t)-1,
+               "persmed MED-D: discard removes the rejected file and clears the refusal");
+    TEST_CHECK(read_raw_file("small.bin.bad", got, sizeof(got)) == sizeof(file),
+               "persmed MED-D: the .bad copy survives the discard");
+    TEST_CHECK(pref_cfg_fs_discard_rejected("small.bin") == ESP_ERR_INVALID_STATE,
+               "persmed MED-D: a second discard (no longer rejected) is refused");
+    write_raw_file("small.bin", file, sizeof(file));
+    (void)pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
     TEST_CHECK(pref_cfg_fs_remove("small.bin") == ESP_OK && !pref_cfg_fs_rev_unknown("small.bin"),
                "MED-1: a deliberate remove clears the refusal");
     TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_OK, "MED-1: save works after remove");
@@ -743,6 +772,7 @@ static void test_med1_rejected_file_never_overwritten(void)
 
 int main(void)
 {
+    test_persist_scratch_fallback_counter();
     test_backup_json();
     test_touch_cal();
     test_pref_cfg_fs();

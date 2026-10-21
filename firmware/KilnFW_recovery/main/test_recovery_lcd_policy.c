@@ -435,6 +435,34 @@ static void test_http_source(const char *path)
         CHECK(strstr(wr, "recovery_pico_busy()") != NULL, "wifi_reset refuses (409) while a Pico relay runs");
         free(wr);
     }
+    // RE-01: restart fence. restart_soon() sets the flag before any task exists; every writer refuses on it.
+    char *rs = fn_body(src, "static void restart_soon(");
+    CHECK(rs != NULL && strstr(rs, "s_restart_pending") != NULL &&
+              strstr(rs, "s_restart_pending") < strstr(rs, "xTaskCreate("),
+          "restart_soon sets the restart-pending flag before creating the restart task");
+    free(rs);
+    char *rb = fn_body(src, "static bool route_blocked(");
+    CHECK(rb != NULL && strstr(rb, "recovery_apply_busy()") != NULL &&
+              strstr(rb, "recovery_http_restart_pending()") != NULL,
+          "route_blocked covers apply-busy and restart-pending");
+    free(rb);
+    {
+        const char *fence_routes[] = {"static esp_err_t boot_guard_reset_post(", "static esp_err_t recovery_exit_post(",
+                                      "static esp_err_t wifi_reset_post(",       "static esp_err_t sw_reset_post(",
+                                      "static esp_err_t pico_upload_post(",      "static esp_err_t apply_staged_post("};
+        for (size_t i = 0; i < sizeof(fence_routes) / sizeof(fence_routes[0]); i++) {
+            char *fb = fn_body(src, fence_routes[i]);
+            CHECK(fb != NULL && strstr(fb, "route_blocked()") != NULL, "mutating route refuses (409) while a restart is pending");
+            free(fb);
+        }
+        char *oe = fn_body(src, "static esp_err_t ota_esp_post(");
+        CHECK(oe != NULL && strstr(oe, "recovery_http_restart_pending()") != NULL,
+              "POST /api/ota/esp refuses (409) while a restart is pending");
+        free(oe);
+    }
+    CHECK(strstr(src, "\\\"keepalive_sent\\\"") != NULL && strstr(src, "\\\"keepalive_last_err\\\"") != NULL &&
+              strstr(src, "\\\"keepalive_last_send_ms\\\"") != NULL && strstr(src, "recovery_keepalive_get_stats(") != NULL,
+          "status reports the keepalive counters (RE-02)");
     char *sel = fn_body(src, "int recovery_http_select_app_and_restart(");
     CHECK(sel != NULL && strstr(sel, "recovery_boot_partition_set_and_verify(") != NULL &&
               strstr(sel, "restart_soon(") != NULL,
@@ -461,6 +489,7 @@ static void test_install_source(const char *path)
     }
     normalize(src);
     strip_comments(src);
+    CHECK(strstr(src, "recovery_http_restart_pending()") != NULL, "install recover task honours the restart fence (RE-01)");
     CHECK(strstr(src, "recovery_lcd_set_error(") == NULL, "install path never raises the error banner (it hides the passphrase)");
     char *sf = fn_body(src, "static void show_failure(");
     CHECK(sf != NULL, "show_failure found");
@@ -546,6 +575,11 @@ static void test_apply_esp_source(const char *path)
     }
     normalize(src);
     strip_comments(src);
+    char *as = fn_body(src, "esp_err_t recovery_apply_esp_start(");
+    CHECK(as != NULL && strstr(as, "recovery_http_restart_pending()") != NULL &&
+              strstr(as, "recovery_http_restart_pending()") < strstr(as, "__atomic_compare_exchange_n("),
+          "apply start refuses once a restart is pending, before claiming (RE-01)");
+    free(as);
     char *sb = fn_body(src, "static int cb_set_boot(");
     CHECK(sb != NULL, "cb_set_boot found");
     if (sb) {

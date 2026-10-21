@@ -286,7 +286,7 @@ static update_stage_err_t flush_head(update_stage_t *st)
     bool dirty = false;
     if (st->semver_given) {
         // A declared version may not override a valid one in the descriptor (else 99.0.0 on an old image
-        // would walk past the downgrade gate). An invalid/blank descriptor version leaves the declared one.
+        // would walk past the downgrade gate). With a gate (AUP-03) an invalid descriptor version is refused; only an ungated stage keeps the declared one.
         // Gated stagers (hand upload AND the GitHub release fetch, which installs update_stage_manifest_gate)
         // compare the NORMALISED forms: leading v and a trailing "-dirty" (ESP-IDF's git-describe
         // PROJECT_VER, e.g. the published v1.0.0-pre.3 image reads "v1.0.0-pre.3-dirty") are dropped from the
@@ -303,8 +303,15 @@ static update_stage_err_t flush_head(update_stage_t *st)
                 return UPDATE_STAGE_ERR_BAD_VERSION;
             }
         }
-        if (st->gate != NULL && update_semver_parse(dn, &dv) && strcmp(dn, st->semver) != 0) {
-            return UPDATE_STAGE_ERR_VERSION_MISMATCH;
+        if (st->gate != NULL) {
+            // AUP-03: with the version check active an unparseable descriptor version is refused, not
+            // accepted under the declared one.
+            if (!update_semver_parse(dn, &dv)) {
+                return UPDATE_STAGE_ERR_BAD_VERSION;
+            }
+            if (strcmp(dn, st->semver) != 0) {
+                return UPDATE_STAGE_ERR_VERSION_MISMATCH;
+            }
         }
     } else {
         // Strip v/V and one trailing "-dirty" exactly as the declared branch does; the dirty fact goes to the
@@ -493,6 +500,13 @@ update_stage_err_t update_stage_upload_finish(update_stage_t *st)
     }
     if (memcmp(streamed, reread, STAGE_SHA256_LEN) != 0) {
         return fail(st, UPDATE_STAGE_ERR_READBACK);
+    }
+
+    // OP-01: the SHA above only covers the bytes received. Verify the whole image structurally
+    // (every segment, checksum, digest) before it can be marked VERIFIED. No header is written yet,
+    // so a refused image leaves the stage reading as not staged.
+    if (st->io.image_verify != NULL && st->io.image_verify(st->io.ctx, st->total) != 0) {
+        return fail(st, UPDATE_STAGE_ERR_BAD_IMAGE);
     }
 
     stage_header_t h;

@@ -61,8 +61,8 @@ foreach ($lit in $lastInstall) {
 }
 
 # --- 2. ota_esp_post ordering --------------------------------------------
-$m = [regex]::Match($http, 'static esp_err_t ota_esp_post\(.*?\n\}', 'Singleline')
-if (-not $m.Success) { throw "ota_esp_post not found" }
+$m = [regex]::Match($http, 'static esp_err_t ota_esp_post_locked\(.*?\n\}', 'Singleline')
+if (-not $m.Success) { throw "ota_esp_post_locked not found" }
 $body = $m.Value
 # The call must be a statement at the function's top indentation (not inside if (0) { } or a nested block).
 $mSup = [regex]::Match($body, '(?m)^ {4}(?:int\s+\w+\s*=\s*|\(void\))?recovery_install_supersede\(\)')

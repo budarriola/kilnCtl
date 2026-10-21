@@ -29,7 +29,14 @@ function Invoke-HostTestProcess {
         }
         if ($done) {
             $lines | ForEach-Object { Write-Host $_ }
-            return $p.ExitCode
+            $p.WaitForExit()  # parameterless wait finishes async stream/exit bookkeeping so ExitCode is populated
+            $code = $p.ExitCode
+            if ($null -eq $code) {
+                # Seen once under load: a test printed PASS yet the runner counted a failure (null ExitCode).
+                Write-Host "FAIL ${Name}: process exit code unreadable (null); counted as a failure, not a pass"
+                return 125
+            }
+            return $code
         }
         Write-Host "FAIL ${Name}: timed out after $TimeoutSec s"
         Write-Host "---- output tail ($Name) ----"

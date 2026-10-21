@@ -437,6 +437,25 @@ static void test_volatile_dirty_flag_and_persisted_version(void)
 // that does not construct this disagreement passes against the defect.
 static void test_mixed_armed_refusal_wire_reason_uses_persisted_not_cached_tc_type(void)
 {
+    TEST_SECTION("config_store_flash: persisted check period is flash truth, not the live RAM record (A7)");
+    reset_all();
+    {
+        uint32_t pp = 123u;
+        /* my own new check "unavailable before boot_load" was invalid: s_loaded survives reset_all() */
+        config_store_boot_load();
+        TEST_CHECK(config_store_get_persisted_check_period_s(&pp) == true, "A7: available after boot_load");
+        const uint32_t flash_period = pp;
+        config_store_record_t vr;
+        config_store_default(&vr);
+        vr.config_check_period_s = flash_period + 77u;
+        TEST_CHECK(config_store_write_volatile(&vr, NULL) == true, "A7 fixture: volatile install accepted");
+        config_store_record_t live;
+        TEST_CHECK(config_store_get_full_record(&live) && live.config_check_period_s == flash_period + 77u,
+                   "A7 fixture: live RAM period moved");
+        TEST_CHECK(config_store_get_persisted_check_period_s(&pp) && pp == flash_period,
+                   "A7: persisted period unmoved by a RAM-only change");
+    }
+
     TEST_SECTION("config_store_flash: a MIXED ARMED refusal's wire reason is derived from the "
                  "PERSISTED tc_type and agrees with its own log sentence (re-review defect 1)");
     reset_all();
@@ -1894,7 +1913,8 @@ static const f1_field_t k_f1_fields[] = {
     F1(config_check_period_s, K_SAFETY), F1(ct_cal, K_SAFETY), F1(max_expected_power_w, K_ALLOWED),
     F1(i_normal_a, K_SAFETY), F1(overcurrent_pct, K_SAFETY), F1(overcurrent_time_s, K_SAFETY),
     F1(ct_topology, K_SAFETY), F1(zone_ct_channel, K_SAFETY), F1(i_present_a_manual, K_ALLOWED),
-    F1(tc_offset_c, K_SAFETY), F1(estop_active_level, K_SAFETY), F1(reserved, K_ALLOWED),
+    F1(tc_offset_c, K_SAFETY), F1(estop_active_level, K_SAFETY), F1(tc_sheath_tau_s, K_SAFETY),
+    F1(reserved, K_ALLOWED),
 };
 #undef F1
 // Bytes of config_store_record_t that belong to no member (compiler padding).
@@ -2230,8 +2250,150 @@ static void test_volatile_gate_refuses_k_ct_change_but_accepts_resend(void)
     TEST_CHECK(config_store_write_volatile(&n, NULL) == true, "idle: k_ct change installs");
 }
 
+// PS2-04: a narrow tc_type write that needs a sector erase is refused while
+// ARMED (the erase stalls core 1), with a distinct decision/reason/wire value.
+static bool ps24_narrow_tc_write(uint8_t tc_type, const char **reason,
+                                 config_store_write_decision_t *decision)
+{
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = tc_type;
+    rec.calibration_missing = false;
+    return config_store_write_ex(&rec, /*heat_safe=*/true, reason, decision);
+}
+
+static void test_ps2_04_armed_narrow_write_needing_erase_is_refused(void)
+{
+    TEST_SECTION("PS2-04: ARMED narrow write that needs an erase is refused (log wrap)");
+    reset_all();
+    config_store_boot_load();
+    for (uint32_t i = 0; i < CONFIG_STORE_SLOTS_PER_SECTOR; i++) {
+        write_default_with_tc_type((uint8_t)(i % 8u));
+    }
+    uint8_t before = config_store_get_tc_type();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    const char *reason = NULL;
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_OK;
+    bool ok = ps24_narrow_tc_write(0x05u, &reason, &decision);
+    TEST_CHECK(!ok, "write needing a sector erase is refused while ARMED");
+    TEST_CHECK(decision == CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE,
+               "distinct refusal decision");
+    TEST_CHECK(reason != NULL && strstr(reason, "erase") != NULL, "reason names the erase");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_B_INDEX) == 0, "no erase happened");
+    TEST_CHECK(config_store_get_tc_type() == before, "record unchanged");
+    TEST_CHECK(link_task_commit_config_reject_reason_for(
+                   CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE, 0u, 0u) ==
+                   KILNLINK_COMMIT_CONFIG_REJECT_ARMED_NEEDS_ERASE,
+               "maps to its own wire reason");
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+    ok = ps24_narrow_tc_write(0x05u, &reason, &decision);
+    TEST_CHECK(ok, "the same write succeeds once disarmed");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_B_INDEX) == 1, "disarmed write erased sector B");
+}
+
+static void test_ps2_04_armed_narrow_write_without_erase_still_allowed(void)
+{
+    TEST_SECTION("PS2-04: ARMED narrow write that needs no erase is still allowed");
+    reset_all();
+    config_store_boot_load();
+    write_default_with_tc_type(0x01u);
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    const char *reason = NULL;
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_REFUSED_ARMED;
+    TEST_CHECK(ps24_narrow_tc_write(0x02u, &reason, &decision), "plain append while ARMED works");
+    TEST_CHECK(decision == CONFIG_STORE_WRITE_OK, "decision OK");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_A_INDEX) == 0 &&
+                   fake_flash_get_erase_count(SECTOR_B_INDEX) == 0,
+               "no erase");
+}
+
+static void test_ps2_04_armed_torn_slot_fallback_is_refused(void)
+{
+    TEST_SECTION("PS2-04: ARMED narrow write whose slot is torn (erase fallback) is refused");
+    reset_all();
+    config_store_boot_load();
+    write_default_with_tc_type(0x01u);
+    hal_flash_region_t region_a;
+    TEST_CHECK(hal_flash_region_init(&region_a, SAFTYFW_CONFIG_STORE_FLASH_OFFSET,
+                                      SAFTYFW_CONFIG_STORE_FLASH_SIZE) == HAL_OK, "bind region");
+    uint8_t junk[HAL_FLASH_PROGRAM_SIZE];
+    memset(junk, 0x5A, sizeof(junk));
+    TEST_CHECK(hal_flash_program(&region_a, 1u * CONFIG_STORE_RECORD_LEN, junk, sizeof(junk)) == HAL_OK,
+               "tear slot 1");
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    const char *reason = NULL;
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_OK;
+    TEST_CHECK(!ps24_narrow_tc_write(0x02u, &reason, &decision), "refused while ARMED");
+    TEST_CHECK(decision == CONFIG_STORE_WRITE_REFUSED_ARMED_NEEDS_ERASE, "needs-erase refusal");
+    TEST_CHECK(fake_flash_get_erase_count(SECTOR_B_INDEX) == 0, "nothing erased");
+}
+
+// PS2-03: a newer record refused at load is remembered; the next write goes above its seq.
+static void ps23_put_record(uint32_t sector_offset, size_t slot, uint16_t version, uint32_t seq)
+{
+    hal_flash_region_t region;
+    TEST_CHECK(hal_flash_region_init(&region, sector_offset, SAFTYFW_CONFIG_STORE_FLASH_SIZE) == HAL_OK,
+               "bind region");
+    config_store_record_t r;
+    config_store_default(&r);
+    r.seq = seq;
+    uint8_t raw[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&r, raw);
+    raw[4] = (uint8_t)(version & 0xFFu); // REC_OFF_FORMAT_VERSION; CRC left stale: the
+    raw[5] = (uint8_t)(version >> 8);    // too-new path never trusts a CRC it cannot check
+    TEST_CHECK(hal_flash_program(&region, (uint32_t)slot * CONFIG_STORE_RECORD_LEN, raw,
+                                  CONFIG_STORE_RECORD_LEN) == HAL_OK, "program record");
+}
+
+static void test_ps2_03_refused_newer_record_flag_and_seq_floor(void)
+{
+    TEST_SECTION("PS2-03: a refused newer record is flagged and the next write seq is above it");
+    reset_all();
+    config_store_boot_load();
+    write_default_with_tc_type(0x01u); // slot 0, seq 1
+    TEST_CHECK(!config_store_newer_record_refused(), "no flag on a clean board");
+    ps23_put_record(SAFTYFW_CONFIG_STORE_FLASH_OFFSET, 3, (uint16_t)(CONFIG_STORE_FORMAT_VERSION + 1u), 50u);
+    config_store_boot_load();
+    TEST_CHECK(config_store_get_tc_type() == 0x01u, "the older valid record loaded");
+    TEST_CHECK(config_store_newer_record_refused(), "refused newer record is reported");
+    TEST_CHECK(config_store_refused_seq_floor() == 50u, "floor is the refused seq");
+    TEST_CHECK(strstr(config_store_flash_host_stub_console_log(), "REFUSED a newer record") != NULL,
+               "boot logs a WARN");
+
+    write_default_with_tc_type(0x02u);
+    TEST_CHECK(!config_store_newer_record_refused(), "flag clears once a record supersedes it");
+    config_store_record_t got;
+    uint8_t sec[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    hal_flash_region_t region;
+    TEST_CHECK(hal_flash_region_init(&region, SAFTYFW_CONFIG_STORE_FLASH_OFFSET,
+                                      SAFTYFW_CONFIG_STORE_FLASH_SIZE) == HAL_OK, "bind");
+    TEST_CHECK(hal_flash_read(&region, 0, sec, sizeof(sec)) == HAL_OK, "read sector");
+    size_t slot = config_store_find_latest(sec, &got);
+    TEST_CHECK(slot != CONFIG_STORE_NO_SLOT && got.seq == 51u && got.tc_type == 0x02u,
+               "new record seq is above the refused record seq (51)");
+}
+
+static void test_ps2_03_lower_seq_refused_is_not_flagged(void)
+{
+    TEST_SECTION("PS2-03: a refused record older than the loaded one raises no flag");
+    reset_all();
+    config_store_boot_load();
+    write_default_with_tc_type(0x01u);
+    write_default_with_tc_type(0x02u); // seq 2 at slot 1
+    ps23_put_record(SAFTYFW_CONFIG_STORE_FLASH_OFFSET, 4, (uint16_t)(CONFIG_STORE_FORMAT_VERSION + 1u), 1u);
+    config_store_boot_load();
+    TEST_CHECK(!config_store_newer_record_refused(), "refused seq below the loaded seq: no flag");
+}
+
 int main(void)
 {
+    test_ps2_04_armed_narrow_write_needing_erase_is_refused();
+    test_ps2_04_armed_narrow_write_without_erase_still_allowed();
+    test_ps2_04_armed_torn_slot_fallback_is_refused();
+    test_ps2_03_refused_newer_record_flag_and_seq_floor();
+    test_ps2_03_lower_seq_refused_is_not_flagged();
     test_boot_load_blank_sector_is_default();
     test_write_then_reload_round_trips();
     test_fallback_seeded_at_boot_before_any_write();

@@ -191,3 +191,17 @@ Fixed in `8a8b35e7a (tests follow in 26da1f472, f28189d99)`. Host tests 86/86 (t
 - LOW-5: backup export lists `stale_or_unknown_stores` when any store is degraded.
 - NITs: loud log on unknown-table overflow, test inject seam excluded under `ESP_PLATFORM`, stale comment
   rewritten, `zones_page.html` indent.
+
+## Fix status (persmed batch)
+
+The MED-A..MED-D items below were raised against commit 41c7a4c17 and fixed here.
+
+- MED-A: `cfg_fs_read` maps only ENOENT/ENOTDIR to NOT_FOUND; any other fopen failure is ESP_FAIL (state unknown).
+  Test: `test_read_distinguishes_absent_from_unopenable`.
+- MED-B: `kiln_cfg_store_quarantine_clear` first copies the cfg file to `kiln_configs.json.bad` and the legacy NVS
+  blob to `kiln_configs.nvs.bad`, and refuses if a needed copy cannot be made. Test:
+  `test_persmed_older_file_migrates_and_clear_keeps_copy`.
+- MED-C: a cfg file in an older layout (v1/v2) is state OLDER and is migrated through the frozen-layout chain and
+  rewritten in the current layout, never rejected; only newer-than-known stays NEWER/rejected. Same test.
+- MED-D: `POST /api/cfgfs/discard_rejected?store=<file>` (ADMIN, mode-gated) deletes one rejected pref file via
+  `pref_cfg_fs_discard_rejected`, refusing (409) any path not currently rejected. Cap: 179 of 190 routes.

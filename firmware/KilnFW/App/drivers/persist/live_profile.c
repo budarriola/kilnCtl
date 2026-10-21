@@ -13,6 +13,7 @@
 #include "cfg_fs_status.h"
 #include "cfg_save_lock.h"
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "hal_sysinfo.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
@@ -449,7 +450,7 @@ static void fill_unmounted_err(char *err, size_t err_cap, const char *what)
     }
 }
 
-bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t err_cap)
+static bool live_profile_save_record_impl(const live_edit_record_t *rec, char *err, size_t err_cap)
 {
     if (caller_stack_is_external()) {
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
@@ -484,6 +485,31 @@ bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t e
     return true;
 }
 
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in live_profile_save_record_impl stays strict. */
+typedef struct {
+    const live_edit_record_t *rec;
+    char *err;
+    size_t err_cap;
+    bool ret;
+} live_profile_save_record_hop_t;
+
+static void live_profile_save_record_hop_job(void *arg)
+{
+    live_profile_save_record_hop_t *c = (live_profile_save_record_hop_t *)arg;
+    c->ret = live_profile_save_record_impl(c->rec, c->err, c->err_cap);
+}
+
+bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t err_cap)
+{
+    live_profile_save_record_hop_t ctx = { .rec = rec, .err = err, .err_cap = err_cap, .ret = false };
+    if (flash_hop_run(live_profile_save_record_hop_job, &ctx) != ESP_OK) {
+        if (err) snprintf(err, err_cap, "flash worker hop failed");
+        return false;
+    }
+    return ctx.ret;
+}
+
 bool live_profile_load_record(live_edit_record_t *out)
 {
     uint8_t buf[sizeof(live_edit_persisted_t)];
@@ -507,7 +533,7 @@ bool live_profile_load_record(live_edit_record_t *out)
     return live_edit_record_decode(buf, len, out);
 }
 
-static bool live_profile_save_working_locked(const profile_t *p, char *err, size_t err_cap)
+static bool live_profile_save_working_locked_impl(const profile_t *p, char *err, size_t err_cap)
 {
     if (caller_stack_is_external()) {
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
@@ -542,6 +568,31 @@ static bool live_profile_save_working_locked(const profile_t *p, char *err, size
     }
     atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in live_profile_save_working_locked_impl stays strict. */
+typedef struct {
+    const profile_t *p;
+    char *err;
+    size_t err_cap;
+    bool ret;
+} live_profile_save_working_locked_hop_t;
+
+static void live_profile_save_working_locked_hop_job(void *arg)
+{
+    live_profile_save_working_locked_hop_t *c = (live_profile_save_working_locked_hop_t *)arg;
+    c->ret = live_profile_save_working_locked_impl(c->p, c->err, c->err_cap);
+}
+
+static bool live_profile_save_working_locked(const profile_t *p, char *err, size_t err_cap)
+{
+    live_profile_save_working_locked_hop_t ctx = { .p = p, .err = err, .err_cap = err_cap, .ret = false };
+    if (flash_hop_run(live_profile_save_working_locked_hop_job, &ctx) != ESP_OK) {
+        if (err) snprintf(err, err_cap, "flash worker hop failed");
+        return false;
+    }
+    return ctx.ret;
 }
 
 bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
@@ -845,7 +896,7 @@ live_clear_result_t live_profile_clear_if_gen(uint32_t expected, char *err, size
     return r;
 }
 
-static bool live_profile_clear_locked(char *err, size_t err_cap)
+static bool live_profile_clear_locked_impl(char *err, size_t err_cap)
 {
     /* Legacy NVS copy first: if the file removal below were to fail or be
      * interrupted, the fallback must not be able to resurrect the edit. */
@@ -889,6 +940,30 @@ static bool live_profile_clear_locked(char *err, size_t err_cap)
     }
     atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
+}
+
+/* PSRAM-stack callers hop this write onto the internal-stack bx_flash_worker
+ * (flash_hop.h). The job takes no lock; the guard in live_profile_clear_locked_impl stays strict. */
+typedef struct {
+    char *err;
+    size_t err_cap;
+    bool ret;
+} live_profile_clear_locked_hop_t;
+
+static void live_profile_clear_locked_hop_job(void *arg)
+{
+    live_profile_clear_locked_hop_t *c = (live_profile_clear_locked_hop_t *)arg;
+    c->ret = live_profile_clear_locked_impl(c->err, c->err_cap);
+}
+
+static bool live_profile_clear_locked(char *err, size_t err_cap)
+{
+    live_profile_clear_locked_hop_t ctx = { .err = err, .err_cap = err_cap, .ret = false };
+    if (flash_hop_run(live_profile_clear_locked_hop_job, &ctx) != ESP_OK) {
+        if (err) snprintf(err, err_cap, "flash worker hop failed");
+        return false;
+    }
+    return ctx.ret;
 }
 
 /* One-time boot migration: copies a legacy NVS record / working profile into

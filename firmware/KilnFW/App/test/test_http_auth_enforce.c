@@ -7,6 +7,7 @@
 // path, and OPEN-tier access with no credentials. No ESP-IDF dependency
 // beyond the httpd_method_t/httpd_uri_t types route_tier_table.h names
 // (App/test/stubs/esp_http_server.h supplies those).
+#include <stdio.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -427,6 +428,20 @@ static void test_every_real_route_allows_with_auth_off(void) {
     }
 }
 
+static void test_request_touches_session(void) {
+    TEST_SECTION("http_auth_request_touches_session -- AF-02/AF-03 background header skip");
+    TEST_CHECK(http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW, false, HTTP_GET),
+               "normal GET touches");
+    TEST_CHECK(!http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW, true, HTTP_GET),
+               "background GET does not touch");
+    TEST_CHECK(http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW, true, HTTP_POST),
+               "background-header POST still touches");
+    TEST_CHECK(!http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_DENY_NO_SESSION, false, HTTP_GET),
+               "denied request never touches");
+    TEST_CHECK(!http_auth_request_touches_session(ROUTE_TIER_OPEN, HTTP_AUTH_DECISION_ALLOW, false, HTTP_GET),
+               "OPEN tier never touches");
+}
+
 static void test_decision_counts_as_activity(void) {
     TEST_SECTION("http_auth_decision_counts_as_activity -- section 8's activity predicate");
 
@@ -513,6 +528,86 @@ static void test_page_shell_allowlist(void) {
     TEST_CHECK(!http_auth_is_page_shell_get(NULL, HTTP_GET), "NULL uri is not a page shell");
 }
 
+// KG-01 (owner 2026-10-19): the central page gate. A logged-out request for a
+// protected page must be DENIED by http_auth_check() and answered with a
+// redirect location to the dashboard carrying the page (never the shell); the
+// dashboard, login page and the shared assets it needs stay open; auth off and
+// the unprovisioned Wi-Fi setup pages stay open.
+static void test_page_gate_location_and_open_set(void) {
+    TEST_SECTION("KG-01 page gate: denied page shells redirect to /?next=<page>");
+    char loc[64];
+    for (size_t i = 0; i < PAGE_SHELL_URI_COUNT; i++) {
+        const char *uri = kPageShellUris[i];
+        route_tier_t tier = ROUTE_TIER_OPEN;
+        TEST_CHECK(http_auth_lookup_tier(uri, HTTP_GET, &tier), "page shell has a GET row");
+        bool wifi = strcmp(uri, "/wifi") == 0;
+        TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false, false) == HTTP_AUTH_DECISION_DENY_NO_SESSION,
+                   "KG-01: a logged-out request for a protected page is denied (so the gate redirects it)");
+        http_auth_decision_t user = http_auth_check(tier, HTTP_AUTH_ROLE_USER, true, false, false);
+        TEST_CHECK(user == HTTP_AUTH_DECISION_DENY_INSUFFICIENT || user == HTTP_AUTH_DECISION_ALLOW,
+                   "a USER session is allowed or told insufficient, never no-session");
+        TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, false, false, false) == HTTP_AUTH_DECISION_ALLOW,
+                   "auth off: every page stays open");
+        if (wifi) {
+            TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false, true) == HTTP_AUTH_DECISION_ALLOW,
+                       "/wifi stays open while unprovisioned");
+        } else {
+            TEST_CHECK(http_auth_check(tier, HTTP_AUTH_ROLE_NONE, true, false, true) != HTTP_AUTH_DECISION_ALLOW,
+                       "only /wifi is open while unprovisioned");
+        }
+        char want[64];
+        snprintf(want, sizeof(want), "/?next=%s", uri);
+        TEST_CHECK(http_auth_page_gate_location(uri, loc, sizeof(loc)) && strcmp(loc, want) == 0,
+                   "gate location is /?next=<page>");
+    }
+    for (size_t i = 0; i < PAGE_SHELL_URI_COUNT; i++) {
+        route_tier_t t = ROUTE_TIER_OPEN;
+        (void)http_auth_lookup_tier(kPageShellUris[i], HTTP_GET, &t);
+        bool want = t != ROUTE_TIER_OPEN;
+        TEST_CHECK(http_auth_page_shell_needs_no_store(kPageShellUris[i], HTTP_GET, true, t) == want,
+                   "KH-01: protected page shells get no-store when auth is on");
+        TEST_CHECK(!http_auth_page_shell_needs_no_store(kPageShellUris[i], HTTP_GET, false, t),
+                   "KH-01: auth off leaves caching alone");
+    }
+    TEST_CHECK(!http_auth_page_shell_needs_no_store("/settings", HTTP_GET, true, ROUTE_TIER_OPEN),
+               "KH-01: an OPEN-tier response is never forced to no-store");
+    TEST_CHECK(!http_auth_page_shell_needs_no_store("/app.js", HTTP_GET, true, ROUTE_TIER_OPEN),
+               "KH-01: static assets keep their caching");
+    TEST_CHECK(!http_auth_page_shell_needs_no_store("/api/zones", HTTP_GET, true, ROUTE_TIER_ADMIN),
+               "KH-01: API routes are not page shells");
+    TEST_CHECK(!http_auth_page_gate_location("/", loc, sizeof(loc)) && loc[0] == '\0',
+               "the dashboard is not a gated page (no redirect loop)");
+    TEST_CHECK(!http_auth_page_gate_location("/login", loc, sizeof(loc)), "/login is not gated");
+    TEST_CHECK(!http_auth_page_gate_location("/api/zones", loc, sizeof(loc)), "no location for an /api/ route");
+    TEST_CHECK(!http_auth_page_gate_location("/settings", loc, 8), "a too-small buffer fails");
+    TEST_CHECK(!http_auth_page_gate_location(NULL, loc, sizeof(loc)), "NULL uri fails");
+    TEST_CHECK(!http_auth_page_gate_location("/settings", NULL, 64), "NULL out fails");
+
+    /* The dashboard, login page and the shared assets it loads stay viewable logged out. */
+    static const char *const open_uris[] = {"/", "/login", "/app.js", "/nav.js", "/theme.css"};
+    for (size_t i = 0; i < sizeof(open_uris) / sizeof(open_uris[0]); i++) {
+        route_tier_t tier = ROUTE_TIER_ADMIN;
+        TEST_CHECK(http_auth_lookup_tier(open_uris[i], HTTP_GET, &tier) && tier == ROUTE_TIER_OPEN,
+                   "dashboard/login/shared asset stays OPEN");
+    }
+    /* Page-specific script: only /safety/commissioning and /setup load it. */
+    route_tier_t ctier = ROUTE_TIER_OPEN;
+    TEST_CHECK(http_auth_lookup_tier("/commissioning_shared.js", HTTP_GET, &ctier) && ctier == ROUTE_TIER_ADMIN,
+               "KG-01: commissioning_shared.js is ADMIN, not an OPEN shared asset");
+    /* No non-/api GET row other than the reviewed open set is OPEN. */
+    for (size_t i = 0; i < ROUTE_TIER_TABLE_COUNT; i++) {
+        const route_tier_entry_t *e = &kRouteTierTable[i];
+        if (e->method != HTTP_GET || strncmp(e->uri, "/api/", 5) == 0 || e->tier != ROUTE_TIER_OPEN) {
+            continue;
+        }
+        bool reviewed = strcmp(e->uri, "/status") == 0;
+        for (size_t k = 0; k < sizeof(open_uris) / sizeof(open_uris[0]); k++) {
+            reviewed = reviewed || strcmp(open_uris[k], e->uri) == 0;
+        }
+        TEST_CHECK(reviewed, "KG-01: no new OPEN page/asset beyond the reviewed dashboard set");
+    }
+}
+
 // Owner decision 2026-09-28: /wifi, /networks and /scan open without a
 // session ONLY while the board is unprovisioned; once provisioned they must
 // require an administrator session, same as the sibling /provision,
@@ -593,6 +688,17 @@ static void test_refusal_close_threshold(void) {
     TEST_CHECK(!http_auth_refusal_should_close(HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES), "exactly the threshold: keep");
     TEST_CHECK(http_auth_refusal_should_close(HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES + 1), "one byte over: close");
     TEST_CHECK(http_auth_refusal_should_close(2500000u), "a multi-MB OTA image body: close");
+    TEST_CHECK(!http_auth_refusal_should_close(23u * 1024u), "RS-02: a 23 KB backup body is drained, not closed");
+
+    TEST_SECTION("RS-02 http_auth_refusal_drain_step -- bounded by bytes and by time");
+    TEST_CHECK(http_auth_refusal_drain_step(0, 100, 5) == HTTP_AUTH_DRAIN_DONE, "recv 0: done");
+    TEST_CHECK(http_auth_refusal_drain_step(256, 256, 5) == HTTP_AUTH_DRAIN_CONTINUE, "data within caps: continue");
+    TEST_CHECK(http_auth_refusal_drain_step(-1, 10, 5) == HTTP_AUTH_DRAIN_ABORT, "socket error: abort");
+    TEST_CHECK(http_auth_refusal_drain_step(256, HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES, 5) == HTTP_AUTH_DRAIN_CONTINUE, "exactly the byte cap: continue");
+    TEST_CHECK(http_auth_refusal_drain_step(256, HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES + 1, 5) == HTTP_AUTH_DRAIN_ABORT, "over the byte cap: abort");
+    TEST_CHECK(http_auth_refusal_drain_step(256, 512, HTTP_AUTH_REFUSAL_DRAIN_MAX_MS) == HTTP_AUTH_DRAIN_CONTINUE, "exactly the time cap: continue");
+    TEST_CHECK(http_auth_refusal_drain_step(256, 512, HTTP_AUTH_REFUSAL_DRAIN_MAX_MS + 1) == HTTP_AUTH_DRAIN_ABORT, "over the time cap: abort");
+    TEST_CHECK(HTTP_AUTH_REFUSAL_DRAIN_MAX_MS <= 2000u && HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES <= 32768u, "caps stay hard");
 }
 
 typedef struct { const char *origin, *referer, *host; } fake_hdrs_t;
@@ -814,6 +920,7 @@ void run_test_http_auth_enforce(void) {
     test_origin_glue();
     test_num_strict();
     test_page_shell_allowlist();
+    test_page_gate_location_and_open_set();
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();
     test_auth_disabled_inert_path();
@@ -830,6 +937,7 @@ void run_test_http_auth_enforce(void) {
     test_every_table_row_reachable_via_lookup();
     test_every_real_route_allows_with_auth_off();
     test_decision_counts_as_activity();
+    test_request_touches_session();
     test_wifi_setup_tier_provisioned_gating();
     test_refusal_close_threshold();
 }

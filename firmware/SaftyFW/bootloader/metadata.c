@@ -254,6 +254,30 @@ bool bootloader_metadata_next_write_needs_erase(size_t latest_slot_index)
     return (latest_slot_index + 1) >= BOOTLOADER_METADATA_SLOTS_PER_SECTOR;
 }
 
+bootloader_metadata_write_plan_t bootloader_metadata_plan_write(size_t latest_slot_index,
+                                                                  bool target_erased)
+{
+    bootloader_metadata_write_plan_t p;
+    p.slot = bootloader_metadata_next_write_slot(latest_slot_index);
+    p.needs_erase = bootloader_metadata_next_write_needs_erase(latest_slot_index);
+    p.needs_backup = bootloader_metadata_wrap_needs_backup(latest_slot_index);
+    if (!p.needs_erase && !target_erased) {
+        p.slot = 0;
+        p.needs_erase = true;
+        p.needs_backup = latest_slot_index != BOOTLOADER_METADATA_NO_SLOT &&
+                         latest_slot_index != BOOTLOADER_METADATA_FROM_BACKUP;
+    }
+    return p;
+}
+
+bool bootloader_metadata_persist_failure_blocks_boot(const bootloader_metadata_t *meta, uint8_t slot)
+{
+    if (meta == NULL || slot >= 2u) {
+        return true;
+    }
+    return meta->slots[slot].state == BOOTLOADER_SLOT_PENDING_VERIFY;
+}
+
 // --- Boot decision -----------------------------------------------------
 
 static bool slot_is_bootable(bootloader_slot_state_t state)

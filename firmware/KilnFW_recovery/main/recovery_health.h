@@ -29,7 +29,8 @@ void recovery_health_clear_http(void);
 void recovery_health_clear_wifi(void);
 
 // Count a failure-driven restart, keep the count across it, and restart.
-void recovery_health_restart_for_http(void) __attribute__((noreturn));
+// FX-04: returns false (no restart, count untouched) when an apply is still running after the bounded wait.
+bool recovery_health_restart_for_http(void);
 void recovery_health_restart_for_wifi(void) __attribute__((noreturn));
 
 #ifdef __cplusplus

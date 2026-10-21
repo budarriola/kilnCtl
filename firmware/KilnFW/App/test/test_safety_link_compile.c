@@ -520,6 +520,16 @@ static inline TickType_t safety_link_test_xTaskGetTickCount(void) { return s_fak
 // changes, only which token this test's single merged TU sees for each.
 #define TAG TAG_frames
 #include "../drivers/safety/safety_link_frames.c"
+/* FD-05 link stand-ins: record what safety_apply_trip_event() hands to trip_history_note(). */
+static unsigned g_th_note_calls;
+static trip_history_entry_t g_th_last_note;
+bool trip_history_note(const trip_history_entry_t *e) { g_th_note_calls++; g_th_last_note = *e; return true; }
+bool trip_history_note_event(uint32_t pu, uint32_t eu, uint32_t utc, uint32_t bs, float tc, float thr, uint8_t reason, uint8_t seq, uint8_t rep) { (void)rep; trip_history_entry_t e; memset(&e, 0, sizeof(e)); e.pico_uptime_ms = pu; e.esp_uptime_s = eu; e.utc = utc; e.boot_seq = bs; e.safety_tc_c = tc; e.threshold = thr; e.reason = reason; e.pico_trip_seq = seq; e.zone = TRIP_HISTORY_ZONE_UNKNOWN; return trip_history_note(&e); }
+unsigned boot_history_recent(boot_history_entry_t out[BOOT_HISTORY_RECENT]) { memset(out, 0, sizeof(boot_history_entry_t) * BOOT_HISTORY_RECENT); out[0].seq = 7u; return 1u; }
+void time_sync_get_status(time_sync_status_t *out) { memset(out, 0, sizeof(*out)); }
+uint32_t boot_history_latest_seq(void) { return 7u; }
+uint8_t boot_history_latest_rep(void) { return 0u; }
+uint32_t time_sync_utc_or_zero(void) { return 0u; }
 #undef TAG
 #define TAG TAG_inbox
 #include "../drivers/safety/safety_link_inbox.c"
@@ -2168,6 +2178,23 @@ static void test_stale_reset_never_received_is_also_down(void)
 // clearable but actually get re-populated with the NEW peer's identity,
 // which is what lets a subsequent rollback attempt compare against the
 // right baseline instead of a connection that already ended.
+static void test_first_boot_id_after_esp_boot_is_not_a_reboot(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- PF-01: the first boot id after an ESP boot is the starting value, "
+                 "a later change is a reboot");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count;
+    msg.length = set_fw_version_frame(msg.payload, false, NULL, 0, NULL, 0, 42, 0, 0);
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq == 0u, "MUST GO RED if the first boot id bumps pico_reboot_seq");
+    TEST_CHECK(link.pico_boot_id_ever_seen, "the first boot id is recorded as seen");
+    msg.length = set_fw_version_frame(msg.payload, false, NULL, 0, NULL, 0, 43, 0, 0);
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq == 1u, "a real boot id change after that still counts as a reboot");
+}
+
 static void test_link_blip_same_boot_id_is_not_a_reboot(void)
 {
     TEST_SECTION("safety_apply_fw_version -- firing audit MED-4: a link blip (known flag cleared) followed by "
@@ -3401,6 +3428,45 @@ static void tt_set_reply(uint8_t outcome, uint8_t trip_seq)
     s_stub_request_id_delta = 0u;
 }
 
+static void el01_apply_fresh_status(SafetyLinkClass *link)
+{
+    uart_proto_message_t status;
+    memset(&status, 0, sizeof(status));
+    status.rx_ms = (uint32_t)s_fake_tick_count;
+    set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
+    status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    safety_apply_status(link, &status);
+}
+
+static void test_el01_local_freshness_uses_diag_age_not_status_age(void)
+{
+    TEST_SECTION("EL-01 -- clear_trip/test_trip judge the DIAG frame's own age (4500 ms), not the STATUS tick");
+    safety_link_test_trip_outcome_t oc;
+    uint8_t seq;
+    SafetyLinkClass link = boot_clear_test_setup();
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_fake_tick_count = 0;
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 1u, 0x5Au);
+    /* STATUS keeps arriving, DIAG stops: 3000 ms old is still fresh (<= 4500), STATUS age is irrelevant. */
+    s_fake_tick_count = 3000;
+    el01_apply_fresh_status(&link);
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "EL-01: DIAG 3000 ms old (STATUS fresh) still clears");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u, "EL-01: that clear was sent");
+    /* DIAG now 6000 ms old with a fresh STATUS: refused, nothing sent. */
+    s_fake_tick_count = 6000;
+    el01_apply_fresh_status(&link);
+    base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_ERR_INVALID_STATE,
+               "EL-01: clear refused when the DIAG is older than 4500 ms though STATUS is fresh");
+    TEST_CHECK(s_stub_broadcast_count == base, "EL-01: stale-DIAG clear sends nothing");
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_INVALID_STATE &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_STALE,
+               "EL-01: test trip refused LOCAL_STALE on an old DIAG with fresh STATUS");
+    TEST_CHECK(s_stub_broadcast_count == base, "EL-01: stale-DIAG test trip sends nothing");
+}
+
 static void test_send_test_trip(void)
 {
     TEST_SECTION("safety_link_send_test_trip -- local refusals send nothing; happy path maps "
@@ -3931,13 +3997,19 @@ static void test_safetyfx10_trip_event_after_diag_is_arrival_order(void)
     TEST_SECTION("SAFETYFX10 MED-1 -- trip_event_after_diag records arrival order: set by TRIP_EVENT, cleared by DIAG "
                  "and by a Pico reboot; immune to the 2^32 ms age aliasing");
     s_fake_tick_count = 0;
+    g_th_note_calls = 0;
     SafetyLinkClass link = make_link();
     link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
     TEST_CHECK(!link.cached.trip_event_after_diag, "fresh link: flag clear");
     apply_diag_uptime(&link, 600000u);
     apply_trip_event_seq(&link, 1u);
     TEST_CHECK(link.cached.trip_event_after_diag, "TRIP_EVENT after a DIAG sets the flag");
+    /* FD-05: a new trip hands exactly one entry to trip_history_note(); the resend copy does not. */
+    TEST_CHECK(g_th_note_calls == 1u && g_th_last_note.pico_trip_seq == 1u && g_th_last_note.reason == 1u &&
+                   g_th_last_note.boot_seq == 7u && g_th_last_note.zone == TRIP_HISTORY_ZONE_UNKNOWN,
+               "FD-05: new TRIP_EVENT noted once with reason, trip_seq, boot_seq");
     apply_trip_event_seq(&link, 1u); /* resend copy of the same burst */
+    TEST_CHECK(g_th_note_calls == 1u, "FD-05: resent TRIP_EVENT (same trip_seq) is not noted again");
     TEST_CHECK(link.cached.trip_event_after_diag, "a resend copy keeps the flag set");
     apply_diag_uptime(&link, 601000u);
     TEST_CHECK(!link.cached.trip_event_after_diag, "a DIAG after the event clears the flag");
@@ -4067,6 +4139,7 @@ int main(void)
     test_stale_reset_never_received_is_also_down();
     test_stale_reset_then_reapply_recovers_after_reconnect();
     test_link_blip_same_boot_id_is_not_a_reboot();
+    test_first_boot_id_after_esp_boot_is_not_a_reboot();
     test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();
     test_frames_gated_above_a_version_are_not_expected_from_that_peer();
     test_update_in_progress_does_not_relax_link_loss_block();
@@ -4099,6 +4172,7 @@ int main(void)
     test_tripfx4_low2_diag_age_through_get_status_and_reboot_clear();
     test_wp3_info5_test_trip_result_counted_in_stats();
     test_send_test_trip();
+    test_el01_local_freshness_uses_diag_age_not_status_age();
     test_low4_link_down_invalidates_uptime_baseline();
     test_reboot_counted_once_diag_before_fw_version();
     test_reboot_counted_once_per_diag_all_signals();

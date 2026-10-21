@@ -20,8 +20,10 @@ function Get-Code($rel) {
     $p = Join-Path $Root $rel
     if (-not (Test-Path $p)) { throw "missing $rel" }
     $t = [IO.File]::ReadAllText($p)
-    $t = [regex]::Replace($t, '/\*.*?\*/', '', 'Singleline')
-    return [regex]::Replace($t, '//[^\r\n]*', '')
+    # One pass: a '/*' inside a // comment (e.g. "/api/*") must not open a bogus block comment, and
+    # '//' inside a string must not truncate a line. Strings are matched first and kept.
+    $rx = '"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*''|/\*.*?\*/|//[^\r\n]*'
+    return [regex]::Replace($t, $rx, { param($m) if ($m.Value[0] -eq '"' -or $m.Value[0] -eq "'") { $m.Value } else { '' } }, 'Singleline')
 }
 $fail = @()
 $rec = Get-Code "firmware\KilnFW_recovery\main\recovery_http.c"

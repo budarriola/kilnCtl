@@ -705,6 +705,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.profile_id = profile_id;
     s_exec.segment_index = 0;
     s_exec.dwelling = false;
+    s_exec.dwell_arrived_hot = false;
     s_exec.segment_elapsed_s = 0;
     s_exec.segment_elapsed_rem_ms = 0;
     s_exec.ramp_lock_held = false;

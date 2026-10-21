@@ -394,8 +394,27 @@ static void test_format_confirm_uri_override_is_fail_closed(void)
                "fragment is not a query");
 }
 
+static void test_uri_query_token(void)
+{
+    char t[16];
+    TEST_CHECK(cfg_fs_uri_query_token("/x?store=aux.bin", "store", t, sizeof(t)) && strcmp(t, "aux.bin") == 0,
+               "persmed MED-D: plain value returned");
+    TEST_CHECK(cfg_fs_uri_query_token("/x?a=1&store=zones.json&b=2", "store", t, sizeof(t)) &&
+                   strcmp(t, "zones.json") == 0,
+               "persmed MED-D: value found among other keys");
+    TEST_CHECK(!cfg_fs_uri_query_token("/x?store=a/b", "store", t, sizeof(t)) && t[0] == '\0',
+               "persmed MED-D: path separator refused");
+    TEST_CHECK(!cfg_fs_uri_query_token("/x?store=a%2Fb", "store", t, sizeof(t)), "percent-encoding refused");
+    TEST_CHECK(!cfg_fs_uri_query_token("/x?store=", "store", t, sizeof(t)), "empty value refused");
+    TEST_CHECK(!cfg_fs_uri_query_token("/x?store=0123456789abcdefg", "store", t, sizeof(t)), "too long refused");
+    TEST_CHECK(!cfg_fs_uri_query_token("/x?xstore=a", "store", t, sizeof(t)), "longer key name no match");
+    TEST_CHECK(!cfg_fs_uri_query_token("/x", "store", t, sizeof(t)), "no query refused");
+    TEST_CHECK(!cfg_fs_uri_query_token(NULL, "store", t, sizeof(t)), "NULL refused");
+}
+
 void run_test_cfg_fs_format_gate(void)
 {
+    test_uri_query_token();
     test_format_confirm_decision();
     test_format_confirm_uri_override_is_fail_closed();
     test_blank_partition_is_safe_to_format();

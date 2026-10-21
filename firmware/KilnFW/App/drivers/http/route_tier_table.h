@@ -156,7 +156,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),
-    ROUTE_TIER("/commissioning_shared.js", HTTP_GET, ROUTE_TIER_OPEN),
+    /* KG-01: page-specific (only /safety/commissioning and /setup load it): ADMIN, not a shared asset. */
+    ROUTE_TIER("/commissioning_shared.js", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/profile_exec", HTTP_GET, ROUTE_TIER_OPEN),
     ROUTE_TIER("/api/readiness", HTTP_GET, ROUTE_TIER_OPEN),
@@ -316,6 +317,8 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * per-profile firing history card (ADMIN-tier /settings/zones shell);
      * the dashboard does not fetch this route. Moved out of OPEN. */
     ROUTE_TIER("/api/firing_history", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* FD-02: durable per-firing trace list / CSV download; read by the same ADMIN zones page card. */
+    ROUTE_TIER("/api/firing_trace", HTTP_GET, ROUTE_TIER_ADMIN),
 
     /* Tuning */
     ROUTE_TIER("/api/autotune/start", HTTP_POST, ROUTE_TIER_ADMIN),
@@ -365,6 +368,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/ota/pico/rollback", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/factory_reset", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/cfgfs/format_confirm", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs/discard_rejected", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/sw_reset", HTTP_POST, ROUTE_TIER_ADMIN),
     /* GITHUB_RELEASE_UPDATE_PLAN.md WP4: the update stage. The status read is
      * ADMIN too -- it names the staged build's version, commit and hash. */
@@ -396,6 +400,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
      * route above reads, so it is classified ADMIN on the same basis. */
     ROUTE_TIER("/api/dualwrite_window/restore_verified", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/partitions", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diag/bundle", HTTP_GET, ROUTE_TIER_ADMIN), /* FD-01 support bundle */
     ROUTE_TIER("/api/backup/export", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/crash_report", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/boot_guard", HTTP_GET, ROUTE_TIER_ADMIN),
@@ -480,10 +485,11 @@ static const route_tier_entry_t kRouteTierTable[] = {
 #define ROUTE_TIER_TABLE_COUNT \
     (sizeof(kRouteTierTable) / sizeof(kRouteTierTable[0]))
 
-/* Page shells served WITHOUT a session even when their own ROUTE_TIER row
- * above is USER/ADMIN (owner report 2026-09-24: opening the web UI must
- * never show a login; the login is asked for, in a cancelable modal, only
- * when an action actually needs it). An explicit allowlist -- NOT "any GET
+/* Page shells that get a 302 to /?next= (KG-01) instead of a 401 body when
+ * there is no session, even though their own ROUTE_TIER row above is
+ * USER/ADMIN: opening a gated page must land on the dashboard, with the
+ * login asked for in a cancelable modal. They are redirected, NEVER served,
+ * without a session. An explicit allowlist -- NOT "any GET
  * outside /api/" -- so a future non-/api GET route (a download, an export,
  * anything that returns board state) still gets the ordinary fail-closed
  * 401/403 unless someone deliberately adds it here. Every entry must be a
@@ -516,9 +522,8 @@ static const char *const kPageShellUris[] = {
     PAGE_SHELL_URI("/setup"),
     PAGE_SHELL_URI("/ota"),
     /* ROUTE_TIER_WIFI_SETUP, not USER/ADMIN: open outright while
-     * unprovisioned; once provisioned the shell is still served so nav.js's
-     * "Network settings" link lands on the page and app.js raises the login
-     * modal, instead of a bare 401 body. Static embedded HTML, no per-board
+     * unprovisioned; once provisioned it is redirected to /?next= like the
+     * shells above (KG-01), never served, instead of a bare 401 body. Static embedded HTML, no per-board
      * data; /scan and /networks keep their real tier gate. */
     PAGE_SHELL_URI("/wifi"),
 };

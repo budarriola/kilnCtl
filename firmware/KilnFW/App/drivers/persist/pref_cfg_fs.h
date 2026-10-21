@@ -87,6 +87,12 @@ esp_err_t pref_cfg_fs_load_var_checked(const char *rel_path, void *out, size_t c
 // ESP_ERR_INVALID_STATE when cfg is not mounted.
 esp_err_t pref_cfg_fs_remove(const char *rel_path);
 
+// persmed MED-D: the operator escape from a rejected-file refusal. Deletes rel_path ONLY when it is currently
+// marked rev-unknown (a rejected/undecodable file; its .bad copy already exists), which also clears the mark.
+// ESP_ERR_INVALID_STATE when the path is not rev-unknown or cfg is unmounted (a healthy file is never deleted
+// by this); ESP_ERR_INVALID_ARG on NULL.
+esp_err_t pref_cfg_fs_discard_rejected(const char *rel_path);
+
 // Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
 // cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- same seam
 // zones_config_cfg_fs.h uses: host tests exercise the real cfg_fs_write_atomic()

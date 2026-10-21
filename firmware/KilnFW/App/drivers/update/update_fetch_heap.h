@@ -11,6 +11,14 @@
 // same base: idle free (scratch held) minus the global low-water of the whole run. A draw is NOT the change of
 // a prior min_free (REVIEW_UPDFX6 MED-1: the previous text mistook benchupd4's 2908 B min_free delta for one).
 //
+// OH-02 NOTE: admission still derives from the pre-XIP benchupd4 draw (21488 B less the 4496 B writer share). Only one
+// reading (xipland C) comes from the current build and it predates UR-01; four more heap.min_free readings are
+// bench-pending before the table can be rewritten. The block gate is FETCH_CHECK_BLOCK_MIN (3072 B); the old
+// FETCH_LARGEST_BLOCK_MIN no longer exists.
+// UR-01 NOTE: the prose below and the draw table are the pre-UR-01 history (heap writer, 21488 B draw). Current pinned
+// values: MEASURED_DRAW 16992, MODEL_DRAW 18016, ADMISSION (held) 27232, PRECHECK 28256, hop download 25696; every
+// "31728 / 32752 / 22512 / 30192 / 7168" figure below is the old value. Floor margins are unchanged by construction.
+//
 //   FLOOR                8192 B   owner floor
 //   MAX_STEP             1024 B   margin for heap movement between two samples (LOW-1 below)
 //   ABORT_BELOW          9216 B   = FLOOR + MAX_STEP: a SAMPLED BACKSTOP, not a guarantee (UPDFX8, REVIEW_UPDFX7
@@ -67,8 +75,10 @@
 //   - SHA-256 (hardware SHA DMA): a partial block is copied into an internal DMA buffer of at most one block,
 //     64 B (components/mbedtls/port/sha/core/sha.c:335, buf_len <= block_length checked at :322); the reallocs at
 //     :172/:185 are the flash-encryption-only paths and are inactive here (flash encryption is off);
-//   - mbedtls record buffers: PSRAM (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y); the client rx/tx buffers (2048 B each)
-//     are allocated at open, before the loop; lwIP/WiFi pbufs prefer PSRAM and the WiFi static rx buffers are
+//   - mbedtls record buffers: PSRAM (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y). The client rx/tx buffers (2048 B each,
+//     OH-03) are NOT in PSRAM: esp_http_client callocs them, and under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+//     both land in internal RAM (4 KB of every fetch's draw that cannot be moved). They are allocated at open,
+//     before the loop; lwIP/WiFi pbufs prefer PSRAM and the WiFi static rx buffers are
 //     preallocated.
 // So the fetch itself moves internal heap by about 100 B per pass. The 1024 B is therefore NOT a fetch
 // allocation: it is an empirical margin for concurrent tasks (one httpd request-handler allocation, a KDF, an
@@ -112,9 +122,16 @@
 // rule and the hard minimum. Predicted on the benchupd5 idle board: DMA free 26995 - 1024 = 25971 B against a
 // need of 23940 B, +2031 B.
 //
-// Largest free block: the biggest single internal allocation at start is the 4096 B update_fetch_wr stack
-// (+ overhead); 6144 B = 1.5x passes the idle largest block (9728 B, sk04 log; 11776 B in benchupd5, low-water
-// 7680 B in the TLS handshake). A check needs only the 2 KB client buffers (3072 B).
+// UR-01 (supersedes GP-01 / GD-01 / GD-02): update_fetch_wr's 5120 B stack, its TCB and the 1024 B stager scratch
+// are static internal DRAM reserved at boot (update_fetch.c: s_wr_stack, s_wr_tcb, s_scratch). Static DRAM cost:
+// 5120 + sizeof(StaticTask_t) (~350 B) + 1024 = ~6.5 KB less the former 1024 B heap scratch already in the model.
+// Consequences here: (1) no largest-block gate for the writer; (2) MEASURED_DRAW excludes the writer share
+// (FETCH_HEAP_WRITER_SHARE_BYTES) so the admission levels fall by it; (3) the scratch is no longer taken from the heap,
+// so the live reading at admission is ~1024 B ABOVE the "scratch held" baseline the table was measured on; that is
+// kept as unsubtracted margin until the bench re-measure. The gates that remain cover real heap use: the TLS session
+// and its 2 KB client buffers (FETCH_CHECK_BLOCK_MIN), the redirect-hop dip, and the DMA rules above.
+// BENCH-PENDING: re-measure heap.min_free on a board with this build.
+//
 //
 // Limits (review 2026-10-07, REVIEW_UPDFX4/5/6/7).
 // ABORT_BELOW is a sampled backstop (REVIEW_UPDFX7 MED-1). Concurrent tasks allocate internal RAM in blocks larger
@@ -164,7 +181,12 @@ extern "C" {
 #define FETCH_IDLE_MIN_FREE_BYTES 29647u
 // Largest measured whole-run draw with the scratch held (benchupd4, table above) plus the explicit margin.
 // BENCH-PENDING (UPDFX8): needs at least 5 heap.min_free readings from this build before any further lowering.
-#define FETCH_HEAP_MEASURED_DRAW_BYTES 21488u
+// UR-01: the writer task's 4096 B stack + ~400 B TCB were heap allocations inside every row of the draw table
+// (the rows are history; they were measured with the heap writer). The writer is now static DRAM, so its share is
+// no longer a draw: MEASURED_DRAW is the largest measured row (21488 B) less the writer share. GP-01's extra
+// 1024 B of stack never entered MEASURED_DRAW and no longer consumes DRAW_MARGIN either.
+#define FETCH_HEAP_WRITER_SHARE_BYTES (4096u + 400u)
+#define FETCH_HEAP_MEASURED_DRAW_BYTES (21488u - FETCH_HEAP_WRITER_SHARE_BYTES)
 #define FETCH_HEAP_DRAW_MARGIN_BYTES 1024u
 #define FETCH_HEAP_MODEL_DRAW_BYTES (FETCH_HEAP_MEASURED_DRAW_BYTES + FETCH_HEAP_DRAW_MARGIN_BYTES)
 
@@ -183,10 +205,12 @@ _Static_assert(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - FETCH_HEAP_MEASURED_DRAW_
 _Static_assert(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES == FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH,
                "the pre-scratch level is the admission level plus exactly the scratch");
 
-#define FETCH_LARGEST_BLOCK_MIN 6144u
-// Check job: TLS handshake only, no writer task. Needs the 2 KB client buffers as the biggest block.
+// UR-01: no largest-block gate for the writer any more -- its stack, TCB and the stager scratch are static DRAM.
+// What is left is the gate that still covers real heap use: the TLS session's 2 KB client rx/tx buffers are the
+// biggest single internal allocation of BOTH job kinds, so one block floor serves both (the former 7168 B
+// download-only floor existed for the writer stack alone).
 #define FETCH_CHECK_DRAW_BYTES (11044u + 1024u)
-#define FETCH_CHECK_BLOCK_MIN 3072u
+#define FETCH_CHECK_BLOCK_MIN 3072u  // both kinds (see above)
 // Heap at a redirect hop below the scratch-held job start (benchupd: 29275 -> 27855 = 1420 B, rounded up).
 #define FETCH_HOP_DIP_BYTES 1536u
 // Redirect hops after the first: a download needs the start need less the dip (the dip is part of the draw); a
@@ -217,7 +241,7 @@ _Static_assert(FETCH_HOP_CHECK_HEAP_MIN - FETCH_CHECK_DRAW_BYTES >= FETCH_HEAP_A
 typedef enum {
     FETCH_HEAP_OK = 0,
     FETCH_HEAP_LOW_FREE,   // current free internal heap below the start or hop need for this kind
-    FETCH_HEAP_LOW_BLOCK,  // largest free internal block below FETCH_LARGEST_BLOCK_MIN
+    FETCH_HEAP_LOW_BLOCK,  // largest free internal block below FETCH_CHECK_BLOCK_MIN
 } fetch_heap_verdict_t;
 
 // Admission at a job or redirect-hop start (every fresh TLS session). The caller reads the heap AFTER

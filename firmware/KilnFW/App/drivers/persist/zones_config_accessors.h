@@ -191,6 +191,12 @@ typedef enum {
 #define ZONE_CAL_OFFSET_MIN_C (-50.0f)
 #define ZONE_CAL_OFFSET_MAX_C 50.0f
 
+/* zone_cfg_t::tc_sheath_tau_s -- seconds, thermocouple protection-tube time
+ * constant. 0 = no tube, compensation off. Same range as tc_lag_comp.h's
+ * TC_LAG_COMP_TAU_MIN_S/MAX_S (asserted equal in profile_executor.c). */
+#define ZONE_TC_SHEATH_TAU_MIN_S 0.0f
+#define ZONE_TC_SHEATH_TAU_MAX_S 600.0f
+
 /* zone_cfg_t::max_ramp_c_per_hr -- 0 = never configured. */
 #define ZONE_MAX_RAMP_C_PER_HR_MAX 1000.0f
 
@@ -1270,6 +1276,16 @@ bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c);
 
 bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c);
 
+/* Getter/setter pair for a zone's tc_sheath_tau_s (ZONES_CFG_VERSION 26->27).
+ * Lives next to cal_offset_c because both describe the same sensor: the
+ * offset is applied first, then the lag compensation. Out of range
+ * (non-finite, < ZONE_TC_SHEATH_TAU_MIN_S or > ZONE_TC_SHEATH_TAU_MAX_S) is
+ * refused, never clamped; an in-range value is stored rounded to whole
+ * seconds. Per sensor, never mirrored. */
+bool zones_config_get_tc_sheath_tau(uint8_t zone_index, float *out_tau_s);
+bool zones_config_set_tc_sheath_tau(uint8_t zone_index, float tau_s);
+bool zones_config_set_tc_sheath_tau_no_save(uint8_t zone_index, float tau_s);
+
 /* TODO.md 6A.1's control modes. OFF: never commands heat (safe default, and
  * what a zone the board supports but the kiln doesn't use should be set to).
  * BANGBANG: relay on/off around setpoint with a fixed hysteresis band, no
@@ -1863,6 +1879,10 @@ size_t zones_config_canonical_max_size(void);
  * zones_config_json.h (zones_cfg_t's home), so the type is not visible in
  * every translation unit that includes this header. */
 bool zones_config_export_canonical(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Same as above but in the pre-v27 canonical form (no tc_sheath_tau_s per zone), which is what
+ * a package exported before ZONES_CFG_VERSION 27 hashed (BW-06 follow-up). Verification only. */
+bool zones_config_export_canonical_pre_v27(const void *cfg, uint8_t *out, size_t out_cap, size_t *out_len);
 
 /* Inverse of the above. `out` is memset(0) FIRST, unconditionally, before any
  * field is written -- H1's "zero-fill on reconstruction" requirement, so a

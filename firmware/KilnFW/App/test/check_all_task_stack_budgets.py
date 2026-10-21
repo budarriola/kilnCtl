@@ -756,6 +756,16 @@ TASKS = [
          stack=lambda: extract_local_macro("drivers/net/pico_auto_update_boot.c",
              r'#define PICO_AUTO_UPDATE_TASK_STACK\s+(\d+)',
              r'xTaskCreate\(pico_auto_update_task,\s*"pico_auto_update",\s*PICO_AUTO_UPDATE_TASK_STACK')),
+    dict(name="update_fetch_wr", root="wr_task",
+         # GP-01/BX-03: writer task of update_fetch.c; runs every stager call, including the OP-01/RX-11
+         # esp_image_verify walk whose io callbacks (io_image_verify -> iv_* in update_http.c) are reached through
+         # a function-pointer table the walk cannot follow, so they are extra roots. IDF-internal indirect dispatch
+         # (esp_flash chip ops, PSA driver dispatch) stays unresolved: lower bound, INDETERMINATE.
+         stack=lambda: extract_local_macro("drivers/update/update_fetch.c",
+             r'#define FETCH_WR_STACK_BYTES\s+(\d+)',
+             r'xTaskCreateStaticPinnedToCore\(wr_task,\s*"update_fetch_wr",\s*FETCH_WR_STACK_BYTES'),
+         extra_roots=[("io_image_verify", "update_http.c"), ("iv_sha_finish", "update_http.c"),
+                      ("iv_read", "update_http.c"), ("iv_sha_update", "update_http.c")]),
     dict(name="info_uart_bridge", root="info_bridge_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge_info.c",
              r'xTaskCreatePinnedToCoreWithCaps\(info_bridge_task,\s*"info_uart_bridge",\s*(\d+)')),
@@ -781,15 +791,13 @@ TASKS = [
     dict(name="profile_exec_wdt", root="watchdog_task_entry",
          stack=lambda: extract_int_literal("drivers/control/profile_executor_start.c",
              r'xTaskCreatePinnedToCoreWithCaps\(watchdog_task_entry,\s*"profile_exec_wdt",\s*(\d+)')),
-    dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task",
-         stack=lambda: extract_int_literal("drivers/http/ota_http_esp.c",
-             r'xTaskCreate\(ota_rollback_reboot_task,\s*"ota_rollback_reboot",\s*(\d+)')),
     dict(name="recovery_boot", root="ota_recovery_boot_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
              r'xTaskCreate\(ota_recovery_boot_reboot_task,\s*"recovery_boot",\s*(\d+)')),
     dict(name="ota_pico_rollback", root="ota_pico_rollback_task",
-         stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
-             r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
+         stack=lambda: extract_local_macro("drivers/http/ota_http_pico.c",
+             r'#define OTA_PICO_ROLLBACK_STACK_BYTES\s+(\d+)',
+             r'xTaskCreateStaticPinnedToCore\(\s*ota_pico_rollback_task,\s*"ota_pico_rollback",\s*OTA_PICO_ROLLBACK_STACK_BYTES')),
     dict(name="ota_confirm", root="main_ota_rollback_confirm_task",
          # REVIEW_LCD19FX6 LOW-2: loops for(;;) until boot_guard's clear verifies and, after it, runs
          # update_http_stale_stage_check() (PSA SHA-256, 1 KB work buffer) on a 5120 B stack.
@@ -914,9 +922,8 @@ TASKS = [
          historical_note="2026-09-04 panic: s_lvgl_task_stack (this task's own 8192 B stack) sits close "
                           "behind thermo_owner.c's s_slots[] in .bss; a reentrant lv_obj_invalidate()-in-"
                           "flush-callback path (pre-51e1ef5) could run this stack deep enough to corrupt it.",
-         stack=lambda: extract_local_macro("drivers/ui/lvgl_port.c",
-             r'static StackType_t s_lvgl_task_stack\[(\d+)\s*/\s*sizeof\(StackType_t\)\]',
-             r'xTaskCreateStaticPinnedToCore\(\s*lvgl_port_task,\s*"lvgl",\s*sizeof\(s_lvgl_task_stack\)'),
+         stack=lambda: extract_int_literal("drivers/ui/lvgl_port.c",
+             r'xTaskCreatePinnedToCoreWithCaps\(\s*lvgl_port_task,\s*"lvgl",\s*(\d+)'),
          # lvgl_port_task's own body is thin -- practically all of its real
          # depth lives behind lv_timer_handler()'s internal function-pointer
          # dispatch (stack_budget_lib.has_unresolved_dispatch() confirms this
@@ -957,7 +964,7 @@ TASKS = [
              "CONFIG_KILNCTL_UART_OWNER_STACK_SIZE")),
     dict(name="uart_proto_rx", root="uart_protocol_rx_task",
          stack=lambda: extract_sdkconfig_macro("main_network_http.c",
-             r'uart_protocol_init\(&ctx->uart_proto,.*?UART_PROTOCOL_STACK_SIZE',
+             r'uart_protocol_init\(ctx->uart_proto,.*?UART_PROTOCOL_STACK_SIZE',
              "CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE")),
     dict(name="kiln_cfg_swap", root="swap_worker_task",
          # Added 2026-09-22 after a REAL hardware stack overflow
@@ -1017,6 +1024,7 @@ CEILING_BYTES = {
     # budget; reported here per the standing instruction not to bump a
     # stack size just because a checker was newly wired up.
     "pico_auto_update": 3104,
+    "update_fetch_wr": 3216,  # 2026-10-18 GP-01: measured against checkbuild_origin_kilnfw (wr_task + deepest io extra root); honest free 1904 B of 5120 B (declared raised 4096 -> 5120) before ~300 B unmodelled overhead and unresolved IDF dispatch
     "gpio_probe": 3376,
     "link_watchdog": 1200,  # 2026-10-10: re-measured 1200 B (was 1168 B); honest free 1572 B of 3072 B, stack unchanged
     # 3792 = 48 (bx_worker_task's own dispatch loop) + 3744 (the deepest of
@@ -1038,7 +1046,7 @@ CEILING_BYTES = {
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
     "bx_flash_worker": 6464,  # 2026-10-15 re-measured; honest free 33.9%. Prev:  # 2026-10-12: re-measured 6352 B (was 6336 B) after 44289aa41 uart_proto_message_t.rx_ms; honest free 3588 B (35.0%), so only the regression ceiling moves
-    "info_uart_bridge": 3200,
+    "info_uart_bridge": 3216,  # 2026-10-18: re-measured 3216 B (was 3200 B) after the UB-02 stack_margin spinlock and BX-03 retained-exit flag in build_stack_margin_reply; honest free 880 B (21.5%) of the 4096 B PSRAM stack, stack unchanged
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3328,
     "thermo_uart_bridge": 3168,
@@ -1067,7 +1075,10 @@ CEILING_BYTES = {
     # (set_reason()/latch_boot_fault()) and returns before any state-
     # mutating step if the allocation fails, so a failed allocation can
     # never leave a partial swap.
-    "kiln_cfg_swap": 5520,
+    # 2026-10-16 psramhop: save_pending hops via flash_hop_run (the walk counts the
+    # inline path: save_pending + save_pending_job frames), 5520 -> 5568 B measured.
+    # The real save runs on bx_flash_worker, not this stack; 2324 B honest free of 8192 B.
+    "kiln_cfg_swap": 5568,
     "autotune_engine": 2944,
     # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
     # regression tripwire -- NOT a measured worst case. The task's deep path
@@ -1100,8 +1111,7 @@ CEILING_BYTES = {
     # and the guard 9 pending-verdict merge. Honest free at 6144 B stays above 3000 B.
     # 2026-10-10 review R2ACE I7: +64 B margin over the 2752 B measurement (6144 B stack).
     "profile_exec_wdt": 2816,
-    "ota_rollback_reboot": 2464,
-    # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
+    # recovery_boot: same shape as the removed ota_rollback_reboot task (announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
     "ota_pico_rollback": 2912,
     "ota_confirm": 3808,  # 2026-10-15 re-measured  # measured 2026-10-12 against a fresh target build (lower bound: indirect call)
@@ -1148,7 +1158,7 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7744,  # 2026-10-15 re-measured; honest free 21.4%
+    "http_async_job": 7760,  # 2026-10-16 tc sheath lag: backup_import_job path +16 B, honest free 21.3%; before: 2026-10-15 re-measured 7744
     # (prev note follows)  # 2026-10-12: re-measured 7728 B (was 7632 B): backup_import_job chain 5728 B after 44289aa41 uart_proto_message_t.rx_ms; honest free 2212 B (21.6%)
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
@@ -1296,7 +1306,20 @@ CEILING_BYTES = {
     # walk's own measured total, not headroom-padded: 1184 B of the declared
     # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
     # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
-    "wifi_prov_owner": 3056,  # 2026-10-15 re-measured
+    # 2026-10-16: 3056 -> 3104 B (+48 B), measured on dev a3d5965b5. No large local
+    # grew: the extra depth is the owner_task -> do_rescan_tick -> ap_teardown_should_defer
+    # -> http_auth_any_ap_session_active -> resolve_timeout_s -> web_auth_store_load_policy
+    # chain (read-only AP session query, c27c415a1; web auth store lock, 4dabdd28b), all
+    # 32-64 B frames. Declared stack is 4096 B in PSRAM (0 B DRAM): 692 B honest free.
+    # 2026-10-20: 3104 -> 3504 B (+400 B) measured on dev tip; load_policy -> password_configured
+    # -> load_blob -> hal_kv_open -> nvs createOrOpenNamespace/writeItem path (AU-02/BW-01) is now
+    # reachable from the rescan tick. Declared stack raised 4096 -> 5120 B (PSRAM, 0 B DRAM): 1.6 KB free.
+    # 2026-10-20: 3504 -> 3632 B (+128 B) measured on dev tip da16ba544 (OG/OF-05 running_image_id
+    # frame reachable from the rescan tick); declared 5120 B PSRAM, 1.4 KB free.
+    # 2026-10-20 (WP-01): 3632 -> 3456 B (-176 B). web_auth_store_load_policy's AU-02 lost-policy probes
+    # (admin record, user record, LCD blob) moved into noinline helpers so load_policy's own frame is
+    # 64 B instead of 272 B; the deepest chain no longer holds the credential/LCD blob locals.
+    "wifi_prov_owner": 3456,
     # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
     # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
     # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.

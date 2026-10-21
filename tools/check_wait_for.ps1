@@ -48,6 +48,7 @@ function Run-WaitMid([string[]]$argv, [scriptblock]$act) {
     $running = -not $p.HasExited
     & $act
     $p.WaitForExit(60000) | Out-Null
+    $p.WaitForExit()
     $code = $p.ExitCode
     $out = @(Get-Content $o)
     $line = @($out | Where-Object { $_ -like 'WAIT_RESULT *' }) | Select-Object -Last 1

@@ -182,6 +182,10 @@ static size_t read_file_blob_raw(uint8_t *blob, size_t cap, uint32_t *rev)
 //    save/load must behave EXACTLY like plain NVS save/load -- the file
 //    layer is a silent no-op.
 // ---------------------------------------------------------------------
+/* Host stub: zones_config_cfg_fs.c asks whether a deferred cfg format was started (FS-01/FS-05). */
+static bool s_stub_format_started = false;
+bool cfg_fs_mount_format_ever_started(void) { return s_stub_format_started; }
+
 static void test_partition_absent_falls_through_to_nvs_only(void)
 {
     TEST_SECTION("zones cfg_fs: partition absent -- a legacy NVS copy still loads, a save fails loud");
@@ -215,33 +219,33 @@ static void test_partition_absent_falls_through_to_nvs_only(void)
 // ---------------------------------------------------------------------
 static void test_nvs_fallback_then_file_preferred_after_migration(void)
 {
-    TEST_SECTION("zones cfg_fs: legacy NVS blob migrates to the file on first load; the file is read after that");
+    TEST_SECTION("zones cfg_fs (FS-01): missing zones.json on a mounted cfg does NOT adopt the frozen legacy NVS blob");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
 
     stage_legacy_nvs("migrate", 3.25f, 1);
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
-    bool found = false, valid = false;
-    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "first load adopts the legacy NVS blob");
-    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "migrate") == 0 && s_zones.cfg.zones[0].pid_kp == 3.25f,
-               "loaded config is the legacy one");
+    zones_config_load_fault_reset_for_test();
+    bool found = false, valid = true;
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(!valid, "FS-01: stale legacy NVS blob is not adopted as valid");
+    TEST_CHECK(s_zones.cfg.zones[0].pid_kp != 3.25f, "FS-01: legacy values are not in RAM");
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(zones_config_get_load_fault(&lf) && strstr(lf.reason, "legacy NVS") != NULL,
+               "FS-01: a load fault naming the legacy copy is latched");
 
-    bool exists = false;
-    TEST_CHECK(cfg_fs_exists(ZONES_CFG_FILE_PATH, &exists) == ESP_OK && exists,
-               "the first load migrated it into the file");
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists(ZONES_CFG_FILE_PATH, &exists) == ESP_OK && !exists,
+               "FS-01: the legacy blob is not written into a new zones.json");
 
-    zones_cfg_t raw;
-    uint32_t rev = 0;
-    bool raw_valid = false;
-    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
-    TEST_CHECK(raw_valid && strcmp(raw.zones[0].name, "migrate") == 0, "the file holds a valid copy");
-
-    /* Second boot: NVS now gone entirely, the file alone carries the config. */
+    /* Once the operator re-commissions (a save), the file alone carries the config. */
+    stage("commissioned", 3.25f);
+    TEST_CHECK(nvs_save() == ESP_OK, "re-commission save");
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
-    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "second load succeeds from the file alone");
-    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "migrate") == 0 && s_zones.cfg.zones[0].pid_kp == 3.25f,
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "next load succeeds from the file alone");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "commissioned") == 0 && s_zones.cfg.zones[0].pid_kp == 3.25f,
                "reloaded config matches");
 }
 
@@ -1650,8 +1654,24 @@ static void test_legacy_partition_does_not_overwrite_newer_file(void)
     reset_all();
 }
 
+static void test_format_window_does_not_adopt_legacy_nvs(void)
+{
+    TEST_SECTION("zones cfg_fs (FS-05): while the deferred cfg format runs (cfg not yet mounted) the legacy blob is not adopted");
+    reset_all();
+    stage_legacy_nvs("window", 2.5f, 1);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    zones_config_load_fault_reset_for_test();
+    s_stub_format_started = true;
+    bool found = false, valid = true;
+    (void)nvs_load(&found, &valid);
+    s_stub_format_started = false;
+    TEST_CHECK(!valid, "FS-05: outcome matches the post-format boot (untrustworthy), not timing-dependent adoption");
+    reset_all();
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
+    test_format_window_does_not_adopt_legacy_nvs();
     test_rejected_file_with_older_copy_present();
     test_legacy_partition_does_not_overwrite_newer_file();
     test_rejected_file_is_preserved_and_latches_fault();

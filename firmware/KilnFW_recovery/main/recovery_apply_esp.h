@@ -40,6 +40,12 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
 // mutating route refuses with 409 meanwhile.
 bool recovery_apply_busy(void);
 
+// RC-01: the direct POST /api/ota/esp upload takes the same claim the unattended apply uses (the
+// shared app-writer flag behind recovery_apply_busy). Claim returns false when it is already held
+// (answer 409); release when the upload ends (a restart then follows on success).
+bool recovery_app_write_claim(void);
+void recovery_app_write_release(void);
+
 // Snapshot of the last apply's progress (phase IDLE if none ran this boot).
 void recovery_apply_esp_status(recovery_apply_progress_t *out);
 

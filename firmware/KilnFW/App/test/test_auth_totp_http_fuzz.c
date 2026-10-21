@@ -545,9 +545,30 @@ static void test_status_reports_forgot_blocked(void)
         }
     }
     TEST_CHECK(login_backoff_is_locked(&s_totp_lockouts[0].backoff, now), "setup: slots are locked");
-    TEST_CHECK(status_blocked(), "every slot locked: blocked");
-    s_totp_lockouts[3].in_use = false;
-    TEST_CHECK(!status_blocked(), "one free slot: not blocked");
+    TEST_CHECK(!status_blocked(), "every slot locked: NOT blocked (AG-02 evicts the oldest)");
+}
+
+// AG-02: a full table of locked slots evicts the oldest entry, never NULL.
+static void test_totp_full_locked_evicts_oldest(void)
+{
+    TEST_SECTION("totp lockout table -- full table of locks evicts the oldest (AG-02)");
+    fuzz_fresh();
+    uint32_t now = 100000u;
+    for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
+        totp_lockout_slot_t *s = &s_totp_lockouts[i];
+        memset(s, 0, sizeof(*s));
+        s->in_use = true;
+        snprintf(s->ip, sizeof(s->ip), "10.4.0.%u", i + 1);
+        s->last_activity_ms = now - 10u - i; /* slot 15 is oldest */
+        for (int k = 0; k < 5; k++) {
+            login_backoff_record_failure(&s->backoff, now);
+        }
+    }
+    totp_lockout_slot_t *s = totp_lockout_slot_for("10.9.9.9", now);
+    TEST_CHECK(s != NULL, "AG-02: new IP gets a slot when every slot is locked");
+    TEST_CHECK(s == &s_totp_lockouts[TOTP_LOCKOUT_MAX_IPS - 1], "AG-02: the oldest slot was the victim");
+    TEST_CHECK(s != NULL && !login_backoff_is_locked(&s->backoff, now), "AG-02: new slot is clean");
+    TEST_CHECK(login_backoff_is_locked(&s_totp_lockouts[0].backoff, now), "AG-02: other lockouts intact");
 }
 
 // AUDIT_LOGSTORE_TIME LOW-2: LRU victim is the largest unsigned elapsed time.
@@ -577,6 +598,7 @@ int main(void)
     test_reset_failed_write_keeps_token();
     test_status_reports_forgot_blocked();
     test_totp_lru_wrap();
+    test_totp_full_locked_evicts_oldest();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

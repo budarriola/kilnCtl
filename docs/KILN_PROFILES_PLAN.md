@@ -122,9 +122,9 @@ hand-written field list would.
 
 The groups, for the record:
 
-- `0x0101`–`0x010A` — sensing: `tc_source`, `borrowed_zone_index`,
+- `0x0101`–`0x010B` — sensing: `tc_source`, `borrowed_zone_index`,
   `tc_placement_mode`, **`abs_max_temp_c`**, `tc_type`, `ct_channel_map[3]`,
-  `ct_installed`, `tc_offset_c`.
+  `ct_installed`, `tc_offset_c`, `tc_sheath_tau_s` (0x010B).
 - `0x0201`–`0x0212` — guards: firing/overshoot margins, **`max_rate_c_per_min`
   and `rate_window_s` (the S8 rate guard)**, blind/frozen windows, TC
   disagreement, cold-junction limits, borrowed-TC staleness,

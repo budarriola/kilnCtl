@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "bootloader_common.h"
 #include "esp_image_format.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -14,6 +15,9 @@
 #include "psa/crypto.h"
 
 #include "recovery_boot_verify.h"
+#include "recovery_http.h"
+#include "stage_header.h"
+#include "stage_image_verify.h"
 
 static const char *TAG = "recovery_apply";
 
@@ -113,6 +117,68 @@ static void cb_sha_abort(void *c)
     }
 }
 
+// OP-01 / RX-11: verify the STAGED image (at STAGE_IMAGE_OFFSET), run before app is erased, so a
+// truncated or corrupt staged image is refused with app untouched. Not esp_image_verify(): its
+// mapped-segment alignment check uses the absolute flash offset, and stage+4 KB is never 64 KB
+// aligned, so every good image failed (stage_image_verify.h). cb_app_verify below still runs the
+// full esp_image_verify over the aligned copy.
+typedef struct {
+    const esp_partition_t *stage;
+    psa_hash_operation_t op;
+    bool active;
+} sv_ctx_t;
+static int sv_read(void *c, uint32_t off, void *buf, uint32_t len)
+{
+    return esp_partition_read(((sv_ctx_t *)c)->stage, STAGE_IMAGE_OFFSET + off, buf, len) == ESP_OK ? 0 : -1;
+}
+static int sv_sha_begin(void *c)
+{
+    sv_ctx_t *h = c;
+    h->op = psa_hash_operation_init();
+    h->active = psa_hash_setup(&h->op, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    return h->active ? 0 : -1;
+}
+static int sv_sha_update(void *c, const void *d, uint32_t n)
+{
+    sv_ctx_t *h = c;
+    return (h->active && psa_hash_update(&h->op, d, n) == PSA_SUCCESS) ? 0 : -1;
+}
+static int sv_sha_finish(void *c, uint8_t out[32])
+{
+    sv_ctx_t *h = c;
+    if (!h->active) {
+        return -1;
+    }
+    size_t n = 0;
+    psa_status_t st = psa_hash_finish(&h->op, out, 32, &n);
+    if (st != PSA_SUCCESS) {
+        psa_hash_abort(&h->op);
+    }
+    h->active = false;
+    return (st == PSA_SUCCESS && n == 32) ? 0 : -1;
+}
+static int sv_chip_ok(void *c, const uint8_t hdr[24])
+{
+    (void)c;
+    return bootloader_common_check_chip_validity((const esp_image_header_t *)hdr, ESP_IMAGE_APPLICATION) == ESP_OK ? 0 : -1;
+}
+static int cb_stage_verify(void *c, uint32_t image_len)
+{
+    apply_ctx_t *a = c;
+    static sv_ctx_t h; // apply task only; static keeps the PSA op off the task stack
+    memset(&h, 0, sizeof(h));
+    h.stage = a->stage;
+    const stage_image_io_t io = {.ctx = &h, .read = sv_read, .sha_begin = sv_sha_begin,
+                                 .sha_update = sv_sha_update, .sha_finish = sv_sha_finish, .chip_ok = sv_chip_ok};
+    uint32_t len = 0;
+    stage_image_result_t r = stage_image_verify(&io, image_len, &len);
+    if (r != STAGE_IMG_OK) {
+        ESP_LOGE(TAG, "staged image invalid (stage_image_verify %d)", (int)r);
+        return -1;
+    }
+    return len <= image_len ? 0 : -1;
+}
+
 // esp_image_verify over the copy: image header, every segment, the appended
 // checksum and (when enabled) the SHA-256 digest. The image must also end
 // within the length that was staged.
@@ -167,6 +233,7 @@ static void apply_task(void *arg)
         .sha_update = cb_sha_update,
         .sha_finish = cb_sha_finish,
         .sha_abort = cb_sha_abort,
+        .stage_verify = cb_stage_verify,
         .app_verify = cb_app_verify,
         .set_boot = cb_set_boot,
         .yield = cb_yield,
@@ -203,6 +270,9 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     if (!stage) {
         return ESP_ERR_NOT_FOUND;
     }
+    if (recovery_http_restart_pending()) { // RE-01: a restart is scheduled; never start an app write
+        return ESP_ERR_INVALID_STATE;
+    }
     // Atomic claim: the main task (unattended install) and an httpd handler can race here.
     bool expected = false;
     if (!__atomic_compare_exchange_n(&s_running, &expected, true, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
@@ -233,6 +303,17 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+bool recovery_app_write_claim(void)
+{
+    bool expected = false;
+    return __atomic_compare_exchange_n(&s_running, &expected, true, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+void recovery_app_write_release(void)
+{
+    __atomic_store_n(&s_running, false, __ATOMIC_SEQ_CST);
 }
 
 bool recovery_apply_busy(void)

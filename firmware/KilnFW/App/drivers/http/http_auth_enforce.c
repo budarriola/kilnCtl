@@ -153,6 +153,19 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
     return tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN || tier == ROUTE_TIER_WIFI_SETUP;
 }
 
+bool http_auth_request_touches_session(route_tier_t tier, http_auth_decision_t decision,
+                                       bool has_background_header, httpd_method_t method) {
+    if (!http_auth_decision_counts_as_activity(tier, decision)) {
+        return false;
+    }
+    // AF-02/AF-03: only a GET carrying X-Kiln-Background is a passive timer poll; any other
+    // method with the header is a real action and still counts.
+    if (has_background_header && method == HTTP_GET) {
+        return false;
+    }
+    return true;
+}
+
 bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
     if (uri == NULL || method != HTTP_GET || strncmp(uri, "/api/", 5) == 0) {
         return false;
@@ -168,6 +181,47 @@ bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
     // untabled route (fail-closed ADMIN everywhere else); never treat that
     // as a shell.
     return listed && http_auth_lookup_tier(uri, HTTP_GET, NULL);
+}
+
+bool http_auth_page_gate_location(const char *uri, char *out, size_t cap) {
+    if (out != NULL && cap > 0) {
+        out[0] = '\0';
+    }
+    if (uri == NULL || out == NULL || !http_auth_is_page_shell_get(uri, HTTP_GET)) {
+        return false;
+    }
+    static const char prefix[] = "/?next=";
+    size_t plen = sizeof(prefix) - 1;
+    size_t ulen = strlen(uri);
+    if (plen + ulen + 1 > cap) {
+        return false;
+    }
+    for (size_t i = 0; i < ulen; i++) {
+        char c = uri[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
+                  c == '/';
+        if (!ok) {
+            return false;
+        }
+    }
+    memcpy(out, prefix, plen);
+    memcpy(out + plen, uri, ulen + 1);
+    return true;
+}
+
+bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method, bool web_enabled,
+                                         route_tier_t tier) {
+    return web_enabled && tier != ROUTE_TIER_OPEN && http_auth_is_page_shell_get(uri, method);
+}
+
+http_auth_drain_step_t http_auth_refusal_drain_step(int ret, size_t total_bytes, uint32_t elapsed_ms) {
+    if (ret == 0) {
+        return HTTP_AUTH_DRAIN_DONE;
+    }
+    if (ret < 0 || total_bytes > HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES || elapsed_ms > HTTP_AUTH_REFUSAL_DRAIN_MAX_MS) {
+        return HTTP_AUTH_DRAIN_ABORT;
+    }
+    return HTTP_AUTH_DRAIN_CONTINUE;
 }
 
 bool http_auth_refusal_should_close(size_t content_len) {

@@ -338,7 +338,7 @@ static bool start_deferred_auto_format(void)
      * flash directly (it dispatches to the flash worker, which owns its own
      * safe stack), but keeping it internal-RAM is the same standing rule as
      * every other flash-adjacent task in this codebase
-     * (project_psram_stack_nvs_panic). 3072 words is generous for a function
+     * (project_psram_stack_nvs_panic). 3072 BYTES (xTaskCreate takes bytes, not words) is generous for a function
      * whose own frames are a handful of locals plus one dispatch call. */
     BaseType_t created = xTaskCreate(cfg_fs_auto_format_task, "cfg_autofmt", 3072, NULL, tskIDLE_PRIORITY + 1, NULL);
     if (created != pdPASS) {

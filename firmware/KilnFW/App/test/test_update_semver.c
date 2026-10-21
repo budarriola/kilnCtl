@@ -136,6 +136,45 @@ static void test_format(void)
     TEST_CHECK(update_semver_format(&v, NULL, 10) == 0, "NULL buffer rejected");
 }
 
+static int desc_vs(const char *desc, const char *other)
+{
+    char m[64];
+    if (!update_semver_from_describe(desc, m, sizeof(m))) {
+        return 99;
+    }
+    return cmp_str(m, other);
+}
+
+// BM-02: a dev build's esp_app_desc version is `git describe` output; it must become a known, correctly
+// ordered version (the bench string was "1.0.0-pre.1-201-g2071348") without ranking below its own tag.
+static void test_from_describe(void)
+{
+    TEST_SECTION("update_semver_from_describe -- dev build git-describe versions (BM-02)");
+    char m[64];
+    TEST_CHECK(update_semver_from_describe("1.0.0-pre.1-201-g2071348", m, sizeof(m)) && strcmp(m, "1.0.0-pre.1.201") == 0,
+               "bench string maps to 1.0.0-pre.1.201");
+    TEST_CHECK(update_semver_from_describe("v1.0.0-pre.1-201-g2071348-dirty", m, sizeof(m)) &&
+                   strcmp(m, "1.0.0-pre.1.201") == 0,
+               "leading v and -dirty accepted");
+    TEST_CHECK(desc_vs("1.0.0-pre.1-201-g2071348", "1.0.0-pre.1") > 0, "dev build is newer than its own tag");
+    TEST_CHECK(desc_vs("1.0.0-pre.1-201-g2071348", "1.0.0-pre.2") < 0, "dev build is older than the next prerelease");
+    TEST_CHECK(desc_vs("1.0.0-pre.1-201-g2071348", "1.0.0") < 0, "dev build is older than the release");
+    TEST_CHECK(desc_vs("1.0.0-pre.1-10-gabcdef0", "1.0.0-pre.1.9") > 0, "more commits sorts higher (10 beats 9 numerically)");
+    TEST_CHECK(update_semver_from_describe("1.0.0-pre.1", m, sizeof(m)) && strcmp(m, "1.0.0-pre.1") == 0,
+               "exact tag build unchanged");
+    TEST_CHECK(update_semver_from_describe("1.2.3-40-gabcdef0", m, sizeof(m)) && strcmp(m, "1.2.3") == 0,
+               "release base keeps the base (equal candidate still needs force, lower still a downgrade)");
+    TEST_CHECK(update_semver_from_describe("1.0.0-pre.1-0-gabcdef0", m, sizeof(m)) && strcmp(m, "1.0.0-pre.1") == 0,
+               "zero commits past the tag is the tag");
+    TEST_CHECK(!update_semver_from_describe("2071348", m, sizeof(m)) && m[0] == '\0', "bare commit hash stays unknown");
+    TEST_CHECK(!update_semver_from_describe("", m, sizeof(m)), "empty stays unknown");
+    TEST_CHECK(!update_semver_from_describe(NULL, m, sizeof(m)), "NULL stays unknown");
+    TEST_CHECK(!update_semver_from_describe("garbage-12-gabcdef0", m, sizeof(m)), "invalid base stays unknown");
+    TEST_CHECK(!update_semver_from_describe("1.0.0-pre.1-201-g2071348", m, 8), "too-small buffer fails");
+    TEST_CHECK(!update_semver_from_describe("1.0.0-abcdefghijklmnopqrstuvwxyz0123-5-gabcdef0", m, sizeof(m)),
+               "prerelease overflow after appending the count stays unknown");
+}
+
 void run_test_update_semver(void)
 {
     test_parse_valid();
@@ -144,4 +183,5 @@ void run_test_update_semver(void)
     test_compare_core();
     test_compare_prerelease();
     test_format();
+    test_from_describe();
 }

@@ -382,6 +382,19 @@ static void test_list_pick(void)
     snprintf(list, sizeof(list), "[%s,%s]", e1, e2);
     TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0, "stable v1.3.0 beats v1.2.5-rc.1");
 
+    // AUP-02: a patch of an OLDER line created after a newer release sits first in the list; the higher version wins
+    rel_elem(e1, sizeof(e1), "v1.2.9", false, false, true);
+    rel_elem(e2, sizeof(e2), "v1.3.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s]", e1, e2);
+    TEST_CHECK(pick(list, false, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0, "newer-created older version loses (stable)");
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0, "newer-created older version loses (pre allowed)");
+    // AUP-02: pre-releases off never picks a pre-release, even a higher one or one flagged only by its tag
+    rel_elem(e1, sizeof(e1), "v9.0.0-rc.1", false, true, true);
+    rel_elem(e3, sizeof(e3), "v8.0.0-rc.1", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s,%s]", e1, e3, e2);
+    TEST_CHECK(pick(list, false, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0 && !r.prerelease,
+               "pre-releases off: no pre-release is ever picked");
+
     // drafts are skipped even with pre-releases allowed and even if highest
     rel_elem(e1, sizeof(e1), "v9.0.0", true, false, true);
     rel_elem(e2, sizeof(e2), "v1.3.0", false, false, true);

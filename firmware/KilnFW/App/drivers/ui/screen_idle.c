@@ -1,3 +1,4 @@
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "screen_idle.h"
 
 #include <stdlib.h>
@@ -193,7 +194,7 @@ static void screen_idle_refresh_inputs(screen_idle_t *idle)
      * distinguishes RUNNING-or-PAUSED from everything else, collapsing
      * FAULTED into "not active"), so this stays a heap-allocated full
      * read, same pattern as safety_cfg_http.c. */
-    profile_exec_status_t *pst = heap_caps_malloc(sizeof(*pst), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *pst = persist_scratch_alloc(sizeof(*pst));
     if (!pst) {
         return; /* out of memory -- leaves cached_* at their previous values for another poll */
     }

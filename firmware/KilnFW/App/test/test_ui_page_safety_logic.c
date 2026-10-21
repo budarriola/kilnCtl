@@ -25,7 +25,13 @@ void run_test_ui_page_safety_logic(void)
         TEST_CHECK(!v.tripped_live && !v.diag_unknown, "fresh ARMED is not a trip and is known");
 
         v = ui_safety_view_derive(true, SAFETY_LINK_DIAG_STATE_TRIPPED, SAFETY_LINK_STALE_MS);
-        TEST_CHECK(!v.tripped_live && v.diag_unknown, "stale TRIPPED is a silent link, not a live trip");
+        TEST_CHECK(v.tripped_live && !v.diag_unknown, "EL-02: stale cached TRIPPED still shows as tripped");
+
+        v = ui_safety_view_derive(true, SAFETY_LINK_DIAG_STATE_TRIPPED, 600000u);
+        TEST_CHECK(v.tripped_live, "EL-02: a very old cached TRIPPED still shows as tripped");
+
+        v = ui_safety_view_derive(true, SAFETY_LINK_DIAG_STATE_ARMED, SAFETY_LINK_STALE_MS);
+        TEST_CHECK(!v.tripped_live && v.diag_unknown, "stale ARMED is a silent link, unknown");
 
         v = ui_safety_view_derive(true, SAFETY_LINK_DIAG_STATE_TRIPPED, SAFETY_LINK_STALE_MS - 1);
         TEST_CHECK(v.tripped_live, "one ms inside the staleness bound is still live");

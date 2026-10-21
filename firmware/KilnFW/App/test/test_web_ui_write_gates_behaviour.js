@@ -104,6 +104,7 @@ async function wizStep7(zonesSecondOk) {
   await w.sandbox.renderStep7();
   w.doc.getElementById('s7TcType').value = '1';
   w.doc.getElementById('s7AbsMax').value = '1300';
+  w.doc.getElementById('s7TcSheath').value = 'bare';
   w.doc.getElementById('s7CtInstalled').value = '0';
   const before = w.calls.length;
   w.doc.getElementById('step7Save').fire('click');

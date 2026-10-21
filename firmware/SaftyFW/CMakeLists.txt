@@ -63,6 +63,9 @@ set(SAFTYFW_APP_SOURCES
     src/watchdog_overdue_diag.c
     src/watchdog_overdue_diag_codec.c
     src/safety_guards.c
+    # TC sheath lag estimator (param 0x010B), the same pure-C module KilnFW's
+    # per-zone compensation uses -- one implementation, two firmwares.
+    ${CMAKE_CURRENT_LIST_DIR}/../KilnFW/App/drivers/control/tc_lag_comp.c
     src/max31856.c
     # Pure CR1.TC TYPE[3:0] range predicate, split out of max31856.c so it is
     # host-testable (test/test_max31856_tc_type_policy.c) with no SPI/GPIO
@@ -101,6 +104,7 @@ set(SAFTYFW_APP_SOURCES
     # presence_policy.c) with no hardware/adc.h stub -- see
     # current_presence_policy.h.
     src/current_presence_policy.c
+    src/ct_blind_policy.c
     # ct_amps_cal.c -- pure, host-tested (test/test_ct_amps_cal.c) per-channel
     # CT amps correction current_sense.c applies on top of its own physics-
     # based conversion; see that file's header comment.
@@ -318,6 +322,7 @@ target_include_directories(SaftyFW PRIVATE
     src/board
     src/update
     bootloader
+    ${CMAKE_CURRENT_LIST_DIR}/../KilnFW/App/drivers/control
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -562,6 +567,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
         src/board
         src/update
         bootloader
+        ${CMAKE_CURRENT_LIST_DIR}/../KilnFW/App/drivers/control
         ${CMAKE_CURRENT_BINARY_DIR}
     )
 

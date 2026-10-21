@@ -1,0 +1,482 @@
+// Host tests for App/drivers/persist/firing_trace.c (FD-02): append, rate gate, batched flush,
+// rotation over 4 slots, corrupt files, write failure, truncation at 24 h, power-cut loss bound,
+// init restore and CSV rows. firing_trace.c is #included; CommonFW's CRC is linked separately.
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "test_common.h"
+
+#include "esp_err.h"
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
+#include "../drivers/persist/firing_trace.c"
+
+/* ---- RAM "cfg_fs" ---------------------------------------------------------- */
+typedef struct {
+    char path[24];
+    uint8_t *data;
+    size_t len;
+} ramfile_t;
+static ramfile_t g_files[8];
+static int g_write_calls;
+static int g_append_calls;
+static size_t g_bytes_written; /* FW-03: total bytes sent to flash (write + append) */
+static esp_err_t g_append_fail;
+static esp_err_t g_write_fail; /* ESP_OK = succeed */
+static void (*g_pending)(void *);
+static int g_post_calls;
+static int g_run_calls;
+static bool g_post_refuse; /* FY-02: post refused forever */
+static bool g_run_fail_queued; /* FY-07: run() queues the job but reports an error */
+static void (*g_run_queued)(void *);
+
+static ramfile_t *rf_find(const char *p, int create)
+{
+    for (int i = 0; i < 8; i++) {
+        if (g_files[i].path[0] && strcmp(g_files[i].path, p) == 0) return &g_files[i];
+    }
+    if (!create) return NULL;
+    for (int i = 0; i < 8; i++) {
+        if (!g_files[i].path[0]) {
+            snprintf(g_files[i].path, sizeof(g_files[i].path), "%s", p);
+            return &g_files[i];
+        }
+    }
+    return NULL;
+}
+
+static esp_err_t t_write(const char *p, const void *d, size_t n)
+{
+    g_write_calls++;
+    if (g_write_fail != ESP_OK) return g_write_fail;
+    g_bytes_written += n;
+    ramfile_t *f = rf_find(p, 1);
+    free(f->data);
+    f->data = malloc(n);
+    memcpy(f->data, d, n);
+    f->len = n;
+    return ESP_OK;
+}
+
+static esp_err_t t_append(const char *p, const void *d1, size_t n1, const void *d2, size_t n2)
+{
+    g_append_calls++;
+    if (g_append_fail != ESP_OK) return g_append_fail;
+    ramfile_t *f = rf_find(p, 0);
+    if (!f) return ESP_ERR_NOT_FOUND;
+    f->data = realloc(f->data, f->len + n1 + n2);
+    memcpy(f->data + f->len, d1, n1);
+    memcpy(f->data + f->len + n1, d2, n2);
+    f->len += n1 + n2;
+    g_bytes_written += n1 + n2;
+    return ESP_OK;
+}
+
+static esp_err_t t_read(const char *p, void *buf, size_t cap, size_t *out)
+{
+    ramfile_t *f = rf_find(p, 0);
+    if (!f) return ESP_ERR_NOT_FOUND;
+    if (f->len > cap) return ESP_ERR_INVALID_SIZE;
+    memcpy(buf, f->data, f->len);
+    if (out) *out = f->len;
+    return ESP_OK;
+}
+
+static esp_err_t t_post(void (*fn)(void *))
+{
+    g_post_calls++;
+    if (g_post_refuse) return ESP_ERR_INVALID_STATE;
+    if (g_pending) return ESP_ERR_INVALID_STATE;
+    g_pending = fn;
+    return ESP_OK;
+}
+
+static esp_err_t t_run(void (*fn)(void *), void *a)
+{
+    g_run_calls++;
+    if (g_run_fail_queued) {
+        g_run_queued = fn;
+        return ESP_FAIL;
+    }
+    fn(a);
+    return ESP_OK;
+}
+
+static void run_pending(void)
+{
+    void (*fn)(void *) = g_pending;
+    g_pending = NULL;
+    if (fn) fn(NULL);
+}
+
+static void *t_alloc(size_t n)
+{
+    return malloc(n);
+}
+
+static const firing_trace_io_t k_io = {.write = t_write, .append = t_append, .read = t_read, .post = t_post, .run = t_run, .alloc = t_alloc};
+
+static void wipe_files(void)
+{
+    for (int i = 0; i < 8; i++) {
+        free(g_files[i].data);
+        memset(&g_files[i], 0, sizeof(g_files[i]));
+    }
+}
+
+static void fresh(void)
+{
+    firing_trace_reset_for_test();
+    wipe_files();
+    g_write_calls = g_post_calls = g_run_calls = g_append_calls = 0;
+    g_bytes_written = 0;
+    g_append_fail = ESP_OK;
+    g_write_fail = ESP_OK;
+    g_pending = NULL;
+    g_post_refuse = false;
+    g_run_fail_queued = false;
+    g_run_queued = NULL;
+    firing_trace_init(&k_io);
+}
+
+static uint32_t g_up;
+static bool note(uint32_t token, float sp, float t0, float d0)
+{
+    float t[3] = {t0, NAN, 21.5f};
+    float d[3] = {d0, NAN, 0.0f};
+    g_up += 60;
+    bool r = firing_trace_note(token, g_up, 1700000000u + g_up, sp, t, d, 2);
+    firing_trace_service();
+    run_pending();
+    return r;
+}
+
+static size_t durable_n(uint32_t id)
+{
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    if (firing_trace_open(id, scratch, sizeof(scratch), &v) != ESP_OK) return (size_t)-1;
+    return v.entry.n;
+}
+
+static void run_firing(uint32_t token, int samples)
+{
+    g_up = 0;
+    for (int i = 0; i < samples; i++) note(token, 100.0f, 50.0f + i, 0.5f);
+}
+
+static void test_append_and_batch(void)
+{
+    TEST_SECTION("firing_trace: append, rate gate, batched flush");
+    fresh();
+    TEST_CHECK(note(7, 100.0f, 50.0f, 0.5f), "first sample stored");
+    TEST_CHECK(g_write_calls == 1 && durable_n(1) == 1, "first sample flushes so the file exists");
+    float t[3] = {1, 1, 1};
+    TEST_CHECK(!firing_trace_note(7, g_up + 30, 0, 1.0f, t, t, 0), "sample < 60 s after the last is refused");
+    for (int i = 0; i < 9; i++) note(7, 100.0f, 51.0f + i, 0.5f);
+    TEST_CHECK(g_write_calls + g_append_calls == 1, "9 more samples buffered, no write yet");
+    note(7, 100.0f, 60.0f, 0.5f);
+    TEST_CHECK(g_write_calls + g_append_calls == 2 && durable_n(1) == 11, "flush when 10 are unflushed");
+    firing_trace_entry_t le[FT_SLOTS];
+    TEST_CHECK(firing_trace_list(le) == 1, "one firing listed");
+}
+
+static void test_end_and_loss(void)
+{
+    TEST_SECTION("firing_trace: end flushes, power-cut loss bounded by one batch");
+    fresh();
+    run_firing(9, 25); /* flushes at n=1, 11, 21 */
+    size_t durable = durable_n(1);
+    TEST_CHECK(durable == 21, "25 samples noted, 21 durable before any end");
+    TEST_CHECK(25 - durable <= FT_FLUSH_EVERY, "worst-case power-cut loss <= 10 samples");
+    firing_trace_end();
+    TEST_CHECK(g_run_calls == 1 && durable_n(1) == 25, "end() flushes the tail synchronously");
+    firing_trace_entry_t e[FT_SLOTS];
+    firing_trace_list(e);
+    TEST_CHECK((e[0].flags & FT_FLAG_CLOSED) != 0 && e[0].n == 25, "entry marked closed");
+    TEST_CHECK(!note(9, 1.0f, 1.0f, 0.0f), "no new samples accepted for the ended run token");
+    firing_trace_end();
+    TEST_CHECK(g_run_calls == 1, "second end() is a no-op");
+}
+
+static void test_rotation(void)
+{
+    TEST_SECTION("firing_trace: rotation keeps the last 4 firings");
+    fresh();
+    for (uint32_t k = 1; k <= 5; k++) {
+        run_firing(100 + k, 3);
+        firing_trace_end();
+    }
+    firing_trace_entry_t e[FT_SLOTS];
+    size_t n = firing_trace_list(e);
+    TEST_CHECK(n == 4, "4 firings retained");
+    TEST_CHECK(e[0].seq == 5 && e[3].seq == 2, "newest first: 5,4,3,2");
+    TEST_CHECK(durable_n(1) == (size_t)-1, "firing 1 was overwritten by firing 5");
+    TEST_CHECK(durable_n(5) == 3, "firing 5 readable");
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_ERR_NOT_FOUND,
+               "opening a rotated-out id reports NOT_FOUND (slot holds another firing)");
+}
+
+static void test_corrupt_and_restore(void)
+{
+    TEST_SECTION("firing_trace: corrupt file ignored, init restores the index");
+    fresh();
+    for (uint32_t k = 1; k <= 3; k++) {
+        run_firing(200 + k, 4);
+        firing_trace_end();
+    }
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    ramfile_t *f2 = rf_find("trace/ft2.bin", 0);
+    TEST_CHECK(f2 != NULL, "firing 2 file exists");
+    f2->data[FT_SAMPLES_OFF + 3] ^= 0x40; /* flip a sample bit */
+    TEST_CHECK(firing_trace_open(2, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "sample corruption caught");
+    f2->data[FT_SAMPLES_OFF + 3] ^= 0x40;
+    f2->data[9] ^= 0x01; /* header seq byte */
+    TEST_CHECK(firing_trace_open(2, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "header corruption caught");
+    f2->data[9] ^= 0x01;
+    ramfile_t *f1 = rf_find("trace/ft1.bin", 0);
+    f1->len = 10; /* file cut inside the header */
+    firing_trace_reset_for_test();
+    firing_trace_init(&k_io); /* "reboot" */
+    firing_trace_entry_t e[FT_SLOTS];
+    size_t n = firing_trace_list(e);
+    TEST_CHECK(n == 2 && e[0].seq == 3 && e[1].seq == 2, "scan keeps valid files, drops the truncated one");
+    run_firing(300, 2);
+    firing_trace_end();
+    TEST_CHECK(durable_n(4) == 2, "next firing gets seq 4 (max valid + 1) after a reboot");
+}
+
+static void test_write_failure(void)
+{
+    TEST_SECTION("firing_trace: failed write keeps samples in RAM and retries");
+    fresh();
+    g_write_fail = ESP_FAIL;
+    run_firing(5, 12);
+    TEST_CHECK(durable_n(1) == (size_t)-1, "nothing durable while writes fail");
+    TEST_CHECK(g_write_calls >= 1, "flush was attempted");
+    g_write_fail = ESP_OK;
+    firing_trace_end();
+    TEST_CHECK(durable_n(1) == 12, "end() later writes every buffered sample");
+}
+
+static void test_truncation(void)
+{
+    TEST_SECTION("firing_trace: 24 h cap");
+    fresh();
+    run_firing(11, FT_MAX_SAMPLES + 5);
+    firing_trace_end();
+    firing_trace_entry_t e[FT_SLOTS];
+    firing_trace_list(e);
+    TEST_CHECK(e[0].n == FT_MAX_SAMPLES, "capped at 1440 samples");
+    TEST_CHECK((e[0].flags & FT_FLAG_TRUNCATED) != 0, "truncated flag set");
+    TEST_CHECK(durable_n(1) == FT_MAX_SAMPLES, "file holds 1440 samples");
+    TEST_CHECK(rf_find("trace/ft1.bin", 0)->len <= FT_FILE_MAX && rf_find("trace/ft1.bin", 0)->len > 28824u,
+               "file size: 1440 samples plus the header and per-batch headers, within FT_FILE_MAX");
+}
+
+static void test_fw03_wear(void)
+{
+    TEST_SECTION("firing_trace: FW-03 a 1440-sample firing writes under 2x the final file size");
+    fresh();
+    run_firing(31, FT_MAX_SAMPLES);
+    firing_trace_end();
+    size_t flen = rf_find("trace/ft1.bin", 0)->len;
+    TEST_CHECK(durable_n(1) == FT_MAX_SAMPLES, "all 1440 samples durable");
+    TEST_CHECK(g_bytes_written < 2u * flen, "FW-03: total bytes written < 2x the final file size");
+    TEST_CHECK(g_write_calls == 1 && g_append_calls >= 140, "FW-03: one atomic create, then appends");
+    firing_trace_entry_t e[FT_SLOTS];
+    firing_trace_list(e);
+    TEST_CHECK((e[0].flags & FT_FLAG_CLOSED) != 0, "closed marker batch read back");
+
+    TEST_SECTION("firing_trace: FW-03 failed append falls back to one atomic rewrite, no data lost");
+    fresh();
+    run_firing(32, 25);
+    g_append_fail = ESP_FAIL;
+    for (int i = 0; i < 10; i++) note(32, 100.0f, 70.0f + i, 0.5f);
+    g_append_fail = ESP_OK;
+    TEST_CHECK(g_write_calls >= 2, "after the failed append the next flush was a whole-file rewrite");
+    int a0 = g_append_calls;
+    for (int i = 0; i < 10; i++) note(32, 100.0f, 90.0f + i, 0.5f);
+    TEST_CHECK(g_append_calls > a0, "appends resume after the rewrite");
+    firing_trace_end();
+    TEST_CHECK(durable_n(1) == 45, "all 45 samples durable after the fallback");
+}
+
+static void test_fw03_torn(void)
+{
+    TEST_SECTION("firing_trace: FW-03 torn last batch is dropped, earlier batches kept");
+    fresh();
+    run_firing(41, 25); /* batches: 1, 10, 10, then 4 unflushed in RAM */
+    ramfile_t *f = rf_find("trace/ft1.bin", 0);
+    TEST_CHECK(f && durable_n(1) == 21, "21 samples durable before the cut");
+    size_t full = f->len;
+    f->len = full - 7; /* power cut mid-append of the last batch */
+    TEST_CHECK(durable_n(1) == 11, "short last batch dropped (11 left)");
+    f->len = full;
+    f->data[full - 1] ^= 0x01; /* full-length but garbled last batch */
+    TEST_CHECK(durable_n(1) == 11, "last batch with a bad CRC dropped");
+    f->data[full - 1] ^= 0x01;
+    TEST_CHECK(durable_n(1) == 21, "restored file reads whole again");
+    f->len = full - 7;
+    firing_trace_reset_for_test();
+    firing_trace_init(&k_io); /* reboot with the torn tail */
+    firing_trace_entry_t e[FT_SLOTS];
+    size_t n = firing_trace_list(e);
+    TEST_CHECK(n == 1 && e[0].n == 11 && (e[0].flags & FT_FLAG_INTERRUPTED) != 0, "init lists the torn file as interrupted with 11 samples");
+    f->len = full;
+    f->data[FT_SAMPLES_OFF + 3] ^= 0x01; /* first batch garbled, data after it */
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC, "a bad batch with data after it rejects the file");
+}
+
+static void test_fv05_middle_count(void)
+{
+    TEST_SECTION("firing_trace: FV-05 a middle batch whose count runs past the end is corruption, not a torn tail");
+    fresh();
+    run_firing(41, 25);
+    ramfile_t *f = rf_find("trace/ft1.bin", 0);
+    TEST_CHECK(f && durable_n(1) == 21, "setup: 21 samples durable");
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    f->data[FT_HDR_SIZE] = 0xFFu; /* first batch count corrupted upward (little endian low byte), valid batches follow */
+    f->data[FT_HDR_SIZE + 1] = 0x00u;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_ERR_INVALID_CRC,
+               "FV-05: oversized middle count with valid batches after it rejects the file");
+}
+
+static void test_post_busy(void)
+{
+    TEST_SECTION("firing_trace: service() never double-posts");
+    fresh();
+    g_up = 0;
+    float t[3] = {1, 2, 3};
+    firing_trace_note(1, 60, 0, 1.0f, t, t, 0);
+    firing_trace_service();
+    TEST_CHECK(g_post_calls == 1, "one post for a due flush");
+    firing_trace_service();
+    TEST_CHECK(g_post_calls == 1, "no second post while the first is outstanding");
+    run_pending();
+    TEST_CHECK(durable_n(1) == 1, "job ran");
+    firing_trace_service();
+    TEST_CHECK(g_post_calls == 1, "nothing due, no post");
+}
+
+static void test_csv(void)
+{
+    TEST_SECTION("firing_trace: CSV rows");
+    fresh();
+    g_up = 0;
+    float t[3] = {-12.34f, NAN, 1234.5f};
+    float d[3] = {0.5f, NAN, 1.0f};
+    firing_trace_note(3, 120, 0u /* unsynced */, 999.9f, t, d, 7);
+    firing_trace_end();
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_OK, "open");
+    char line[FT_CSV_LINE_CAP];
+    size_t h = firing_trace_csv_header(line, sizeof(line));
+    TEST_CHECK(h > 0 && strncmp(line, "uptime_s,utc_epoch,setpoint_c,", 30) == 0, "header");
+    size_t o = firing_trace_csv_row(&v, 0, line, sizeof(line));
+    TEST_CHECK(o > 0, "row formatted");
+    TEST_CHECK(strcmp(line, "120,0,999.9,-12.3,,1234.5,50.0,,100.0,7\n") == 0, "row: epoch 0, inactive blank, values");
+    TEST_CHECK(firing_trace_csv_row(&v, 1, line, sizeof(line)) == 0, "index past n refused");
+}
+
+static void test_refused_post(void)
+{
+    TEST_SECTION("firing_trace: FY-02/03 post refused forever");
+    fresh();
+    g_post_refuse = true;
+    g_up = 0;
+    float t[3] = {1, 2, 3};
+    firing_trace_note(1, 60, 0, 1.0f, t, t, 0);
+    for (int i = 0; i < 50; i++) firing_trace_service(); /* 50 executor ticks, one sample */
+    TEST_CHECK(g_post_calls == 1, "FY-03: refused post is retried at most once per sample, not per tick");
+    for (int i = 0; i < 11; i++) {
+        note(1, 100.0f, 50.0f + i, 0.5f);
+        for (int k = 0; k < 20; k++) firing_trace_service();
+    }
+    TEST_CHECK(g_post_calls <= 12, "FY-03: one attempt per new sample (12 samples => <= 12 posts)");
+    TEST_CHECK(durable_n(1) == (size_t)-1, "FY-02: nothing durable while every post is refused");
+    firing_trace_entry_t e[FT_SLOTS];
+    TEST_CHECK(firing_trace_list(e) == 0, "no flushed file listed (loss = whole firing so far, documented)");
+    firing_trace_end();
+    TEST_CHECK(durable_n(1) == 11, "end-of-firing flush still persists everything");
+    g_post_refuse = false;
+}
+
+static void test_in_progress_and_interrupted(void)
+{
+    TEST_SECTION("firing_trace: FY-04 in_progress/last_flush, FY-05 interrupted after reboot");
+    fresh();
+    run_firing(40, 3);
+    firing_trace_entry_t e[FT_SLOTS];
+    TEST_CHECK(firing_trace_list(e) == 1, "listed");
+    TEST_CHECK(FT_IN_PROGRESS(e[0].flags), "FY-04: active firing is in_progress");
+    TEST_CHECK(e[0].last_epoch == 1700000000u + 60u, "FY-04: last_flush epoch = newest durable sample (1 flushed)");
+    static uint8_t scratch[FT_FILE_MAX];
+    firing_trace_view_t v;
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_OK && FT_IN_PROGRESS(v.entry.flags) &&
+                   v.entry.last_epoch == 1700000000u + 60u,
+               "FY-04: open() reports in_progress and last flush");
+    firing_trace_reset_for_test();
+    firing_trace_init(&k_io); /* reboot mid-firing */
+    TEST_CHECK(firing_trace_list(e) == 1 && (e[0].flags & FT_FLAG_INTERRUPTED) && !FT_IN_PROGRESS(e[0].flags),
+               "FY-05: stale closed:false file is interrupted, not in progress, after boot");
+    TEST_CHECK(firing_trace_open(1, scratch, sizeof(scratch), &v) == ESP_OK && (v.entry.flags & FT_FLAG_INTERRUPTED),
+               "FY-05: open() reports interrupted");
+    fresh();
+    run_firing(41, 3);
+    firing_trace_end();
+    firing_trace_list(e);
+    TEST_CHECK((e[0].flags & FT_FLAG_CLOSED) && !(e[0].flags & FT_FLAG_INTERRUPTED) && e[0].last_epoch == 1700000000u + 180u,
+               "closed firing is neither in progress nor interrupted; last flush = last sample");
+}
+
+static void test_busy_not_cleared_while_queued(void)
+{
+    TEST_SECTION("firing_trace: FY-07 busy flag stays set while a job may still be queued");
+    fresh();
+    run_firing(50, 3);
+    g_run_fail_queued = true;
+    firing_trace_end(); /* run() errors but the job is queued and still reads the buffer */
+    TEST_CHECK(g_run_queued != NULL, "final job queued");
+    g_up = 0;
+    TEST_CHECK(!note(51, 1.0f, 1.0f, 0.0f), "FY-07: a new firing cannot start (reuse the buffer) while the job is queued");
+    g_run_fail_queued = false;
+    g_run_queued(NULL); /* the worker finally runs it */
+    g_run_queued = NULL;
+    TEST_CHECK(durable_n(1) == 3, "queued job wrote firing 1 intact");
+    TEST_CHECK(note(51, 1.0f, 1.0f, 0.0f), "new firing starts once the job drained");
+    TEST_CHECK(durable_n(1) == 3, "firing 1 file not mixed with firing 2");
+}
+
+int main(void)
+{
+    test_append_and_batch();
+    test_end_and_loss();
+    test_rotation();
+    test_corrupt_and_restore();
+    test_fw03_wear();
+    test_fw03_torn();
+    test_fv05_middle_count();
+    test_write_failure();
+    test_truncation();
+    test_post_busy();
+    test_csv();
+    test_refused_post();
+    test_in_progress_and_interrupted();
+    test_busy_not_cleared_while_queued();
+    firing_trace_reset_for_test();
+    wipe_files();
+    printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
+    return g_test_failures == 0 ? 0 : 1;
+}

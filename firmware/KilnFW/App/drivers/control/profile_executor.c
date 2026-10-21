@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "profile_executor.h"
 #include "profile_executor_internal.h"
 
@@ -18,6 +19,7 @@
 
 #include "adaptive_tune.h" /* PID_EXPANSION_PLAN.md Phase 7d -- see that file's own header comment */
 #include "autotune_engine.h"
+#include "firing_trace.h" /* FD-02: durable per-firing trace, RAM-only append from here */
 #include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
@@ -42,6 +44,7 @@ extern bool profiles_validate_candidate(const profile_t *candidate, int mode, ch
 #include "pid.h"
 #include "pid_fuzzy.h"
 #include "ramp_assist_cfg.h"
+#include "tc_lag_comp.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
@@ -93,7 +96,11 @@ const char *PE_TAG = "profile_executor";
  *            range; HISTORY_TEMP_INVALID encodes NaN
  *   duty     whole percent, u8; 255 encodes "no value"
  * The graph this feeds is a multi-hour trend, not a scope trace. */
-s_exec_state_t s_exec;
+EXT_RAM_BSS_ATTR s_exec_state_t s_exec;
+
+_Static_assert(TC_LAG_COMP_TAU_MAX_S == (unsigned)ZONE_TC_SHEATH_TAU_MAX_S &&
+                   TC_LAG_COMP_TAU_MIN_S == (unsigned)ZONE_TC_SHEATH_TAU_MIN_S,
+               "zone tc_sheath_tau_s bounds must match tc_lag_comp.h");
 
 /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_internal.h's
  * big table comment for the full rule list and rationale; this is just the
@@ -601,7 +608,25 @@ static void reload_live_profile_if_changed(void)
          * concurrent segment advance: both the window check just above and
          * this swap run under the SAME lock acquisition, against the SAME
          * s_exec.segment_index read, so nothing can move between the two. */
+        /* CL-01: a changed target_c on the dwelling segment must ramp, not
+         * step. Compare OLD content (still in s_exec.profile) to the new. */
+        bool clear_dwell = false;
+        if (s_exec.segment_index < s_exec.profile.segment_count && s_exec.segment_index < candidate->segment_count) {
+            clear_dwell = profile_live_pickup_dwell_target_changed(
+                s_exec.dwelling, s_exec.profile.segments[s_exec.segment_index].target_c,
+                candidate->segments[s_exec.segment_index].target_c);
+        }
         s_exec.profile = *candidate;
+        if (clear_dwell) {
+            s_exec.dwelling = false;
+            s_exec.dwell_arrived_hot = false;
+            s_exec.segment_elapsed_s = 0;
+            s_exec.segment_elapsed_rem_ms = 0;
+            s_exec.dwell_credit_applied_s = 0.0f;
+            s_exec.dwell_credit_cap_s = 0.0f;
+            ESP_LOGW(PE_TAG, "live edit changed dwelling segment %u target: dwell cleared, ramping to new target",
+                     s_exec.segment_index);
+        }
     }
 
     /* HIGH-1: only a CHECKED outcome (OK or a REFUSED_*) may consume this
@@ -809,6 +834,7 @@ void executor_task_entry(void *arg)
             }
             xSemaphoreGive(s_exec.lock);
             if (fs_need_persist) {
+                firing_trace_end(); /* FD-02: final synchronous flush of this firing's trace */
                 firing_stats_persist(&fs_rec);
                 /* Outside s_exec.lock, same as the persist call above --
                  * this can do a batch fit and an NVS write of its own (via
@@ -917,7 +943,23 @@ void executor_task_entry(void *arg)
             raw_c[zi] = combined;
             sensor_ok[zi] = valid;
             s_exec.zones[zi].actual_valid = valid;
-            s_exec.zones[zi].actual_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
+            {
+                /* Offset first, then sheath-lag compensation (tc_lag_comp.c).
+                 * tau 0 is an exact passthrough: actual_c == actual_cal_c and
+                 * the guard lead is 0, i.e. identical to before this field. */
+                zone_runtime_t *zr = &s_exec.zones[zi];
+                float cal_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
+                float tau_s = 0.0f;
+                zones_config_get_tc_sheath_tau(zi, &tau_s);
+                bool lag_reset = false;
+                float est_c = tc_lag_comp_step(&zr->tc_lag, tau_s, cal_c, valid, dt_s, &lag_reset);
+                if (lag_reset) {
+                    zr->pid_sensor_outage = true; /* re-base the PID derivative with the filter */
+                }
+                zr->actual_cal_c = cal_c;
+                zr->actual_c = valid ? est_c : NAN;
+                zr->tc_lag_corr_c = valid ? zr->tc_lag.corr_c : 0.0f;
+            }
 
             /* Cross-zone coupling filter (PID_EXPANSION_PLAN.md 2c/Phase 3b,
              * BLOCKING review finding 3): updated exactly once per control
@@ -1148,6 +1190,9 @@ void executor_task_entry(void *arg)
                 s_exec.target_c = new_target;
                 if (s_exec.target_c == seg->target_c) {
                     s_exec.dwelling = true;
+                    /* CL-03: remember if the dwell starts with a zone still above target (descending
+                     * segment, free cool); the dwell timer then waits, see the dwelling branch. */
+                    s_exec.dwell_arrived_hot = ramp_assist_zones_above_band(&s_exec);
                     s_exec.segment_elapsed_s = 0;
                 s_exec.segment_elapsed_rem_ms = 0;
                     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit spend, at
@@ -1188,6 +1233,13 @@ void executor_task_entry(void *arg)
                 }
             } else {
                 s_exec.target_c = seg->target_c;
+                /* CL-03: hold the dwell TIMER (not the setpoint) until every driving zone is within the
+                 * band of target; restarts the count so the hold is timed at temperature. */
+                bool dwell_too_hot = ramp_assist_dwell_too_hot(&s_exec);
+                if (dwell_too_hot) {
+                    s_exec.segment_elapsed_s = 0;
+                    s_exec.segment_elapsed_rem_ms = 0;
+                }
                 /* PID_EXPANSION_PLAN.md sec 7.6: bounded in-dwell credit.
                  * nominal_s is the un-credited floor -- reaching it always
                  * ends the dwell, credit or not, exactly as before sec 7.3
@@ -1208,8 +1260,8 @@ void executor_task_entry(void *arg)
                 uint32_t credited_threshold_s = (total_spend_s >= (float)nominal_s)
                     ? 0u : nominal_s - (uint32_t)total_spend_s;
                 bool target_reached = ramp_assist_dwell_target_reached(&s_exec);
-                bool dwell_done = (s_exec.segment_elapsed_s >= nominal_s) ||
-                    (s_exec.segment_elapsed_s >= credited_threshold_s && target_reached);
+                bool dwell_done = !dwell_too_hot && ((s_exec.segment_elapsed_s >= nominal_s) ||
+                    (s_exec.segment_elapsed_s >= credited_threshold_s && target_reached));
                 if (dwell_done) {
                     s_exec.segment_index++;
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
@@ -1761,6 +1813,7 @@ void executor_task_entry(void *arg)
             thermal_guard_input_t gin = {
                 .sensor_ok = sensor_ok[zi],
                 .measurement_c = raw_c[zi], /* RAW -- a calibration offset must not hide an out-of-range sensor */
+                .lead_c = z->tc_lag_corr_c, /* sheath lead; 0 without a tube -- see thermal_guard_input_t */
                 /* PID_EXPANSION_PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_
                  * STUDY.md section 2.4: this zone's OWN commanded setpoint
                  * (rate-limited toward the shared s_exec.target_c by this
@@ -1777,6 +1830,11 @@ void executor_task_entry(void *arg)
                 .setpoint_c = zone_commanded_setpoint_c(z, zi),
                 .commanded_duty = commanded_duty_for_guards,
                 .dt_s = dt_s,
+                /* SR-10: positive duty rendered as relay OFF for the whole
+                 * window (below the minimum on-time) still arms guard 3. */
+                .relay_held_off = heater_zone_applies_relay && !heat_blocked_for_guards && z->duty > 0.0f &&
+                                  z->heater_state.window_started && z->heater_state.on_ms_this_window == 0 &&
+                                  !z->heater_state.relay_on,
                 /* Guard 8 (TODO.md 6A.3/6A.5): this tick's whole-bus snapshot,
                  * raw and un-averaged, so a zone can be compared against its
                  * neighbours in the same chamber. Costs nothing extra -- the
@@ -2049,6 +2107,19 @@ void executor_task_entry(void *arg)
             if (s_exec.history_count < HISTORY_MAX_SAMPLES) {
                 s_exec.history_count++;
             }
+            /* FD-02: durable trace, 1 sample/min, RAM-only append (flash flush happens after the lock). */
+            _Static_assert(MAX31856_CHANNEL_COUNT == FT_ZONES, "firing_trace zone count");
+            {
+                time_t ft_now = time(NULL);
+                for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) { /* inactive zones: NaN, not stack garbage */
+                    if (inactive_mask & (1u << zi)) { actual_c[zi] = NAN; duty[zi] = NAN; }
+                    /* FY-06: a monitor-only zone (relay-less HEATER) is never commanded: blank duty, not 0.0 */
+                    else if (s_exec.zones[zi].monitor_only) { duty[zi] = NAN; }
+                }
+                firing_trace_note((uint32_t)s_exec.history_run_start_tick, ticks_to_s(now),
+                                  (ft_now >= (time_t)1577836800) ? (uint32_t)ft_now : 0u, s_exec.target_c,
+                                  actual_c, duty, s_exec.segment_index);
+            }
         }
 
         /* --- Reboot breadcrumb (TODO.md 6A.3) -------------------------------
@@ -2105,6 +2176,7 @@ void executor_task_entry(void *arg)
         capture_run_snapshot(&tick_snap);
         bool faulted_now = run_faulted_this_tick;
         xSemaphoreGive(s_exec.lock);
+        firing_trace_service(); /* FD-02: non-blocking post of a due flush, outside the lock */
 
         /* Rate-limited internally (at most one NVS write per 10 min, and only
          * if something changed) -- see relay_cycles.h's flash-wear note.
@@ -2328,15 +2400,24 @@ void watchdog_task_entry(void *arg)
         bool safety_diag_tripped_any_age = false;
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
+        uint16_t safety_diag_trip_mask = 0u;
         bool safety_k4_closed = false;
         uint32_t safety_reboot_seq = 0u;
         bool safety_diag_since_reboot = false;
         uint8_t safety_boot_reason = 0u;
         bool safety_status_ok = false;
+        bool safety_boot_id_seen = false;
+        bool safety_boot_id_valid = false; /* PF-04 */
+        uint8_t safety_boot_id_value = 0u;
+        uint32_t safety_diag_uptime_ms = 0u;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
                 safety_status_ok = true;
+                safety_boot_id_seen = safety_status.pico_boot_id_ever_seen;
+                safety_boot_id_valid = safety_status.pico_boot_id_valid;
+                safety_boot_id_value = safety_status.pico_boot_id;
+                safety_diag_uptime_ms = safety_status.diag_uptime_ms;
                 safety_age_ms = safety_status.age_ms;
                 /* F5HOLDERFX4 MED-1: the DIAG's own age is diag_frame_age_ms (age_ms is the STATUS
                  * frame's). safety_diag_valid = "fresh enough to act on as OK"; a cached TRIPPED is
@@ -2349,6 +2430,7 @@ void watchdog_task_entry(void *arg)
                 safety_diag_since_reboot = safety_status.diag_since_reboot;
                 safety_boot_reason = safety_status.diag_boot_reason;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
+                safety_diag_trip_mask = safety_status.diag_trip_mask;
                 /* SAFETYFX10 LOW-1: a trip inferred from a TRIP_EVENT newer than the DIAG has no DIAG reason;
                  * name the event's own reason instead of "none". */
                 if (safety_diag_tripped_any_age && safety_status.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
@@ -2564,12 +2646,20 @@ void watchdog_task_entry(void *arg)
          */
         /* F1: tell heat_enable what the Pico reports so a lost grant is re-requested. */
         uint32_t wdt_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        /* PF-04: Pico boot id + "Pico booted before this ESP" (DIAG uptime beyond the ESP's own); invalid defaults
+         * when the status read failed. */
+        heat_enable_note_pico_boot_identity(safety_status_ok && safety_boot_id_valid, safety_boot_id_value,
+                                            safety_status_ok && safety_diag_since_reboot &&
+                                                safety_diag_uptime_ms > wdt_now_ms);
         /* A failed status read must never feed reboot seq 0 (looks like a reboot). */
         if (safety_status_ok) {
+            heat_enable_note_boot_id_seen(safety_boot_id_seen); /* PF-01: before the reboot rule */
             heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason, wdt_now_ms);
         }
         /* A DIAG from before the latest Pico reboot describes the old boot: feed
          * INIT so its ARMED cannot satisfy the new boot's K4 check (LOW-3). */
+        heat_enable_note_pico_trip_info(safety_diag_since_reboot ? safety_diag_trip_reason : 0u,
+                                        safety_diag_since_reboot ? safety_diag_trip_mask : 0u);
         heat_enable_note_pico_state(safety_diag_valid,
                                     safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT,
                                     safety_k4_closed, wdt_now_ms);
@@ -2580,9 +2670,27 @@ void watchdog_task_entry(void *arg)
         bool hold_reboot = heat_enable_reboot_hold();
         bool hold_unconfirmed = !hold_reboot && heat_enable_grant_unconfirmed();
         if (hold_reboot) {
-            (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
-            /* Autotune has no pause state: abort is its equivalent (relays off). */
-            (void)autotune_engine_abort_bounded("pico_fatal_reboot", 100u);
+            /* PF-03: a latch from the claimless lost-trip rule is not a fatal reboot. */
+            if (heat_enable_reboot_hold_first_sight()) {
+                /* PF-04: the Pico was already running a fatal boot reason when this controller started. */
+                (void)profile_executor_pause_with_reason_bounded("pico_fatal_before_esp_boot");
+                (void)autotune_engine_abort_bounded("pico_fatal_before_esp_boot", 100u);
+            } else if (heat_enable_reboot_hold_lost_trip_only()) {
+                (void)profile_executor_pause_with_reason_bounded("pico_lost_trip_latched");
+                (void)autotune_engine_abort_bounded("pico_lost_trip_latched", 100u);
+            } else if (heat_enable_reboot_hold_repeated_benign()) {
+                (void)profile_executor_pause_with_reason_bounded("pico_repeated_reboot");
+                (void)autotune_engine_abort_bounded("pico_repeated_reboot", 100u);
+            } else {
+                (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
+                /* Autotune has no pause state: abort is its equivalent (relays off). */
+                (void)autotune_engine_abort_bounded("pico_fatal_reboot", 100u);
+            }
+        } else if (heat_enable_boot_id_unseen_blocked()) {
+            /* PR-04: no Pico boot id yet -> heat withheld; say so instead of running cold silently. */
+            (void)profile_executor_pause_with_reason_bounded("pico_boot_id_unseen");
+            /* HH-03: autotune has no pause state; abort so it does not run cold without a reason. */
+            (void)autotune_engine_abort_bounded("pico_boot_id_unseen", 100u);
         } else if (hold_unconfirmed) {
             (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
             (void)autotune_engine_abort_bounded("heat_grant_unconfirmed", 100u);

@@ -112,18 +112,26 @@ float pid_update_terms(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
     float error = setpoint - measurement;
 
     /* Functional range blending (TODO.md 6A.2 / Marlin PID_FUNCTIONAL_RANGE):
-     * outside pid_range_c, skip the PID math entirely and hold the
-     * integrator -- a 900C climb from cold must not spend an hour winding
+     * outside pid_range_c, skip the PID math entirely and clear the
+     * integrator (CL-04) -- a 900C climb from cold must not spend an hour winding
      * up I only to overshoot on arrival. prev_measurement still updates so
      * D isn't fed a stale value when re-entering the range; the caller is
      * responsible for pid_seed_bumpless() at that transition. Note this
-     * early return does NOT update d_filtered -- it stays frozen (0.0f on a
+     * early return does NOT update d_filtered -- it is cleared to 0.0f (CL-04) on a
      * cold start) for the whole time error is out of range. Gains don't
      * matter while out of range, but any fuzzy-PID layer reading d_filtered
      * (pid_fuzzy.c) will see a stale/zero rate on the first in-range tick
      * or two after re-entering, until the low-pass filter catches up. */
     if (fabsf(error) > cfg->pid_range_c) {
         state->prev_measurement = measurement;
+        /* CL-04: do NOT carry the integral (or the frozen D filter) across an
+         * out-of-range excursion. A long dwell at 1000 C leaves a large hold
+         * integral; a following segment that cools to 600 C would otherwise
+         * re-enter the range with it and overdrive. Cold-start state is what
+         * the loop is built to enter from (see the initialized branch). Both
+         * paired states are cleared together (reset-one-side class). */
+        state->integral = 0.0f;
+        state->d_filtered = 0.0f;
         float u = (error > 0.0f) ? 1.0f : 0.0f;
         if (out_terms) {
             *out_terms = (pid_terms_t){.p = u, .i = 0.0f, .d = 0.0f, .ff = 0.0f};

@@ -140,6 +140,19 @@ typedef enum {
 lcd_keypad_submit_result_t lcd_keypad_state_submit(lcd_keypad_state_t *ks, uint32_t now_ms,
                                                     lcd_pin_role_t *out_role);
 
+// LU-01: the same submit split in three so the (slow, KDF) verify can run off
+// the LVGL task. lcd_keypad_state_submit() is exactly begin + verify + finish.
+//   begin:  lockout cycle reset, lockout check, can_submit check. Returns true
+//           when the PIN should now be verified; false fills *early with
+//           LOCKED_OUT or TOO_SHORT (no verify, no lockout change).
+//   verify: runs the installed verify function; touches no keypad state, so it
+//           is safe on a worker task with a copy of the digits.
+//   finish: records the failure/success on ks->lockout and returns the result.
+bool lcd_keypad_state_submit_begin(lcd_keypad_state_t *ks, uint32_t now_ms, lcd_keypad_submit_result_t *early);
+lcd_pin_role_t lcd_keypad_state_verify(const char *digits, uint8_t len);
+lcd_keypad_submit_result_t lcd_keypad_state_submit_finish(lcd_keypad_state_t *ks, uint32_t now_ms,
+                                                           lcd_pin_role_t role, lcd_pin_role_t *out_role);
+
 // --- LCD inactivity lock + 10s stay-unlocked prompt (section 8, LCD half) -
 
 // timeout_s == 0 is the "never" sentinel (section 8: "'never' is meaningful

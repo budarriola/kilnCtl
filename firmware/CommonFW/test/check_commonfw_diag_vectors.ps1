@@ -118,6 +118,13 @@ try {
     # parameterless overload settles it.
     $proc.WaitForExit()
     $exitCode = $proc.ExitCode
+    # Under heavy load ExitCode can still read $null right after the wait; poll briefly before giving up.
+    for ($i = 0; ($null -eq $exitCode) -and ($i -lt 25); $i++) {
+        Start-Sleep -Milliseconds 200
+        $proc.Refresh()
+        $proc.WaitForExit()
+        $exitCode = $proc.ExitCode
+    }
     if ($null -eq $exitCode) {
         throw "CommonFW's test_diag exited but reported no exit code -- refusing to grade it."
     }

@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "flash_hop.h"
 #include "nvs_key_check.h"
 
 #include "freertos/FreeRTOS.h"
@@ -33,6 +34,7 @@
                                 * validity check, section 5.2 rule 5. */
 
 #include "kiln_cfg_store_internal.h"
+#include "cfg_fs.h" /* cfg_fs_read(), cfg_fs_is_available() */
 #include "persist_scratch.h"
 #include "kiln_cfg_store_cfg_fs.h"
 #include "kiln_package.h" /* kiln_package_capture_pico_half()/_compute_hash() -- explicit even
@@ -600,6 +602,79 @@ static uint32_t kiln_cfg_rev_load(void)
     return err == HAL_OK ? rev : 0;
 }
 
+/* persmed MED-C: the cfg file is the only store written now, so a file left by an OLDER layout (v1/v2 here; every
+ * future bump adds its frozen type) must be migrated like the NVS blob always was -- not treated as rejected,
+ * which would lock the store at the first version bump. Reads the file again (the resolve layer only reports
+ * OLDER), converts it into s_store through the same chain nvs_load_store() uses, and rewrites it in the current
+ * layout (file rev unchanged until that write bumps it). Returns false when the bytes are not a known older
+ * layout; the caller then preserves them as .bad and quarantines. */
+/* PS-01: why a migration did not happen. Only MIGRATE_UNKNOWN_LAYOUT may
+ * quarantine the file as unmigratable (and keep a .bad copy); a transient
+ * failure (alloc, I/O) leaves the good file untouched for a retry next boot. */
+typedef enum { MIGRATE_OK = 0, MIGRATE_TRANSIENT, MIGRATE_UNKNOWN_LAYOUT } kcs_migrate_result_t;
+
+static kcs_migrate_result_t migrate_older_cfg_file(uint32_t *out_rev)
+{
+    size_t cap = 4 + sizeof(kiln_cfg_store_blob_t);
+    if (4 + sizeof(kiln_cfg_store_blob_v1_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v1_t);
+    }
+    if (4 + sizeof(kiln_cfg_store_blob_v2_t) > cap) {
+        cap = 4 + sizeof(kiln_cfg_store_blob_v2_t);
+    }
+    uint8_t *raw = persist_scratch_alloc(cap);
+    if (!raw) {
+        return MIGRATE_TRANSIENT;
+    }
+    size_t len = 0;
+    if (cfg_fs_read(KILN_CFG_STORE_FILE_PATH, raw, cap, &len) != ESP_OK) {
+        free(raw);
+        return MIGRATE_TRANSIENT; /* I/O error: the file may be perfectly good */
+    }
+    if (len < 5) {
+        free(raw);
+        return MIGRATE_UNKNOWN_LAYOUT;
+    }
+    uint32_t rev = (uint32_t)raw[0] | ((uint32_t)raw[1] << 8) | ((uint32_t)raw[2] << 16) | ((uint32_t)raw[3] << 24);
+    const uint8_t *blob = raw + 4;
+    size_t blen = len - 4;
+    bool ok = false;
+    bool alloc_failed = false;
+    if (blen == sizeof(kiln_cfg_store_blob_v1_t) && blob[0] == 1) {
+        kiln_cfg_store_blob_v1_t *v1 = persist_scratch_alloc(sizeof(*v1));
+        kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
+        if (v1 && v2) {
+            memcpy(v1, blob, sizeof(*v1));
+            migrate_store_v1_to_v2(v1, v2);
+            migrate_store_v2_to_v3(v2, &s_store);
+            ok = true;
+        } else {
+            alloc_failed = true;
+        }
+        free(v1);
+        free(v2);
+    } else if (blen == sizeof(kiln_cfg_store_blob_v2_t) && blob[0] == 2) {
+        kiln_cfg_store_blob_v2_t *v2 = persist_scratch_alloc(sizeof(*v2));
+        if (v2) {
+            memcpy(v2, blob, sizeof(*v2));
+            migrate_store_v2_to_v3(v2, &s_store);
+            ok = true;
+        } else {
+            alloc_failed = true;
+        }
+        free(v2);
+    }
+    if (!ok && !alloc_failed) {
+        (void)kiln_cfg_store_cfg_fs_preserve_bad(raw, len);
+    }
+    free(raw);
+    if (ok) {
+        *out_rev = rev;
+        return MIGRATE_OK;
+    }
+    return alloc_failed ? MIGRATE_TRANSIENT : MIGRATE_UNKNOWN_LAYOUT;
+}
+
 /* Wraps nvs_load_store() with the `cfg` LittleFS read-through/dual-write
  * policy (docs/FILESYSTEM_USER_DATA.md section 5, "kiln config slots"
  * item) -- exactly the shape zones_config_store.c's nvs_load() wraps
@@ -633,6 +708,29 @@ static void nvs_load_store_with_cfg_fs(void)
     kiln_cfg_file_state_t fstate = KILN_CFG_FILE_ABSENT;
     bool trustworthy = kiln_cfg_store_cfg_fs_resolve_ex(&s_store, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                         &used_file, &fstate);
+    if (fstate == KILN_CFG_FILE_OLDER) {
+        uint32_t file_rev = 0;
+        free(resolved);
+        kcs_migrate_result_t mig = migrate_older_cfg_file(&file_rev);
+        if (mig == MIGRATE_OK) {
+            s_kiln_cfg_rev = file_rev;
+            hal_status_t save_err = nvs_save_store(); /* current layout on disk so the next boot takes the fast path */
+            ESP_LOGI(TAG, "kiln_cfg_store migrated the older cfg file (rev %lu) to v%u%s", (unsigned long)file_rev,
+                     (unsigned)KILN_CFG_STORE_VERSION, save_err == HAL_OK ? "" : " (rewrite failed; will retry)");
+            return;
+        }
+        reset_to_defaults();
+        if (mig == MIGRATE_TRANSIENT) {
+            /* PS-01: file untouched, no .bad; the quarantine is RAM-only so a reboot retries the migration. */
+            set_quarantine("kiln config file could not be read for migration (transient) -- file kept, reboot to retry");
+        } else {
+            set_quarantine(kiln_cfg_store_cfg_fs_last_preserve_failed()
+                               ? "kiln config file is an older layout this firmware cannot migrate -- copy could NOT be kept as .bad"
+                               : "kiln config file is an older layout this firmware cannot migrate -- copy kept as .bad");
+        }
+        s_kiln_cfg_rev = nvs_rev;
+        return;
+    }
     if (fstate == KILN_CFG_FILE_UNKNOWN || fstate == KILN_CFG_FILE_NEWER || fstate == KILN_CFG_FILE_REJECTED) {
         /* persfx4 MED-3: the cfg file is the store that is written now, and it exists but could not be used
          * (unreadable / newer than this firmware / corrupt). Quarantine (mutators refused, nothing written) and
@@ -642,7 +740,9 @@ static void nvs_load_store_with_cfg_fs(void)
         snprintf(qmsg, sizeof(qmsg), "kiln config file is %s -- file left untouched",
                  fstate == KILN_CFG_FILE_NEWER     ? "newer than this firmware"
                  : fstate == KILN_CFG_FILE_UNKNOWN ? "unreadable at boot"
-                                                   : "corrupt or the wrong size (copy kept as .bad)");
+                           : kiln_cfg_store_cfg_fs_last_preserve_failed()
+                               ? "corrupt or the wrong size (copy could NOT be kept as .bad)"
+                               : "corrupt or the wrong size (copy kept as .bad)");
         reset_to_defaults();
         set_quarantine(qmsg);
         s_kiln_cfg_rev = nvs_rev;
@@ -677,7 +777,7 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
-static hal_status_t nvs_save_store(void)
+static hal_status_t nvs_save_store_impl(void)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "nvs_save_store: REFUSING -- calling task's stack is in external RAM "
@@ -708,6 +808,30 @@ static hal_status_t nvs_save_store(void)
     }
     s_kiln_cfg_rev = new_rev;
     return HAL_OK;
+}
+
+/* PSRAM-stack callers (kiln_cfg_swap worker) hop the cfg write onto the
+ * internal-stack bx_flash_worker. The job takes no lock: the caller already
+ * holds kiln_cfg_store_lock and a worker job must never take it. The guard in
+ * nvs_save_store_impl stays strict. */
+typedef struct {
+    hal_status_t st;
+} nvs_save_store_ctx_t;
+
+static void nvs_save_store_job(void *arg)
+{
+    ((nvs_save_store_ctx_t *)arg)->st = nvs_save_store_impl();
+}
+
+static hal_status_t nvs_save_store(void)
+{
+    nvs_save_store_ctx_t ctx = { .st = HAL_NOT_READY };
+    esp_err_t e = flash_hop_run(nvs_save_store_job, &ctx);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store: flash worker hop failed: %s", esp_err_to_name(e));
+        return HAL_NOT_READY;
+    }
+    return ctx.st;
 }
 
 /* ---- Internal helpers ------------------------------------------------------ */
@@ -921,6 +1045,40 @@ static bool name_collides(const char *normalized_name, int32_t exclude_id)
     return false;
 }
 
+/* Recompute e->pkg_hash from its stored ESP blob + Pico half in the CURRENT canonical form.
+ * RAM only (persisted by the next save); on any failure the old hash is kept. */
+static void rehash_slot_in_ram(kiln_cfg_entry_t *e)
+{
+    zones_cfg_t *cfg = persist_scratch_alloc(sizeof(*cfg));
+    uint8_t *canonical = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    size_t canonical_len = 0;
+    uint32_t hash = 0;
+    if (cfg && canonical && e->blob_len <= sizeof(*cfg)) {
+        memset(cfg, 0, sizeof(*cfg));
+        memcpy(cfg, e->blob, e->blob_len);
+        if (zones_config_export_canonical(cfg, canonical, ZONES_CONFIG_BLOB_MAX_SIZE, &canonical_len) &&
+            kiln_package_compute_hash(e->pkg_schema, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
+            hash != 0) {
+            e->pkg_hash = hash;
+        }
+    }
+    free(cfg);
+    free(canonical);
+}
+
+/* BW-06 follow-up: the canonical form that pkg_hash covers changed (zones v27 added
+ * tc_sheath_tau_s), so a stored slot can carry a stale hash that would not verify on re-import.
+ * Re-hash every populated slot from its stored blob in the current form. */
+static void rehash_all_slots_in_ram(void)
+{
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        kiln_cfg_entry_t *e = &s_store.entries[i];
+        if (e->in_use && e->pico_populated && e->pkg_hash != 0) {
+            rehash_slot_in_ram(e);
+        }
+    }
+}
+
 /* ---- Public API ------------------------------------------------------------ */
 
 esp_err_t kiln_cfg_store_init(void)
@@ -953,6 +1111,8 @@ esp_err_t kiln_cfg_store_init(void)
             e->pkg_schema = 0;
         }
     }
+
+    rehash_all_slots_in_ram(); /* BW-06 follow-up */
 
     /* Boot-time active-config restore -- see kiln_cfg_store_init()'s doc
      * comment (kiln_cfg_store.h) for the exact three-outcome fallback this
@@ -1853,6 +2013,39 @@ bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, siz
                            "refusing: calling task's stack is in external RAM (PSRAM) and the legacy NVS "
                            "blob erase would abort the board -- retry from an internal-stack task");
     }
+    /* persmed MED-B: keep what is being discarded. The cfg file (any state, including a NEWER one the resolve
+     * layer deliberately left unpreserved) goes to kiln_configs.json.bad; the quarantining legacy NVS blob, when
+     * there is one, goes to kiln_configs.nvs.bad. If a copy that should exist cannot be made, nothing is
+     * discarded. */
+    if (!kiln_cfg_store_cfg_fs_preserve_existing_file()) {
+        return set_reason(reason_out, reason_cap,
+                           "refusing: the unreadable kiln config file could not be copied to .bad first -- "
+                           "nothing was discarded");
+    }
+    if (cfg_fs_is_available()) {
+        hal_kv_handle_t rh;
+        if (hal_kv_open(&rh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            size_t nlen = 0;
+            if (hal_kv_get_blob(&rh, NVS_KEY_STORE, NULL, &nlen) == HAL_OK && nlen > 0 && nlen <= 65536) {
+                uint8_t *nb = persist_scratch_alloc(nlen);
+                bool kept = false;
+                if (nb) {
+                    size_t got = nlen;
+                    if (hal_kv_get_blob(&rh, NVS_KEY_STORE, nb, &got) == HAL_OK && got == nlen) {
+                        kept = kiln_cfg_store_cfg_fs_get_write_fn()(KILN_CFG_STORE_NVS_BAD_PATH, nb, nlen) == ESP_OK;
+                    }
+                    free(nb);
+                }
+                if (!kept) {
+                    hal_kv_close(&rh);
+                    return set_reason(reason_out, reason_cap,
+                                       "refusing: the legacy NVS kiln config blob could not be copied to .bad "
+                                       "first -- nothing was discarded");
+                }
+            }
+            hal_kv_close(&rh);
+        }
+    }
     ESP_LOGW(TAG, "kiln_cfg_store: operator confirmed discard of quarantined store (%s) -- starting a "
                   "fresh, empty store",
              s_quarantine_reason);
@@ -2120,6 +2313,13 @@ typedef struct {
     kiln_pkg_safety_t pico;
 } kiln_cfg_import_scratch_t;
 
+/* SR-31 (BW-06): Pico params retired from the mirror table (context_max_age_s 0x0401,
+ * mainfault_debounce_ms 0x0404, 0x0405). Packages made before the removal carry them. */
+static bool pkg_param_id_is_retired(uint16_t id)
+{
+    return id == 0x0401u || id == 0x0404u || id == 0x0405u;
+}
+
 /* ---- Shared validate-only core, factored out of kiln_cfg_store_import_
  * package_json() (docs/KILN_PROFILES_PLAN.md item 17, backup-restore
  * follow-up): the backup/restore path needs a two-pass "validate every
@@ -2200,7 +2400,8 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
     for (uint16_t i = 0; i < s->pico.count; i++) {
         uint8_t known_type = 0;
         const char *known_name = NULL;
-        if (!safety_cfg_store_lookup(s->pico.entries[i].param_id, &known_type, &known_name)) {
+        if (!safety_cfg_store_lookup(s->pico.entries[i].param_id, &known_type, &known_name) &&
+            !pkg_param_id_is_retired(s->pico.entries[i].param_id)) {
             char msg[128];
             snprintf(msg, sizeof(msg),
                      "package's safety-processor section names parameter id %u, which this firmware "
@@ -2223,9 +2424,50 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
     if (!kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico, &recomputed)) {
         IMPORT_REFUSE("internal error: hash computation failed");
     }
+    if (recomputed != declared_hash && s->cand.version < 27) {
+        /* BW-06 follow-up: a package exported before zones v27 hashed the canonical form without
+         * tc_sheath_tau_s. Verify against that form, then re-hash in the current form. */
+        size_t legacy_len = 0;
+        uint32_t legacy = 0;
+        if (zones_config_export_canonical_pre_v27(&s->cand, s->canonical, sizeof(s->canonical), &legacy_len) &&
+            kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)legacy_len, &s->pico, &legacy) &&
+            legacy == declared_hash) {
+            for (size_t zi = 0; zi < sizeof(s->cand.zones) / sizeof(s->cand.zones[0]); zi++) {
+                s->cand.zones[zi].tc_sheath_tau_s = 0; /* v26 padding bytes, not a setting */
+            }
+            if (!zones_config_export_canonical(&s->cand, s->canonical, sizeof(s->canonical), &canonical_len) ||
+                !kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico,
+                                           &recomputed)) {
+                IMPORT_REFUSE("internal error: hash computation failed");
+            }
+            declared_hash = recomputed;
+        }
+    }
     if (recomputed != declared_hash) {
         IMPORT_REFUSE("package hash does not match its contents -- the file is corrupted, was "
                       "hand-edited, or was truncated in transit");
+    }
+
+    /* SR-31 (BW-06): the hash above covered the ORIGINAL bytes, retired ids included. Now skip
+     * the retired ids (0x0401/0x0404/0x0405) so they are never stored or applied, and re-hash
+     * what is actually kept. Unknown ids were already refused above. */
+    {
+        uint16_t kept = 0;
+        for (uint16_t i = 0; i < s->pico.count; i++) {
+            if (pkg_param_id_is_retired(s->pico.entries[i].param_id)) {
+                ESP_LOGW(TAG, "kiln package import: skipping retired safety param id 0x%04X (SR-31)",
+                         (unsigned)s->pico.entries[i].param_id);
+                continue;
+            }
+            s->pico.entries[kept++] = s->pico.entries[i];
+        }
+        if (kept != s->pico.count) {
+            s->pico.count = kept;
+            if (!kiln_package_compute_hash(pkg_schema, s->canonical, (uint16_t)canonical_len, &s->pico,
+                                           &recomputed)) {
+                IMPORT_REFUSE("internal error: hash computation failed after retired-param skip");
+            }
+        }
     }
 
     /* ---- Compatibility 5.3, table rows 2/3 (plan section 5.3,

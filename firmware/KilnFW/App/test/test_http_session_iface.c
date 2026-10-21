@@ -6,10 +6,12 @@
 // and a REAL persisted policy (web_auth_store_set_policy()/fake_kv.c), with
 // fake_time.c's controllable clock standing in for hal_time_now_ms() -- no
 // transcribed copy of any of this logic.
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
 
+#include "psa/crypto.h" /* AX-04 psa_stub_hash_fail */
 #include "../drivers/http/http_session_iface.h"
 #include "../drivers/net/web_auth_session.h"
 #include "../drivers/persist/web_auth_store.h"
@@ -217,7 +219,7 @@ static void test_touch_unknown_token_and_never_timeout(void)
 
     set_policy_timeout(-1); // "never" (web_auth_store's -1 sentinel)
     make_session("tok-never", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
-    fake_time_advance_ms(1000u * 3600u * 24u); // a full day later
+    fake_time_advance_ms(1000u * 3600u * 10u); // 10 h later (inside the AG-05 12 h absolute cap)
     http_auth_session_touch("tok-never", "10.0.0.5", false);
 
     web_auth_session_role_t role;
@@ -562,8 +564,8 @@ static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
     // Even long after any ordinary timeout would have expired it, the never
     // policy alone never drops it -- only the presence argument does.
     fake_time_advance_ms(365ULL * 24 * 3600 * 1000);
-    TEST_CHECK(http_auth_any_ap_session_active(true),
-               "a year later, still defers while a station is present -- never-expire really never expires");
+    TEST_CHECK(!http_auth_any_ap_session_active(true),
+               "a year later, no longer defers: AG-05 12 h absolute cap applies even under the never policy");
     TEST_CHECK(!http_auth_any_ap_session_active(false),
                "a year later, does not defer once the station is gone -- never-expire alone can't pin the AP up");
 
@@ -572,6 +574,42 @@ static void test_any_ap_session_active_never_timeout_requires_ap_station(void)
 
 // AUDIT_LOGSTORE_TIME LOW-1: an expired session left allocated would read valid again
 // once the uint32 ms tick wraps (2^32 ms = 49.7 days after its last use).
+// AZ-03: the LVGL-side reset gesture posts a request; httpd applies it on its
+// next table access instead of another task mutating the unlocked table.
+static void test_destroy_all_request_applied_by_httpd(void)
+{
+    TEST_SECTION("AZ-03 destroy-all request is deferred to the httpd-side table access");
+    reset_all();
+    set_policy_timeout(600);
+    make_session("tok-az03", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    TEST_CHECK(http_auth_session_status("tok-az03", "10.0.0.5", &role, NULL, NULL), "session live before");
+    http_session_destroy_all_request_post();
+    TEST_CHECK(!http_auth_session_status("tok-az03", "10.0.0.5", &role, NULL, NULL),
+               "session gone after the request is applied");
+    make_session("tok-az03b", WEB_AUTH_SESSION_ROLE_USER, 0);
+    TEST_CHECK(http_auth_session_status("tok-az03b", "10.0.0.5", &role, NULL, NULL),
+               "request applies once; a later session survives");
+}
+
+// FX-01: the Wi-Fi task reads the table through http_auth_any_ap_session_active();
+// that read must never apply a posted destroy-all (only httpd does).
+static void test_fx01_wifi_read_does_not_apply_destroy_all(void)
+{
+    TEST_SECTION("FX-01 http_auth_any_ap_session_active never applies the posted destroy-all");
+    reset_all();
+    set_policy_timeout(600);
+    make_session("tok-fx01", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    http_auth_session_touch("tok-fx01", "10.0.0.5", /*via_ap=*/true);
+    http_session_destroy_all_request_post();
+    TEST_CHECK(!http_auth_any_ap_session_active(false), "FA-02 Wi-Fi-path read sees no session once a destroy-all is posted");
+    TEST_CHECK(!http_auth_any_ap_session_active(true), "FA-02 same with a station associated");
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    TEST_CHECK(!http_auth_session_status("tok-fx01", "10.0.0.5", &role, NULL, NULL),
+               "httpd-side access applies the destroy-all");
+    TEST_CHECK(!http_auth_any_ap_session_active(false), "after httpd applied it the Wi-Fi read sees none");
+}
+
 static void test_expired_session_does_not_revive_after_tick_wrap(void)
 {
     TEST_SECTION("expired session is freed and stays dead across the 2^32 ms tick wrap");
@@ -614,8 +652,86 @@ static void test_session_expired_after_idle_longer_than_tick_wrap(void)
                "after a tick-wrap-length idle the session is expired, not revived by the wrapped 32-bit difference");
 }
 
+// OF-01/OF-02: the last-access timestamp is one 32-bit atomic (no hi/lo pair
+// that can tear on a carry) and the wrap check loads it exactly once.
+static void test_ax01_session_survives_past_2_pow_32_ms(void)
+{
+    TEST_SECTION("AX-01 a session resolves repeatedly after uptime > 2^32 ms");
+    reset_all();
+    set_policy_timeout(3600);
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_NONE;
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL); /* record an access */
+    fake_time_advance_ms(0x7FFFFFFFu);
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL);
+    fake_time_advance_ms(0x7FFFFFFFu);
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL);
+    fake_time_advance_ms(10002u); /* uptime now 2^32 + 10 s */
+    (void)http_auth_session_status("nobody", "10.0.0.5", &role, NULL, NULL);
+    make_session("tok-ax01", WEB_AUTH_SESSION_ROLE_ADMIN, (uint32_t)hal_time_now_ms());
+    TEST_CHECK(http_auth_session_resolve("tok-ax01", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN, "first resolve ADMIN");
+    fake_time_advance_ms(1000u);
+    TEST_CHECK(http_auth_session_resolve("tok-ax01", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN,
+               "second resolve still ADMIN (table not wiped by a truncated-timestamp gap)");
+    TEST_CHECK(http_auth_session_status("tok-ax01", "10.0.0.5", &role, NULL, NULL), "status still valid");
+}
+
+// AX-04: a failed SHA-256 yields no key: hash_token reports failure, resolve answers NONE.
+static void test_ax04_hash_failure_refuses(void)
+{
+    TEST_SECTION("AX-04 SHA-256 failure is reported and never becomes a zero key");
+    reset_all();
+    set_policy_timeout(3600);
+    make_session("tok-ax04", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    uint8_t h[32];
+    psa_stub_hash_fail = true;
+    TEST_CHECK(!http_session_hash_token("x", 1, h), "hash_token reports failure");
+    TEST_CHECK(http_auth_session_resolve("tok-ax04", "10.0.0.5") == HTTP_AUTH_ROLE_NONE, "resolve answers NONE");
+    web_auth_session_role_t role = WEB_AUTH_SESSION_ROLE_ADMIN;
+    TEST_CHECK(!http_auth_session_status("tok-ax04", "10.0.0.5", &role, NULL, NULL) &&
+                   role == WEB_AUTH_SESSION_ROLE_NONE,
+               "status refuses");
+    psa_stub_hash_fail = false;
+    TEST_CHECK(http_session_hash_token("x", 1, h), "hash_token succeeds again");
+    TEST_CHECK(http_auth_session_resolve("tok-ax04", "10.0.0.5") == HTTP_AUTH_ROLE_ADMIN, "session intact afterwards");
+}
+
+static void test_of01_last_access_single_atomic_loaded_once(void)
+{
+    TEST_SECTION("OF-01/02 last-access timestamp is a single 32-bit atomic, loaded once");
+    static const char *const cand[] = {
+        "../drivers/http/http_session_iface.c",
+        "App/drivers/http/http_session_iface.c",
+        "firmware/KilnFW/App/drivers/http/http_session_iface.c",
+    };
+    char *text = test_read_source_anchored(__FILE__, "../drivers/http/http_session_iface.c", cand,
+                                           sizeof(cand) / sizeof(cand[0]));
+    TEST_CHECK(text != NULL, "http_session_iface.c readable");
+    if (text == NULL) {
+        return;
+    }
+    TEST_CHECK(strstr(text, "static volatile uint32_t s_last_access_ms;") == NULL &&
+                   strstr(text, "s_last_access_hi") != NULL && strstr(text, "s_last_access_seq") != NULL,
+               "AX-01: timestamp is 64-bit (hi/lo under a sequence counter), not a truncated uint32");
+    const char *fn = strstr(text, "static bool session_table_gap_wrapped");
+    const char *end = fn ? strstr(fn, "static void session_wrap_guard") : NULL;
+    TEST_CHECK(fn != NULL && end != NULL, "wrap check located");
+    if (fn != NULL && end != NULL) {
+        int loads = 0;
+        for (const char *p = fn; (p = strstr(p, "session_last_access_load()")) != NULL && p < end; p++) {
+            loads++;
+        }
+        TEST_CHECK(loads == 1, "wrap check loads the timestamp exactly once");
+    }
+    free(text);
+}
+
 void run_test_http_session_iface(void) {
+    test_of01_last_access_single_atomic_loaded_once();
+    test_ax01_session_survives_past_2_pow_32_ms();
+    test_ax04_hash_failure_refuses();
     test_session_expired_after_idle_longer_than_tick_wrap();
+    test_destroy_all_request_applied_by_httpd();
+    test_fx01_wifi_read_does_not_apply_destroy_all();
     test_expired_session_does_not_revive_after_tick_wrap();
     test_status_reports_without_touching();
     test_status_unknown_and_no_token();

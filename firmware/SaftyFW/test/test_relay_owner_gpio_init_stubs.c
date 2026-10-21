@@ -25,11 +25,23 @@ QueueHandle_t xQueueCreate(UBaseType_t num_items, UBaseType_t item_size)
     return &s_dummy_queue;
 }
 
+extern int g_stub_queue_back_calls;
 BaseType_t xQueueSend(QueueHandle_t queue, const void *item, TickType_t ticks_to_wait)
 {
     (void)queue;
     (void)item;
     (void)ticks_to_wait;
+    g_stub_queue_back_calls++;
+    return pdTRUE;
+}
+
+int g_stub_queue_back_calls;
+int g_stub_queue_front_calls;
+
+BaseType_t xQueueSendToFront(QueueHandle_t queue, const void *item, TickType_t ticks_to_wait)
+{
+    (void)queue; (void)item; (void)ticks_to_wait;
+    g_stub_queue_front_calls++;
     return pdTRUE;
 }
 

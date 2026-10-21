@@ -579,7 +579,7 @@ Live read, 2026-09-13, `GET http://192.168.1.156/api/zones`:
 
 Every zone reads `ZONE_MODEL_FIT_TEMP_UNKNOWN`. All three models predate
 `5d3bc854` and were backfilled to the sentinel by
-`zones_config_migrate.c:1006`; no zone has been re-autotuned since, so the
+`zones_config_migrate.c:730`; no zone has been re-autotuned since, so the
 field that the whole schedule is normalised against is empty across the
 entire fixture. §3 says using `model_fit_temp_c` rather than a guessed
 constant makes correct `T_ref` "already guaranteed structurally." **It does

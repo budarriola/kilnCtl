@@ -37,6 +37,8 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
 #include "../drivers/http/safety_stack_margin_http.c"
 
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; } /* RS-02: http_auth_http.c refusal drain */
+
 // ---------------------------------------------------------------------------
 // esp_http_server.h / wifi_provision_http.h stub bodies -- never invoked by
 // these tests (only safety_stack_margin_build_json() is called directly),

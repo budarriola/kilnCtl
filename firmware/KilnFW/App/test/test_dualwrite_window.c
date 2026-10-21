@@ -323,6 +323,31 @@ static void test_window_may_close_is_report_only_by_construction(void)
                "no auto-drop occurred");
 }
 
+extern bool g_hop_stub_internal_stack; // test_safety_cfg_store.c's flash-worker stub model (main executable)
+
+static void test_psram_stack_note_hops_to_flash_worker(void)
+{
+    TEST_SECTION("dualwrite_window notes -- from a PSRAM-stack task the persist hops to the flash worker; "
+                 "without the worker it is refused and the flag is not persisted");
+    reset_all();
+    dualwrite_window_status_t st;
+
+    fake_kv_set_write_safe_here(false);
+    g_hop_stub_internal_stack = false; /* stub runs the job inline on the PSRAM-modelled stack: guard refuses */
+    dualwrite_window_note_firing_complete();
+    fake_kv_set_write_safe_here(true);
+    dualwrite_window_get_status(&st);
+    TEST_CHECK(st.firing_complete == false, "no worker context: the guarded write is refused, flag not persisted");
+
+    fake_kv_set_write_safe_here(false);
+    g_hop_stub_internal_stack = true;
+    dualwrite_window_note_firing_complete();
+    g_hop_stub_internal_stack = false;
+    fake_kv_set_write_safe_here(true);
+    dualwrite_window_get_status(&st);
+    TEST_CHECK(st.firing_complete == true, "through the worker the PSRAM-stack note persists");
+}
+
 void run_test_dualwrite_window(void)
 {
     // stubs/freertos/semphr.h's xSemaphoreTake() returns
@@ -346,6 +371,7 @@ void run_test_dualwrite_window(void)
     test_compute_status_window_may_close();
     test_boot_check_persists_and_is_once_per_boot();
     test_note_firing_complete_and_restore_verified_are_sticky();
+    test_psram_stack_note_hops_to_flash_worker();
     test_note_mount_failure_resets_streak_but_not_flags();
     test_get_status_load_tolerant_on_no_record();
     test_window_may_close_is_report_only_by_construction();

@@ -62,10 +62,11 @@
 #define ZBG_REGEN_ENV "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS"
 
 /* Padding bytes natural C alignment puts in zones_cfg_t today: 2 after the
- * 6-byte header, 11 per zone_cfg_t (3+3+3+2), 3 after timing_profile_count.
+ * 6-byte header, 9 per zone_cfg_t (3+3+3; the old 2-byte hole before
+ * hyst_c became tc_sheath_tau_s in v27), 3 after timing_profile_count.
  * A field added to the struct but not to the fill below would show up as
  * extra "padding" here, so this is also the "every field was set" check. */
-#define ZBG_EXPECTED_PAD_BYTES (2u + 11u * MAX31856_CHANNEL_COUNT + 3u)
+#define ZBG_EXPECTED_PAD_BYTES (2u + 9u * MAX31856_CHANNEL_COUNT + 3u)
 
 static char s_text[64 * 1024];
 static size_t s_text_len;
@@ -224,6 +225,7 @@ static void zbg_fill_zone(zones_cfg_t *c, int zi)
     ZF(progress_band_c);
     ZB(zone_type);
     ZB(failsafe_state);
+    ZH(tc_sheath_tau_s);
     ZF(hyst_c);
     ZH(min_on_s);
     ZH(min_off_s);
@@ -430,7 +432,89 @@ static void test_zones_blob_golden_matches_firmware_layout(void)
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
 }
 
+/* docs/CONFIG_MIGRATION_CHAIN.md sec 5: the one D1 step (v26 -> v27) must be
+ * exercised against a captured v26 blob. cfg_blobs/zones_v26.bin is a
+ * minimal valid v26 config (2 zones, "ZoneA", kp 3.5, max 1150 C, relay
+ * mask 1, real v26 CRC) with 0x1234/0x1235/0x1236 written into each zone's
+ * offset-222 bytes: on v26 those
+ * two bytes per zone were padding, so this is exactly "stray, non-zero
+ * padding" and the step must zero it rather than adopt it as a lag tau. */
+#define ZBG_V26_FIXTURE_REL "cfg_blobs/zones_v26.bin"
+
+static void test_zones_v26_fixture_migrates_through_the_step(void)
+{
+    char *path = test_resolve_from_here(__FILE__, ZBG_V26_FIXTURE_REL);
+    TEST_CHECK(path != NULL, "zones v26 fixture: resolve path");
+    if (!path) {
+        return;
+    }
+    static uint8_t blob[sizeof(zones_cfg_t) + 16];
+    size_t len = 0;
+    FILE *f = fopen(path, "rb");
+    TEST_CHECK(f != NULL, "zones v26 fixture: cfg_blobs/zones_v26.bin opens");
+    if (f) {
+        len = fread(blob, 1, sizeof(blob), f);
+        fclose(f);
+    }
+    free(path);
+    TEST_CHECK(len == sizeof(zones_cfg_v26_t), "zones v26 fixture: length is sizeof(zones_cfg_v26_t)");
+    TEST_CHECK(blob[0] == 26, "zones v26 fixture: version byte is 26");
+    if (len != sizeof(zones_cfg_v26_t)) {
+        return;
+    }
+
+    static zones_cfg_t out;
+    const char *reason = NULL;
+    zones_decode_result_t r = zones_config_json_decode_blob(blob, len, &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_OK, "zones v26 fixture: decodes (migrated through zones_cfg_step_v26_to_v27)");
+    if (r != ZONES_DECODE_OK) {
+        printf("  reason: %s\n", reason ? reason : "(null)");
+        return;
+    }
+    const zones_cfg_v26_t *src = (const zones_cfg_v26_t *)blob;
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "zones v26 fixture: migrated struct is current version");
+    TEST_CHECK(out.thermo_count == src->thermo_count && out.relay_count == src->relay_count,
+               "zones v26 fixture: wrapper counts carried");
+    bool tau_zero = true;
+    bool name_same = true;
+    bool cal_same = true;
+    for (int i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        tau_zero = tau_zero && out.zones[i].tc_sheath_tau_s == 0;
+        name_same = name_same && memcmp(out.zones[i].name, src->zones[i].name, sizeof(out.zones[i].name)) == 0;
+        cal_same = cal_same && out.zones[i].cal_offset_c == src->zones[i].cal_offset_c;
+    }
+    TEST_CHECK(tau_zero, "zones v26 fixture: stray v26 padding never becomes tc_sheath_tau_s (all zones 0)");
+    TEST_CHECK(name_same && cal_same, "zones v26 fixture: zone names and cal offsets carried");
+    TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0 && out.zones[0].relay_mask == 0x01 &&
+                   out.zones[0].pid_kp == 3.5f && out.zones[0].max_temp_c == 1150.0f,
+               "zones v26 fixture: zone 0 values carried");
+
+    /* Same blob with one flipped byte: the step's own CRC gate refuses it. */
+    blob[30] ^= 0x01u;
+    r = zones_config_json_decode_blob(blob, len, &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_CORRUPT, "zones v26 fixture: a flipped byte fails the v26 CRC gate");
+    blob[30] ^= 0x01u;
+}
+
+/* D2 expiry: a version below ZONES_CFG_MIGRATION_EXPIRY_FLOOR is refused as
+ * too old to consume, at its own correct length, never migrated. */
+static void test_zones_below_expiry_floor_refused(void)
+{
+    _Static_assert(ZONES_CFG_MIGRATION_EXPIRY_FLOOR == ZONES_CFG_VERSION - 8, "plan sec 4.2 floor");
+    static uint8_t blob[sizeof(zones_cfg_v18_t)];
+    memset(blob, 0, sizeof(blob));
+    blob[0] = (uint8_t)(ZONES_CFG_MIGRATION_EXPIRY_FLOOR - 1);
+    static zones_cfg_t out;
+    const char *reason = NULL;
+    TEST_CHECK(blob[0] == 18, "zones expiry: floor - 1 is v18 at ZONES_CFG_VERSION 27");
+    zones_decode_result_t r = zones_config_json_decode_blob(blob, sizeof(zones_cfg_v18_t), &out, &reason);
+    TEST_CHECK(r == ZONES_DECODE_CORRUPT, "zones expiry: v18 blob refused");
+    TEST_CHECK(reason && strstr(reason, "expiry floor") != NULL, "zones expiry: reason names the expiry floor");
+}
+
 void run_test_zones_blob_golden(void)
 {
     test_zones_blob_golden_matches_firmware_layout();
+    test_zones_v26_fixture_migrates_through_the_step();
+    test_zones_below_expiry_floor_refused();
 }

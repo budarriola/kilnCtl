@@ -12,6 +12,11 @@ typedef void (*TaskFunction_t)(void *);
 #define tskNO_AFFINITY ((BaseType_t)-1)
 BaseType_t xTaskCreatePinnedToCore(TaskFunction_t task, const char *name, unsigned long stack, void *arg,
                                    UBaseType_t prio, TaskHandle_t *out, BaseType_t core);
+// UR-01: static task creation (stack depth in bytes, like ESP-IDF). The host fake still runs a thread.
+typedef struct { long opaque[16]; } StaticTask_t;
+typedef uint8_t StackType_t;
+TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t task, const char *name, unsigned long stack, void *arg,
+                                           UBaseType_t prio, StackType_t *stack_buf, StaticTask_t *tcb, BaseType_t core);
 void vTaskDelete(TaskHandle_t t);
 TickType_t xTaskGetTickCount(void);
 void vTaskDelay(TickType_t ticks);

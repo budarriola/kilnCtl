@@ -1728,6 +1728,59 @@ static void test_fuzz_zones_post_toplevel_hostile(void)
     }
 }
 
+/* ZONES_CFG v27 sheath tau on the whole-page POST: z%u_sheath_tau is
+ * optional (absent preserves the stored value, so an older page or a
+ * wizard step that does not know the field cannot reset it), parsed in
+ * seconds 0..600 and refused out of range. The same bounds are mirrored by
+ * the web pages (zones_page.html, setup_wizard_page.html) and checked
+ * against this parser by tools/PcTools/tests/test_sheath_tau_client_bounds.py. */
+static void test_parse_zone_fields_sheath_tau(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_sheath_tau optional (omit preserves), 0..600 s, refused outside");
+    zone_cfg_t current = make_stored_zone();
+    current.tc_sheath_tau_s = 90;
+    static const char base[] = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+                               "z0_cal=1.5&z0_kp=2.0&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                               "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+    struct { const char *extra; bool ok; uint16_t want; const char *msg; } cases[] = {
+        {"", true, 90, "absent z0_sheath_tau preserves the stored tau"},
+        {"&z0_sheath_tau=0", true, 0, "0 turns compensation off"},
+        {"&z0_sheath_tau=180", true, 180, "180 s stored"},
+        {"&z0_sheath_tau=600", true, 600, "600 s upper bound accepted"},
+        {"&z0_sheath_tau=59.6", true, 60, "fractional seconds round to the nearest whole second"},
+        {"&z0_sheath_tau=601", false, 0, "601 s refused"},
+        {"&z0_sheath_tau=-1", false, 0, "negative refused"},
+        {"&z0_sheath_tau=abc", false, 0, "non-numeric refused"},
+        {"&z0_sheath_tau=nan", false, 0, "NaN refused"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char body[640];
+        snprintf(body, sizeof(body), "%s%s", base, cases[i].extra);
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok == cases[i].ok, cases[i].msg);
+        if (ok && cases[i].ok) {
+            TEST_CHECK(out.tc_sheath_tau_s == cases[i].want, cases[i].msg);
+        }
+    }
+}
+
+/* Mode gate: a sheath tau change rides the same POST /api/zones and is
+ * refused 409 while a firing or autotune runs, like every other zone field. */
+static void test_zones_post_sheath_tau_refused_while_running(void)
+{
+    TEST_SECTION("zones_post_handler -- a z0_sheath_tau change is refused by the mode gate while RUNNING");
+    s_test_profile_status.state = PROFILE_EXEC_RUNNING;
+    s_test_ok_called = false;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2&z0_sheath_tau=120");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    TEST_CHECK(!s_test_ok_called, "no success for a sheath tau change while running");
+    TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
+               "refused with the mode-gate 409 body");
+}
+
 // Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
 // spec): zones_post_handler() used to call system_mode_gate_check() AFTER
 // ota_http_check_interlocks() -- which already refuses (409 "a profile is
@@ -2335,6 +2388,16 @@ static void test_zones_cfg_lock_covers_commit_and_setters(void)
     TEST_CHECK(!zones_config_set_max_ramp_no_save(0, -1.0f), "rejected setter");
     TEST_CHECK(s_config_generation == g && s_zones_cfg_lock_acquires == a0 + 1,
                "a rejected setter neither locks nor bumps");
+
+    /* Sheath tau setter: same 0..600 s bound as the POST parser and validate. */
+    float tau_out = -1.0f;
+    TEST_CHECK(zones_config_set_tc_sheath_tau_no_save(0, 600.0f), "sheath tau setter takes 600 s");
+    TEST_CHECK(zones_config_get_tc_sheath_tau(0, &tau_out) && tau_out == 600.0f, "sheath tau 600 s reads back");
+    TEST_CHECK(!zones_config_set_tc_sheath_tau_no_save(0, 601.0f), "sheath tau setter refuses 601 s");
+    TEST_CHECK(!zones_config_set_tc_sheath_tau_no_save(0, -1.0f), "sheath tau setter refuses -1 s");
+    TEST_CHECK(!zones_config_set_tc_sheath_tau_no_save(0, NAN), "sheath tau setter refuses NaN");
+    TEST_CHECK(zones_config_get_tc_sheath_tau(0, &tau_out) && tau_out == 600.0f, "refused sheath tau leaves 600 s");
+    TEST_CHECK(zones_config_set_tc_sheath_tau_no_save(0, 0.0f), "sheath tau setter takes 0 (off)");
 }
 
 static void test_zones_post_refuses_relay_claimed_by_aux(void)
@@ -2870,6 +2933,20 @@ static void stage_zones_blob(const void *data, size_t len)
     hal_kv_set_blob(&h, NVS_KEY_ZONES, data, len);
     hal_kv_commit(&h);
     hal_kv_close(&h);
+}
+
+/* FS-01: with cfg mounted, a missing zones.json no longer adopts a legacy NVS blob, so tests that exercise
+ * migration of an older blob stage it as the zones.json file (4-byte LE rev + raw blob) instead. */
+static void stage_zones_file_blob(const void *data, size_t len)
+{
+    uint8_t buf[sizeof(zones_cfg_t) + 4];
+    if (len + 4 > sizeof(buf)) {
+        return;
+    }
+    memset(buf, 0, 4);
+    buf[0] = 1;
+    memcpy(buf + 4, data, len);
+    (void)cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, buf, len + 4);
 }
 
 static void test_nvs_load_from_too_short_is_corrupt_not_refused(void)
@@ -3494,6 +3571,15 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
 // never-trust-a-bare-write-return-code precedent. This stages a real OLDER
 // (v1) blob -- not the never-reached newer-blob case above -- and checks
 // what's actually on flash afterward, not just what's in RAM.
+/* v26 blobs carry a real CRC the D1 step's own gate checks: everything
+ * before crc32, then 4 zero bytes (zones_config_migrate.c). */
+static void zh_stamp_v26_crc(zones_cfg_v26_t *src)
+{
+    static const uint8_t zero4[sizeof(uint32_t)] = {0};
+    uint32_t crc = esp_crc32_le(0, (const uint8_t *)src, offsetof(zones_cfg_v26_t, crc32));
+    src->crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+}
+
 static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
 {
     TEST_SECTION("zones_http_start -- single-step migration hazard: a migrated OLDER blob is "
@@ -3501,9 +3587,10 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     nvs_test_enable(true);
     nvs_test_clear();
 
-    zones_cfg_v1_t src;
+    zones_cfg_v26_t src;
     memset(&src, 0, sizeof(src));
-    src.version = 1;
+    src.version = 26; /* the one consumable older version (D1 step input) */
+    src.timing_profile_count = 1;
     src.thermo_count = 2;
     src.relay_count = 2;
     src.max_simultaneous_relays = 2;
@@ -3511,7 +3598,8 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     src.zones[0].relay_mask = 0x01;
     src.zones[0].pid_kp = 3.5f;
     src.zones[0].max_temp_c = 1150.0f;
-    stage_zones_blob(&src, sizeof(src));
+    zh_stamp_v26_crc(&src);
+    stage_zones_file_blob(&src, sizeof(src));
 
     s_zones_config_valid = false;
     (void)zones_http_start(); // ESP_ERR_INVALID_STATE from the stub HTTP server is expected/ignored --
@@ -3530,9 +3618,9 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     }
     TEST_CHECK(readback_err == HAL_OK, "the migrated blob must actually be readable back from the cfg file");
     TEST_CHECK(readback_len == sizeof(zones_cfg_t),
-              "the persisted blob must be full current-version size, not the old v1 size still sitting there");
+              "the persisted blob must be full current-version size");
     TEST_CHECK(readback[0] == ZONES_CFG_VERSION,
-              "THE HAZARD: flash must hold the migrated version, not the stale v1 byte a second-step-only "
+              "THE HAZARD: flash must hold the migrated version, not the stale v26 byte a second-step-only "
               "migration policy would then be unable to consume");
 
     zones_cfg_t on_disk;
@@ -3581,9 +3669,10 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     nvs_test_enable(true);
     nvs_test_clear();
 
-    zones_cfg_v1_t src;
+    zones_cfg_v26_t src;
     memset(&src, 0, sizeof(src));
-    src.version = 1;
+    src.version = 26; /* the one consumable older version (D1 step input) */
+    src.timing_profile_count = 1;
     src.thermo_count = 1;
     src.relay_count = 1;
     src.max_simultaneous_relays = 1;
@@ -3591,7 +3680,8 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     src.zones[0].relay_mask = 0x01;
     src.zones[0].pid_kp = 2.0f;
     src.zones[0].max_temp_c = 1000.0f;
-    stage_zones_blob(&src, sizeof(src));
+    zh_stamp_v26_crc(&src);
+    stage_zones_file_blob(&src, sizeof(src));
 
     // Sabotage the cfg write so BOTH write-back attempts
     // (zones_config_persist_migrated_blob_verified()'s bounded retry loop
@@ -3604,7 +3694,7 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     TEST_CHECK(zones_config_get_migration_persist_fault(&fault),
               "a write-back that lies on both attempts must latch the migration-persist fault -- "
               "this used to be an ESP_LOGE only, invisible to the operator");
-    TEST_CHECK(fault.on_disk_version == 1, "the latched fault must name the pre-migration on-disk version");
+    TEST_CHECK(fault.on_disk_version == 26, "the latched fault must name the pre-migration on-disk version");
     TEST_CHECK(fault.fw_version == ZONES_CFG_VERSION,
               "the latched fault must name the firmware version the migration was TO, not a stale value");
     zones_config_cfg_fs_reset_write_fn_for_test();
@@ -3733,11 +3823,13 @@ static void test_nvs_load_from_old_version_wrong_length_is_rejected(void)
     nvs_test_enable(true);
     nvs_test_clear();
 
-    zones_cfg_v3_t src3;
+    // Was v3-sized-claims-v4; v1..v18 are now below the D2 expiry floor
+    // and refused before any length check, so the lie is told one version up.
+    zones_cfg_v25_t src3;
     memset(&src3, 0, sizeof(src3));
-    src3.version = 4; // LIES about being v4 -- actually only a v3-sized blob
+    src3.version = 26; // LIES about being v26 -- actually only a v25-sized blob
     src3.thermo_count = 3;
-    stage_zones_blob(&src3, sizeof(src3)); // v3-sized, not v4-sized
+    stage_zones_blob(&src3, sizeof(src3)); // v25-sized, not v26-sized
 
     zones_cfg_t out_cfg;
     bool found = true, valid = true;
@@ -4144,232 +4236,16 @@ static void test_nvs_save_load_round_trip_current_version(void)
 // their documented defaults (0 / THERMO_TC_K) -- but the per-zone fields v1
 // DOES carry (name, gains, thresholds, model params) must be the real staged
 // values, not zeros or a wrong-offset read.
-static void test_nvs_load_from_v1_blob_upconverts_fields_correctly(void)
-{
-    TEST_SECTION("nvs_load_from -- a v1 blob (predates continue_on_zone_trip/safety_tc_type) "
-                 "upconverts every zone's real field values correctly");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v1_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 1;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].cal_offset_c = 1.5f;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].pid_ki = 0.2f;
-    src.zones[0].pid_kd = 0.1f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.zones[0].min_temp_c = -10.0f;
-    src.zones[0].model_k_dc = 7.0f;
-    src.zones[0].model_tau_s = 300.0f;
-    src.zones[0].model_dead_time_s = 12.0f;
-
-    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].cal_offset_c = 2.5f;
-    src.zones[1].pid_kp = 4.5f;
-    src.zones[1].max_temp_c = 1250.0f;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v1 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 0, "v1 predates continue_on_zone_trip -- documented default 0");
-    TEST_CHECK(out_cfg.safety_tc_type == THERMO_TC_K, "v1 predates safety_tc_type -- documented default THERMO_TC_K");
-
-    TEST_CHECK(strcmp(out_cfg.zones[0].name, "ZoneA") == 0, "zones[0].name (real v1 value) carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01, "zones[0].relay_mask carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].cal_offset_c, 1.5f, 1e-6, "zones[0].cal_offset_c carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].pid_kp, 3.5f, 1e-6, "zones[0].pid_kp carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].pid_ki, 0.2f, 1e-6, "zones[0].pid_ki carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1150.0f, 1e-6, "zones[0].max_temp_c carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].min_temp_c, -10.0f, 1e-6, "zones[0].min_temp_c carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 7.0f, 1e-6, "zones[0].model_k_dc carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 300.0f, 1e-6, "zones[0].model_tau_s carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 12.0f, 1e-6, "zones[0].model_dead_time_s carried through");
-    TEST_CHECK(out_cfg.zones[0].tc_type == THERMO_TC_K, "zones[0].tc_type defaults to THERMO_TC_K (v1 predates it)");
-    TEST_CHECK(out_cfg.zones[0].thermo_mask == 0x01, "zones[0].thermo_mask defaults to legacy 1<<0 mapping");
-
-    TEST_CHECK(strcmp(out_cfg.zones[1].name, "ZoneB") == 0, "zones[1].name must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK_NEAR(out_cfg.zones[1].cal_offset_c, 2.5f, 1e-6, "zones[1].cal_offset_c must be the real value");
-    TEST_CHECK_NEAR(out_cfg.zones[1].pid_kp, 4.5f, 1e-6, "zones[1].pid_kp must be the real value");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c must be the real value");
-    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask defaults to legacy 1<<1 mapping");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Dedicated v2 blob test -- v2 adds continue_on_zone_trip over v1 but shares
 // v1's zone layout (zone_cfg_v1_t) and converter (convert_zone_v1()).
-static void test_nvs_load_from_v2_blob_upconverts_fields_correctly(void)
-{
-    TEST_SECTION("nvs_load_from -- a v2 blob (adds continue_on_zone_trip over v1) upconverts "
-                 "every zone's real field values correctly");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v2_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 2;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.continue_on_zone_trip = 1;
-
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-
-    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].pid_kp = 4.5f;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].model_tau_s = 250.0f;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v2 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "v2's real continue_on_zone_trip value carried through (unlike v1's forced 0)");
-    TEST_CHECK(out_cfg.safety_tc_type == THERMO_TC_K, "v2 predates safety_tc_type -- documented default THERMO_TC_K");
-
-    TEST_CHECK(strcmp(out_cfg.zones[1].name, "ZoneB") == 0, "zones[1].name must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK_NEAR(out_cfg.zones[1].pid_kp, 4.5f, 1e-6, "zones[1].pid_kp must be the real value");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c must be the real value");
-    TEST_CHECK_NEAR(out_cfg.zones[1].model_tau_s, 250.0f, 1e-6, "zones[1].model_tau_s must be the real value");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Dedicated v3 blob test -- v3 adds the 8 guard thresholds over v1's zone
 // layout; still predates thermo_mask/tc_type/ct_mask.
-static void test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly(void)
-{
-    TEST_SECTION("nvs_load_from -- a v3 blob (adds the 8 guard thresholds) upconverts every "
-                 "zone's real field values, guard thresholds included, correctly");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v3_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 3;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.continue_on_zone_trip = 1;
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.zones[0].guard_wrong_dir_window_s = 45.0f;
-    src.zones[0].guard_runaway_margin_c = 15.0f;
-
-    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].guard_wrong_dir_window_s = 55.0f;
-    src.zones[1].guard_wrong_dir_rate_c_per_min = 5.0f;
-    src.zones[1].guard_off_settle_s = 20.0f;
-    src.zones[1].guard_runaway_rate_c_per_min = 8.0f;
-    src.zones[1].guard_runaway_margin_c = 25.0f;
-    src.zones[1].guard_drift_period_s = 60.0f;
-    src.zones[1].guard_sensor_fault_debounce_ticks = 3.0f;
-    src.zones[1].guard_frozen_window_s = 90.0f;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v3 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
-
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_wrong_dir_window_s, 55.0f, 1e-6, "zones[1].guard_wrong_dir_window_s -- new in v3 -- carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_wrong_dir_rate_c_per_min, 5.0f, 1e-6, "zones[1].guard_wrong_dir_rate_c_per_min carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_off_settle_s, 20.0f, 1e-6, "zones[1].guard_off_settle_s carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_rate_c_per_min, 8.0f, 1e-6, "zones[1].guard_runaway_rate_c_per_min carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 25.0f, 1e-6, "zones[1].guard_runaway_margin_c carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_drift_period_s, 60.0f, 1e-6, "zones[1].guard_drift_period_s carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_sensor_fault_debounce_ticks, 3.0f, 1e-6, "zones[1].guard_sensor_fault_debounce_ticks carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_frozen_window_s, 90.0f, 1e-6, "zones[1].guard_frozen_window_s carried through");
-
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01, "zones[0].relay_mask still correct (sanity check)");
-    TEST_CHECK_NEAR(out_cfg.zones[0].guard_wrong_dir_window_s, 45.0f, 1e-6, "zones[0].guard_wrong_dir_window_s still correct (sanity check)");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Dedicated v4 blob test -- v4 appends thermo_mask (a REAL, operator-set
 // value now, not the legacy 1<<chan_idx default v1/v3 fall back to) at the
 // tail of v3's zone layout; still predates tc_type.
-static void test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly(void)
-{
-    TEST_SECTION("nvs_load_from -- a v4 blob (adds real thermo_mask over v3) upconverts every "
-                 "zone's real field values, including the operator-set thermo_mask, correctly");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v4_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 4;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.zones[0].thermo_mask = 0x04; // deliberately NOT 1<<0, to distinguish real value from the legacy default
-
-    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].guard_runaway_margin_c = 25.0f;
-    src.zones[1].thermo_mask = 0x01; // deliberately NOT 1<<1
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v4 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
-
-    TEST_CHECK(out_cfg.zones[0].thermo_mask == 0x04,
-              "zones[0].thermo_mask is the real v4 operator-set value, not the legacy 1<<0 default");
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x01,
-              "zones[1].thermo_mask is the real v4 operator-set value, not the legacy 1<<1 default");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 25.0f, 1e-6, "zones[1].guard_runaway_margin_c carried through");
-    TEST_CHECK(out_cfg.zones[1].tc_type == THERMO_TC_K, "zones[1].tc_type defaults to THERMO_TC_K (v4 predates it)");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Item 2 -- the actual historical bug: an old-version (v5, i.e. the exact
 // "3 -> 4, 4 -> 5 grew zone_cfg_t mid-struct" case the defect report calls
@@ -4379,72 +4255,6 @@ static void test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly(void)
 // and flagged VALID" behavior. zones[1]/zones[2] specifically, since those
 // are the ones the old memcpy-based migration got wrong (zones[0] happened
 // to always land correctly, which is exactly what let the bug hide).
-static void test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly(void)
-{
-    TEST_SECTION("nvs_load_from -- item 2: an old (v5) blob's zones[1]/zones[2] land at the "
-                 "correct fields after typed conversion, not shifted");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v5_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 5;
-    src.thermo_count = 3;
-    src.relay_count = 4;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 5;
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].max_temp_c = 1100.0f;
-    src.zones[0].tc_type = 1;
-    src.zones[0].guard_runaway_margin_c = 11.0f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].max_temp_c = 1200.0f;
-    src.zones[1].tc_type = 2;
-    src.zones[1].guard_runaway_margin_c = 22.0f;
-    src.zones[1].thermo_mask = 0x02;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].max_temp_c = 1300.0f;
-    src.zones[2].tc_type = 3;
-    src.zones[2].guard_runaway_margin_c = 33.0f;
-    src.zones[2].thermo_mask = 0x04;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v5 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "top-level continue_on_zone_trip carried through");
-    TEST_CHECK(out_cfg.safety_tc_type == 5, "top-level safety_tc_type (real v5 value) carried through");
-
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted -- "
-                                                    "this is the exact field the old bug misread");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1200.0f, 1e-6, "zones[1].max_temp_c must be the real "
-                                                                "value, not an arbitrary float from "
-                                                                "the wrong offset");
-    TEST_CHECK(out_cfg.zones[1].tc_type == 2, "zones[1].tc_type carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 22.0f, 1e-6,
-                    "zones[1].guard_runaway_margin_c -- a thermal guard threshold -- must be the real value");
-    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask (real v5 value) carried through");
-
-    TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
-    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1300.0f, 1e-6, "zones[2].max_temp_c must be the real value");
-    TEST_CHECK(out_cfg.zones[2].tc_type == 3, "zones[2].tc_type carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[2].guard_runaway_margin_c, 33.0f, 1e-6, "zones[2].guard_runaway_margin_c must be the real value");
-    TEST_CHECK(out_cfg.zones[2].thermo_mask == 0x04, "zones[2].thermo_mask (real v5 value) carried through");
-
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01, "zones[0].relay_mask still correct (sanity check)");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1100.0f, 1e-6, "zones[0].max_temp_c still correct (sanity check)");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 /* A config that zones_config_json_validate() accepts, so a test can change exactly
  * one field and attribute the rejection to it. */
@@ -4468,94 +4278,6 @@ static void make_minimal_valid_cfg(zones_cfg_t *cfg)
      * field whose 0 is illegal. */
 }
 
-static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
-{
-    TEST_SECTION("nvs_load_from -- a v7 blob upconverts to v8: every zone's existing fields land "
-                 "correctly and the nine new overrides default to 0 (= firmware default)");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v7_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 7;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-
-    /* Mirrors the bench board's actual live config -- zone 0 is the one that
-     * is really commissioned, zones 1 and 2 carry their own masks. */
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].control_mode = 2;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].max_ramp_c_per_hr = 900.0f;
-    src.zones[0].guard_wrong_dir_window_s = 60.0f;
-    src.zones[0].tc_type = 3;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].guard_runaway_margin_c = 22.0f;
-    src.zones[1].tc_type = 3;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].guard_runaway_margin_c = 33.0f;
-    src.zones[2].tc_type = 3;
-
-    src.crc32 = 0; /* v7's own CRC is not checked on the old-version path */
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v7 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.safety_tc_type == 3, "safety_tc_type carried through");
-
-    TEST_CHECK(out_cfg.zones[0].control_mode == 2, "zones[0].control_mode (PID) survives the upgrade");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_ramp_c_per_hr, 900.0f, 1e-6, "zones[0].max_ramp_c_per_hr survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].guard_wrong_dir_window_s, 60.0f, 1e-6,
-                    "zones[0]'s configured guard window survives -- the operator's setting, not a default");
-
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask must NOT be shifted");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 22.0f, 1e-6, "zones[1] guard threshold correct");
-    TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
-    TEST_CHECK_NEAR(out_cfg.zones[2].guard_runaway_margin_c, 33.0f, 1e-6, "zones[2] guard threshold correct");
-
-    /* v7 predates the nine timing overrides entirely (ZONES_CFG_VERSION 8->9)
-     * -- there is nothing to migrate, so every zone is pointed at ONE
-     * synthesized "Default" profile, and that profile's nine fields are all
-     * 0 (= firmware default), matching exactly how a v7 board already
-     * behaved. */
-    TEST_CHECK(out_cfg.timing_profile_count == 1,
-              "a v7 board -- no per-zone timing data to migrate -- collapses to one shared profile");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0,
-              "the synthesized profile is named \"Default\"");
-    for (uint8_t i = 0; i < 3; i++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "zones[%u] points at the shared Default profile (index 0)", i);
-        TEST_CHECK(out_cfg.zones[i].timing_profile == 0, msg);
-    }
-    const zone_timing_profile_t *tp0 = &out_cfg.timing_profiles[0];
-    bool all_zero = tp0->guard_progress_duty_min == 0.0f && tp0->guard_progress_window_s == 0.0f &&
-                    tp0->guard_drift_hysteresis_c == 0.0f && tp0->guard_frozen_eps_c == 0.0f &&
-                    tp0->guard_cross_zone_period_s == 0.0f && tp0->bangbang_hysteresis_c == 0.0f &&
-                    tp0->cooling_limited_margin_c == 0.0f && tp0->cooling_limited_hold_s == 0.0f &&
-                    tp0->ramp_lock_band_c == 0.0f;
-    TEST_CHECK(all_zero, "the synthesized Default profile's nine fields are all 0 (= firmware default)");
-    TEST_CHECK(out_cfg.pc_link_abort_silence_ms == 0.0f,
-               "the global pc_link_abort_silence_ms also defaults to 0 on upgrade");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // THE test this whole pass is about (task instructions: "the migration needs
 // a test that would FAIL if v8 data were misread -- build a real v8 blob with
@@ -4565,133 +4287,6 @@ static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
 // (sizeof the CURRENT struct instead of the frozen v8 snapshot) would make
 // this blob either get rejected outright (wrong length) or, worse, silently
 // misread -- this test would catch either failure mode.
-static void test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly(void)
-{
-    TEST_SECTION("nvs_load_from -- a v8 blob with DISTINCT per-zone timing overrides migrates "
-                 "losslessly: each zone gets its own profile with its exact original nine values");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v8_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 8;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].tc_type = 3;
-    src.zones[0].guard_progress_duty_min = 0.10f;
-    src.zones[0].guard_progress_window_s = 100.0f;
-    src.zones[0].guard_drift_hysteresis_c = 1.0f;
-    src.zones[0].guard_frozen_eps_c = 0.10f;
-    src.zones[0].guard_cross_zone_period_s = 10.0f;
-    src.zones[0].bangbang_hysteresis_c = 2.0f;
-    src.zones[0].cooling_limited_margin_c = 5.0f;
-    src.zones[0].cooling_limited_hold_s = 60.0f;
-    src.zones[0].ramp_lock_band_c = 3.0f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].tc_type = 3;
-    src.zones[1].guard_progress_duty_min = 0.20f;
-    src.zones[1].guard_progress_window_s = 200.0f;
-    src.zones[1].guard_drift_hysteresis_c = 2.0f;
-    src.zones[1].guard_frozen_eps_c = 0.20f;
-    src.zones[1].guard_cross_zone_period_s = 20.0f;
-    src.zones[1].bangbang_hysteresis_c = 4.0f;
-    src.zones[1].cooling_limited_margin_c = 6.0f;
-    src.zones[1].cooling_limited_hold_s = 70.0f;
-    src.zones[1].ramp_lock_band_c = 4.0f;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].tc_type = 3;
-    src.zones[2].guard_progress_duty_min = 0.30f;
-    src.zones[2].guard_progress_window_s = 300.0f;
-    src.zones[2].guard_drift_hysteresis_c = 3.0f;
-    src.zones[2].guard_frozen_eps_c = 0.30f;
-    src.zones[2].guard_cross_zone_period_s = 30.0f;
-    src.zones[2].bangbang_hysteresis_c = 6.0f;
-    src.zones[2].cooling_limited_margin_c = 7.0f;
-    src.zones[2].cooling_limited_hold_s = 80.0f;
-    src.zones[2].ramp_lock_band_c = 5.0f;
-
-    src.crc32 = 0; /* v8's own CRC is not checked on the old-version path */
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v8 blob with distinct zone values must migrate to a "
-                              "valid current config -- NOT be rejected as corrupt");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-    TEST_CHECK_NEAR((double)out_cfg.pc_link_abort_silence_ms, 45000.0, 1e-6,
-                    "the global pc_link_abort_silence_ms (real v8 value) carried through");
-
-    /* THE lossless-migration proof: three distinct zones -> three distinct
-     * profiles, each zone pointed at its OWN profile, none shared. If
-     * expected_len_for_version(8) had returned sizeof(the CURRENT struct)
-     * (the exact profiles_http.c mistake this pass's instructions warn
-     * about) instead of sizeof(zones_cfg_v8_t), this blob would either fail
-     * the length check outright (found && valid would be false, caught
-     * above) or -- had the sizes happened to coincide -- be misread field-by-
-     * field-wrong, and the checks below would catch that: a byte-shifted
-     * read would not reproduce these exact numbers at these exact zones. */
-    TEST_CHECK(out_cfg.timing_profile_count == 3,
-              "three distinct zones must produce three distinct profiles, not a collapsed shared one");
-    TEST_CHECK(out_cfg.zones[0].timing_profile != out_cfg.zones[1].timing_profile &&
-              out_cfg.zones[1].timing_profile != out_cfg.zones[2].timing_profile &&
-              out_cfg.zones[0].timing_profile != out_cfg.zones[2].timing_profile,
-              "every zone's assigned profile index must be distinct from every other zone's");
-
-    struct { float duty, window, drift, eps, xzone, bb, coolmargin, coolhold, ramplock; } expect[3] = {
-        {0.10f, 100.0f, 1.0f, 0.10f, 10.0f, 2.0f, 5.0f, 60.0f, 3.0f},
-        {0.20f, 200.0f, 2.0f, 0.20f, 20.0f, 4.0f, 6.0f, 70.0f, 4.0f},
-        {0.30f, 300.0f, 3.0f, 0.30f, 30.0f, 6.0f, 7.0f, 80.0f, 5.0f},
-    };
-    for (uint8_t i = 0; i < 3; i++) {
-        char msg[128];
-        uint8_t p = out_cfg.zones[i].timing_profile;
-        TEST_CHECK(p < out_cfg.timing_profile_count, "zone's profile index must be in range");
-        const zone_timing_profile_t *tp = &out_cfg.timing_profiles[p];
-        snprintf(msg, sizeof(msg), "zone %u's profile guard_progress_duty_min is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->guard_progress_duty_min, (double)expect[i].duty, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile guard_progress_window_s is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->guard_progress_window_s, (double)expect[i].window, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile guard_drift_hysteresis_c is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->guard_drift_hysteresis_c, (double)expect[i].drift, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile guard_frozen_eps_c is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->guard_frozen_eps_c, (double)expect[i].eps, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile guard_cross_zone_period_s is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->guard_cross_zone_period_s, (double)expect[i].xzone, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile bangbang_hysteresis_c is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->bangbang_hysteresis_c, (double)expect[i].bb, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile cooling_limited_margin_c is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->cooling_limited_margin_c, (double)expect[i].coolmargin, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile cooling_limited_hold_s is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->cooling_limited_hold_s, (double)expect[i].coolhold, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone %u's profile ramp_lock_band_c is its OWN original v8 value", i);
-        TEST_CHECK_NEAR((double)tp->ramp_lock_band_c, (double)expect[i].ramplock, 1e-6, msg);
-    }
-
-    /* The other zone fields (untouched by this pass) must also have survived
-     * the v8->v9 conversion, same discipline as the v5/v7 lossless-migration
-     * tests above -- a bug in convert_zone_v8() could plausibly leave the
-     * TIMING fields correct while breaking something else it touches. */
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].tc_type == 3, "zones[1].tc_type carried through");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // The degenerate case explicitly called out by this pass's instructions:
 // "Today's board has all-zero values on every zone, which should collapse to
@@ -4700,41 +4295,6 @@ static void test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_lossle
 // even be zero); this one is a v8 blob whose zones DO carry the nine fields,
 // every one of them still at the default 0 -- proving the dedup logic
 // collapses "all zero" to ONE profile, not the "no such fields exist" case.
-static void test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile(void)
-{
-    TEST_SECTION("nvs_load_from -- a v8 blob where every zone's nine overrides are still all-zero "
-                 "(the owner's actual board today) collapses to ONE shared \"Default\" profile");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v8_t src;
-    memset(&src, 0, sizeof(src)); /* every zone's nine timing fields at their 0 default */
-    src.version = 8;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.zones[0].relay_mask = 0x01;
-    src.zones[1].relay_mask = 0x02;
-    src.zones[2].relay_mask = 0x04;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "an all-zero-timing v8 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.timing_profile_count == 1,
-              "three zones, all identical (all-zero) timing values, collapse to exactly one profile");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0,
-              "the single shared profile is named \"Default\", not \"Zone 1\"");
-    TEST_CHECK(out_cfg.zones[0].timing_profile == 0 && out_cfg.zones[1].timing_profile == 0 &&
-              out_cfg.zones[2].timing_profile == 0,
-              "every zone points at the same shared profile 0");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 static void test_validate_rejects_out_of_range_v8_fields(void)
 {
@@ -4884,87 +4444,6 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
 // once Phase 5's resolve-on-save logic lands (a later pass). This test would
 // FAIL if convert_zone_v9() ever left settings_source at its zero-initialized
 // default instead of explicitly setting it.
-static void test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_settings_source_is_custom(void)
-{
-    TEST_SECTION("nvs_load_from -- a v9 blob upconverts to v10: new float fields default to 0, "
-                 "settings_source lands at CUSTOM (0xFF) for every zone (NOT 0), and every "
-                 "pre-existing field survives unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v9_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 9;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].tc_type = 3;
-    src.zones[0].control_mode = 2; /* PID -- a real, distinct, pre-existing operator setting */
-    src.zones[0].pid_kp = 2.5f;
-    src.zones[0].max_temp_c = 1300.0f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-
-    src.crc32 = 0; /* v9's own CRC is not checked on the old-version path */
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v9 blob must migrate to a valid current (v10) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    for (uint8_t i = 0; i < 3; i++) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "zones[%u].fuzzy_strength_pct defaults to 0 (not configured)", i);
-        TEST_CHECK_NEAR(out_cfg.zones[i].fuzzy_strength_pct, 0.0f, 1e-6, msg);
-        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            snprintf(msg, sizeof(msg), "zones[%u].coupling_coeff[%u] defaults to 0 (no coupling measured)", i, j);
-            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_coeff[j], 0.0f, 1e-6, msg);
-        }
-        snprintf(msg, sizeof(msg),
-                "zones[%u].settings_source lands at ZONE_SETTINGS_SOURCE_CUSTOM (0xFF), NOT 0 -- "
-                "0 would silently claim \"copies zone 0's settings\"", i);
-        TEST_CHECK(out_cfg.zones[i].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM, msg);
-    }
-
-    // Pre-existing fields must survive the upgrade completely unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK(out_cfg.safety_tc_type == 3, "safety_tc_type carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(out_cfg.timing_profile_count == 1, "timing_profile_count carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK(out_cfg.zones[0].thermo_mask == 0x01 && out_cfg.zones[1].thermo_mask == 0x02 &&
-              out_cfg.zones[2].thermo_mask == 0x04, "thermo_mask must NOT be shifted for any zone");
-    TEST_CHECK(out_cfg.zones[0].control_mode == 2, "zones[0].control_mode (PID) survives the upgrade");
-    TEST_CHECK_NEAR(out_cfg.zones[0].pid_kp, 2.5f, 1e-6, "zones[0].pid_kp survives the upgrade");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // ---------------------------------------------------------------------------
 // Same-day follow-up (2026-08-30): ZONES_CFG_VERSION 10->11 -- the single
@@ -4987,92 +4466,6 @@ static void test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_setting
 // now is already the v11 row-coupling shape) -- so staging with sizeof(src)
 // here stages a byte count independently verified to match the real v10
 // on-flash layout, not a number that happens to match today's struct.
-static void test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell(void)
-{
-    TEST_SECTION("nvs_load_from -- a v10 blob upconverts to v11: coupling_coeff/coupling_neighbor_zone "
-                 "fold into the right coupling_coeff[] cell, every other cell (incl. diagonal) is 0, "
-                 "and every other pre-existing v10 field survives unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v10_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 10;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].fuzzy_strength_pct = 40.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    /* zone 0's ONE storable neighbor before this pass: zone 2, coeff 6.75. */
-    src.zones[0].coupling_coeff = 6.75f;
-    src.zones[0].coupling_neighbor_zone = 2.0f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    /* zone 1: no coupling ever measured on a v10 board -- coupling_coeff
-     * stays at its 0 default, same "not configured" meaning either side of
-     * the migration. */
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; /* v10's own CRC is not checked on the old-version path */
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v10 blob must migrate to a valid current (v11) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // The one cell that must be populated: zone 0's row, column 2.
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[2], 6.75f, 1e-6,
-                    "zone 0's v10 (coeff, neighbor=2) pair lands in coupling_coeff[2]");
-    // Every other cell of zone 0's row, including its own diagonal, is 0.
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[0], 0.0f, 1e-6, "zone 0's diagonal cell is 0");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 0.0f, 1e-6, "zone 0's untouched neighbor cell (1) is 0");
-    // Zones 1 and 2 never had a v10 coupling pair -- their whole rows are 0.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "zone 1's untouched coupling_coeff[%u] is 0", j);
-        TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[j], 0.0f, 1e-6, msg);
-        snprintf(msg, sizeof(msg), "zone 2's untouched coupling_coeff[%u] is 0", j);
-        TEST_CHECK_NEAR(out_cfg.zones[2].coupling_coeff[j], 0.0f, 1e-6, msg);
-    }
-
-    // Pre-existing v10 fields must survive the upgrade completely unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].fuzzy_strength_pct, 40.0f, 1e-6, "zones[0].fuzzy_strength_pct survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
-    TEST_CHECK(out_cfg.zones[0].settings_source[SRC_GROUP_LIMITS] == ZONE_SETTINGS_SOURCE_CUSTOM,
-              "zones[0].settings_source (already a real v10 field) is carried through verbatim, "
-              "not re-defaulted the way v9's migration must");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // 2026-08-31 defect fix: a v10 blob whose single coupling pair is
 // self-referencing (coupling_neighbor_zone == the zone's OWN index) must
@@ -5085,63 +4478,6 @@ static void test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell(void)
 // entire commissioned config over one stray self-reference. Unreachable
 // today (no board has ever held a v10 blob with a self-referencing pair),
 // but cheap to guard and this proves the guard actually does something.
-static void test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped(void)
-{
-    TEST_SECTION("nvs_load_from -- a v10 blob with a self-referencing coupling pair "
-                 "(neighbor == own zone index) is dropped, not folded into the diagonal, "
-                 "so the migrated config is still VALID rather than CORRUPT");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v10_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 10;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.safety_tc_type = 3;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    /* the defect: zone 1's stored pair points at itself. */
-    src.zones[1].coupling_coeff = 9.5f;
-    src.zones[1].coupling_neighbor_zone = 1.0f;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid,
-              "a v10 blob with a self-referencing coupling pair must still migrate to a VALID "
-              "config, not be discarded as CORRUPT");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "zone 1's self-referencing pair leaves coupling_coeff[%u] at 0", j);
-        TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[j], 0.0f, 1e-6, msg);
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): a v11 blob (coupling_coeff[]
 // row shape, but predating coupling_tau_s[]/coupling_dead_time_s[] entirely)
@@ -5153,99 +4489,6 @@ static void test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped(void)
 // count, never the live zone_cfg_t/zones_cfg_t (already the v12 shape by
 // now), mirroring test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell()
 // above exactly.
-static void test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero(void)
-{
-    TEST_SECTION("nvs_load_from -- a v11 blob upconverts to v12: coupling_tau_s[]/"
-                 "coupling_dead_time_s[] default to 0 (never stored pre-v12), coupling_coeff[] "
-                 "and every other pre-existing v11 field survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v11_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 11;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].fuzzy_strength_pct = 40.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    // A v11 board that HAD already measured a coupling gain (the row this
-    // pass's own bump exists to grow with tau/L) -- coupling_coeff[2] must
-    // survive the migration untouched while coupling_tau_s[2]/
-    // coupling_dead_time_s[2] (fields v11 never had at all) come out at 0.
-    src.zones[0].coupling_coeff[2] = 6.75f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v11's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v11 blob must migrate to a valid current (v12) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // coupling_coeff[] carried through verbatim -- this migration does not
-    // touch the row's existing shape at all.
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[2], 6.75f, 1e-6,
-                    "zone 0's pre-existing coupling_coeff[2] survives the v11->v12 migration untouched");
-
-    // THE thing this test is really about: coupling_tau_s[]/
-    // coupling_dead_time_s[] must be all-zero for every zone and every cell
-    // -- not garbage, not uninitialized memory -- since no version before v12
-    // ever stored either array.
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            char msg[96];
-            snprintf(msg, sizeof(msg), "zones[%u].coupling_tau_s[%u] is 0 (v11 never stored this)", i, j);
-            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_tau_s[j], 0.0f, 1e-6, msg);
-            snprintf(msg, sizeof(msg), "zones[%u].coupling_dead_time_s[%u] is 0 (v11 never stored this)", i, j);
-            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_dead_time_s[j], 0.0f, 1e-6, msg);
-        }
-    }
-
-    // Pre-existing v11 fields must survive the upgrade completely unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].fuzzy_strength_pct, 40.0f, 1e-6, "zones[0].fuzzy_strength_pct survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
-    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Full end-to-end chain: a genuine v9 blob (predates coupling entirely) must
 // still land on a valid, all-zero-coupling v11 config after going through
@@ -5259,59 +4502,6 @@ static void test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero(
 // Dedicated v6 blob test -- v6 shares v7's zone layout (zone_cfg_v7_t) and
 // converter (convert_zone_v7()) but predates v7's own crc32 field. Only v7
 // had a dedicated blob test before this; v6 was only reached indirectly.
-static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
-{
-    TEST_SECTION("nvs_load_from -- a v6 blob (v7's zone layout, no crc32 yet) upconverts every "
-                 "zone's real field values, including ct_mask, correctly");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v6_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 6;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 4;
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].tc_type = 2;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.zones[0].ct_mask = 0x01;
-
-    snprintf(src.zones[1].name, sizeof(src.zones[1].name), "ZoneB");
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].tc_type = 3;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].guard_runaway_margin_c = 25.0f;
-    src.zones[1].ct_mask = 0x02;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v6 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
-    TEST_CHECK(out_cfg.safety_tc_type == 4, "top-level safety_tc_type (real v6 value) carried through");
-
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask must NOT be shifted");
-    TEST_CHECK(out_cfg.zones[1].tc_type == 3, "zones[1].tc_type carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 25.0f, 1e-6, "zones[1].guard_runaway_margin_c carried through");
-    TEST_CHECK(out_cfg.zones[1].ct_mask == 0x02, "zones[1].ct_mask -- new since v4 -- carried through, not shifted");
-
-    TEST_CHECK(out_cfg.zones[0].ct_mask == 0x01, "zones[0].ct_mask still correct (sanity check)");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 0.0f, 1e-6, "v6 predates pc_link_abort_silence_ms -- documented default 0");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // RELEASE_HARDENING.md blocker 7's "migration test that runs every
 // historical schema version forward" -- confirmed genuinely missing by
@@ -5338,277 +4528,13 @@ static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
 // of fields common to every historical layout (thermo_count/relay_count,
 // zone name, relay_mask, pid_kp, max_temp_c) survive the trip unchanged.
 
-static void corpus_migrate_case_v1(void)
-{
-    zones_cfg_v1_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 1;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v1 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v1 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v1 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v1 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v1 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v1 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v1 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v1 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v2(void)
-{
-    zones_cfg_v2_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 2;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v2 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v2 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v2 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v2 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v2 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v2 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v2 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v2 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v3(void)
-{
-    zones_cfg_v3_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 3;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v3 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v3 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v3 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v3 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v3 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v3 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v3 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v3 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v4(void)
-{
-    zones_cfg_v4_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 4;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v4 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v4 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v4 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v4 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v4 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v4 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v4 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v4 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v5(void)
-{
-    zones_cfg_v5_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 5;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v5 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v5 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v5 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v5 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v5 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v5 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v5 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v5 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v6(void)
-{
-    zones_cfg_v6_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 6;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v6 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v6 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v6 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v6 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v6 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v6 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v6 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v6 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v7(void)
-{
-    zones_cfg_v7_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 7;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v7 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v7 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v7 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v7 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v7 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v7 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v7 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v7 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v8(void)
-{
-    zones_cfg_v8_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 8;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v8 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v8 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v8 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v8 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v8 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v8 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v8 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v8 zones[0].max_temp_c survives migration");
-    }
-}
 
 /* v9 introduced timing_profile_count/timing_profiles[] --
  * zones_config_json_validate() requires timing_profile_count in
@@ -5618,355 +4544,15 @@ static void corpus_migrate_case_v8(void)
  * own fields (guard windows/margins, all 0.0f) are within-range on their
  * own, so no further per-field setup is needed. */
 
-static void corpus_migrate_case_v9(void)
-{
-    zones_cfg_v9_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 9;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v9 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v9 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v9 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v9 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v9 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v9 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v9 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v9 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v10(void)
-{
-    zones_cfg_v10_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 10;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v10 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v10 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v10 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v10 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v10 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v10 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v10 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v10 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v11(void)
-{
-    zones_cfg_v11_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 11;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v11 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v11 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v11 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v11 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v11 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v11 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v11 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v11 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v12(void)
-{
-    zones_cfg_v12_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 12;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v12 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v12 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v12 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v12 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v12 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v12 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v12 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v12 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v13(void)
-{
-    zones_cfg_v13_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 13;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v13 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v13 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v13 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v13 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v13 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v13 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v13 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v13 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v14(void)
-{
-    zones_cfg_v14_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 14;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v14 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v14 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v14 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v14 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v14 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v14 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v14 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v14 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v15(void)
-{
-    zones_cfg_v15_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 15;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v15 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v15 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v15 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v15 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v15 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v15 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v15 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v15 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v16(void)
-{
-    zones_cfg_v16_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 16;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v16 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v16 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v16 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v16 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v16 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v16 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v16 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v16 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v17(void)
-{
-    zones_cfg_v17_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 17;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v17 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v17 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v17 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v17 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v17 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v17 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v17 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v17 zones[0].max_temp_c survives migration");
-    }
-}
 
-static void corpus_migrate_case_v18(void)
-{
-    zones_cfg_v18_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 18;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.timing_profile_count = 1;
-    zones_cfg_t out;
-    const char *reason = "";
-    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
-    char msg[192];
-    snprintf(msg, sizeof(msg), "v18 blob must migrate forward to current cleanly (decode_blob "
-             "reason if not: %s)", reason);
-    if (r != ZONES_DECODE_OK) {
-        printf("    v18 decode reason: %s\n", reason);
-    }
-    TEST_CHECK(r == ZONES_DECODE_OK, msg);
-    if (r == ZONES_DECODE_OK) {
-        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v18 migrated result stamped current version");
-        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
-                  "v18 top-level thermo_count/relay_count survive migration");
-        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v18 zone name survives migration");
-        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v18 zones[0].relay_mask survives migration");
-        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v18 zones[0].pid_kp survives migration");
-        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
-                        "v18 zones[0].max_temp_c survives migration");
-    }
-}
 
 static void corpus_migrate_case_v19(void)
 {
@@ -6239,30 +4825,83 @@ static void corpus_migrate_case_v25(void)
     }
 }
 
+static void corpus_migrate_case_v26(void)
+{
+    zones_cfg_v26_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 26;
+    src.thermo_count = 2;
+    src.relay_count = 2;
+    src.max_simultaneous_relays = 2;
+    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "ZoneA");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].pid_kp = 3.5f;
+    src.zones[0].max_temp_c = 1150.0f;
+    src.timing_profile_count = 1;
+    /* v26 offset 222 is struct padding: firmware that wrote it never
+     * initialized it, so the migration must zero tc_sheath_tau_s rather
+     * than adopt whatever bytes were there. */
+    memset((uint8_t *)&src.zones[0] + 222, 0xA5, 2);
+    memset((uint8_t *)&src.zones[1] + 222, 0x5A, 2);
+    {
+        static const uint8_t zero4[sizeof(uint32_t)] = {0};
+        uint32_t crc = esp_crc32_le(0, (const uint8_t *)&src, offsetof(zones_cfg_v26_t, crc32));
+        src.crc32 = esp_crc32_le(crc, zero4, sizeof(zero4));
+    }
+    zones_cfg_t out;
+    const char *reason = "";
+    zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
+    char msg[192];
+    snprintf(msg, sizeof(msg), "v26 blob must migrate forward to current cleanly (decode_blob "
+             "reason if not: %s)", reason);
+    if (r != ZONES_DECODE_OK) {
+        printf("    v26 decode reason: %s\n", reason);
+    }
+    TEST_CHECK(r == ZONES_DECODE_OK, msg);
+    if (r == ZONES_DECODE_OK) {
+        TEST_CHECK(out.version == ZONES_CFG_VERSION, "v26 migrated result stamped current version");
+        TEST_CHECK(out.thermo_count == 2 && out.relay_count == 2,
+                  "v26 top-level thermo_count/relay_count survive migration");
+        TEST_CHECK(strcmp(out.zones[0].name, "ZoneA") == 0, "v26 zone name survives migration");
+        TEST_CHECK(out.zones[0].relay_mask == 0x01, "v26 zones[0].relay_mask survives migration");
+        TEST_CHECK_NEAR(out.zones[0].pid_kp, 3.5f, 1e-6, "v26 zones[0].pid_kp survives migration");
+        TEST_CHECK_NEAR(out.zones[0].max_temp_c, 1150.0f, 1e-6,
+                        "v26 zones[0].max_temp_c survives migration");
+        TEST_CHECK(out.zones[0].tc_sheath_tau_s == 0 && out.zones[1].tc_sheath_tau_s == 0,
+                   "v26 -> v27: padding garbage at the new tc_sheath_tau_s offset is zeroed (tau off)");
+    }
+}
+
+/* D2 expiry (docs/CONFIG_MIGRATION_CHAIN.md sec 4.2): ZONES_CFG_VERSION 27
+ * put ZONES_CFG_MIGRATION_EXPIRY_FLOOR at 19 and deleted the v1..v18 tail
+ * converters (and the per-version migration tests that went with them). Each
+ * of those versions, at its own correct length, is now refused as too old to
+ * consume, never migrated and never treated as a fresh default. */
+static void corpus_expired_versions_refused(void)
+{
+    static uint8_t blob[sizeof(zones_cfg_t)];
+    for (unsigned v = 1; v < ZONES_CFG_MIGRATION_EXPIRY_FLOOR; v++) {
+        /* The floor is checked before any length check, so one length serves
+         * every expired version; v18's real size is the closest-to-valid case. */
+        size_t len = (v == 18) ? sizeof(zones_cfg_v18_t) : sizeof(zones_cfg_v26_t);
+        memset(blob, 0, sizeof(blob));
+        blob[0] = (uint8_t)v;
+        zones_cfg_t out;
+        const char *reason = "";
+        zones_decode_result_t r = zones_config_json_decode_blob(blob, len, &out, &reason);
+        char msg[192];
+        snprintf(msg, sizeof(msg), "v%u is below the expiry floor: refused as too old to consume (reason: %s)", v,
+                 reason ? reason : "(null)");
+        TEST_CHECK(r == ZONES_DECODE_CORRUPT && reason && strstr(reason, "expiry floor") != NULL, msg);
+    }
+}
+
 static void test_zones_config_migration_corpus_every_historical_version_forward(void)
 {
     TEST_SECTION("zones_config_json_decode_blob -- release-hardening corpus: every historical "
-                 "zones_cfg version v1..v25 migrates forward to current cleanly, not just the "
+                 "zones_cfg version v19..v26 migrates (v1..v18 refused) forward to current cleanly, not just the "
                  "individually-named versions other tests exercise");
-
-    corpus_migrate_case_v1();
-    corpus_migrate_case_v2();
-    corpus_migrate_case_v3();
-    corpus_migrate_case_v4();
-    corpus_migrate_case_v5();
-    corpus_migrate_case_v6();
-    corpus_migrate_case_v7();
-    corpus_migrate_case_v8();
-    corpus_migrate_case_v9();
-    corpus_migrate_case_v10();
-    corpus_migrate_case_v11();
-    corpus_migrate_case_v12();
-    corpus_migrate_case_v13();
-    corpus_migrate_case_v14();
-    corpus_migrate_case_v15();
-    corpus_migrate_case_v16();
-    corpus_migrate_case_v17();
-    corpus_migrate_case_v18();
+    corpus_expired_versions_refused();
     corpus_migrate_case_v19();
     corpus_migrate_case_v20();
     corpus_migrate_case_v21();
@@ -6270,12 +4909,13 @@ static void test_zones_config_migration_corpus_every_historical_version_forward(
     corpus_migrate_case_v23();
     corpus_migrate_case_v24();
     corpus_migrate_case_v25();
+    corpus_migrate_case_v26();
 
     /* This corpus must actually track ZONES_CFG_VERSION rather than silently
      * going stale the next time it bumps: fail loudly, at test-run time, the
      * day a v26 (or later) historical layout exists and this file has not
      * been extended to cover it. */
-    _Static_assert(ZONES_CFG_VERSION == 26,
+    _Static_assert(ZONES_CFG_VERSION == 27,
                    "a new zones_cfg version was added -- extend this corpus with a new "
                    "corpus_migrate_case_vN() for the version that just became historical, then "
                    "update this assert to the new ZONES_CFG_VERSION");
@@ -6290,138 +4930,7 @@ static void test_zones_config_migration_corpus_every_historical_version_forward(
 // way -- so this asserts real, non-default, non-zero values for fields that
 // have existed since v1 (name, pid_kp, max_temp_c, model_tau_s) all still
 // read back correctly out of the fully-migrated v15 struct.
-static void test_nvs_load_from_v1_blob_chains_end_to_end_to_v16_preserving_real_values(void)
-{
-    TEST_SECTION("nvs_load_from -- a v1 blob migrates end-to-end to the current (v16) config: "
-                 "real v1 field values (not just new-field defaults) survive every hop");
-    nvs_test_enable(true);
-    nvs_test_clear();
 
-    zones_cfg_v1_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 1;
-    src.thermo_count = 2;
-    src.relay_count = 2;
-    src.max_simultaneous_relays = 2;
-
-    snprintf(src.zones[0].name, sizeof(src.zones[0].name), "OldestZone");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].cal_offset_c = 1.5f;
-    src.zones[0].pid_kp = 3.5f;
-    src.zones[0].pid_ki = 0.2f;
-    src.zones[0].pid_kd = 0.1f;
-    src.zones[0].max_temp_c = 1150.0f;
-    src.zones[0].min_temp_c = -10.0f;
-    src.zones[0].model_k_dc = 7.0f;
-    src.zones[0].model_tau_s = 300.0f;
-    src.zones[0].model_dead_time_s = 12.0f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].pid_kp = 4.5f;
-    src.zones[1].max_temp_c = 1250.0f;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a v1 blob must migrate end-to-end to a valid current (v16) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v16) version");
-
-    // Real values that existed at v1 and must have survived every hop to v15.
-    TEST_CHECK(strcmp(out_cfg.zones[0].name, "OldestZone") == 0,
-              "zones[0].name -- present since v1 -- survives all the way to v15");
-    TEST_CHECK_NEAR(out_cfg.zones[0].pid_kp, 3.5f, 1e-6, "zones[0].pid_kp survives all the way to v15");
-    TEST_CHECK_NEAR(out_cfg.zones[0].pid_ki, 0.2f, 1e-6, "zones[0].pid_ki survives all the way to v15");
-    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1150.0f, 1e-6, "zones[0].max_temp_c survives all the way to v15");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 300.0f, 1e-6, "zones[0].model_tau_s survives all the way to v15");
-    TEST_CHECK_NEAR(out_cfg.zones[1].pid_kp, 4.5f, 1e-6, "zones[1].pid_kp (a DIFFERENT zone's value) survives too, unshifted");
-    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives too, unshifted");
-
-    // Fields introduced well after v1 (coupling matrix: v11/v12; tuning
-    // quality record: v13; adaptive_tune_enabled: v14; coupling_diag_k_dc:
-    // v15) correctly land at their documented zero/unset defaults, since a v1
-    // board never had any such data to carry.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[j], 0.0f, 1e-6, "v1 has no coupling data -- 0 (unset)");
-        TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[j], 0.0f, 1e-6, "v1 has no coupling tau data -- 0 (unset)");
-        TEST_CHECK_NEAR(out_cfg.zones[0].coupling_dead_time_s[j], 0.0f, 1e-6, "v1 has no coupling dead-time data -- 0 (unset)");
-    }
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 0.0f, 1e-6, "v1 has no coupling_diag_k_dc -- 0 (unset)");
-    TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 0, "v1 has no adaptive_tune_enabled -- documented default 0");
-    TEST_CHECK(out_cfg.zones[0].tuning_valid == 0, "v1 has no tuning-quality record -- documented default 0 (not valid)");
-    // ease_off_window_mult: introduced at v16 (ZONES_CFG_VERSION 15->16) as a
-    // global scalar, moved PER-ZONE at v16->v17 (this pass). A v1 blob has
-    // nothing to say about it either way, so convert_zone_v1() leaves every
-    // zone's copy at its memset(0) default -- the SAME documented "0 = use
-    // the firmware default" sentinel every other 0-defaulted field here uses
-    // (unlike the raw literal-2.0 story this test told before the field
-    // became per-zone). The actual "behaviour UNCHANGED" proof is therefore
-    // two-part: the raw stored value is the legal sentinel, AND the
-    // accessor a real caller (zone_taper_climb_rate()) actually uses
-    // resolves that sentinel to ZONE_EASE_OFF_WINDOW_MULT_DEFAULT (2.0),
-    // the exact value the removed PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT
-    // #define held -- checked on every zone, not just zone 0.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[j].ease_off_window_mult, 0.0f, 1e-9,
-                        "v1 has no ease_off_window_mult -- stored as the literal 0 sentinel, not resolved eagerly");
-    }
-    s_zones.cfg = out_cfg;
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        float got = -1.0f;
-        TEST_CHECK(zones_config_get_ease_off_window_mult(j, &got) && fabsf(got - ZONE_EASE_OFF_WINDOW_MULT_DEFAULT) < 1e-6,
-                  "v1 (and every pre-v16 version) resolves every zone's ease_off_window_mult to 2.0 through "
-                  "the accessor, matching the removed compile-time #define exactly");
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
-
-static void test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling(void)
-{
-    TEST_SECTION("nvs_load_from -- a v9 blob migrates through v10 to v11 (end-to-end): valid, "
-                 "current version, and an all-zero coupling row (v9 never had ANY coupling data)");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v9_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 9;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.crc32 = 0;
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v9 blob must migrate all the way to a valid v11 config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            char msg[96];
-            snprintf(msg, sizeof(msg), "zones[%u].coupling_coeff[%u] is 0 (v9 has no coupling data at all)", i, j);
-            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_coeff[j], 0.0f, 1e-6, msg);
-        }
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 static void test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it(void)
 {
@@ -8818,96 +7327,6 @@ static void test_zones_config_set_pid_gain_tolerance_boundaries(void)
 // live zone_cfg_t/zones_cfg_t (already the v13 shape by now), mirroring
 // test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero()
 // above exactly.
-static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
-{
-    TEST_SECTION("nvs_load_from -- a v12 blob upconverts to v13: every tuning_* field defaults to "
-                 "UNKNOWN (tuning_valid=false), never a value that reads as a real measurement, while "
-                 "coupling_tau_s[]/model_k_dc/etc survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v12_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 12;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 20.969f;
-    src.zones[0].model_tau_s = 640.0f;
-    src.zones[0].model_dead_time_s = 45.0f;
-    src.zones[0].coupling_tau_s[1] = 42.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v12's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v12 blob must migrate to a valid current (v13) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: every tuning_* field must be at
-    // its "unknown" zero default for every zone -- not garbage, not
-    // uninitialized memory -- since no version before v13 ever stored a
-    // tuning-quality record.
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "zones[%u].tuning_valid is false (v12 never stored a quality record)", i);
-        TEST_CHECK(!out_cfg.zones[i].tuning_valid, msg);
-        snprintf(msg, sizeof(msg), "zones[%u].tuning_method reads 0, but gated unknown by tuning_valid", i);
-        TEST_CHECK(out_cfg.zones[i].tuning_method == 0, msg);
-        snprintf(msg, sizeof(msg), "zones[%u].tuning_settled reads 0, but gated unknown by tuning_valid", i);
-        TEST_CHECK(out_cfg.zones[i].tuning_settled == 0, msg);
-        snprintf(msg, sizeof(msg), "zones[%u].tuning_seq is 0 (never written)", i);
-        TEST_CHECK(out_cfg.zones[i].tuning_seq == 0, msg);
-    }
-    // Pre-existing v12 fields must survive the upgrade completely unchanged
-    // -- the same "everything else carries through" proof
-    // test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero()
-    // makes for the v11->v12 migration.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 640.0f, 1e-6, "zones[0].model_tau_s survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 45.0f, 1e-6, "zones[0].model_dead_time_s survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // ZONES_CFG_VERSION 13->14: a v13 blob (predates adaptive_tune_enabled
 // entirely -- the full tuning-quality record and everything before it, but
@@ -8922,97 +7341,6 @@ static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
 // zones_cfg_v13_t -- frozen, historical types, never the live zone_cfg_t/
 // zones_cfg_t (already the v14 shape by now), mirroring
 // test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown() above.
-static void test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero(void)
-{
-    TEST_SECTION("nvs_load_from -- a v13 blob upconverts to v14: adaptive_tune_enabled defaults to 0 "
-                 "(\"opted out\") for every zone, while the tuning_* quality record/coupling_coeff[]/"
-                 "coupling_tau_s[]/model_k_dc/etc survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v13_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 13;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 20.969f;
-    src.zones[0].model_tau_s = 640.0f;
-    src.zones[0].model_dead_time_s = 45.0f;
-    src.zones[0].coupling_coeff[1] = 10.887f;
-    src.zones[0].coupling_tau_s[1] = 42.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    src.zones[0].tuning_valid = 1;
-    src.zones[0].tuning_method = 1; /* autotune_method_t: 0=STEP, 1=RELAY */
-    src.zones[0].tuning_rule = 3;   /* autotune_rule_t: 0-3 valid */
-    src.zones[0].tuning_baseline_c = 25.5f;
-    src.zones[0].tuning_seq = 7;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v13's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v13 blob must migrate to a valid current (v14) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: adaptive_tune_enabled must be at
-    // its "opted out" zero default for every zone -- not garbage, not
-    // uninitialized memory -- since no version before v14 ever stored it.
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "zones[%u].adaptive_tune_enabled reads 0 (v13 never stored it)", i);
-        TEST_CHECK(out_cfg.zones[i].adaptive_tune_enabled == 0, msg);
-    }
-    // Pre-existing v13 fields, including the tuning-quality record, must
-    // survive the upgrade completely unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    TEST_CHECK(out_cfg.zones[0].tuning_valid == 1, "zones[0].tuning_valid survives");
-    TEST_CHECK(out_cfg.zones[0].tuning_method == 1, "zones[0].tuning_method survives");
-    TEST_CHECK(out_cfg.zones[0].tuning_rule == 3, "zones[0].tuning_rule survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].tuning_baseline_c, 25.5f, 1e-6, "zones[0].tuning_baseline_c survives");
-    TEST_CHECK(out_cfg.zones[0].tuning_seq == 7, "zones[0].tuning_seq survives");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2 follow-up): a
 // v14 blob (predates coupling_diag_k_dc entirely -- adaptive_tune_enabled
@@ -9025,94 +7353,6 @@ static void test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero(v
 // never the live zone_cfg_t/zones_cfg_t (already the v15 shape by now),
 // mirroring test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown()
 // above exactly.
-static void test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero(void)
-{
-    TEST_SECTION("nvs_load_from -- a v14 blob upconverts to v15: coupling_diag_k_dc defaults to 0.0 "
-                 "(\"not measured\") for every zone, while adaptive_tune_enabled/coupling_coeff[]/"
-                 "coupling_tau_s[]/model_k_dc/etc survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v14_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 14;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 20.969f;
-    src.zones[0].model_tau_s = 640.0f;
-    src.zones[0].model_dead_time_s = 45.0f;
-    src.zones[0].coupling_coeff[1] = 10.887f;
-    src.zones[0].coupling_tau_s[1] = 42.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    src.zones[0].adaptive_tune_enabled = 1;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v14's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v14 blob must migrate to a valid current (v15) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: coupling_diag_k_dc must be at its
-    // "not measured" zero default for every zone -- not garbage, not
-    // uninitialized memory -- since no version before v15 ever stored it.
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "zones[%u].coupling_diag_k_dc reads 0.0 (v14 never stored it)", i);
-        TEST_CHECK(out_cfg.zones[i].coupling_diag_k_dc == 0.0f, msg);
-    }
-    // Pre-existing v14 fields must survive the upgrade completely unchanged
-    // -- the same "everything else carries through" proof
-    // test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown() makes
-    // for the v12->v13 migration.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == ZONE_SETTINGS_SOURCE_CUSTOM, ss_msg);
-    }
-    TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
-              "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
-    TEST_CHECK(out_cfg.zones[1].adaptive_tune_enabled == 0,
-              "zones[1].adaptive_tune_enabled stays 0 (never opted in)");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // The A/B-campaign task's own migration proof: a v15 blob (the version
 // immediately before ease_off_window_mult existed) must upconvert to v16
@@ -9125,101 +7365,6 @@ static void test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero(void
 // keeps surviving through this one too. Same shape as
 // test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero() just
 // above, one version later.
-static void test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default(void)
-{
-    TEST_SECTION("nvs_load_from -- a v15 blob upconverts (chained through v16) to v17: every zone's "
-                 "ease_off_window_mult resolves to 2.0 (matching the removed compile-time #define exactly "
-                 "-- behaviour UNCHANGED), while coupling_diag_k_dc/model_k_dc/pc_link_abort_silence_ms/etc "
-                 "survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v15_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 15;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 20.969f;
-    src.zones[0].model_tau_s = 640.0f;
-    src.zones[0].model_dead_time_s = 45.0f;
-    src.zones[0].coupling_coeff[1] = 10.887f;
-    src.zones[0].coupling_diag_k_dc = 19.4f; /* a REAL, already-measured v15 value -- must survive */
-    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
-    src.zones[0].adaptive_tune_enabled = 1;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v15's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v15 blob must migrate to a valid current (v16) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: ease_off_window_mult -- now
-    // per-zone (ZONES_CFG_VERSION 16->17) -- must land at the legal 0
-    // sentinel on every zone (v15 never stored it, at any level), which
-    // resolves through the accessor to ZONE_EASE_OFF_WINDOW_MULT_DEFAULT
-    // (2.0) for EVERY zone, not just zone 0.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[j].ease_off_window_mult, 0.0f, 1e-9,
-                        "v15 has no ease_off_window_mult -- lands on the 0 sentinel, not resolved eagerly");
-    }
-    s_zones.cfg = out_cfg;
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        float got = -1.0f;
-        TEST_CHECK(zones_config_get_ease_off_window_mult(j, &got) && fabsf(got - ZONE_EASE_OFF_WINDOW_MULT_DEFAULT) < 1e-6,
-                  "ease_off_window_mult resolves to 2.0 on every zone (v15 never stored it) -- behaviour "
-                  "UNCHANGED from the removed compile-time #define");
-    }
-
-    // Pre-existing v15 fields -- including a REAL, non-default
-    // coupling_diag_k_dc -- must survive the upgrade completely unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6,
-                    "zones[0].coupling_diag_k_dc (a real v15 measurement) survives the v15->v16 hop");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
-    }
-    TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
-              "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // THE migration this whole pass exists for (PID_EXPANSION_PLAN.md sec
 // 3.6d): a v16 board that already ran the 2.0-vs-3.0 global A/B campaign
@@ -9230,68 +7375,6 @@ static void test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default
 // migration would. This is the exact backward-compatibility case the task
 // calls out: "a stored config must load with every zone taking the old
 // global value."
-static void test_nvs_load_from_v16_blob_carries_global_ease_off_mult_to_every_zone(void)
-{
-    TEST_SECTION("nvs_load_from -- a v16 blob's single global ease_off_window_mult (e.g. a live 3.0 "
-                 "A/B arm) migrates to v17 landing on EVERY zone verbatim -- not re-defaulted, not left "
-                 "on only zone 0");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v16_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 16;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 30000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-    src.ease_off_window_mult = 3.0f; /* a REAL, non-default, live A/B arm value -- must reach every zone */
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 22.5f;
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-
-    src.crc32 = 0; // v16's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v16 blob must migrate to a valid current (v17) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: every zone's ease_off_window_mult
-    // -- not just zone 0's -- must be EXACTLY the v16 board's one global
-    // value, carried forward verbatim.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[j].ease_off_window_mult, 3.0f, 1e-6,
-                        "every zone's ease_off_window_mult carries the v16 board's global 3.0 verbatim");
-    }
-
-    // Pre-existing v16 fields must survive unchanged too.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 30000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 22.5f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02 && out_cfg.zones[2].relay_mask == 0x04,
-              "relay_mask must NOT be shifted for any zone");
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // zones_config_get/set_ease_off_window_mult() -- the accessor pair
 // profile_executor_feedforward.c's zone_taper_climb_rate() actually calls
@@ -9394,95 +7477,6 @@ static void test_ease_off_window_mult_accessor_get_set_and_range(void)
 // to carry forward, so this is a pure "does the new field survive as the
 // safe default, not garbage from the memset boundary" proof, alongside every
 // pre-existing v17 field surviving completely unchanged.
-static void test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped(void)
-{
-    TEST_SECTION("nvs_load_from -- a v17 blob upconverts to v18: every zone's new "
-                 "approach_rate_cap_c_per_hr lands on the 0 (uncapped) sentinel -- behaviour UNCHANGED -- "
-                 "while ease_off_window_mult/coupling_diag_k_dc/model_k_dc/etc survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v17_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 17;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 20.969f;
-    src.zones[0].model_tau_s = 640.0f;
-    src.zones[0].model_dead_time_s = 45.0f;
-    src.zones[0].coupling_coeff[1] = 10.887f;
-    src.zones[0].coupling_diag_k_dc = 19.4f;
-    src.zones[0].ease_off_window_mult = 3.5f; /* a REAL, already-running A/B arm -- must survive */
-    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].ease_off_window_mult = 2.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v17's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v17 blob must migrate to a valid current (v18) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: approach_rate_cap_c_per_hr must
-    // land at the legal 0 (uncapped) sentinel on EVERY zone -- v17 never
-    // stored it, at any level, and unlike ease_off_window_mult there is no
-    // global scalar this migration needs to carry forward instead.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[j].approach_rate_cap_c_per_hr, 0.0f, 1e-9,
-                        "v17 has no approach_rate_cap_c_per_hr -- lands on the 0 (uncapped) sentinel");
-        float got = -1.0f;
-        s_zones.cfg = out_cfg;
-        TEST_CHECK(zones_config_get_approach_rate_cap_c_per_hr(j, &got) && got == 0.0f,
-                  "the accessor reports every migrated zone uncapped -- not resolved to any other value");
-    }
-
-    // Pre-existing v17 fields -- including a REAL, non-default per-zone
-    // ease_off_window_mult A/B arm -- must survive the upgrade completely
-    // unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6, "zones[0].coupling_diag_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6,
-                    "zones[0]'s REAL, non-default ease_off_window_mult A/B arm survives the v17->v18 hop");
-    TEST_CHECK_NEAR(out_cfg.zones[1].ease_off_window_mult, 2.0f, 1e-6, "zones[1].ease_off_window_mult survives");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Accessor pair for zone_cfg_t::approach_rate_cap_c_per_hr (PID_EXPANSION_
 // PLAN.md sec 3.6d / PER_ZONE_TARGET_DESIGN_STUDY.md option (b)) -- same
@@ -9585,104 +7579,6 @@ static void test_approach_rate_cap_accessor_get_set_and_range(void)
 // not garbage from the memset boundary, AND resolve through the accessor to
 // bit-identical 20.0/0.5" proof, alongside every pre-existing v18 field
 // surviving completely unchanged.
-static void test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default(void)
-{
-    TEST_SECTION("nvs_load_from -- a v18 blob upconverts to v19: every zone's new "
-                 "error_band_c/rate_band_c_per_s land on the 0 sentinel, which the accessors resolve to "
-                 "the UNCHANGED firmware default (20.0/0.5) -- while approach_rate_cap_c_per_hr/"
-                 "ease_off_window_mult/model_k_dc/etc survive unchanged");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v18_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 18;
-    src.thermo_count = 3;
-    src.relay_count = 3;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].thermo_mask = 0x01;
-    src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].model_k_dc = 20.969f;
-    src.zones[0].model_tau_s = 640.0f;
-    src.zones[0].model_dead_time_s = 45.0f;
-    src.zones[0].coupling_coeff[1] = 10.887f;
-    src.zones[0].coupling_diag_k_dc = 19.4f;
-    src.zones[0].ease_off_window_mult = 3.5f;
-    src.zones[0].approach_rate_cap_c_per_hr = 30.0f; /* a REAL, already-running A/B arm -- must survive */
-    src.zones[0].settings_source = 1; /* real link to zone 1 -- not self-referencing, so normalize_settings_source_cycles() cannot silently mask a fan-out bug the way the CUSTOM/0 sentinel could for zone 0 */
-
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].thermo_mask = 0x02;
-    src.zones[1].max_temp_c = 1250.0f;
-    src.zones[1].ease_off_window_mult = 2.0f;
-    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].thermo_mask = 0x04;
-    src.zones[2].max_temp_c = 1200.0f;
-    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-
-    src.crc32 = 0; // v18's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "a well-formed v18 blob must migrate to a valid current (v19) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // THE thing this test is really about: error_band_c/rate_band_c_per_s
-    // must land at the legal 0 sentinel on EVERY zone's raw stored field (v18
-    // never stored either, at any level), and the ACCESSOR must resolve that
-    // 0 to the bit-identical firmware default -- 20.0/0.5, exactly what the
-    // removed ERROR_BAND_C/RATE_BAND_C_PER_S #defines always were.
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[j].error_band_c, 0.0f, 1e-9,
-                        "v18 has no error_band_c -- the raw stored field lands on the 0 sentinel");
-        TEST_CHECK_NEAR(out_cfg.zones[j].rate_band_c_per_s, 0.0f, 1e-9,
-                        "v18 has no rate_band_c_per_s -- the raw stored field lands on the 0 sentinel");
-        s_zones.cfg = out_cfg;
-        float got_e = -1.0f, got_r = -1.0f;
-        TEST_CHECK(zones_config_get_error_band_c(j, &got_e) && fabsf(got_e - 20.0f) < 1e-6,
-                  "the accessor resolves every migrated zone's error band to the bit-identical "
-                  "firmware default 20.0 -- an existing board migrates to EXACTLY today's behaviour");
-        TEST_CHECK(zones_config_get_rate_band_c_per_s(j, &got_r) && fabsf(got_r - 0.5f) < 1e-6,
-                  "the accessor resolves every migrated zone's rate band to the bit-identical "
-                  "firmware default 0.5 -- an existing board migrates to EXACTLY today's behaviour");
-    }
-
-    // Pre-existing v18 fields -- including a REAL, non-default per-zone
-    // approach_rate_cap_c_per_hr A/B arm -- must survive the upgrade
-    // completely unchanged.
-    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
-    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
-    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
-              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
-    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_diag_k_dc, 19.4f, 1e-6, "zones[0].coupling_diag_k_dc survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].ease_off_window_mult, 3.5f, 1e-6, "zones[0].ease_off_window_mult survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].approach_rate_cap_c_per_hr, 30.0f, 1e-6,
-                    "zones[0]'s REAL, non-default approach_rate_cap_c_per_hr A/B arm survives the v18->v19 hop");
-    for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
-        char ss_msg[96];
-        snprintf(ss_msg, sizeof(ss_msg), "zones[0].settings_source group %u carried through verbatim (Opus "
-                "review of 5672719, item 1: the prefix+tail helper's fan-out must reach every group, not "
-                "just LIMITS)", (unsigned)g);
-        TEST_CHECK(out_cfg.zones[0].settings_source[g] == 1, ss_msg);
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 static void test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr(void)
 {
@@ -9902,122 +7798,6 @@ static void test_settings_source_per_group_resolution_is_independent(void)
 // live coupling_coeff matrix -- so the field this pass could most plausibly
 // corrupt (a real, non-default value only a commissioned board would ever
 // populate) is exercised with the actual number, not a stand-in.
-static void test_nvs_load_from_v18_blob_real_board_values_migration(void)
-{
-    TEST_SECTION("nvs_load_from -- the LIVE board's real v18 config (read via kiln_call "
-                 "control_get_zones/get_board_state, not synthesized) migrates to v19 with every "
-                 "pre-existing field byte-identical and both new fuzzy-band fields resolving to 20.0/0.5");
-    nvs_test_enable(true);
-    nvs_test_clear();
-
-    zones_cfg_v18_t src;
-    memset(&src, 0, sizeof(src));
-    src.version = 18;
-    src.thermo_count = 3;
-    src.relay_count = 4;
-    src.continue_on_zone_trip = 1;
-    src.safety_tc_type = 3;
-    src.pc_link_abort_silence_ms = 45000.0f;
-    src.timing_profile_count = 1;
-    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
-
-    // Zone 0 -- board's actual reported values (control_get_zones, 2026-09-04)
-    src.zones[0].relay_mask = 0x01;
-    src.zones[0].control_mode = 3;
-    src.zones[0].cal_offset_c = 0.0f;
-    src.zones[0].pid_kp = 0.03180000185966492f;
-    src.zones[0].pid_ki = 9.999999747378752e-05f;
-    src.zones[0].pid_kd = 0.8400999903678894f;
-    src.zones[0].max_ramp_c_per_hr = 900.0f;
-    src.zones[0].max_temp_c = 80.0f;
-    src.zones[0].min_temp_c = 0.0f;
-    src.zones[0].coupling_coeff[1] = 27.32f;
-    src.zones[0].coupling_coeff[2] = 21.72f;
-
-    // Zone 1 -- board's actual reported values
-    src.zones[1].relay_mask = 0x02;
-    src.zones[1].control_mode = 3;
-    src.zones[1].cal_offset_c = 0.0f;
-    src.zones[1].pid_kp = 0.048500001430511475f;
-    src.zones[1].pid_ki = 0.00019999999494757503f;
-    src.zones[1].pid_kd = 1.054800033569336f;
-    src.zones[1].max_ramp_c_per_hr = 900.0f;
-    src.zones[1].max_temp_c = 80.0f;
-    src.zones[1].min_temp_c = 0.0f;
-    src.zones[1].coupling_coeff[0] = 14.30f;
-    src.zones[1].coupling_coeff[2] = 22.15f;
-
-    // Zone 2 -- board's actual reported values
-    src.zones[2].relay_mask = 0x04;
-    src.zones[2].control_mode = 3;
-    src.zones[2].cal_offset_c = 0.0f;
-    src.zones[2].pid_kp = 0.06310000270605087f;
-    src.zones[2].pid_ki = 0.00019999999494757503f;
-    src.zones[2].pid_kd = 1.069000005722046f;
-    src.zones[2].max_ramp_c_per_hr = 900.0f;
-    src.zones[2].max_temp_c = 80.0f;
-    src.zones[2].min_temp_c = 0.0f;
-    src.zones[2].coupling_coeff[0] = 8.33f;
-    src.zones[2].coupling_coeff[1] = 12.42f;
-
-    src.crc32 = 0; // v18's own CRC is not checked on the old-version path
-
-    stage_zones_blob(&src, sizeof(src));
-
-    zones_cfg_t out_cfg;
-    bool found = false, valid = false;
-    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
-
-    TEST_CHECK(err == ESP_OK, "no NVS error");
-    TEST_CHECK(found && valid, "the board's real v18 blob must migrate to a valid current (v19) config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
-
-    // Every pre-existing field the board actually reported must survive
-    // byte-identically -- this is the failure mode being guarded against:
-    // a migration that works on all-defaults but corrupts a field only a
-    // real, commissioned config populates.
-    static const float kp[3] = {0.03180000185966492f, 0.048500001430511475f, 0.06310000270605087f};
-    static const float ki[3] = {9.999999747378752e-05f, 0.00019999999494757503f, 0.00019999999494757503f};
-    static const float kd[3] = {0.8400999903678894f, 1.054800033569336f, 1.069000005722046f};
-    static const uint8_t relay_mask[3] = {0x01, 0x02, 0x04};
-
-    for (uint8_t j = 0; j < 3; j++) {
-        TEST_CHECK(out_cfg.zones[j].relay_mask == relay_mask[j], "relay_mask survives unchanged");
-        TEST_CHECK(out_cfg.zones[j].control_mode == 3, "control_mode survives unchanged");
-        TEST_CHECK_NEAR(out_cfg.zones[j].cal_offset_c, 0.0f, 1e-9, "cal_offset_c survives unchanged");
-        TEST_CHECK_NEAR(out_cfg.zones[j].pid_kp, kp[j], 1e-9, "pid_kp survives byte-identically");
-        TEST_CHECK_NEAR(out_cfg.zones[j].pid_ki, ki[j], 1e-9, "pid_ki survives byte-identically");
-        TEST_CHECK_NEAR(out_cfg.zones[j].pid_kd, kd[j], 1e-9, "pid_kd survives byte-identically");
-        TEST_CHECK_NEAR(out_cfg.zones[j].max_ramp_c_per_hr, 900.0f, 1e-9, "max_ramp_c_per_hr survives unchanged");
-        TEST_CHECK_NEAR(out_cfg.zones[j].max_temp_c, 80.0f, 1e-9, "max_temp_c survives unchanged");
-        TEST_CHECK_NEAR(out_cfg.zones[j].min_temp_c, 0.0f, 1e-9, "min_temp_c survives unchanged");
-    }
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 27.32f, 1e-6, "zones[0].coupling_coeff[1] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[2], 21.72f, 1e-6, "zones[0].coupling_coeff[2] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[0], 14.30f, 1e-6, "zones[1].coupling_coeff[0] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[2], 22.15f, 1e-6, "zones[1].coupling_coeff[2] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[2].coupling_coeff[0], 8.33f, 1e-6, "zones[2].coupling_coeff[0] survives");
-    TEST_CHECK_NEAR(out_cfg.zones[2].coupling_coeff[1], 12.42f, 1e-6, "zones[2].coupling_coeff[1] survives");
-
-    // THE two new fields, on a REAL board config, not a synthetic one: must
-    // land on the 0 sentinel and resolve through the accessor to the
-    // bit-identical firmware default (20.0/0.5).
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        TEST_CHECK_NEAR(out_cfg.zones[j].error_band_c, 0.0f, 1e-9,
-                        "real board's migrated zone lands error_band_c on the 0 sentinel");
-        TEST_CHECK_NEAR(out_cfg.zones[j].rate_band_c_per_s, 0.0f, 1e-9,
-                        "real board's migrated zone lands rate_band_c_per_s on the 0 sentinel");
-        s_zones.cfg = out_cfg;
-        float got_e = -1.0f, got_r = -1.0f;
-        TEST_CHECK(zones_config_get_error_band_c(j, &got_e) && fabsf(got_e - 20.0f) < 1e-6,
-                  "accessor resolves the real board's migrated error band to 20.0");
-        TEST_CHECK(zones_config_get_rate_band_c_per_s(j, &got_r) && fabsf(got_r - 0.5f) < 1e-6,
-                  "accessor resolves the real board's migrated rate band to 0.5");
-    }
-
-    nvs_test_enable(false);
-    nvs_test_clear();
-}
 
 // Accessor pair for zone_cfg_t::error_band_c/::rate_band_c_per_s (PID_
 // EXPANSION_PLAN.md sec 3.6g) -- same shape as
@@ -10591,7 +8371,7 @@ static void test_decode_zones_blob_accepts_a_v25_blob_with_a_correct_crc(void)
     const char *reason = "unset";
     zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
     TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v25 blob migrates cleanly");
-    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v26) version");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
     TEST_CHECK(out.thermo_count == 2, "sibling field survives the hop unchanged");
     TEST_CHECK(out.zones[0].autotune_baseline_k_dc == 0.0f,
                "a migrated zone's new autotune_baseline_k_dc reads the 'not recorded yet' sentinel, "
@@ -10688,7 +8468,7 @@ static void test_decode_zones_blob_accepts_a_v24_blob_with_a_correct_crc(void)
     const char *reason = "unset";
     zones_decode_result_t r = zones_config_json_decode_blob(&src, sizeof(src), &out, &reason);
     TEST_CHECK(r == ZONES_DECODE_OK, "a well-formed, correctly-CRC'd v24 blob migrates cleanly");
-    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current (v26) version");
+    TEST_CHECK(out.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
     TEST_CHECK(out.thermo_count == 2, "sibling field survives the two-version hop unchanged");
     TEST_CHECK(out.zones[0].coil_power_w == 0.0f,
                "a migrated zone's v25-added coil_power_w reads its 'equal share' sentinel, "
@@ -10816,9 +8596,11 @@ static void test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught(void
     nvs_test_enable(true);
     nvs_test_clear();
 
-    zones_cfg_v18_t src;
+    // Was a v18 blob; v18 is now below the D2 expiry floor. v26 has
+    // error_band_c and memset leaves it on the same 0 sentinel.
+    zones_cfg_v26_t src;
     memset(&src, 0, sizeof(src));
-    src.version = 18;
+    src.version = 26;
     src.thermo_count = 1;
     src.relay_count = 1;
     src.timing_profile_count = 1;
@@ -10826,8 +8608,8 @@ static void test_NEGATIVE_migration_default_of_zero_instead_of_20_is_caught(void
     src.zones[0].relay_mask = 0x01;
     src.zones[0].thermo_mask = 0x01;
     src.zones[0].max_temp_c = 1300.0f;
-    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
-    src.crc32 = 0; // v18's own CRC is not checked on the old-version path
+    memset(src.zones[0].settings_source, ZONE_SETTINGS_SOURCE_CUSTOM, sizeof(src.zones[0].settings_source));
+    zh_stamp_v26_crc(&src);
 
     stage_zones_blob(&src, sizeof(src));
 
@@ -16716,6 +14498,7 @@ static void make_fully_populated_cfg_poisoned(zones_cfg_t *cfg, uint8_t poison)
         zc->progress_band_c = 3.5f + (float)z;
         zc->zone_type = 0;
         zc->failsafe_state = 0;
+        zc->tc_sheath_tau_s = (uint16_t)(60u + z);
         zc->hyst_c = 2.0f + (float)z;
         zc->min_on_s = (uint16_t)(30 + z);
         zc->min_off_s = (uint16_t)(30 + z);
@@ -17165,6 +14948,8 @@ void run_test_zones_http(void)
     test_zones_fix_review9_atomic_pair_and_claim_gated_writers();
     test_zones_pid_post_accepts_while_idle();
     test_zones_post_refused_by_mode_gate_before_interlock();
+    test_parse_zone_fields_sheath_tau();
+    test_zones_post_sheath_tau_refused_while_running();
     test_zones_pid_post_refuses_embedded_nul();
     test_zones_pid_post_bumps_generation();
     test_zones_pid_post_rejects_kp_over_bound();
@@ -17207,24 +14992,8 @@ void run_test_zones_http(void)
     test_nvs_save_dispatches_the_kiln_config_autosave();
     test_zones_saves_run_in_save_section();
     test_nvs_save_runs_under_save_mutex_with_distinct_revs();
-    test_nvs_load_from_v1_blob_upconverts_fields_correctly();
-    test_nvs_load_from_v2_blob_upconverts_fields_correctly();
-    test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly();
-    test_nvs_load_from_v4_blob_upconverts_thermo_mask_correctly();
-    test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
-    test_nvs_load_from_v6_blob_upconverts_fields_correctly();
     test_zones_config_migration_corpus_every_historical_version_forward();
-    test_nvs_load_from_v1_blob_chains_end_to_end_to_v16_preserving_real_values();
-    test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields();
-    test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
-    test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
     test_validate_rejects_out_of_range_v8_fields();
-
-    test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_settings_source_is_custom();
-    test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell();
-    test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero();
-    test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped();
-    test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling();
     test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it();
     test_validate_accepts_relay_type_mercury_rejects_past_it();
     test_push_all_relay_types_clears_orphaned_relay();
@@ -17266,17 +15035,9 @@ void run_test_zones_http(void)
     test_settings_source_per_group_resolution_is_independent();
     test_tuning_quality_round_trip_asymmetric_per_zone();
     test_zones_config_set_pid_invalidates_tuning_quality();
-    test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown();
-    test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero();
-    test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero();
-    test_nvs_load_from_v15_blob_defaults_ease_off_window_mult_to_default();
-    test_nvs_load_from_v16_blob_carries_global_ease_off_mult_to_every_zone();
     test_ease_off_window_mult_accessor_get_set_and_range();
-    test_nvs_load_from_v17_blob_defaults_approach_rate_cap_to_uncapped();
     test_approach_rate_cap_accessor_get_set_and_range();
-    test_nvs_load_from_v18_blob_defaults_fuzzy_bands_to_firmware_default();
     test_nvs_load_from_v19_blob_defaults_relay_type_to_ssr();
-    test_nvs_load_from_v18_blob_real_board_values_migration();
     test_fuzzy_bands_accessor_get_set_and_range();
     test_progress_band_c_accessor_get_set_and_range();
     test_NEGATIVE_wrong_zone_progress_band_read_is_caught();

@@ -31,7 +31,7 @@ bool http_auth_policy_web_enabled(void) {
 
 bool http_auth_policy_admin_bootstrap_needed(void) {
     bool effective_enabled = http_auth_policy_web_enabled();
-    bool admin_configured = web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    bool admin_configured = web_auth_store_admin_configured_or_unreadable();
     return web_auth_admin_bootstrap_needed(effective_enabled, admin_configured);
 }
 

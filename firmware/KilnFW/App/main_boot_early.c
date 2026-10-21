@@ -33,6 +33,8 @@
 #include "cfg_fs_mount.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
+#include "boot_history.h"
+#include "esp_app_desc.h"
 #include "estop_verification.h"
 #include "MAX31856.h"
 #include "hal_spi_esp_owner.h" /* ILI9488_start() still takes a raw spi_owner_t*
@@ -57,10 +59,25 @@
 #include "rtc_watchdog.h"
 #include "time_sync.h"
 #include "wifi_prov.h"
+#include "web_auth_store.h"
 #include "settings.h"
 
 #include "main_internal.h"
 #include "startup_faults.h"
+
+/* FD-03 helper, noinline so the 228 B crash record lives in its own short-lived frame
+ * instead of widening app_main's. */
+static void __attribute__((noinline)) main_record_boot_history(void)
+{
+    uint32_t prev_up_s = 0u;
+    bool prev_up_known = crash_report_prev_boot_uptime(&prev_up_s);
+    crash_report_record_t bh_crash;
+    bool bh_has_crash = crash_report_get(&bh_crash);
+    const esp_app_desc_t *bh_desc = esp_app_get_description();
+    (void)boot_history_record_boot((uint8_t)hal_sysinfo_reset_reason(), prev_up_known, prev_up_s,
+                                   bh_has_crash ? bh_crash.dump_id : 0u, bh_has_crash,
+                                   bh_desc ? bh_desc->version : NULL, 0u);
+}
 
 /* The three MAX31856 ~DRDY lines land on the SX1509 (IO8/IO9/IO10), not on
  * ESP32 GPIOs, so the thermocouple driver cannot see them without owning an
@@ -263,6 +280,12 @@ void main_boot_early(main_boot_ctx_t *ctx)
         // crash_report_init() itself.
         crash_report_init();
 
+        // boot_history.c (FD-03): one NVS write per boot appends this boot's reset reason,
+        // previous-boot uptime (crash_report's RTC beacon snapshot), crash dump_id and
+        // firmware hash to the 16-entry ring. Must follow crash_report_init(). Wall
+        // clock is 0 (SNTP is not up this early). Never fails app_main.
+        main_record_boot_history();
+
         // estop_verification.c: brings up the same KILN_NVS_PARTITION
         // namespace to read/persist the operator's E-stop bench-verification
         // confirmation (readiness item "estop_verified"). Own module, own
@@ -313,6 +336,15 @@ void main_boot_early(main_boot_ctx_t *ctx)
     if (wifi_err != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "wifi_prov_start failed: %s -- no Wi-Fi this boot, PC link and safety link unaffected",
                  esp_err_to_name(wifi_err));
+    }
+
+    // FS-02: decide "login storage reset" vs factory-fresh now that the default
+    // nvs and wifi_nvs partitions are both up. Surviving Wi-Fi STA credentials
+    // count as "set up before". A reset latches auth fail-closed (dashboards
+    // only until the admin is set again), LCD banner, readiness item.
+    if (web_auth_store_storage_reset_evaluate(!wifi_prov_is_unprovisioned())) {
+        ESP_LOGE(MAIN_TAG, "!!! LOGIN STORAGE WAS RESET (nvs auth data missing, board was set up before): "
+                           "auth fails CLOSED until an admin is set again (bootstrap / physical reset gesture)");
     }
 
     // Advertises this board as "kilnctl.local" over mDNS so the web UI/pc_tools

@@ -6,9 +6,15 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "recovery_apply_esp.h"
 
 #include "recovery_health_policy.h"
 
+#define RHEALTH_APPLY_WAIT_MS (10 * 60 * 1000)
 static const char *TAG = "recovery_health";
 
 #define RESTART_MAGIC 0x52454331u
@@ -60,13 +66,23 @@ void recovery_health_clear_wifi(void)
     s_wifi_restarts = 0;
 }
 
-void recovery_health_restart_for_http(void)
+bool recovery_health_restart_for_http(void)
 {
+    // RO-01: never cut a running install apply (same bounded wait as recovery_wifi.c).
+    const int64_t wait_start_us = esp_timer_get_time();
+    while (recovery_apply_busy()) {
+        if (esp_timer_get_time() - wait_start_us > (int64_t)RHEALTH_APPLY_WAIT_MS * 1000) {
+            ESP_LOGW(TAG, "apply still busy after %d ms; NOT restarting (FX-04), staying up", RHEALTH_APPLY_WAIT_MS);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
     s_http_restarts++;
     s_keep = true;
     esp_restart();
     for (;;) {
     }
+    return true;
 }
 
 void recovery_health_restart_for_wifi(void)

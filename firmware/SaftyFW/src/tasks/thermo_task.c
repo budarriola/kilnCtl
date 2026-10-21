@@ -36,6 +36,7 @@
 #include "max31856_reconfig_retry.h" // periodic re-probe while tc_type is unverified, see its own header
 #include "max31856_tc_range_policy.h" // per-tc_type plausibility band, see its own header for the full argument
 #include "task_priorities.h"
+#include "tc_lag_comp.h" // TC sheath lag lead (param 0x010B), shared with KilnFW's per-zone compensation
 #include "thermo_task_drdy_recovery.h" // pure missed-edge decision, see its own header
 #include "watchdog_task.h"
 
@@ -215,6 +216,34 @@ void thermo_task_request_tc_type_reapply(void)
 // inside any task's own deadline.
 #define THERMO_TASK_UNCONFIGURED_WAIT_MS 500u
 
+// TC sheath lag (param 0x010B). Owned by this task alone; the state and its
+// timestamp are reset together by thermo_task_lag_step().
+static tc_lag_comp_state_t s_lag;
+static uint32_t s_lag_last_ms = 0;
+static bool s_lag_have_ts = false;
+
+// Fill snap->tc_lead_c (compensated - raw, degC). tau 0 is an exact no-op:
+// lead 0 and the filter held reset. Called once per published conversion.
+static void thermo_task_lag_step(thermo_snapshot_t *snap)
+{
+    uint16_t tau_s = config_store_get_tc_sheath_tau_s();
+    float dt_s = s_lag_have_ts ? (float)(uint32_t)(snap->timestamp_ms - s_lag_last_ms) / 1000.0f : 0.0f;
+    s_lag_last_ms = snap->timestamp_ms;
+    s_lag_have_ts = true;
+    snap->tc_lead_c = 0.0f;
+    if (tau_s == 0u) {
+        if (s_lag.primed) {
+            tc_lag_comp_reset(&s_lag);
+        }
+        return;
+    }
+    bool valid = snap->valid && !isnan(snap->tc_c);
+    float est = tc_lag_comp_step(&s_lag, (float)tau_s, snap->tc_c, valid, dt_s, NULL);
+    if (valid && isfinite(est)) {
+        snap->tc_lead_c = est - snap->tc_c;
+    }
+}
+
 static TaskHandle_t s_task_handle = NULL;
 
 static SemaphoreHandle_t s_snapshot_lock = NULL;
@@ -275,6 +304,7 @@ bool thermo_task_get_snapshot(thermo_snapshot_t *out)
     out->timestamp_ms = 0;
     out->valid = false;
     out->tc_c = NAN;
+    out->tc_lead_c = 0.0f;
     out->cj_c = NAN;
     out->fault_bits = 0;
     out->spi_failed = false;
@@ -724,6 +754,7 @@ static void thermo_task_fn(void *arg)
             }
         }
 
+        thermo_task_lag_step(&snap);
         thermo_task_publish(&snap);
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_THERMO_TASK);

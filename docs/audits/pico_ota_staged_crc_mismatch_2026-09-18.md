@@ -82,7 +82,7 @@ example `esp_crc32_le(0, ...)` at
 `firmware/KilnFW/App/drivers/persist/kiln_package.c:159`,
 `firmware/KilnFW/App/drivers/persist/kiln_cfg_swap.c:83`,
 `firmware/KilnFW/App/drivers/http/profiles_http.c:379`, and the chained pair at
-`firmware/KilnFW/App/drivers/persist/zones_config_migrate.c:935-936`. **This
+`firmware/KilnFW/App/drivers/persist/zones_config_migrate.c:483-484`. **This
 handler is the sole outlier in the codebase.**
 
 Let `R(init, data)` denote the bare reflected table loop over poly `0xEDB88320`

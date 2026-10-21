@@ -133,6 +133,9 @@ typedef struct {
     bool last_mut_was_write;
     sha_t sha;
     bool sha_open;
+    bool fail_image_verify;
+    unsigned image_verify_calls;
+    uint32_t image_verify_len;
 } fl_t;
 
 static int fl_erase(void *c, uint32_t off, uint32_t len)
@@ -229,6 +232,13 @@ static void fl_sha_abort(void *c)
     f->sha_aborts++;
     f->sha_open = false;
 }
+static int fl_image_verify(void *c, uint32_t len)
+{
+    fl_t *f = c;
+    f->image_verify_calls++;
+    f->image_verify_len = len;
+    return f->fail_image_verify ? -1 : 0;
+}
 static void fl_lock(void *c) { ((fl_t *)c)->lock_n++; }
 static update_stage_t g_st;
 // Review 7 L2 probe: at every unlock, an UPLOADING phase must already carry the owner it was begun with.
@@ -260,6 +270,7 @@ static void reset_board(void)
         .sha_update = fl_sha_update,
         .sha_finish = fl_sha_finish,
         .sha_abort = fl_sha_abort,
+        .image_verify = fl_image_verify,
         .lock = fl_lock,
         .unlock = fl_unlock,
         .yield = NULL,
@@ -441,6 +452,21 @@ static void test_size_limits(void)
     TEST_CHECK(i.image_length == CAP, "full-capacity length reported");
 }
 
+static void test_image_verify_op01(void)
+{
+    TEST_SECTION("update_stage -- OP-01 full image verify before VERIFIED");
+    reset_board();
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK && is_staged(), "OP-01: good image staged");
+    TEST_CHECK(g_fl.image_verify_calls == 1 && g_fl.image_verify_len == 30000u, "OP-01: image_verify ran once over the whole length");
+    reset_board();
+    g_fl.fail_image_verify = true; /* sha-consistent but truncated/corrupt past the first chunk */
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_BAD_IMAGE, "OP-01: structurally invalid image refused");
+    TEST_CHECK(!is_staged() && g_fl.image_verify_calls == 1, "OP-01: never marked VERIFIED");
+    TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE, "OP-01: idle after the refusal");
+}
+
 static void test_bad_images(void)
 {
     TEST_SECTION("update_stage -- not an ESP32-S3 app image");
@@ -612,6 +638,121 @@ static void test_http_buffer_is_the_shared_internal_chunk(void)
                "no PSRAM / heap buffer (bounce-through-stack-temp and hidden internal temp)");
     free(text);
 }
+static char *lk05_read(const char *rel)
+{
+    char alt1[160], alt2[160], alt3[160];
+    snprintf(alt1, sizeof(alt1), "../drivers/%s", rel);
+    snprintf(alt2, sizeof(alt2), "App/drivers/%s", rel);
+    snprintf(alt3, sizeof(alt3), "firmware/KilnFW/App/drivers/%s", rel);
+    const char *cands[] = {alt1, alt2, alt3};
+    return test_read_source_anchored(__FILE__, alt1, cands, 3);
+}
+
+static void test_lk05_refusal_drain_has_its_own_buffer(void)
+{
+    TEST_SECTION("LK-05 -- refusal drains never touch the shared 4 KB OTA chunk (stale_running_matches hashes through it on the ota_confirm task) (source-text scan)");
+    char *http = lk05_read("http/ota_http.c");
+    TEST_CHECK(http != NULL, "ota_http.c readable");
+    if (http != NULL) {
+        char *fn = strstr(http, "esp_err_t ota_http_refusal_drain(httpd_req_t *req)");
+        TEST_CHECK(fn != NULL, "drain takes only the request (no caller-supplied buffer)");
+        TEST_CHECK(strstr(http, "s_refusal_drain_buf[OTA_REFUSAL_DRAIN_BUF_SIZE]") != NULL &&
+                       strstr(http, "#define OTA_REFUSAL_DRAIN_BUF_SIZE 512") != NULL,
+                   "drain reads into its own 512 B static buffer");
+        if (fn != NULL) {
+            char *end = strstr(fn, "\n}\n");
+            if (end == NULL) { end = strstr(fn, "\n}\r\n"); }
+            if (end != NULL) { *end = '\0'; }
+            TEST_CHECK(strstr(fn, "ota_http_esp_chunk_buf") == NULL, "drain body does not borrow the shared chunk");
+        }
+        free(http);
+    }
+    static const char *const files[] = {"http/ota_http_esp.c", "http/ota_http_pico.c", "http/backup_import.c",
+                                         "update/update_http.c"};
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        char *t = lk05_read(files[i]);
+        TEST_CHECK(t != NULL, "caller source readable");
+        if (t == NULL) { continue; }
+        bool bad = false;
+        size_t plen = strlen("ota_http_refusal_drain(req");
+        for (char *p = t; (p = strstr(p, "ota_http_refusal_drain(req")) != NULL; p++) {
+            if (p[plen] != ')') { bad = true; }
+        }
+        TEST_CHECK(!bad, "every drain call passes only the request");
+        free(t);
+    }
+    char *bi = lk05_read("http/backup_import.c");
+    if (bi != NULL) {
+        char *fn = strstr(bi, "static esp_err_t backup_import_refusal_finish(");
+        TEST_CHECK(fn != NULL, "refusal_finish present");
+        if (fn != NULL) {
+            char *end = strstr(fn, "\n}\n");
+            if (end == NULL) { end = strstr(fn, "\n}\r\n"); }
+            if (end != NULL) { *end = '\0'; }
+            TEST_CHECK(strstr(fn, "ota_http_esp_chunk_buf") == NULL, "backup refusal drain does not use the shared chunk");
+        }
+        free(bi);
+    }
+    char *esp = lk05_read("http/ota_http_esp.c");
+    if (esp != NULL) {
+        TEST_CHECK(strstr(esp, "every user is an OTA/update handler") == NULL, "the false single-task comment is gone");
+        TEST_CHECK(strstr(esp, "NOT httpd-only (LK-05)") != NULL, "comment states the buffer is shared across tasks");
+        free(esp);
+    }
+}
+
+/* Returns the body of the function starting at `sig` (copy truncated at the first closing brace in column 0). */
+static char *lf_fn_body(char *text, const char *sig)
+{
+    char *fn = text != NULL ? strstr(text, sig) : NULL;
+    if (fn == NULL) { return NULL; }
+    char *end = strstr(fn, "\n}\n");
+    if (end == NULL) { end = strstr(fn, "\n}\r\n"); }
+    if (end != NULL) { *end = '\0'; }
+    return fn;
+}
+
+static void test_lf_review_fixes(void)
+{
+    TEST_SECTION("LF-01..LF-04 -- stale hash own PSRAM buffer, drain cap comment + yield cadence, bounded resolve lock wait (source-text scan)");
+    char *ui = lk05_read("update/update_install_http.c");
+    char *fn = lf_fn_body(ui, "static bool stale_running_matches(");
+    TEST_CHECK(fn != NULL, "LF-01 stale_running_matches present");
+    if (fn != NULL) {
+        TEST_CHECK(strstr(fn, "ota_http_esp_chunk_buf") == NULL, "LF-01 stale hash does not borrow the shared 4 KB chunk");
+        TEST_CHECK(strstr(fn, "heap_caps_malloc(cap, MALLOC_CAP_SPIRAM") != NULL, "LF-01 own temporary PSRAM buffer");
+        int allocs = 0, frees = 0;
+        for (char *p = fn; (p = strstr(p, "heap_caps_free(buf)")) != NULL; p++) { frees++; }
+        for (char *p = fn; (p = strstr(p, "heap_caps_malloc(")) != NULL; p++) { allocs++; }
+        TEST_CHECK(allocs == 1 && frees >= 3, "LF-01 buffer freed on every exit path (setup fail, read fail, after loop)");
+    }
+    free(ui);
+
+    char *au = lk05_read("http/http_auth_http.c");
+    fn = lf_fn_body(au, "static esp_err_t refusal_result(httpd_req_t *req)");
+    TEST_CHECK(fn != NULL, "LF-03 refusal_result present");
+    if (fn != NULL) {
+        TEST_CHECK(strstr(fn, "since_yield >= AUTH_REFUSAL_YIELD_BYTES") != NULL, "LF-03 yields by byte count, not per read");
+        char *d = strstr(fn, "vTaskDelay(1)");
+        char *g = strstr(fn, "since_yield >= AUTH_REFUSAL_YIELD_BYTES");
+        TEST_CHECK(d != NULL && g != NULL && g < d, "LF-03 vTaskDelay sits behind the yield gate");
+    }
+    TEST_CHECK(au != NULL && strstr(au, "#define AUTH_REFUSAL_YIELD_BYTES 4096") != NULL, "LF-03 yield every 4 KB");
+    TEST_CHECK(au != NULL && strstr(au, "about 2 s + 3 s = 5 s") != NULL, "LF-02 comment states the real ~5 s bound");
+    free(au);
+
+    char *wa = lk05_read("persist/web_auth_store.c");
+    fn = lf_fn_body(wa, "#define STORAGE_RESET_RESOLVE_BUSY_RETRIES 3");
+    TEST_CHECK(fn != NULL, "LF-04 storage_reset_resolve present");
+    if (fn != NULL) {
+        TEST_CHECK(strstr(fn, "set_policy_wait(&p, STORAGE_RESET_RESOLVE_LOCK_WAIT_MS)") != NULL, "LF-04 short wait per try");
+        TEST_CHECK(strstr(fn, "web_auth_store_set_policy(") == NULL, "LF-04 does not use the 5 s lock wait");
+    }
+    TEST_CHECK(wa != NULL && strstr(wa, "#define STORAGE_RESET_RESOLVE_LOCK_WAIT_MS 1000") != NULL, "LF-04 1 s wait");
+    TEST_CHECK(wa != NULL && strstr(wa, "#define STORAGE_RESET_RESOLVE_BUSY_RETRIES 3") != NULL, "LF-04 3 tries -> ~3 s worst case");
+    free(wa);
+}
+
 static void test_upload_recv_failure_clears_gate_and_has_deadline(void)
 {
     TEST_SECTION("update_http.c -- stage upload recv-failure exit clears the stack gate pointer; overall deadline (source-text scan)");
@@ -971,6 +1112,12 @@ static void test_install_gate(void)
     make_image(30000, "v1.0.0-pre.3");
     TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty,
                "declared, clean descriptor: not dirty");
+    // AUP-03: declared version + gate set + descriptor version not parseable: refused, nothing staged.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "banana");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 && !is_staged(),
+               "AUP-03: gated, declared, unparseable descriptor version: refused");
     // REVIEW_STAGEVERFX2 LOW-1: the smallest case-variant suffix (dn is exactly "-DIRTY", dl == 6) is refused when declared too.
     reset_board();
     memset(&r, 0, sizeof(r));
@@ -1049,8 +1196,11 @@ static void test_install_gate(void)
     reset_board();
     memset(&r, 0, sizeof(r));
     make_image(30000, "not-a-version");
-    TEST_CHECK(upload_gated(30000, 4096, "2.0.0", rec_gate, &r) == UPDATE_STAGE_OK && r.calls == 1,
-               "F2: an invalid descriptor version leaves the declared one in force");
+    TEST_CHECK(upload_gated(30000, 4096, "2.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 && !is_staged(),
+               "F2/AUP-03: gated, an unparseable descriptor version is refused, not accepted under the declared one");
+    reset_board();
+    make_image(30000, "not-a-version");
+    TEST_CHECK(upload(30000, 4096, "2.0.0", NULL) == UPDATE_STAGE_OK, "AUP-03: ungated path keeps the declared version");
     reset_board();
     make_image(30000, "v1.2.3");
     TEST_CHECK(upload(30000, 4096, "99.0.0", NULL) == UPDATE_STAGE_OK, "F2: ungated (fetch) path is not subject to the check");
@@ -1367,11 +1517,14 @@ void run_test_update_stage(void)
     test_semver_and_commit_args();
     test_size_limits();
     test_bad_images();
+    test_image_verify_op01();
     test_wrong_project_refused();
     test_install_gate();
     test_gate_refusal_keeps_stage();
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
+    test_lk05_refusal_drain_has_its_own_buffer();
+    test_lf_review_fixes();
     test_upload_recv_failure_clears_gate_and_has_deadline();
     test_status_never_trusts_a_header_alone();
     test_clear();

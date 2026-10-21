@@ -9,6 +9,7 @@
 
 #include "esp_flash.h" /* esp_flash_get_size() -- flash_size below, same call as ui_page_diagnostics.c */
 #include "dram_watch.h" /* dram_watch_get() -- heap_internal_largest_low below */
+#include "persist_scratch.h" /* persist_scratch_fallback_count() -- FX-05 */
 #include "esp_heap_caps.h"
 #include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below, address/size now sourced from hal_sysinfo */
 #include "esp_log.h"
@@ -21,6 +22,7 @@
 #include "lvgl_port.h" /* lvgl_port_touch_is_calibrated() -- see the "touch_calibrated" /api/status field below */
 #include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
 #include "dashboard_json.h" /* json_escape()/append_zone_status_json() -- split out for host-testability, see that header */
+#include "heat_enable.h" /* heat_enable_get_reboot_state() -- PF-03 */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
 #include "kiln_io_owner.h"
@@ -137,6 +139,16 @@ void dashboard_prime_flash_facts(void)
         s_flash_used = metadata.image_len;
     }
     s_flash_facts_read = true;
+}
+
+bool dashboard_running_image_len(uint32_t *len)
+{
+    dashboard_prime_flash_facts();
+    if (!s_flash_used_known || s_flash_used == 0 || len == NULL) {
+        return false;
+    }
+    *len = s_flash_used;
+    return true;
 }
 
 void dashboard_get_status(dashboard_status_t *out)
@@ -559,6 +571,11 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     out->heap_spiram_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+#ifdef ESP_PLATFORM
+    out->persist_scratch_fallbacks = persist_scratch_fallback_count();
+    heat_enable_get_reboot_state(&out->pico_reboot_seq, &out->pico_reboot_latched,
+                                 &out->pico_reboot_lost_trip_only);
+#endif
     out->heap_spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
 
     /* DRAM_PSRAM_PLAN.md Phase 0 (4.1): the one capability not previously
@@ -861,6 +878,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t firing_history_uri = {
         .uri = "/api/firing_history", .method = HTTP_GET, .handler = firing_history_get_handler,
     };
+    static const httpd_uri_t firing_trace_uri = {
+        .uri = "/api/firing_trace", .method = HTTP_GET, .handler = firing_trace_get_handler,
+    };
     static const httpd_uri_t safety_clear_trip_uri = {
         .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
     };
@@ -955,6 +975,11 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = kiln_http_register(server, &firing_history_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/firing_history) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = kiln_http_register(server, &firing_trace_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/firing_trace) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = kiln_http_register(server, &history_csv_uri);

@@ -208,6 +208,28 @@ size_t bootloader_metadata_next_write_slot(size_t latest_slot_index);
 // as opposed to this being the sector's first-ever write.
 bool bootloader_metadata_next_write_needs_erase(size_t latest_slot_index);
 
+// PS2-02: full write plan, shared by the bootloader and the app. Starts from
+// the arithmetic plan above, then: if no erase is planned but the target slot
+// is not erased (`target_erased` false: a record torn mid-program fails its CRC
+// so find_latest skips it, but its bytes are still there), take the wrap path:
+// verified backup of the newest record (when one exists in the main sector),
+// erase, slot 0. `target_erased` is ignored when the arithmetic plan already
+// erases.
+typedef struct {
+    size_t slot;
+    bool needs_erase;
+    bool needs_backup; // newest record lives in the main sector and the erase would destroy it
+} bootloader_metadata_write_plan_t;
+
+bootloader_metadata_write_plan_t bootloader_metadata_plan_write(size_t latest_slot_index,
+                                                                  bool target_erased);
+
+// PS2-01: true when a failed boot-time metadata persist must stop `slot` from
+// being booted: a PENDING_VERIFY slot whose attempt count could not be
+// recorded is an attempt that was used up (otherwise a crash-looping image is
+// never rolled back).
+bool bootloader_metadata_persist_failure_blocks_boot(const bootloader_metadata_t *meta, uint8_t slot);
+
 // The app's check-in (docs/BOOTLOADER.md: boot_attempts "cleared on check-in",
 // AUDIT_PICO_UPDATE HIGH-1): marks `slot` VALID and clears boot_attempts.
 // Pure so the host tests drive the exact transition update_task.c applies.

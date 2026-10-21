@@ -22,6 +22,7 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 
+#include "recovery_apply_esp.h"
 #include "recovery_health.h"
 #include "recovery_health_policy.h"
 #include "recovery_http.h"
@@ -93,6 +94,10 @@ void app_main(void)
     recovery_lcd_show_message();
     recovery_wifi_start();
 
+    // Unattended install: a request left by the application install route. Runs BEFORE the HTTP
+    // server starts so the apply claim exists before any mutating route can be reached (REVIEW_AUTOFX LOW-4).
+    recovery_install_boot();
+
     // A failed start stops its own server, so it can be retried; if every
     // bounded attempt fails the image restarts (it is stateless) after leaving
     // "HTTP FAILED" on the LCD long enough to read.
@@ -111,14 +116,18 @@ void app_main(void)
         // Only this final failure shows the banner (per-attempt banners would
         // linger after a later successful retry).
         if (rhealth_http_restart_allowed(recovery_health_http_restarts())) {
-            recovery_lcd_set_error("HTTP FAILED", "restarting");
+            if (!recovery_apply_busy()) { // FX-04: never replace the DO NOT POWER-CYCLE warning
+                recovery_lcd_set_error("HTTP FAILED", "restarting");
+            }
             ESP_LOGE(TAG, "HTTP FAILED after %d attempts -- restarting (%u of %u)",
                      RHEALTH_HTTP_START_ATTEMPTS, (unsigned)(recovery_health_http_restarts() + 1),
                      (unsigned)RHEALTH_HTTP_MAX_RESTARTS);
             vTaskDelay(pdMS_TO_TICKS(5000));
-            recovery_health_restart_for_http(); // counted, count kept across the restart
+            (void)recovery_health_restart_for_http(); // counted, count kept; returns only if an apply outlasted the wait
         }
-        recovery_lcd_set_error("HTTP FAILED", "restart limit hit");
+        if (!recovery_apply_busy()) {
+            recovery_lcd_set_error("HTTP FAILED", "restart limit hit");
+        }
         ESP_LOGE(TAG, "HTTP FAILED after %d attempts and %u restarts -- staying up, LCD shows the "
                  "error (power-cycle to retry)", RHEALTH_HTTP_START_ATTEMPTS,
                  (unsigned)recovery_health_http_restarts());
@@ -129,9 +138,6 @@ void app_main(void)
         recovery_lcd_clear_error();
         recovery_health_clear_http();
     }
-
-    // Unattended install: a request left by the application install route.
-    recovery_install_boot();
 
     // wifi/lcd are snapshots (the LCD retry task may be mid re-init).
     if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {

@@ -1,4 +1,5 @@
 // See pref_cfg_fs.h for the full design/rationale.
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "pref_cfg_fs.h"
 
 #include <stdio.h>
@@ -351,7 +352,7 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
  * is covered by one rule. */
 #define PREF_UNKNOWN_MAX 32
 #define PREF_UNKNOWN_PATH_MAX 64
-static char s_unknown_paths[PREF_UNKNOWN_MAX][PREF_UNKNOWN_PATH_MAX];
+static EXT_RAM_BSS_ATTR char s_unknown_paths[PREF_UNKNOWN_MAX][PREF_UNKNOWN_PATH_MAX];
 static portMUX_TYPE s_unknown_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void unknown_set(const char *rel_path, bool unknown)
@@ -515,6 +516,17 @@ esp_err_t pref_cfg_fs_remove(const char *rel_path)
         unknown_set(rel_path, false); /* persfx4: a deliberate remove is the way out of a rejected-file refusal */
     }
     return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
+}
+
+esp_err_t pref_cfg_fs_discard_rejected(const char *rel_path)
+{
+    if (!rel_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!pref_cfg_fs_rev_unknown(rel_path)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return pref_cfg_fs_remove(rel_path);
 }
 
 static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,

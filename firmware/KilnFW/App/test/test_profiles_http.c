@@ -89,6 +89,7 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 #include "hal_kv.h"
 #include "fake_sysinfo.h"
 #include "fake_kv.h"
+#include "stubs/flash_hop_host_stub.h"
 
 typedef hal_kv_handle_t *nvs_handle_t;
 
@@ -5316,6 +5317,36 @@ static void test_profile_rule_temp_nan_refused_even_with_cmp_none(void)
     TEST_CHECK(!profiles_slot_used(0), "a NaN rule threshold is never persisted");
 }
 
+// HR-03: segment target/ramp and rule temp_c use the strict float parse -- trailing junk, hex floats and
+// non-numeric values are refused, never stored (a non-numeric temp_c used to land as 0.0).
+static void test_profile_post_strict_floats_hr03(void)
+{
+    TEST_SECTION("profile_post_handler() -- HR-03 malformed target/ramp/temp_c refused, nothing stored");
+    const char *bad[] = {
+        "seg0_target=100abc&seg0_ramp=50&seg0_dwell=5",
+        "seg0_target=0x1p6&seg0_ramp=50&seg0_dwell=5",
+        "seg0_target=100&seg0_ramp=50abc&seg0_dwell=5",
+        "seg0_target=100&seg0_ramp=0x1p5&seg0_dwell=5",
+        "seg0_target=100&seg0_ramp=50&seg0_dwell=5&rule0_zone=0&rule0_segment=0&rule0_enable=1&rule0_temp_cmp=1&rule0_temp_source=1&rule0_temp_c=abc",
+        "seg0_target=100&seg0_ramp=50&seg0_dwell=5&rule0_zone=0&rule0_segment=0&rule0_enable=1&rule0_temp_cmp=1&rule0_temp_source=1&rule0_temp_c=12abc",
+    };
+    for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        char body[400];
+        snprintf(body, sizeof(body), "id=-1&name=StrictF&zone_mask=1&seg_count=1&%s", bad[k]);
+        run_profile_post(body);
+        TEST_CHECK(!profiles_slot_used(0), "malformed numeric field is refused and nothing persisted");
+    }
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    run_profile_post("id=-1&name=StrictOk&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(profiles_slot_used(0), "control: a clean numeric body is stored");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    run_profile_post("id=-1&name=StrictRule&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5&"
+                     "rule0_zone=0&rule0_segment=0&rule0_enable=1&rule0_temp_cmp=1&rule0_temp_source=1&rule0_temp_c=12abc");
+    TEST_CHECK(strstr(s_resp_capture, "temp_c not a finite number") != NULL,
+               "a malformed rule temp_c is refused by the strict parse (not by a later check)");
+}
+
 static void test_profile_favorite_empty_slot_refused(void)
 {
     TEST_SECTION("profile_favorite_post_handler() -- an empty slot or a bad favorite value is refused");
@@ -5732,15 +5763,26 @@ static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
                  "underneath it (DRAM_PSRAM_PLAN.md section 7.2 safety net)");
     memset(&s_profiles, 0, sizeof(s_profiles));
 
+    flash_hop_stub_reset();
+    g_flash_hop_stub_fail = true; // worker unusable
     fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
     esp_err_t err = nvs_save_slot(0);
 
     TEST_CHECK(err == ESP_ERR_INVALID_STATE,
-               "the wrong-task guard refuses with a diagnosable error, not a crash -- exactly "
-               "the class of bug (an NVS write reached from a PSRAM-stack task) this net exists "
-               "to catch before a future task relocation (DRAM_PSRAM_PLAN.md section 7) makes it "
-               "reachable for real");
+               "with the flash worker unusable the PSRAM-stack save is refused with a diagnosable error, "
+               "not a crash and not a direct write");
+    TEST_CHECK(g_flash_hop_stub_dispatches == 0, "nothing was dispatched");
+
+    /* Worker usable: the save hops (dispatch counted) instead of being refused. */
+    g_flash_hop_stub_fail = false;
+    (void)nvs_save_slot(0);
+    TEST_CHECK(g_flash_hop_stub_dispatches == 1, "PSRAM-stack nvs_save_slot hops onto the flash worker");
+
+    /* The erase entry hops the same way. */
+    flash_hop_stub_reset();
+    (void)nvs_erase_slot_locked(0);
+    TEST_CHECK(g_flash_hop_stub_dispatches == 1, "PSRAM-stack nvs_erase_slot_locked hops onto the flash worker");
 
     fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }
@@ -6600,6 +6642,7 @@ void run_test_profiles_http(void)
     test_profile_post_builtin_id_copies_to_first_free();
     test_profile_name_nul_refused();
     test_profile_rule_temp_nan_refused_even_with_cmp_none();
+    test_profile_post_strict_floats_hr03();
     test_profile_favorite_empty_slot_refused();
     test_fuzz_small_body_handlers();
     test_delete_rev_unknown_is_409();

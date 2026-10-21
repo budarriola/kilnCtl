@@ -133,6 +133,8 @@ try {
     Test-Mutant "identity" @(, @("if (vr != RIC_OK) {", "if (vr == 12345) {"))
     Test-Mutant "toobig" @(@("if (len > io->app_size) {", "if (len > io->app_size * 100u) {"),
                            @("if (vr == RIC_OVERSIZE) {", "if (vr == 12345) {"))
+    # OP-01: full image verify of the stage before the first app erase.
+    Test-Mutant "stageverify" @(, @("if (io->stage_verify(io->ctx, len) != 0) {", "if (0) {"))
     # Copy mechanics.
     Test-Mutant "copyyield" @(, @("if (io->yield && ((off + n) % RECOVERY_APPLY_ERASE_BLOCK) == 0) {", "if (0) {"))
     Test-Mutant "eraseahead" @(, @("if (off >= erased) {", "if (off == 0) {"))
@@ -159,7 +161,7 @@ try {
     Test-Mutant "noerase" @(, @("prog->stage_cleared = io->stage_erase(io->ctx, 0, STAGE_HEADER_SECTOR) == 0;",
                                 "prog->stage_cleared = true;"))
 
-    Write-Host "check_recovery_apply: PASS ($passCount assertions; 22 negative-test mutants plus the real build failed or passed as required)"
+    Write-Host "check_recovery_apply: PASS ($passCount assertions; 23 negative-test mutants plus the real build failed or passed as required)"
     exit 0
 }
 finally {

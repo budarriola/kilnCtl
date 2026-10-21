@@ -116,9 +116,8 @@ $requiredNames = @(
     "gpio_probe",  # liveness: config -- only created when CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y (Kconfig)
     "backlight_pwm",  # liveness: config -- only created when CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE=y (Kconfig, defaults y); found missing from this list by check_stack_task_table_consistency.ps1 (2026-09-24) despite having a real stack_margin_register() call site and a check_all_task_stack_budgets.py TASKS/CEILING_BYTES row all along
     "recovery_exit",  # liveness: on-demand -- transient task an HTTP handler (ota_http_recovery.c) creates per POST /api/ota/esp/recovery_exit call
-    "ota_rollback_reboot",  # liveness: on-demand -- transient task ota_http_esp.c's rollback handler creates on demand
     "recovery_boot",  # liveness: on-demand -- transient task ota_http_recovery.c's POST /api/ota/esp/recovery_boot handler creates on demand
-    "ota_pico_rollback",  # liveness: on-demand -- transient task ota_http_pico.c's rollback handler creates on demand
+    "ota_pico_rollback",  # liveness: on-demand -- persistent static task ota_http_pico.c's rollback handler creates on the first POST (OR-08)
     "update_fetch",  # liveness: on-demand -- transient TLS/HTTP task update_fetch.c creates per POST /api/update/check or /download (GitHub release fetch, GITHUB_RELEASE_UPDATE_PLAN.md WP8)
     "update_fetch_wr",  # liveness: on-demand -- transient flash-writer task update_fetch.c creates per download
     "http_async_job",  # liveness: on-demand -- transient task http_async_job.c creates on demand for a slow POST handler's job (docs/HTTP_POST_OWNER_MIGRATION.md slice A1; first caller is safety_cfg_http.c's ct_auto_zero_post_handler())
@@ -138,6 +137,7 @@ $requiredNames = @(
     # is precisely why it is not allowed on the shared httpd worker stack --
     # so its live margin has to stay measurable.
     "kiln_cfg_swap",
+    "esp_timer",  # liveness: boot-once -- IDF-owned esp_timer task, resolved by xTaskGetHandle in main_network_http.c at boot (ET-02)
 
     # Review finding at 4ddad119 (CLAUDE.md "Register every new task for
     # stack-margin reporting"): zones_current_sweep_task.c's one-shot,
@@ -555,15 +555,8 @@ foreach ($f in $sourceFiles) {
 $exemptCreatedNames = @{
     # (a) short-lived / self-deleting -- exits on its own, no ongoing stack
     # margin to track past the moment it was created.
-    "wifi_mode_ui"      = "ui_page_network.c mode_worker_task: one-shot Wi-Fi mode change, self-deletes"
-    "wifi_ap_id_ui"     = "ui_page_network.c ap_identity_worker_task: one-shot AP identity fetch, self-deletes"
-    "wifi_connect_ui"   = "ui_page_network_manage.c connect_worker_task: one-shot connect attempt, self-deletes"
-    "wifi_forget_ui"    = "ui_page_network_manage.c forget_worker_task: one-shot forget-network call, self-deletes"
-    "wifi_scan_ui"      = "ui_page_network_manage.c scan_worker_task: one-shot Wi-Fi scan, self-deletes"
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
     "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
-    "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
-    "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"
     "recovery_exit_reboot" = "ota_http_recovery.c ota_recovery_exit_reboot_task: registered under the shortened name 'recovery_exit' (see that file's comment), not this FreeRTOS task-name string"
     "sw_reset_reboot"      = "sw_reset_http.c sw_reset_reboot_task: one-shot reboot-after-delay (send ANNOUNCE_REBOOT, then hal_wdt_reboot()), never returns to measure -- same shape as factory_reset_reboot/ota_rollback_reboot above"
     "ota_pico_relay"    = "ota_pico_relay.c relay_task_fn: one-shot relay session, self-deletes"
@@ -580,15 +573,8 @@ $exemptCreatedNames = @{
 # Every exemption is pinned to the ONE file and task function that may create that name (REVIEW_LCD19FX6 INFO-3), so a
 # second create reusing an exempt name in another file (or with another function) is not silently waved through.
 $exemptCreatePin = @{
-    "wifi_mode_ui"         = "ui_page_network.c|mode_worker_task"
-    "wifi_ap_id_ui"        = "ui_page_network.c|ap_identity_worker_task"
-    "wifi_connect_ui"      = "ui_page_network_manage.c|connect_worker_task"
-    "wifi_forget_ui"       = "ui_page_network_manage.c|forget_worker_task"
-    "wifi_scan_ui"         = "ui_page_network_manage.c|scan_worker_task"
     "cfg_autofmt"          = "cfg_fs_mount.c|cfg_fs_auto_format_task"
     "factory_reset_reboot" = "factory_reset.c|reboot_task"
-    "ota_rollback_reboot"  = "ota_http_esp.c|ota_rollback_reboot_task"
-    "ota_pico_rollback"    = "ota_http_pico.c|ota_pico_rollback_task"
     "recovery_exit_reboot" = "ota_http_recovery.c|ota_recovery_exit_reboot_task"
     "sw_reset_reboot"      = "sw_reset_http.c|sw_reset_reboot_task"
     "ota_pico_relay"       = "ota_pico_relay.c|relay_task_fn"
@@ -681,12 +667,8 @@ $stackSkipAllowed = @{
     'ota_pico_relay' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
     'spi_owner_task' = 'create site only: FreeRTOS name behind the spi_owner registration; the size arrives through the stack_depth parameter, not a literal'
     'sw_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
-    'wifi_ap_id_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_connect_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_forget_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_mode_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
-    'wifi_scan_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
     'http_async_job' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'esp_timer' = 'register site only: IDF-owned task, resolved by xTaskGetHandle(), never created by this firmware'
     'httpd_worker' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'i2c_owner_ns2009' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
     'i2c_owner_sx1509' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
@@ -694,7 +676,6 @@ $stackSkipAllowed = @{
     'safety_proto_rx' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'spi_owner' = 'register site only: created by spi_owner init under the name spi_owner_task with a parameter size (see spi_owner_task)'
     'uart_owner_evt_task' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
-    'lvgl' = 'create size is sizeof(static stack array)/sizeof(StackType_t): not a literal'
     'uart_proto_rx' = 'create size is a function parameter (stack_depth) in uart_protocol.c: not a literal'
 }
 # FreeRTOS create name -> stack_margin_register name, for ONE task created and registered under two names (the

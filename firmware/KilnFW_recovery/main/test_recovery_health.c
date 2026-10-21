@@ -311,6 +311,9 @@ static void test_main_source(const char *path)
     CHECK(start != NULL, "recovery_main calls recovery_http_start");
     CHECK(start && strstr(start - 20 > src ? start - 20 : src, "esp_err_t herr =") != NULL,
           "recovery_main keeps recovery_http_start's result");
+    const char *inst = strstr(src, "recovery_install_boot();");
+    CHECK(inst != NULL && start && inst < start, "install claim (recovery_install_boot) precedes recovery_http_start");
+    CHECK(inst != NULL && count_of(src, "recovery_install_boot();") == 1, "recovery_install_boot is called once");
     CHECK(strstr(src, "RHEALTH_HTTP_START_ATTEMPTS") != NULL, "http start is retried a bounded number of times");
     const char *rs = strstr(src, "recovery_health_restart_for_http();");
     const char *up = strstr(src, "recovery image up");
@@ -343,10 +346,20 @@ static void test_health_source(const char *path)
     CHECK(strstr(src, "RTC_NOINIT_ATTR uint32_t s_wifi_restarts") != NULL, "wifi count survives esp_restart");
     CHECK(strstr(src, "esp_reset_reason() == ESP_RST_POWERON") != NULL, "power-on reset detected");
     CHECK(count_of(src, "rhealth_restart_count_at_boot(") == 2, "both counters validated at boot");
+    // RO-01: the HTTP restart waits out a running install apply before esp_restart.
+    char *hr = between(strstr(src, "bool recovery_health_restart_for_http(void)"), "\n}\n");
+    const char *busy = hr ? strstr(hr, "while (recovery_apply_busy())") : NULL;
+    const char *rst = hr ? strstr(hr, "esp_restart();") : NULL;
+    CHECK(busy && rst && busy < rst, "http restart waits for recovery_apply_busy() before esp_restart");
+    // FX-04: the timeout path returns false instead of restarting under a running apply.
+    const char *tmo = hr ? strstr(hr, "RHEALTH_APPLY_WAIT_MS") : NULL;
+    const char *ret = tmo ? strstr(tmo, "return false;") : NULL;
+    CHECK(ret && rst && ret < rst, "http restart wait timeout returns false before esp_restart (FX-04)");
+    CHECK(hr && strstr(hr, "break;") == NULL, "http restart wait has no break out to esp_restart (FX-04)");
     char *sd = between(strstr(src, "static void on_shutdown(void)"), "\n}\n");
     CHECK(sd && strstr(sd, "if (!s_keep)") && strstr(sd, "s_http_restarts = 0;") && strstr(sd, "s_wifi_restarts = 0;"),
           "deliberate restarts zero both counters");
-    char *fh = between(strstr(src, "void recovery_health_restart_for_http(void)"), "\n}\n");
+    char *fh = between(strstr(src, "bool recovery_health_restart_for_http(void)"), "\n}\n");
     CHECK(fh && strstr(fh, "s_http_restarts++;") && strstr(fh, "s_keep = true;"), "http restart counts and keeps");
     char *fw = between(strstr(src, "void recovery_health_restart_for_wifi(void)"), "\n}\n");
     CHECK(fw && strstr(fw, "s_wifi_restarts++;") && strstr(fw, "s_keep = true;"), "wifi restart counts and keeps");
@@ -359,10 +372,60 @@ static void test_health_source(const char *path)
     free(src);
 }
 
+// RC-01: the direct upload takes the apply claim; recover_task re-checks it before select/restart.
+static void test_rc01_source(const char *http_path, const char *inst_path)
+{
+    char *h = load_stripped(http_path, "recovery_http.c readable (rc01)");
+    char *i = load_stripped(inst_path, "recovery_install.c readable");
+    if (h) {
+        char *op = between(strstr(h, "static esp_err_t ota_esp_post(httpd_req_t *req)"), "\n}\n");
+        const char *cl = op ? strstr(op, "recovery_app_write_claim()") : NULL;
+        const char *call = op ? strstr(op, "ota_esp_post_locked(req)") : NULL;
+        const char *rel = op ? strstr(op, "recovery_app_write_release()") : NULL;
+        CHECK(cl && call && rel && cl < call && call < rel, "direct esp upload claims, runs, then releases the apply claim");
+        CHECK(op && strstr(op, "refuse_while_applying(req)") != NULL, "direct esp upload refuses 409 when the claim is held");
+        free(op);
+        free(h);
+    }
+    if (i) {
+        char *rt = between(strstr(i, "static void recover_task(void *arg)"), "\n}\n");
+        CHECK(rt && count_of(rt, "recovery_apply_busy()") >= 3, "recover_task re-checks the claim before select and before restart");
+        const char *sel = rt ? strstr(rt, "recovery_http_select_app_and_restart()") : NULL;
+        const char *last = NULL;
+        for (const char *q = rt; q && (q = strstr(q, "recovery_apply_busy()")) != NULL; q++) {
+            if (sel && q < sel) last = q;
+        }
+        CHECK(last && sel && last < sel && sel - last < 900, "claim re-check sits right before recovery_http_select_app_and_restart");
+        const char *rs = rt ? strstr(rt, "esp_restart();") : NULL;
+        const char *lastr = NULL;
+        for (const char *q = rt; q && rs && (q = strstr(q, "recovery_apply_busy()")) != NULL && q < rs; q++) lastr = q;
+        CHECK(lastr && rs && rs - lastr < 300, "claim re-check sits right before esp_restart");
+        free(rt);
+        free(i);
+    }
+}
+
+// FX-04: the HTTP-failed banners must not replace the install warning while an apply runs.
+static void test_fx04_main(const char *path)
+{
+    char *src = load_stripped(path, "recovery_main.c readable (fx04)");
+    if (!src) {
+        return;
+    }
+    const char *a = strstr(src, "if (!recovery_apply_busy())");
+    const char *b = a ? strstr(a, "\"restarting\"") : NULL;
+    CHECK(a && b && b - a < 250, "restarting banner gated on !recovery_apply_busy (FX-04)");
+    const char *c = strstr(src, "(void)recovery_health_restart_for_http()");
+    const char *d = c ? strstr(c, "if (!recovery_apply_busy())") : NULL;
+    const char *e = d ? strstr(d, "restart limit hit") : NULL;
+    CHECK(d && e && e - d < 250, "restart-limit banner gated on !recovery_apply_busy (FX-04)");
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     test_policy();
-    if (argc < 5) {
+    if (argc < 6) {
         fprintf(stderr, "usage: %s <recovery_wifi.c> <recovery_http.c> <recovery_main.c> <recovery_health.c>\n", argv[0]);
         return 2;
     }
@@ -370,6 +433,8 @@ int main(int argc, char **argv)
     test_wifi_source(argv[1]);
     test_http_source(argv[2]);
     test_main_source(argv[3]);
+    test_rc01_source(argv[2], argv[5]);
+    test_fx04_main(argv[3]);
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

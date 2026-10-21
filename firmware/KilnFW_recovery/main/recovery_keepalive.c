@@ -24,6 +24,10 @@ static SemaphoreHandle_t s_uart_lock; // held by the keepalive while writing, by
 static StaticSemaphore_t s_uart_lock_storage;
 static bool s_uart_ready;
 static TaskHandle_t s_task;
+static volatile uint32_t s_ka_sent;
+static volatile uint32_t s_ka_send_errors;
+static volatile int32_t s_ka_last_err;
+static volatile uint32_t s_ka_last_send_ms;
 static uint8_t s_payload[KILNLINK_FRAME_MAX_PAYLOAD];
 static uint8_t s_wire[KILNLINK_FRAME_STUFFED_MAX];
 
@@ -89,13 +93,37 @@ static void keepalive_task(void *arg)
         if (s_uart_ready) {
             size_t pl = rpp_pack_keepalive(s_payload);
             size_t n = rpp_build_frame(msg_index++, s_payload, pl, s_wire, sizeof(s_wire));
-            if (n > 0) {
-                (void)uart_write_bytes(KA_UART, s_wire, n);
+            int32_t err = 0;
+            if (n == 0) {
+                err = -3;
+            } else {
+                int w = uart_write_bytes(KA_UART, s_wire, n);
+                err = w < 0 ? -1 : ((size_t)w < n ? -2 : 0);
+            }
+            s_ka_last_send_ms = up_ms;
+            s_ka_last_err = err;
+            if (err == 0) {
+                s_ka_sent++;
+            } else {
+                s_ka_send_errors++;
+            }
+            if (s_ka_sent == 1 || (s_ka_sent % 30u) == 0 || err != 0) { // boot log line, then ~1/min
+                ESP_LOGI(TAG, "keepalive sent=%u errors=%u last_err=%d at %u ms", (unsigned)s_ka_sent,
+                         (unsigned)s_ka_send_errors, (int)err, (unsigned)up_ms);
             }
             uart_flush_input(KA_UART); // Pico replies are not read here; never let them pile up
         }
         xSemaphoreGive(s_uart_lock);
     }
+}
+
+void recovery_keepalive_get_stats(recovery_keepalive_stats_t *out)
+{
+    out->sent = s_ka_sent;
+    out->send_errors = s_ka_send_errors;
+    out->last_err = s_ka_last_err;
+    out->last_send_ms = s_ka_last_send_ms;
+    out->task_running = s_task != NULL;
 }
 
 void recovery_keepalive_start(void)

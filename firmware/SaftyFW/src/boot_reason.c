@@ -43,6 +43,13 @@ saftyfw_boot_reason_t boot_reason_read(bool wd_caused_reboot, bool wd_enable_cau
     return out;
 }
 
+saftyfw_boot_reason_t boot_reason_read_wd_reason(uint32_t wd_reason_reg,
+                                                  bool sdk_enable_caused_reboot)
+{
+    bool timeout = (wd_reason_reg & SAFTYFW_WD_REASON_TIMER_BIT) != 0u;
+    return boot_reason_read(timeout, timeout && sdk_enable_caused_reboot);
+}
+
 saftyfw_boot_reason_t boot_reason_get_cached(void)
 {
     return s_cached;

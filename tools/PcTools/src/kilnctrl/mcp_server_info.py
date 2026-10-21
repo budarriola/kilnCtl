@@ -6,6 +6,7 @@ logic changes. See mcp_server.py's module docstring for the overall map.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import dataclasses
 import functools
 import glob
@@ -110,6 +111,12 @@ def get_stack_margin() -> str:
         return "device reported no instrumented tasks"
     lines = []
     for e in entries:
+        if e.exited_retained:
+            lines.append(
+                f"{e.name}: exited, {e.hwm_bytes} B free at worst of {e.configured_stack_bytes} B "
+                f"(retained at task exit) [{e.level.name}]"
+            )
+            continue
         if not e.alive:
             lines.append(f"{e.name}: not running (configured {e.configured_stack_bytes} B)")
             continue
@@ -1369,7 +1376,8 @@ def backup_import(
     category = backup_import_http_client.classify_refusal(status, resp_text)
     if category == backup_import_http_client.REFUSAL_PARTIAL_WRITE:
         return (
-            f"FAILED: HTTP {status} -- a PARTIAL write landed before the restore failed: "
+            f"FAILED: HTTP {status} -- the restore failed after it began writing, so some settings MAY have been applied "
+            f"(compare an export before and after; identical values change nothing): "
             f"{resp_text} (POST elapsed {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
             f"{after_readiness}"
         )
@@ -1520,7 +1528,13 @@ def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     if not records:
         return f"host={resolved} kind={kind}: log is empty (0 records)"
     lines = [f"host={resolved} kind={kind}: {len(records)} record(s)"]
-    lines.extend(event_log_decoder.format_record(r) for r in records)
+    for rec, utc in event_log_decoder.annotate_utc(records):  # FD-04: UTC per boot segment, blank when unknown
+        stamp = (
+            datetime.datetime.fromtimestamp(utc, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+            if utc is not None
+            else "-"
+        )
+        lines.append(f"{stamp:>20} {event_log_decoder.format_record(rec)}")
     return "\n".join(lines)
 
 

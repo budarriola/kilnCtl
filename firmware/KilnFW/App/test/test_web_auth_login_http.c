@@ -46,6 +46,7 @@ psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 // refusing before the KDF runs, per web_auth_login_http.c's header comment.
 // Macro-rename trick so this is test-only instrumentation, not a change to
 // web_auth_store.c itself.
+#include "../drivers/http/http_session_iface.h" /* AX-02 hook posts destroy-all */
 static int s_verify_password_call_count = 0;
 #define web_auth_store_verify_password test_counted_verify_password_impl
 
@@ -55,9 +56,13 @@ static int s_verify_password_call_count = 0;
 // verify_password() directly.
 #include "../drivers/persist/web_auth_store.c"
 #undef web_auth_store_verify_password
+static bool s_verify_hook_post_destroy = false;
 static bool web_auth_store_verify_password(web_auth_role_t role, const char *password)
 {
     s_verify_password_call_count++;
+    if (s_verify_hook_post_destroy) {
+        http_session_destroy_all_request_post(); /* AX-02: reset gesture lands mid-verify */
+    }
     return test_counted_verify_password_impl(role, password);
 }
 
@@ -353,6 +358,9 @@ static void set_admin_credential(const char *username, const char *password)
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, username, password, TEST_SALT, false) ==
                    HAL_OK,
                "test setup: admin credential stores cleanly");
+    // AU-02: a provisioned board always has a policy record; without one it fails closed.
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "test setup: policy stores cleanly");
 }
 
 static esp_err_t do_login(const char *username, const char *password)
@@ -450,7 +458,7 @@ static void test_lockout_table_is_bounded(void)
 // eviction cleared a locked slot -- vacuous against exactly this bug. ***
 static void test_lockout_eviction_never_evicts_a_locked_slot(void)
 {
-    TEST_SECTION("login lockout table -- eviction must skip currently-locked slots (Finding 2)");
+    TEST_SECTION("login lockout table -- full table of locks evicts only the oldest (AZ-04)");
     reset_all();
     set_admin_credential("admin", "correct-horse-battery-staple");
 
@@ -466,44 +474,35 @@ static void test_lockout_eviction_never_evicts_a_locked_slot(void)
     }
     unsigned locked_count = 0;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
+        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff[LOGIN_LADDER_ADMIN], now_ms())) {
             locked_count++;
         }
     }
     TEST_CHECK(locked_count == LOGIN_LOCKOUT_MAX_IPS, "test setup: every slot is now locked");
 
-    // A brand-new, never-seen-before source IP arrives once the table is
-    // saturated with locked attackers. It must be refused outright (429),
-    // NOT granted a slot by evicting one of the locked attackers -- that
-    // eviction is exactly the bypass Finding 2 found.
+    // AZ-04 (owner-directed, supersedes the 2026-09-17 accepted tradeoff): a
+    // brand-new source IP arriving at a fully locked table must NOT be refused
+    // for everyone. It evicts the OLDEST entry; the other lockouts stay intact.
     strncpy(s_stub_client_ip, "10.2.9.99", sizeof(s_stub_client_ip) - 1);
     s_last_status_line = 0;
     esp_err_t err = do_login("admin", "correct-horse-battery-staple");
-    TEST_CHECK(err == ESP_OK, "handler still returns ESP_OK when refusing a saturated-table login");
-    TEST_CHECK(s_last_status_line == 429,
-               "a brand-new IP is refused once the table is saturated with locked IPs, "
-               "rather than being handed a slot evicted from a locked attacker");
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK for a new IP on a saturated table");
+    TEST_CHECK(s_last_status_line != 429,
+               "AZ-04: a brand-new IP is not refused (429) just because the table is full of locks");
 
-    // Every one of the originally-locked IPs must still be locked -- none
-    // was evicted to make room for the new arrival.
     unsigned still_locked = 0;
-    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff, now_ms())) {
-            still_locked++;
-        }
-    }
-    TEST_CHECK(still_locked == LOGIN_LOCKOUT_MAX_IPS,
-               "eviction never cleared a locked slot to make room for the new IP -- "
-               "the pre-fix bug would have shown fewer than LOGIN_LOCKOUT_MAX_IPS here");
-
-    // The new IP must never have been granted a slot at all.
     bool new_ip_got_a_slot = false;
     for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
+        if (s_login_lockouts[i].in_use && login_backoff_is_locked(&s_login_lockouts[i].backoff[LOGIN_LADDER_ADMIN], now_ms())) {
+            still_locked++;
+        }
         if (s_login_lockouts[i].in_use && strcmp(s_login_lockouts[i].ip, "10.2.9.99") == 0) {
             new_ip_got_a_slot = true;
         }
     }
-    TEST_CHECK(!new_ip_got_a_slot, "the refused new IP was never given a table slot");
+    TEST_CHECK(new_ip_got_a_slot, "AZ-04: the new IP was given a slot (oldest entry evicted)");
+    TEST_CHECK(still_locked == LOGIN_LOCKOUT_MAX_IPS - 1,
+               "AZ-04: exactly one lockout was evicted; every other per-address lockout is intact");
 }
 
 // A slot that is free (never used) or in_use but NOT currently locked must
@@ -757,6 +756,105 @@ static void test_success_resets_the_ladder(void)
                "a success resets the ladder back to its first (5s) step");
 }
 
+// SS-01: ladders are per (slot, role).
+static void set_user_credential(const char *username, const char *password)
+{
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, username, password, TEST_SALT, false) == HAL_OK,
+               "test setup: user credential stores cleanly");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "test setup: policy stores cleanly");
+}
+
+static void test_user_success_does_not_reset_admin_ladder(void)
+{
+    TEST_SECTION("login backoff -- a USER success does not reset the ADMIN ladder (SS-01)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    set_user_credential("operator", "user-password-123456");
+    strncpy(s_stub_client_ip, "10.9.0.7", sizeof(s_stub_client_ip) - 1);
+
+    do_login("admin", "wrong-password");
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+    do_login("admin", "wrong-password"); // admin failure #2 -> 10s
+    TEST_CHECK(s_last_status_line != 429, "test setup: failure #2 ran");
+
+    s_last_set_cookie[0] = '\0';
+    esp_err_t err = do_login("operator", "user-password-123456");
+    TEST_CHECK(err == ESP_OK && strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "the USER login succeeds while the ADMIN ladder is locked (per-role lock)");
+
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[1] + 1u);
+    do_login("admin", "wrong-password"); // failure #3 -> 30s only if ADMIN ladder survived
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "ADMIN locked after failure #3");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 30u,
+               "the USER success left the ADMIN ladder at its 3rd step (30s)");
+}
+
+static void test_user_login_refused_503_when_table_full_of_admins(void)
+{
+    TEST_SECTION("login -- USER login with every slot held by ADMIN answers 503, not 500 (SL-07)");
+    reset_all();
+    set_user_credential("operator", "user-password-123456");
+    strncpy(s_stub_client_ip, "10.9.0.8", sizeof(s_stub_client_ip) - 1);
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        uint8_t h[32];
+        memset(h, (int)(i + 1), sizeof(h));
+        TEST_CHECK(web_auth_table_create_session(http_session_table(), h, "10.0.0.5",
+                                                 WEB_AUTH_SESSION_ROLE_ADMIN, 1000u) < WEB_AUTH_WEB_SLOT_COUNT,
+                   "test setup: ADMIN session fills a slot");
+    }
+    s_last_err_status = 0;
+    s_last_status_line = 0;
+    s_last_set_cookie[0] = '\0';
+    do_login("operator", "user-password-123456");
+    TEST_CHECK(s_last_status_line == 503, "refused with 503 service unavailable");
+    TEST_CHECK(s_last_set_cookie[0] == '\0', "no session cookie minted");
+    // DF-01 source scan: the refusal path wipes token_hex and token_hash before it returns.
+    {
+        const char *anchors[] = {"../drivers/http/web_auth_login_http.c", "App/drivers/http/web_auth_login_http.c",
+                                 "firmware/KilnFW/App/drivers/http/web_auth_login_http.c"};
+        char *src = test_read_source_anchored(__FILE__, "../drivers/http/web_auth_login_http.c", anchors, 3);
+        TEST_CHECK(src != NULL, "login source readable");
+        if (src) {
+            const char *m = strstr(src, "all sessions in use by admins, try later");
+            const char *ret = m ? strstr(m, "return ESP_OK;") : NULL;
+            const char *w1 = m ? strstr(m, "login_wipe(token_hex") : NULL;
+            const char *w2 = m ? strstr(m, "login_wipe(token_hash") : NULL;
+            TEST_CHECK(ret && w1 && w2 && w1 < ret && w2 < ret, "503 refusal wipes token_hex and token_hash before returning (DF-01)");
+            // GD-04 source scan: token_hash is wiped right after create_session (covers success and 500), and the
+            // Set-Cookie 500 path destroys the orphan session.
+            const char *cs = strstr(src, "web_auth_table_create_session(login_table, token_hash");
+            const char *wh = cs ? strstr(cs, "login_wipe(token_hash") : NULL;
+            const char *r503 = cs ? strstr(cs, "all sessions in use by admins") : NULL;
+            TEST_CHECK(wh && r503 && wh < r503, "token_hash wiped right after create_session, before any branch (GD-04)");
+            free(src);
+        }
+    }
+}
+
+static void test_remote_success_does_not_reset_remote_ladder(void)
+{
+    TEST_SECTION("login backoff -- a success from the shared off-subnet slot does not reset it (SS-01)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "8.8.8.8", sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password");
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(err == ESP_OK && strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "test setup: the remote success minted a session");
+    do_login("admin", "wrong-password"); // would be step 1 (5s) if the success had reset the ladder
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "locked after the post-success remote failure");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == 10u,
+               "the remote success did not reset the shared ladder (2nd failure -> 10s)");
+}
+
 static void test_refused_attempt_does_not_count_or_extend_wait(void)
 {
     TEST_SECTION("login backoff ladder -- a refused (429) attempt neither counts as a failure "
@@ -902,37 +1000,6 @@ static void test_scope_subnet_math_with_non_24_mask(void)
     TEST_CHECK(s_last_status_line == 429,
                "10.20.30.16 falls outside the /28 boundary and classifies REMOTE, sharing the "
                "already-locked remote slot");
-}
-
-// Review fix (2026-09-21, finding 1): the table-saturation (slot == NULL)
-// 429 path used to send Retry-After: 1, leaking "this is saturation, not a
-// real lock" to the caller -- a real lock reports 5/10/30/60/300 depending
-// on ladder step. Fixed: the saturation path now reports the ladder's own
-// last (worst-case) step, 300s, so both causes of a 429 are indistinguishable
-// from the response alone.
-static void test_saturation_retry_after_matches_ladder_not_one_second(void)
-{
-    TEST_SECTION("login lockout table -- saturated-table Retry-After matches the ladder, "
-                 "not a distinct '1' (Finding 1)");
-    reset_all();
-    set_admin_credential("admin", "correct-horse-battery-staple");
-
-    char ip[46];
-    for (unsigned i = 0; i < LOGIN_LOCKOUT_MAX_IPS; i++) {
-        snprintf(ip, sizeof(ip), "10.3.0.%u", i + 1);
-        strncpy(s_stub_client_ip, ip, sizeof(s_stub_client_ip) - 1);
-        for (int j = 0; j < 3; j++) {
-            do_login("admin", "wrong-password");
-        }
-    }
-    strncpy(s_stub_client_ip, "10.3.9.99", sizeof(s_stub_client_ip) - 1);
-    s_last_status_line = 0;
-    s_last_retry_after[0] = '\0';
-    do_login("admin", "correct-horse-battery-staple");
-    TEST_CHECK(s_last_status_line == 429, "test setup: saturation refuses with 429");
-    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == LOGIN_BACKOFF_LADDER_MS[LOGIN_BACKOFF_LADDER_LEN - 1] / 1000u,
-               "the saturation path reports the ladder's last (worst-case) step, "
-               "never a distinct value that would leak table-saturation vs. a real lock");
 }
 
 // Review fix (2026-09-21, finding 3): an UNKNOWN-scope client (address that
@@ -1138,6 +1205,246 @@ static esp_err_t do_logout(void)
     return logout_post_handler(&req);
 }
 
+static void test_ax02_login_straddling_reset_mints_no_session(void)
+{
+    TEST_SECTION("login -- a destroy-all posted during the password verify mints no session (AX-02)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    s_verify_hook_post_destroy = true;
+    s_last_set_cookie[0] = '\0';
+    s_last_err_status = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    s_verify_hook_post_destroy = false;
+    TEST_CHECK(s_last_err_status == 401, "refused with 401");
+    TEST_CHECK(s_last_set_cookie[0] == '\0', "no cookie issued");
+    {
+        size_t used = 0;
+        for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+            used += http_session_table()->slots[i].in_use ? 1u : 0u;
+        }
+        TEST_CHECK(used == 0u, "no session minted");
+    }
+    s_last_err_status = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "a later login (no reset in flight) still works");
+}
+
+static void test_ax04_login_refuses_on_hash_failure(void)
+{
+    TEST_SECTION("login -- SHA-256 failure refuses the login, no zero-keyed session (AX-04)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    psa_stub_hash_fail = true;
+    s_last_set_cookie[0] = '\0';
+    s_last_err_status = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    psa_stub_hash_fail = false;
+    TEST_CHECK(s_last_err_status == 500 && s_last_set_cookie[0] == '\0', "500, no cookie");
+}
+
+static void test_ax05_relogin_revokes_presented_session_only(void)
+{
+    TEST_SECTION("login -- re-login revokes only the presented previous session (AX-05)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    uint8_t h_old[32], h_other[32];
+    http_session_hash_token("old-token", 9, h_old);
+    http_session_hash_token("other-token", 11, h_other);
+    web_auth_table_create_session(http_session_table(), h_old, "10.0.0.1", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
+    web_auth_table_create_session(http_session_table(), h_other, "10.0.0.9", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
+    strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "login succeeded");
+    TEST_CHECK(web_auth_table_find_by_token(http_session_table(), h_old) < 0, "presented old session revoked");
+    TEST_CHECK(web_auth_table_find_by_token(http_session_table(), h_other) >= 0, "another client's session untouched");
+}
+
+static void test_ay02_refused_success_does_not_reset_ladder(void)
+{
+    TEST_SECTION("login -- a success refused by the AX-02 generation check leaves the ladder alone (AY-02)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.11", sizeof(s_stub_client_ip) - 1);
+    do_login("admin", "wrong-password"); /* failure #1 -> 5s */
+    fake_time_advance_ms(LOGIN_BACKOFF_LADDER_MS[0] + 1u);
+    s_verify_hook_post_destroy = true;
+    s_last_err_status = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    s_verify_hook_post_destroy = false;
+    TEST_CHECK(s_last_err_status == 401, "test setup: correct password refused by the generation check");
+    do_login("admin", "wrong-password"); /* failure #2 -> 10s only if the refused success did not reset */
+    s_last_status_line = 0;
+    s_last_retry_after[0] = '\0';
+    do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_status_line == 429, "locked after the next failure");
+    TEST_CHECK((uint32_t)atoi(s_last_retry_after) == LOGIN_BACKOFF_LADDER_MS[1] / 1000u,
+               "ladder kept its step (10s), the refused success did not reset it");
+}
+
+static bool ay_session_alive(const char *tok)
+{
+    uint8_t h[32];
+    http_session_hash_token(tok, strlen(tok), h);
+    return web_auth_table_find_by_token(http_session_table(), h) >= 0;
+}
+
+static void test_ay03_relogin_revoke_needs_matching_ip(void)
+{
+    TEST_SECTION("login -- re-login revokes the presented session only when bound to the requester IP (AY-03)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    uint8_t h_old[32];
+    http_session_hash_token("old-token", 9, h_old);
+    web_auth_table_create_session(http_session_table(), h_old, "10.0.0.1", WEB_AUTH_SESSION_ROLE_ADMIN, 0u);
+    strncpy(s_stub_client_ip, "10.0.0.7", sizeof(s_stub_client_ip) - 1);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    s_last_set_cookie[0] = 0;
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_set_cookie[0] != 0, "login succeeded");
+    TEST_CHECK(ay_session_alive("old-token"), "a session bound to another IP is NOT revoked");
+
+    strncpy(s_stub_client_ip, "10.0.0.1", sizeof(s_stub_client_ip) - 1);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(!ay_session_alive("old-token"), "a session bound to the requester IP is revoked");
+}
+
+static void test_aq01_full_table_relogin_keeps_bystander(void)
+{
+    TEST_SECTION("login -- full table re-login frees the presenter's own slot, never evicts a bystander (AQ-01)");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    strncpy(s_stub_client_ip, "10.9.0.12", sizeof(s_stub_client_ip) - 1);
+    uint8_t h_by[32];
+    http_session_hash_token("bystander-token", 15, h_by);
+    /* Bystanders are the oldest (LRU) slots; the presenter's slot is the newest. */
+    fake_time_advance_ms(2000u); /* AG-05: issue times must not lie in the future of now_ms() */
+    web_auth_table_create_session(http_session_table(), h_by, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms() - 1900u);
+    for (size_t i = 1; i + 1 < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        uint8_t h[32];
+        memset(h, (int)(i + 1), sizeof(h));
+        web_auth_table_create_session(http_session_table(), h, "10.9.0.99", WEB_AUTH_SESSION_ROLE_ADMIN,
+                                      now_ms() - 1900u + (uint32_t)i);
+    }
+    uint8_t h_old[32];
+    http_session_hash_token("old-token", 9, h_old);
+    web_auth_table_create_session(http_session_table(), h_old, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms() - 100u);
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    s_last_set_cookie[0] = '\0';
+    (void)do_login("admin", "correct-horse-battery-staple");
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "re-login succeeded with a full table");
+    TEST_CHECK(!ay_session_alive("old-token"), "the presenter's old session is revoked");
+    TEST_CHECK(ay_session_alive("bystander-token"), "the oldest bystander session survives the re-login");
+}
+
+static void test_aq01_full_admin_table_user_relogin_replaces_own_slot(void)
+{
+    TEST_SECTION("login -- USER re-login into an all-ADMIN table reuses its own freed slot (AQ-01)");
+    reset_all();
+    set_user_credential("operator", "user-password-123456");
+    strncpy(s_stub_client_ip, "10.9.0.12", sizeof(s_stub_client_ip) - 1);
+    for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        uint8_t h[32];
+        if (i == 0) {
+            http_session_hash_token("old-token", 9, h);
+        } else {
+            memset(h, (int)(i + 1), sizeof(h));
+        }
+        web_auth_table_create_session(http_session_table(), h, "10.9.0.12", WEB_AUTH_SESSION_ROLE_ADMIN, 0u);
+    }
+    stage_cookie_header(HTTP_SESSION_COOKIE_NAME "=old-token");
+    s_last_set_cookie[0] = '\0';
+    (void)do_login("operator", "user-password-123456");
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "login succeeds in the slot the old session freed");
+    TEST_CHECK(!ay_session_alive("old-token"), "old session revoked");
+}
+
+static char *ay_src(const char *const *cands)
+{
+    char *t = test_read_source_anchored(__FILE__, cands[0], cands, 3);
+    if (t) { /* sources may be CRLF; the span anchors use LF */
+        char *w = t;
+        for (const char *r = t; *r; r++) {
+            if (*r != '\r') {
+                *w++ = *r;
+            }
+        }
+        *w = '\0';
+    }
+    return t;
+}
+
+/* AQ-02/AQ-03: the wipes cannot be observed (dead stack), so pin their position structurally:
+ * the code span between two anchors must contain the wipe and (AQ-03) no early return. */
+static bool ay_span_has(const char *src, const char *from, const char *to, const char *needle, const char *forbid)
+{
+    const char *a = src ? strstr(src, from) : NULL;
+    const char *b = a ? strstr(a, to) : NULL;
+    if (!a || !b) {
+        return false;
+    }
+    size_t n = (size_t)(b - a);
+    char *span = malloc(n + 1);
+    if (!span) {
+        return false;
+    }
+    memcpy(span, a, n);
+    span[n] = '\0';
+    bool ok = strstr(span, needle) != NULL && (forbid == NULL || strstr(span, forbid) == NULL);
+    free(span);
+    return ok;
+}
+
+static void test_ay_source_scan(void)
+{
+    static const char *const AUTH_C[] = { "../drivers/http/http_auth_http.c", "App/drivers/http/http_auth_http.c",
+                                          "firmware/KilnFW/App/drivers/http/http_auth_http.c" };
+    static const char *const STATUS_C[] = { "../drivers/http/web_auth_session_status_http.c",
+                                            "App/drivers/http/web_auth_session_status_http.c",
+                                            "firmware/KilnFW/App/drivers/http/web_auth_session_status_http.c" };
+    static const char *const LOGIN_C[] = { "../drivers/http/web_auth_login_http.c",
+                                           "App/drivers/http/web_auth_login_http.c",
+                                           "firmware/KilnFW/App/drivers/http/web_auth_login_http.c" };
+    TEST_SECTION("AY-01 / AY-05 / AQ-03 wipe placement scan");
+    char *auth = ay_src(AUTH_C);
+    char *status = ay_src(STATUS_C);
+    char *login = ay_src(LOGIN_C);
+    TEST_CHECK(auth && status && login, "sources readable");
+    TEST_CHECK(ay_span_has(auth, "static void resolve_role_for_request", "\n}\n", "auth_wipe(token, sizeof(token));", NULL),
+               "resolve_role_for_request wipes its token copy (AY-01)");
+    /* AQ-03: between the out_token copy (resolve_role_for_request call) and the switch on the decision every
+     * deny path shares one wipe, with no return in between. */
+    TEST_CHECK(ay_span_has(auth, "resolve_role_for_request(req, &role, token, sizeof(token));", "switch (decision)",
+                           "auth_wipe(token, sizeof(token));", "return "),
+               "prehandler wipes the caller token copy before the decision switch, no early return (AQ-03)");
+    TEST_CHECK(ay_span_has(status, "http_auth_session_status(have_token", "bool prompt",
+                           "for (volatile char *q = token; q < token + sizeof(token); q++) {\n        *q = 0;\n    }", NULL),
+               "session-status handler wipes its token copy with a volatile loop (AY-01)");
+    TEST_CHECK(ay_span_has(login, "esp_err_t logout_post_handler", "\n}\n", "login_wipe(token, sizeof(token));", NULL),
+               "logout handler wipes its token copy (AY-01)");
+    TEST_CHECK(status && strstr(status, "uint64_t timeout_ms = (uint64_t)timeout_s * 1000u;") != NULL,
+               "session-status computes timeout ms in 64-bit (AY-05)");
+    /* AR-01/AR-02: ordering in the login handler: AX-02 gen refusal, then cookie format + refusal, then the
+     * presenter revoke, then create. Moving the revoke earlier loses the old session on a refusal; moving the
+     * cookie format below create orphans a session on the 500 path. */
+    {
+        const char *h = login ? strstr(login, "uint32_t destroy_gen_before_verify") : NULL;
+        const char *gen = h ? strstr(h, "credentials reset during verify, refused") : NULL;
+        const char *fmt = gen ? strstr(gen, "int cookie_len = snprintf(") : NULL;
+        const char *fmt_fail = fmt ? strstr(fmt, "Set-Cookie formatting failed") : NULL;
+        const char *rev = fmt_fail ? strstr(fmt_fail, "http_auth_session_logout(old_token)") : NULL;
+        const char *role = rev ? strstr(rev, "web_auth_session_role_t session_role") : NULL;
+        const char *cre = role ? strstr(role, "web_auth_table_create_session(login_table") : NULL;
+        TEST_CHECK(cre != NULL, "login handler order: gen refusal < cookie format < revoke < create (AR-01/AR-02)");
+        TEST_CHECK(cre != NULL && strstr(rev, "return ") >= role,
+                   "no return between the revoke and create (AR-01)");
+    }
+    free(auth);
+    free(status);
+    free(login);
+}
+
 static void test_logout_with_valid_cookie_clears_session(void)
 {
     TEST_SECTION("POST /api/auth/logout -- a presented session cookie is revoked and the "
@@ -1147,7 +1454,7 @@ static void test_logout_with_valid_cookie_clears_session(void)
     uint8_t token_hash[32];
     http_session_hash_token("logout-test-token", strlen("logout-test-token"), token_hash);
     size_t slot_idx =
-        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.5", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.5", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
     TEST_CHECK(slot_idx < WEB_AUTH_WEB_SLOT_COUNT, "test setup: session was created");
     TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
                "test setup: the session resolves before logout");
@@ -1174,7 +1481,7 @@ static void test_logout_with_no_cookie_leaves_session_untouched(void)
     uint8_t token_hash[32];
     http_session_hash_token("untouched-token", strlen("untouched-token"), token_hash);
     size_t slot_idx =
-        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.6", WEB_AUTH_SESSION_ROLE_ADMIN, 1000u);
+        web_auth_table_create_session(http_session_table(), token_hash, "10.0.0.6", WEB_AUTH_SESSION_ROLE_ADMIN, now_ms());
     TEST_CHECK(slot_idx < WEB_AUTH_WEB_SLOT_COUNT, "test setup: an unrelated session was created");
     TEST_CHECK(web_auth_table_find_by_token(http_session_table(), token_hash) >= 0,
                "test setup: the unrelated session resolves before the no-cookie logout");
@@ -1349,9 +1656,239 @@ static void test_lockout_no_phantom_lock_at_tick_wrap(void)
     }
 }
 
+// RV-01/RV-02: the REAL write orders. The setup wizard and the Security page both send
+// set_web_password first and set_policy second, on a store with no policy record.
+static void test_rv01_wizard_order_password_then_policy(void)
+{
+    TEST_SECTION("RV-01 -- wizard order (password, then policy) on a fresh store ends in a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "first admin password stores");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && !cur.web_enabled,
+               "RV-01: a credential never leaves the policy absent (stored both-off)");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set_policy after the password succeeds");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled, "web auth enabled and readable");
+    strncpy(s_stub_client_ip, "10.7.0.1", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "correct-horse-battery-staple") == ESP_OK, "admin login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rv01_security_page_order_user_then_admin(void)
+{
+    TEST_SECTION("RV-01 -- Security page order (user pw, admin pw, then policy) ends in a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "user-password-123456", TEST_SALT, false) ==
+                   HAL_OK, "user password first");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK, "policy readable between the two POSTs");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set_policy succeeds");
+    strncpy(s_stub_client_ip, "10.7.0.2", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "correct-horse-battery-staple") == ESP_OK, "admin login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rv01_legacy_board_password_no_policy_migrates_open(void)
+{
+    TEST_SECTION("RV-01 -- legacy board (password, no policy, no marker) keeps auth off after the boot migration");
+    reset_all();
+    (void)web_auth_store_storage_reset_evaluate(true); // fresh boot of the old firmware: sentinel only
+    // Simulate a pre-policy firmware: credential stored, never a policy. Drop the migration marker
+    // and the policy that this firmware's set_password wrote.
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "legacy admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "legacy: no policy, no marker");
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+        (void)hal_kv_erase_key(&h, "auth_mig");
+        (void)hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "pre-migration state reads fail-closed");
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && !cur.web_enabled && !cur.lcd_enabled,
+               "migration stored a both-off policy: prior (open) behaviour kept");
+    TEST_CHECK(!web_auth_store_policy_lost(), "no policy-lost banner on a migrated board");
+    // Migration is one-time: a later policy+marker loss on this provisioned board stays fail-closed.
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "later policy loss");
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "no re-migration: dashboards only");
+    TEST_CHECK(web_auth_store_policy_lost(), "RV-04: policy-lost banner shown");
+    TEST_CHECK(strstr(web_auth_store_policy_lost_banner_text(), "policy lost") != NULL, "RV-04 banner text");
+}
+
+
+static void rf2_kv_erase(const char *key)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+    (void)hal_kv_erase_key(&h, key);
+    (void)hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static void test_rf2_02_user_only_lost_policy_bootstrap_does_not_open(void)
+{
+    TEST_SECTION("RF2-02 -- user-only board that lost policy+marker: admin bootstrap must not write both-off");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "user-password-123456", TEST_SALT, false) ==
+                   HAL_OK, "user password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "policy and marker lost");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "RV-03 state reads fail-closed");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "bootstrap admin stores");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE,
+               "RF2-02: bootstrap did not turn auth off (still fail-closed)");
+    s_policy_lost = false; // stale flag: set_password must refresh it (RF2-04)
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple-2",
+                                           TEST_SALT, false) == HAL_OK, "second admin write");
+    TEST_CHECK(web_auth_store_policy_lost(), "RF2-04: set_password refreshed the policy-lost flag");
+}
+
+static void test_rf2_01_gesture_then_bootstrap_writes_enabled_policy(void)
+{
+    TEST_SECTION("RF2-01 -- policy lost, marker kept: gesture then bootstrap leaves a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "policy enabled (marker written)");
+    rf2_kv_erase("auth_policy");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "policy lost, marker kept: UNREADABLE");
+    TEST_CHECK(strstr(web_auth_store_policy_lost_banner_text(), "LCD password reset") != NULL, "banner names the reset");
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+    TEST_CHECK(web_auth_store_policy_lost(), "banner shown after the gesture");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "still UNREADABLE after the gesture");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "new-password-0123456789",
+                                           TEST_SALT, false) == HAL_OK, "bootstrap");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled,
+               "RF2-01: enabled policy written");
+    TEST_CHECK(!web_auth_store_policy_lost(), "RF2-04: banner cleared after set_password");
+    strncpy(s_stub_client_ip, "10.7.0.3", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "new-password-0123456789") == ESP_OK, "admin login runs");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rf2_04_both_keys_lost_gesture_is_not_open(void)
+{
+    TEST_SECTION("RF2-04 -- both keys lost, gesture: stays fail-closed with a banner, bootstrap recovers");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "both keys lost");
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "wiped blob counts as provisioned");
+    TEST_CHECK(web_auth_store_policy_lost(), "banner refreshed after the wipe");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "new-password-0123456789",
+                                           TEST_SALT, false) == HAL_OK, "bootstrap");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled, "enabled policy written");
+    TEST_CHECK(!web_auth_store_policy_lost(), "banner cleared");
+}
+
+static void test_rf2_05_failed_both_off_write_and_unreadable_mig(void)
+{
+    TEST_SECTION("RF2-05 -- failed both-off write fails set_password; unreadable auth_mig is not migrated");
+    reset_all();
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) != HAL_OK, "both-off write fails: set_password fails");
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "no credential stored");
+
+    reset_all();
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "legacy admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "no policy, no marker");
+    {
+        hal_kv_handle_t h;
+        const uint8_t junk[3] = {1, 2, 3};
+        TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+        (void)hal_kv_set_blob(&h, "auth_mig", junk, sizeof(junk));
+        (void)hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+    (void)web_auth_store_storage_reset_evaluate(true);
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "unreadable auth_mig: no guess, no migration");
+}
+
+
+static void test_rf3_01_enabled_policy_write_failure_stores_no_credential(void)
+{
+    TEST_SECTION("RF3-01 -- failed RF2-01 enabled-policy write: error returned, no credential stored");
+    bool saw_policy_fail = false;
+    for (unsigned skip = 0; skip < 12; skip++) {
+        reset_all();
+        TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                               TEST_SALT, false) == HAL_OK, "admin password");
+        web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+        TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "policy enabled (marker written)");
+        rf2_kv_erase("auth_policy");
+        TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+        fake_kv_script_write_status_after(skip, HAL_IO);
+        hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin",
+                                                       "new-password-0123456789", TEST_SALT, false);
+        fake_kv_script_write_status_after(0, HAL_OK);
+        web_auth_policy_t cur;
+        web_auth_load_status_t lst = web_auth_store_load_policy(&cur);
+        if (st == HAL_OK) {
+            TEST_CHECK(lst == WEB_AUTH_LOAD_OK && cur.web_enabled, "RF3-01: ok return implies the enabled policy is stored");
+        } else {
+            if (lst == WEB_AUTH_LOAD_UNREADABLE) {
+                // policy write failed (a failed credential write may still leave staged data in the fake)
+                TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+                           "RF3-01: policy-write error stores no admin credential");
+                saw_policy_fail = true;
+            }
+        }
+    }
+    TEST_CHECK(saw_policy_fail, "RF3-01: a policy-write failure was exercised");
+}
+
+static void test_rf3_03_lcd_pin_blob_counts_as_provisioned(void)
+{
+    TEST_SECTION("RF3-03 -- LCD-PIN-only board that lost policy+marker reads UNREADABLE, not auth-off");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "123456", TEST_SALT) == HAL_OK, "admin PIN");
+    rf2_kv_erase("auth_policy");
+    rf2_kv_erase("auth_ever");
+    web_auth_policy_t cur;
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "no web credential");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "RF3-03: LCD blob present reads UNREADABLE");
+}
+
 void run_test_web_auth_login_http(void)
 {
+    test_rf3_01_enabled_policy_write_failure_stores_no_credential();
+    test_rf3_03_lcd_pin_blob_counts_as_provisioned();
+    test_rf2_02_user_only_lost_policy_bootstrap_does_not_open();
+    test_rf2_01_gesture_then_bootstrap_writes_enabled_policy();
+    test_rf2_04_both_keys_lost_gesture_is_not_open();
+    test_rf2_05_failed_both_off_write_and_unreadable_mig();
+    test_rv01_wizard_order_password_then_policy();
+    test_rv01_security_page_order_user_then_admin();
+    test_rv01_legacy_board_password_no_policy_migrates_open();
     test_lockout_no_phantom_lock_at_tick_wrap();
+    test_ax02_login_straddling_reset_mints_no_session();
+    test_ax04_login_refuses_on_hash_failure();
+    test_ax05_relogin_revokes_presented_session_only();
+    test_ay02_refused_success_does_not_reset_ladder();
+    test_ay03_relogin_revoke_needs_matching_ip();
+    test_aq01_full_table_relogin_keeps_bystander();
+    test_aq01_full_admin_table_user_relogin_replaces_own_slot();
+    test_ay_source_scan();
     test_lockout_is_per_ip_not_global();
     test_lockout_table_is_bounded();
     test_login_lru_wrap();
@@ -1365,18 +1902,20 @@ void run_test_web_auth_login_http(void)
     test_ladder_retry_after_steps();
     test_ladder_cycle_resets_after_full_window();
     test_success_resets_the_ladder();
+    test_user_success_does_not_reset_admin_ladder();
+    test_remote_success_does_not_reset_remote_ladder();
     test_refused_attempt_does_not_count_or_extend_wait();
     test_remote_failure_delays_a_different_remote_address();
     test_remote_failure_does_not_delay_a_local_address();
     test_local_success_does_not_reset_remote_counter();
     test_scope_subnet_math_with_non_24_mask();
     test_ip_scope_classify_mapped_ipv6_forms();
-    test_saturation_retry_after_matches_ladder_not_one_second();
     test_unknown_scope_shares_the_remote_slot();
     test_refused_login_makes_no_extra_sta_ip_netmask_calls();
     test_mapped_ipv6_dotted_quad_tail_classifies_local();
     test_429_response_is_logged();
     test_logout_with_valid_cookie_clears_session();
+    test_user_login_refused_503_when_table_full_of_admins();
     test_logout_with_no_cookie_leaves_session_untouched();
     test_fuzz_login_hostile_bodies();
 }

@@ -46,6 +46,7 @@ $realSrc = @{
     "recovery_http.c"  = Join-Path $here "recovery_http.c"
     "recovery_main.c"  = Join-Path $here "recovery_main.c"
     "recovery_health.c" = Join-Path $here "recovery_health.c"
+    "recovery_install.c" = Join-Path $here "recovery_install.c"
 }
 
 # $Header: header to build against; $Src: map of the three sources to scan.
@@ -72,7 +73,7 @@ function Build-And-Run {
         throw "cl failed building the $Tag variant (exit $bx)."
     }
     $ErrorActionPreference = "Continue"
-    $ro = cmd /c "`"$exe`" `"$($Src['recovery_wifi.c'])`" `"$($Src['recovery_http.c'])`" `"$($Src['recovery_main.c'])`" `"$($Src['recovery_health.c'])`" 2>&1"
+    $ro = cmd /c "`"$exe`" `"$($Src['recovery_wifi.c'])`" `"$($Src['recovery_http.c'])`" `"$($Src['recovery_main.c'])`" `"$($Src['recovery_health.c'])`" `"$($Src['recovery_install.c'])`" 2>&1"
     $rx = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
     return @{ Exit = $rx; Output = ($ro -join "`n") }
@@ -129,7 +130,7 @@ try {
     Test-Mutant -File "recovery_main.c" -Needle "        recovery_lcd_clear_error();`n" -Replacement "" -Tag "nosuccessclear"
     Test-Mutant -File "recovery_health_policy.h" -Needle "return restarts_so_far < RHEALTH_HTTP_MAX_RESTARTS;" -Replacement "return true;" -Tag "unboundedrestart"
     Test-Mutant -File "recovery_wifi.c" -Needle "                recovery_lcd_set_ap_state(RLCD_AP_RESTARTING);" -Replacement "        (void)0;" -Tag "deadapcreds"
-    Test-Mutant -File "recovery_main.c" -Needle "            recovery_health_restart_for_http();" -Replacement "            (void)0;" -Tag "mainnorestart"
+    Test-Mutant -File "recovery_main.c" -Needle "            (void)recovery_health_restart_for_http();" -Replacement "            (void)0;" -Tag "mainnorestart"
     # Round 3: shared cap, shutdown awareness, failed re-raise, stale counts.
     Test-Mutant -File "recovery_health_policy.h" -Needle "return wifi_restarts_so_far < RHEALTH_HTTP_MAX_RESTARTS;" -Replacement "return true;" -Tag "wifiunbounded"
     Test-Mutant -File "recovery_health_policy.h" -Needle "RHEALTH_AP_RESTART_IMAGE
@@ -142,6 +143,7 @@ try {
 // RTC" -Tag "apnostay"
     Test-Mutant -File "recovery_wifi.c" -Needle "        if (s_shutting_down) {`n            break;" -Replacement "        if (0) {`n            break;" -Tag "ignoreshutdown"
     Test-Mutant -File "recovery_wifi.c" -Needle "if (rhealth_ap_reraise_failed_action(recovery_health_wifi_restarts()) ==`n                        RHEALTH_AP_RESTART_IMAGE) {" -Replacement "if (0) {" -Tag "startfailignored"
+    Test-Mutant -File "recovery_health.c" -Needle "while (recovery_apply_busy())" -Replacement "while (0)" -Tag "httpnowait"
     Test-Mutant -File "recovery_health.c" -Needle "    if (!s_keep) {" -Replacement "    if (0) {" -Tag "staleCounts"
     Test-Mutant -File "recovery_main.c" -Needle "        recovery_health_clear_http();`n    } else {" -Replacement "    } else {" -Tag "limitkeepcount"
     Test-Mutant -File "recovery_health.c" -Needle "void recovery_health_clear_wifi(void)`n{`n    s_wifi_restarts = 0;" -Replacement "void recovery_health_clear_wifi(void)`n{`n    s_wifi_restarts = s_wifi_restarts;" -Tag "clearwifinoop"
@@ -149,6 +151,16 @@ try {
     Test-Mutant -File "recovery_wifi.c" -Needle "recovery_health_clear_wifi(); // staying up for good; after the decision`n            } else {" -Replacement "`n            } else {" -Tag "staydownnoclear"
     Test-Mutant -File "recovery_wifi.c" -Needle "        arm_stable_timer();`n" -Replacement "" -Tag "nostabletimer"
     Test-Mutant -File "recovery_main.c" -Needle "if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {" -Replacement "if (1) {" -Tag "mainungated"
+
+    # RC-01: direct upload claim and recover_task re-check.
+    Test-Mutant -File "recovery_http.c" -Needle "if (recovery_http_restart_pending() || !recovery_app_write_claim()) {" -Replacement "if (0) {" -Tag "rc01noclaim"
+    Test-Mutant -File "recovery_install.c" -Needle "        if (recovery_apply_busy() || recovery_http_restart_pending()) {`n            ESP_LOGW(TAG, `"app write in progress or restart pending; not selecting app`");" -Replacement "        if (0) {`n            ESP_LOGW(TAG, `"app write in progress or restart pending; not selecting app`");" -Tag "rc01noselectrecheck"
+    Test-Mutant -File "recovery_install.c" -Needle "if (recovery_apply_busy() || recovery_pico_busy() || recovery_http_restart_pending()) { // RC-01" -Replacement "if (0) { // RC-01" -Tag "rc01norestartrecheck"
+
+    # FX-04: no restart after the wait times out; banners gated on the apply.
+    Test-Mutant -File "recovery_health.c" -Needle "            return false;" -Replacement "            break;" -Tag "fx04breaks"
+    Test-Mutant -File "recovery_main.c" -Needle "            if (!recovery_apply_busy()) { // FX-04" -Replacement "            if (1) { // FX-04" -Tag "fx04banner"
+    Test-Mutant -File "recovery_main.c" -Needle "        if (!recovery_apply_busy()) {`n            recovery_lcd_set_error(`"HTTP FAILED`", `"restart limit hit`");" -Replacement "        if (1) {`n            recovery_lcd_set_error(`"HTTP FAILED`", `"restart limit hit`");" -Tag "fx04limitbanner"
 
     Write-Host "check_recovery_health: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0

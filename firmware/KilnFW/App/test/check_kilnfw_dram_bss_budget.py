@@ -100,7 +100,7 @@ DEFAULT_ELF = base.DEFAULT_ELF
 # .dram0.bss back down to a measured 99016 B -- back under the original
 # 101000 B ceiling (1984 B headroom), which is restored here rather than
 # left raised.
-CEILING_BYTES = 81500  # IRAMGATE 2026-10-13: measured 80728 after s_store -> PSRAM (was 101000)
+CEILING_BYTES = 65700  # OW-01 2026-10-19: measured 65184 with OR-08 (dev ELF d277), +~500 B allowance (was 81500, measured 80728 on 2026-10-13)
 
 GRADED_SECTION = ".dram0.bss"
 # IRAMGATE 2026-10-13: .dram0.data is internal DRAM too and was ungraded. Baseline

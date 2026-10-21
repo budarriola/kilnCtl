@@ -267,6 +267,11 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): ota_record_save() runs once from
     # app_main's boot-time OTA-verify sequence.
     "ota_record.c",
+    # FD-03: boot_history_record_boot() runs once from app_main's early-boot
+    # sequence (main task, internal-SRAM stack, before task concurrency): Pattern 3.
+    "boot_history.c",
+    # FD-05: trip_history_flush() writes only inside a flash_hop_run() job (bx_flash_worker, internal stack).
+    "trip_history.c",
     # docs/PICO_AUTO_UPDATE.md -- persisted per-pair attempt-budget
     # counter for the Pico auto-update decision (pico_auto_update.h). Same
     # mechanics as boot_guard.c (copied deliberately, see this file's own

@@ -1,7 +1,11 @@
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- s_refusal_drain_buf */
 #include "ota_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "ota_http_internal.h"
 #include "ota_http_util.h"
+
+static bool (*s_fetch_busy_probe)(void); // set by update_fetch (RW-02: also read by the OTA interlock snapshot)
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -424,7 +428,7 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
      * bytes -- same reasoning and pattern as safety_cfg_http.c's reads.
      * Freed right after the switch below; nothing past this point needs
      * more than the enum it already copied out. */
-    profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *pstat = persist_scratch_alloc(sizeof(*pstat));
     if (!pstat) {
         if (reason_out && reason_cap > 0) {
             snprintf(reason_out, reason_cap, "out of memory checking profile state");
@@ -461,7 +465,9 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     // own contract, which is exactly the read-only use this is.
     snap.run_state_interrupted = run_state_boot_record_interrupted();
 
-    snap.other_update_in_progress = ota_http_update_in_progress(NULL);
+    // RW-02: an update check does not claim the update lock but holds ~21.5 KB internal heap for TLS; count it
+    // as an update in progress so an ESP OTA upload is refused beside it.
+    snap.other_update_in_progress = ota_http_update_in_progress(NULL) || (s_fetch_busy_probe != NULL && s_fetch_busy_probe());
 
     snap.temp_ceiling_c = OTA_INTERLOCK_TEMP_CEILING_C;
 
@@ -558,7 +564,6 @@ bool ota_http_any_relay_energized(void)
 // See ota_http.h's doc comment above this function. The mirror-image glue
 // to ota_http_check_interlocks() above: same s_update_claim mutex, opposite
 // direction ("may heat proceed" instead of "may an update start").
-static bool (*s_fetch_busy_probe)(void);
 
 void ota_http_set_fetch_busy_probe(bool (*probe)(void))
 {
@@ -630,8 +635,17 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
 
-esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap)
+// LK-05: the drain discards the body, so it reads into its OWN small static buffer, never the shared 4 KB
+// OTA chunk (ota_http_esp_chunk_buf): stale_running_matches hashes through that chunk on the ota_confirm task
+// while a refusal drain runs on httpd. Only httpd handlers call this and httpd is one task, so the static
+// is never used concurrently. Static, not stack: the httpd stack budget is tight (8 KB).
+#define OTA_REFUSAL_DRAIN_BUF_SIZE 512
+EXT_RAM_BSS_ATTR static uint8_t s_refusal_drain_buf[OTA_REFUSAL_DRAIN_BUF_SIZE]; /* PSRAM: DRAM .bss budget */
+
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
 {
+    uint8_t *buf = s_refusal_drain_buf;
+    const size_t cap = sizeof(s_refusal_drain_buf);
     uint32_t start = now_ms();
     for (;;) {
         // httpd_req_recv() returns 0 once remaining_len is 0, negative on a

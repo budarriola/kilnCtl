@@ -23,6 +23,7 @@ set(KILNLINK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../CommonFW")
 
 idf_component_register(
     SRCS "${KILNLINK_DIR}/src/kilnlink_crc.c"
+         "${KILNLINK_DIR}/src/kiln_crc32.c" # shared CRC32 (thin over esp_crc32_le on target)
          "${KILNLINK_DIR}/src/kilnlink_frame.c"
          "${KILNLINK_DIR}/src/kilnlink_context.c"
          "${KILNLINK_DIR}/src/kilnlink_announce.c"
@@ -109,4 +110,5 @@ idf_component_register(
          # ESP-side caller is App/drivers/net/pico_image_source.c.
          "${KILNLINK_DIR}/src/saftyfw_image_identity.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
+    PRIV_REQUIRES esp_rom # esp_crc.h for kiln_crc32.c
 )

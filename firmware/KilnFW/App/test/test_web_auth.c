@@ -92,6 +92,71 @@ static void test_lru_eviction(void)
                "the 9th (newest) session is present");
 }
 
+// SS-02: USER sessions are evicted before any ADMIN session.
+static void test_eviction_prefers_user_over_admin(void)
+{
+    TEST_SECTION("web_auth_table -- full table evicts LRU USER before any ADMIN (SS-02)");
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+    uint8_t h[WEB_AUTH_WEB_SLOT_COUNT + 2][WEB_AUTH_TOKEN_HASH_LEN];
+    // Slot 0 = oldest and ADMIN; the rest USER.
+    make_hash(h[0], 10);
+    web_auth_table_create_session(&t, h[0], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 1000);
+    for (int i = 1; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        make_hash(h[i], (uint8_t)(10 + i));
+        web_auth_table_create_session(&t, h[i], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, (uint32_t)(1000 + i));
+    }
+    make_hash(h[WEB_AUTH_WEB_SLOT_COUNT], 200);
+    web_auth_table_create_session(&t, h[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 5000);
+    TEST_CHECK(web_auth_table_find_by_token(&t, h[0]) != -1, "the oldest ADMIN session survives");
+    TEST_CHECK(web_auth_table_find_by_token(&t, h[1]) == -1, "the LRU USER session is evicted instead");
+
+    // All ADMIN: an ADMIN is evicted only when no USER exists.
+    web_auth_table_init(&t);
+    for (int i = 0; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        make_hash(h[i], (uint8_t)(10 + i));
+        web_auth_table_create_session(&t, h[i], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, (uint32_t)(1000 + i));
+    }
+    size_t r = web_auth_table_create_session(&t, h[WEB_AUTH_WEB_SLOT_COUNT], "0.0.0.0", WEB_AUTH_SESSION_ROLE_USER, 5000);
+    TEST_CHECK(r == WEB_AUTH_WEB_SLOT_COUNT, "SL-01: a USER login into an all-ADMIN table is refused");
+    for (int i = 0; i < (int)WEB_AUTH_WEB_SLOT_COUNT; i++) {
+        TEST_CHECK(web_auth_table_find_by_token(&t, h[i]) == i, "SL-01: no ADMIN session was evicted");
+    }
+    make_hash(h[WEB_AUTH_WEB_SLOT_COUNT + 1], 201);
+    r = web_auth_table_create_session(&t, h[WEB_AUTH_WEB_SLOT_COUNT + 1], "0.0.0.0", WEB_AUTH_SESSION_ROLE_ADMIN, 5001);
+    TEST_CHECK(r < WEB_AUTH_WEB_SLOT_COUNT && web_auth_table_find_by_token(&t, h[0]) == -1,
+               "an ADMIN login into an all-ADMIN table still evicts the LRU ADMIN");
+}
+
+// SS-03: absolute lifetime from issued_ms, touches do not extend it.
+static void test_absolute_lifetime(void)
+{
+    TEST_SECTION("web_auth_table -- absolute session lifetime (SS-03)");
+    web_auth_table_t t;
+    web_auth_table_init(&t);
+    uint8_t h[WEB_AUTH_TOKEN_HASH_LEN];
+    make_hash(h, 42);
+    uint32_t t0 = 0xF0000000u; // near the tick wrap so wrap-safety is exercised
+    size_t idx = web_auth_table_create_session(&t, h, "1.2.3.4", WEB_AUTH_SESSION_ROLE_ADMIN, t0);
+    uint32_t life = WEB_AUTH_SESSION_MAX_LIFETIME_MS;
+    web_auth_table_touch(&t, idx, t0 + life - 1000u);
+    TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", 300, t0 + life - 500u) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "an actively used session is valid just inside the lifetime");
+    web_auth_table_touch(&t, idx, t0 + life);
+    TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", 300, t0 + life + 1u) == WEB_AUTH_SESSION_ROLE_NONE,
+               "a freshly touched session is still invalid past the absolute lifetime");
+    TEST_CHECK(web_auth_table_reap_expired(&t, 300, t0 + life + 1u) == 1, "the reaper frees it");
+    // AG-05 (owner 2026-10-20): idle policy 'never' still gets the absolute cap.
+    idx = web_auth_table_create_session(&t, h, "1.2.3.4", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
+    web_auth_table_touch(&t, idx, life);
+    TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", WEB_AUTH_TIMEOUT_NEVER_S, life - 10u) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "AG-05: NEVER idle policy valid inside the absolute lifetime");
+    TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", WEB_AUTH_TIMEOUT_NEVER_S, life + 10u) == WEB_AUTH_SESSION_ROLE_NONE,
+               "AG-05: NEVER idle policy still refused past the absolute lifetime");
+    TEST_CHECK(web_auth_table_reap_expired(&t, WEB_AUTH_TIMEOUT_NEVER_S, life + 10u) == 1,
+               "AG-05: NEVER idle policy reaper frees a session past the absolute lifetime");
+}
+
 // AUDIT_LOGSTORE_TIME LOW-2: eviction must be wrap-safe.
 static void test_lru_eviction_across_tick_wrap(void)
 {
@@ -530,7 +595,7 @@ static void test_reap_expired(void)
     TEST_CHECK(web_auth_table_find_by_token(&t, b) >= 0, "live slot kept");
     // After the full 2^32 wrap the freed slot cannot alias back to valid.
     TEST_CHECK(web_auth_table_find_by_token(&t, a) == -1, "freed slot stays gone");
-    TEST_CHECK(web_auth_table_reap_expired(&t, WEB_AUTH_TIMEOUT_NEVER_S, 0xF0000000u) == 0, "never-timeout reaps nothing");
+    TEST_CHECK(web_auth_table_reap_expired(&t, WEB_AUTH_TIMEOUT_NEVER_S, 3600000u) == 0, "never-timeout reaps nothing inside the SS-03 absolute lifetime");
 }
 
 void run_test_web_auth(void)
@@ -539,6 +604,8 @@ void run_test_web_auth(void)
     test_table_init_and_lookup();
     test_unknown_token_effective_role();
     test_lru_eviction();
+    test_eviction_prefers_user_over_admin();
+    test_absolute_lifetime();
     test_lru_eviction_across_tick_wrap();
     test_touch_updates_lru_order();
     test_destroy_session_and_role();

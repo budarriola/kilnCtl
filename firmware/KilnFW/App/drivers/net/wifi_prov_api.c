@@ -207,6 +207,7 @@ esp_err_t do_forget_network(const char *target)
     if (err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "nvs_save_saved_nets failed: %s -- removal will not survive a reboot",
                  esp_err_to_name(err));
+        return err; /* BW-01: removed live but not persisted; HTTP reports 500 */
     }
     return ESP_OK;
 }

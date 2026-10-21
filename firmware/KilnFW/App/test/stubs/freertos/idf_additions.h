@@ -27,6 +27,16 @@ static BaseType_t g_stub_task_create_result = pdFAIL;
 
 static inline void vTaskDeleteWithCaps(TaskHandle_t task) { vTaskDelete(task); }
 
+/* xTaskCreateWithCaps(): same result knob as the plain xTaskCreate() stub
+ * (g_test_stub_xtaskcreate_result, default pdPASS), used by http_async_job.c. */
+static inline BaseType_t xTaskCreateWithCaps(TaskFunction_t task, const char *name, uint32_t stack_depth,
+                                              void *arg, UBaseType_t priority, TaskHandle_t *out_handle,
+                                              uint32_t mem_caps)
+{
+    (void)mem_caps;
+    return xTaskCreate(task, name, stack_depth, arg, priority, out_handle);
+}
+
 static inline BaseType_t xTaskCreatePinnedToCoreWithCaps(TaskFunction_t task, const char *name,
                                                           unsigned long stack_depth, void *arg,
                                                           UBaseType_t priority, TaskHandle_t *out_handle,

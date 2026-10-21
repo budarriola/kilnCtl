@@ -6,6 +6,7 @@
  * ui_page_home.c's own header comment for the full "why" history behind
  * each section below. See ui_page_home_internal.h for the shared
  * statics/prototypes this file reaches across the split. */
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "ui_page_home_internal.h"
 
 #include <stdlib.h>
@@ -22,6 +23,7 @@
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault_kind() -- M13 fix */
 #include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
+#include "web_auth_store.h" /* FS-02 storage-reset banner */
 #include "ct_leak_alarm.h" /* H9 CT alarm -- trip-strip branch */
 #include "ui_page_safety_logic.h" /* shared live-trip derive for the trip strip */
 
@@ -134,7 +136,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * comment above and check_all_task_stack_budgets.py) -- heap-allocate
      * rather than add a 1512-byte profile_exec_status_t stack local here,
      * same pattern as safety_cfg_http.c/dashboard_exec_http.c. */
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (!st) {
         return; /* out of memory -- skip this tick's repaint, next 1 Hz tick tries again */
     }
@@ -273,6 +275,19 @@ void ui_home_refresh_cb(lv_timer_t *timer)
              * visibility than an informational config warning. Reused
              * verbatim -- same widget, same styling, no new LCD color. */
             lv_label_set_text(s_ui_home_trip_strip, "AUTH RESET ARMED -- confirm within 30 s");
+            lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (web_auth_store_storage_reset_latched()) {
+            /* FS-02: nvs auth data was lost on a board that was set up before;
+             * auth is failed closed until an admin is set again. */
+            lv_label_set_text(s_ui_home_trip_strip, web_auth_store_storage_reset_banner_text());
+            lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (web_auth_store_policy_lost()) {
+            /* RV-04: login policy record lost; web is dashboards only and the LCD lock is on. */
+            lv_label_set_text(s_ui_home_trip_strip, web_auth_store_policy_lost_banner_text());
+            lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (web_auth_store_lcd_pin_pending()) {
+            /* F2-01: recovered board keeps the LCD lock on with no admin PIN. */
+            lv_label_set_text(s_ui_home_trip_strip, web_auth_store_lcd_pin_pending_banner_text());
             lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
         } else {
             /* Config-load-fault quarantine: the board could not decode its

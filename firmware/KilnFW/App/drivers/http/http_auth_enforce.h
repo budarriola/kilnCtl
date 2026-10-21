@@ -40,6 +40,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "route_tier_table.h" // route_tier_t, kRouteTierTable, httpd_method_t
 
@@ -196,6 +197,11 @@ http_auth_decision_t http_auth_check(route_tier_t tier, http_auth_role_t role, b
 // states. Any non-ALLOW decision is never activity.
 bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision_t decision);
 
+// Whether a request extends the session: counts_as_activity, except a GET carrying
+// X-Kiln-Background (a passive timer poll, AG-01) which never does (AF-02/AF-03).
+bool http_auth_request_touches_session(route_tier_t tier, http_auth_decision_t decision,
+                                       bool has_background_header, httpd_method_t method);
+
 // True only for a GET whose uri is listed in route_tier_table.h's
 // kPageShellUris[] AND has a GET row in kRouteTierTable. The pre-handler
 // serves such a request's static shell even on a DENY decision (the page's
@@ -204,12 +210,43 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
 // the ordinary 401/403. Pure, host-tested in test_http_auth_enforce.c.
 bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method);
 
+// KG-01 (owner 2026-10-19): the central page gate. A DENIED page-shell GET is
+// never served; the pre-handler answers 302 with the Location this builds:
+// "/?next=<uri>", i.e. the dashboard (an OPEN page) carrying the wanted page,
+// where app.js shows the sign-in dialog first and navigates on success.
+// Returns false (out set to "" when cap > 0) when `uri` is not a page shell
+// (http_auth_is_page_shell_get), holds a character outside [A-Za-z0-9_/]
+// (nothing to percent-encode), or `cap` is too small. Pure, host-tested.
+bool http_auth_page_gate_location(const char *uri, char *out, size_t cap);
+
+// KH-01: true when an ALLOWED response for this request is a protected page shell that
+// must carry Cache-Control: no-store (web auth on, tier not OPEN, GET of a page shell), so
+// Back/Forward after logout cannot show it from cache. The dashboard (OPEN) and static
+// assets keep their own caching.
+bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method, bool web_enabled,
+                                         route_tier_t tier);
+
 // Largest unread request body (Content-Length) a refused request may leave
 // for esp_http_server to purge. The purge runs at CONFIG_HTTPD_PURGE_BUF_LEN
 // (32 B) per read on the single CPU0 httpd task, so a multi-MB unauthenticated
 // POST (an OTA image) would hog it and trip TASK_WDT on IDLE0 (bench finding
-// 2026-10-03). 4 KB = 128 purge reads at most.
-#define HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES 4096u
+// 2026-10-03). RS-02 (benchmain33): a refused request with a body up to this size is drained by the
+// pre-handler itself (small own buffer, hard caps below) so the client reads the 401/403 instead of a
+// connection reset; anything larger closes. 32 KB covers a first backup restore (23 KB).
+#define HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES 32768u
+// Hard wall-clock cap on the whole drain: an unauthenticated client must not hold the single httpd worker.
+// Checked between reads only (LF-02): a blocked recv adds up to recv_wait_timeout (3 s), so the real bound is ~5 s.
+#define HTTP_AUTH_REFUSAL_DRAIN_MAX_MS 2000u
+
+typedef enum {
+    HTTP_AUTH_DRAIN_CONTINUE = 0,
+    HTTP_AUTH_DRAIN_DONE,  // body fully consumed (recv returned 0)
+    HTTP_AUTH_DRAIN_ABORT, // socket error/timeout, byte cap or time cap exceeded: close
+} http_auth_drain_step_t;
+
+// Decision after one httpd_req_recv(): `ret` is its return, `total_bytes` the bytes drained so far INCLUDING
+// this read, `elapsed_ms` the time since the drain started. Pure, host-tested.
+http_auth_drain_step_t http_auth_refusal_drain_step(int ret, size_t total_bytes, uint32_t elapsed_ms);
 
 // True when a refusal sent for a request with `content_len` unread body bytes
 // should return ESP_FAIL (httpd closes the socket without purging) instead of

@@ -555,6 +555,7 @@ Advanced -- it is not one of that page's four guided questions.</p>
 </div>
 <div class="table-scroll">
 <div id="firingStatsHistory"></div>
+<div id="firingTraces"></div>
 </div>
 
 <div id="couplingSection">
@@ -1434,6 +1435,10 @@ function zoneBlock(z, i, relayCount, thermoCount) {
        (saveAll()'s own comment: "tc_type yes, cal offset no"), so it sits
        outside every frame and stays visible whatever the selects say. */
     '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal"' + kgRawAttrs(z.cal_offset_c) + ' value="' + kgR6(z.cal_offset_c) + '">' +
+    /* Protection-tube lag tau: per SENSOR like the offset (applied after it,
+       ESP control reading only), never mirrored. 0 = bare TC, off. min/max
+       must match ZONE_TC_SHEATH_TAU_MIN_S/MAX_S (test_sheath_tau_client_bounds.py). */
+    '<label>Protection tube lag tau (s, 0 = no tube)</label><input type="number" step="1" min="0" max="600" class="sheathtau" value="' + ((typeof z.tc_sheath_tau_s === 'number') ? z.tc_sheath_tau_s : '') + '">' +
     /* coupling_diag_k_dc: the coupling identification's own diagonal cell --
        a MEASURED quantity (see zone_cfg_t::coupling_diag_k_dc's own doc
        comment), always emitted by GET and read-back-and-reposted by POST
@@ -2862,6 +2867,10 @@ document.getElementById('saveBtn').addEventListener('click', function () {
        docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs
        ("tc_type yes, cal offset no"). */
     params.push('z' + i + '_cal=' + kgPost(ownStack.querySelector('.cal')));
+    /* Sheath tau: omit-preserves on the board, so an empty field (GET had no
+       value) is left out rather than posted as 0. */
+    var sheathEl = ownStack.querySelector('.sheathtau');
+    if (sheathEl && String(sheathEl.value).trim() !== '') params.push('z' + i + '_sheath_tau=' + encodeURIComponent(sheathEl.value));
     /* coupling_diag_k_dc and the five controller-bands/shaping fields: same
        "no inheritance group, always this zone's own" treatment as cal offset
        just above -- read off ownStack, matching zones_http_post_parse.c's
@@ -4065,6 +4074,7 @@ function pollFiringStatsCurrent() {
     if (st.profile_id !== lastFiringProfileId) {
       lastFiringProfileId = st.profile_id;
       pollFiringStatsHistory();
+      pollFiringTraces();
     }
   }).catch(function () {});
 }
@@ -4077,6 +4087,25 @@ function pollFiringStatsCurrent() {
 // one giant table (a per-record caption carries the run's own duration/
 // start time, which a single flattened table would have to repeat on every
 // row instead).
+// FD-02: durable per-minute temperature trace of the last 4 firings (kept across reboots), one CSV
+// download link per firing. Source: GET /api/firing_trace (list); each link is /api/firing_trace?id=N.
+function pollFiringTraces() {
+  var el = document.getElementById('firingTraces');
+  fetch('/api/firing_trace').then(function (r) { return r.json(); }).then(function (data) {
+    var fs = (data && data.firings) || [];
+    if (!fs.length) { el.innerHTML = ''; return; }
+    var html = '<p class="hint">Saved firing traces (1 sample/min, survives reboot):</p><ul>';
+    fs.forEach(function (f) {
+      var when = f.start_epoch ? new Date(f.start_epoch * 1000).toLocaleString() : 'start time unknown';
+      html += '<li><a href="/api/firing_trace?id=' + encodeURIComponent(f.id) + '" download>Firing #' +
+        kgEsc(String(f.id)) + '</a> -- ' + kgEsc(when) + ', ' + kgEsc(String(f.samples)) + ' min' +
+        (f.closed ? '' : ' (not closed: interrupted or still running)') +
+        (f.truncated ? ' (truncated at 24 h)' : '') + '</li>';
+    });
+    el.innerHTML = html + '</ul>';
+  }).catch(function () { el.innerHTML = ''; });
+}
+
 function pollFiringStatsHistory() {
   var el = document.getElementById('firingStatsHistory');
   if (lastFiringProfileId === null || lastFiringProfileId === undefined) {

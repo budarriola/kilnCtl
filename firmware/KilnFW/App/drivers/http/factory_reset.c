@@ -367,6 +367,9 @@ static void execute_scope_job(void *arg)
         if (restore_err != ESP_OK) {
             ESP_LOGW(TAG, "esp_wifi_restore() failed: %s -- the Wi-Fi driver's own persisted "
                      "config may survive this reset", esp_err_to_name(restore_err));
+            if (first_err == ESP_OK) {
+                first_err = restore_err;
+            }
         } else {
             ESP_LOGW(TAG, "cleared the Wi-Fi driver's own persisted config (nvs.net80211)");
         }

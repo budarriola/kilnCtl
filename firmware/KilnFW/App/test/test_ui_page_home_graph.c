@@ -521,6 +521,12 @@ void run_test_ui_page_home_graph(void)
         TEST_CHECK(ui_page_home_pause_reason_text("pico_fatal_reboot", b, sizeof(b)) > 0 &&
                        strstr(b, "fatal") != NULL,
                    "pico_fatal_reboot text");
+        TEST_CHECK(ui_page_home_pause_reason_text("pico_fatal_before_esp_boot", b, sizeof(b)) > 0 &&
+                       strstr(b, "before this restart") != NULL,
+                   "pico_fatal_before_esp_boot text");
+        TEST_CHECK(ui_page_home_pause_reason_text("pico_repeated_reboot", b, sizeof(b)) > 0 &&
+                       strstr(b, "twice") != NULL,
+                   "pico_repeated_reboot text");
         TEST_CHECK(ui_page_home_pause_reason_text("heat_grant_unconfirmed", b, sizeof(b)) > 0 &&
                        strstr(b, "heat grant") != NULL,
                    "heat_grant_unconfirmed text");

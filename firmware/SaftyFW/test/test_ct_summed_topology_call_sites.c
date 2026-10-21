@@ -167,8 +167,30 @@ static void test_current_task_any_present_uses_shared_helper(void)
     free(text);
 }
 
+// TC sheath lag (0x010B): safety_core must pass thermo_task's published lead
+// into the guard input (0 only for a borrowed or stale reading), or S1/S2 never
+// see it. safety_core.c is not host-compilable, so a source scan.
+static void test_safety_core_passes_tc_lead(void)
+{
+    TEST_SECTION("safety_core.c: guard input carries thermo.tc_lead_c (0 when borrowed or stale)");
+    static const char *candidates[] = {
+        "../src/tasks/safety_core.c",
+        "src/tasks/safety_core.c",
+        "firmware/SaftyFW/src/tasks/safety_core.c",
+    };
+    char *text = read_file_any(candidates, 3);
+    if (!text) {
+        TEST_CHECK(false, "could not locate src/tasks/safety_core.c");
+        return;
+    }
+    TEST_CHECK(strstr(text, ".tc_lead_c = (use_borrowed_tc || !thermo_fresh) ? 0.0f : thermo.tc_lead_c,") != NULL,
+               "safety_core passes thermo.tc_lead_c to the guards, zeroed only for a borrowed or stale reading");
+    free(text);
+}
+
 void run_test_ct_summed_topology_call_sites(void)
 {
+    test_safety_core_passes_tc_lead();
     test_safety_core_commissioned_gate_uses_shared_helper();
     test_safety_core_present_masking_uses_shared_helper();
     test_safety_core_s14_loop_uses_shared_helper();

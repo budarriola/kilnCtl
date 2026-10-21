@@ -111,6 +111,7 @@ foreach ($f in $jsTests) {
         continue
     }
 
+    $proc.WaitForExit()  # parameterless wait settles ExitCode after the bounded overload
     $stdout = if (Test-Path "$env:TEMP\jshosttest_$($f.BaseName)_out.log") {
         Get-Content "$env:TEMP\jshosttest_$($f.BaseName)_out.log" -Raw
     } else { "" }

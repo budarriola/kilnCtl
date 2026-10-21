@@ -117,6 +117,7 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
     memset(out, 0, sizeof(config_store_ct_channel_cal_t) * CONFIG_STORE_CT_CAL_NUM_CHANNELS);
 }
 bool config_store_get_full_record(config_store_record_t *out) { config_store_default(out); return true; }
+bool config_store_get_persisted_check_period_s(uint32_t *out) { *out = 10u; return true; }
 static uint8_t g_pers_tc, g_cur_tc;
 uint8_t config_store_get_persisted_tc_type(void) { return g_pers_tc; }
 uint32_t config_store_get_ram_integrity_fail_count(void) { return 0; }
@@ -154,7 +155,9 @@ bool config_store_write_volatile(const config_store_record_t *r, const char **wh
 
 static bool g_any_current_present;
 bool current_task_any_current_present(void) { return g_any_current_present; }
-bool current_task_ct_auto_zero_begin(uint8_t ch) { (void)ch; return false; }
+static int g_az_begin_calls, g_az_cancel_calls;
+bool current_task_ct_auto_zero_begin(uint8_t ch) { (void)ch; g_az_begin_calls++; return true; }
+void current_task_ct_auto_zero_cancel(void) { g_az_cancel_calls++; }
 void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *o) { memset(o, 0, sizeof(*o)); }
 void current_task_get_power(current_sense_power_t *o) { memset(o, 0, sizeof(*o)); }
 void current_task_get_snapshot(current_snapshot_t *o) { memset(o, 0, sizeof(*o)); }
@@ -911,6 +914,41 @@ static void scenario_heat_probe_current_floor(void)
     s_context_published = false;
 }
 
+// PN-03: CT auto-zero BEGIN (0x26) is refused while heat is possible or current
+// flows, and the refusal is visible (cancel drops any stale DONE so the ESP's
+// GET_CT_AUTO_ZERO poll reads IDLE).
+static void scenario_ct_auto_zero_gate(void)
+{
+    reset_link_state();
+    s_context_lock = (SemaphoreHandle_t)1;
+    s_degraded_no_context = false;
+    uint8_t p[15 + 14 * 12];
+    uint8_t n = build_context(p, CONTEXT_FLAG_CONTEXT_VALID, 40, 1);
+    send_esp(p, n);
+    uint8_t bp[KILNLINK_CT_AUTO_ZERO_BEGIN_LEN];
+    kilnlink_ct_auto_zero_begin_t bm = { .channel = 0 };
+    kilnlink_ct_auto_zero_begin_status_t bst;
+    size_t bl = kilnlink_ct_auto_zero_begin_encode(&bm, bp, sizeof(bp), &bst);
+    CHECK(bl > 0, "PN-03 begin frame encodes");
+
+    g_any_current_present = false;
+    g_az_begin_calls = g_az_cancel_calls = 0;
+    send_esp(bp, (uint8_t)bl);
+    CHECK(g_az_begin_calls == 1 && g_az_cancel_calls == 0, "PN-03 idle, no current: BEGIN accepted (begin=%d cancel=%d)", g_az_begin_calls, g_az_cancel_calls);
+
+    g_any_current_present = true;
+    g_az_begin_calls = g_az_cancel_calls = 0;
+    send_esp(bp, (uint8_t)bl);
+    CHECK(g_az_begin_calls == 0 && g_az_cancel_calls == 1, "PN-03 current flowing: BEGIN refused and stale result cancelled (begin=%d cancel=%d)", g_az_begin_calls, g_az_cancel_calls);
+
+    g_any_current_present = false;
+    s_context_lock = NULL;
+    s_context_published = false;
+    g_az_begin_calls = g_az_cancel_calls = 0;
+    send_esp(bp, (uint8_t)bl);
+    CHECK(g_az_begin_calls == 0 && g_az_cancel_calls == 1, "PN-03 no fresh context (heat state unknown): BEGIN refused, fail closed");
+}
+
 // --- R2-B: COMMIT_CONFIG / APPLY_CONFIG_VOLATILE handlers ------------------------
 
 // Decodes the last UART frame into a COMMIT_CONFIG_REJECTED (0x20) payload.
@@ -1363,6 +1401,8 @@ int main(void)
     printf("-> heat_probe_current_floor\n");
     scenario_heat_probe_current_floor();
     CHECK(s_context_lock == NULL && !s_context_published, "heat_probe scenario leaves no fake context lock/publish behind (A-LOW-1)");
+    printf("-> ct_auto_zero_gate\n");
+    scenario_ct_auto_zero_gate();
     printf("-> trip_seq\n");
     scenario_trip_seq();
     printf("-> unknown_commands\n");

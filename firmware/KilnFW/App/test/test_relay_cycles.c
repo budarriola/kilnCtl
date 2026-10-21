@@ -52,6 +52,12 @@
 // and test_profile_executor_prestart.c already rely on.
 #include "stubs/bx_worker_stub.h"
 
+// Accessors for test_run_state.c (same executable, different TU): it cannot see this TU's static stub state.
+unsigned bx_stub_dispatches(void) { return s_stub_dispatch_count; }
+void bx_stub_reset(void) { s_stub_dispatch_count = 0; s_stub_dispatch_fail = false; s_stub_on_flash_worker = false; }
+void bx_stub_set_fail(bool f) { s_stub_dispatch_fail = f; }
+void bx_stub_set_on_worker(bool f) { s_stub_on_flash_worker = f; }
+
 #include "../drivers/persist/relay_cycles.c"
 
 static void mount_cfg_fresh(void);

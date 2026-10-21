@@ -1,5 +1,6 @@
 /* fake_kv.c -- host fake backend for hal_kv.h. See fake_kv.h. */
 #include "fake_kv.h"
+#include "../common/hal_kv_wstat_impl.h" /* BW-01 */
 
 #include <string.h>
 
@@ -174,13 +175,17 @@ static bool key_logically_present(const fake_kv_key_slot_t *k)
  * of do_get() and fake_kv_reset_all(), both below) since this file has no
  * header of its own for internal statics and forward declarations. */
 static unsigned s_get_call_count = 0;
+static unsigned s_set_call_count = 0; /* FW-01/04: NVS write counting in wear tests */
 /* Probe-error injection for hal_kv_key_exists(): the next `s_key_exists_fail_count` probes return the status. */
 static unsigned s_key_exists_fail_count = 0;
 static unsigned s_key_exists_fail_skip = 0; /* probes that succeed normally before the failures start */
 static hal_status_t s_key_exists_fail_status = HAL_OK;
 
+static char s_fake_auto_erased[8][FAKE_KV_MAX_NAME_LEN];
+
 void fake_kv_reset_all(void)
 {
+    memset(s_fake_auto_erased, 0, sizeof(s_fake_auto_erased));
     hal_kv_set_write_refuse_hook(NULL);
     memset(s_partitions, 0, sizeof(s_partitions));
     memset(s_handles, 0, sizeof(s_handles));
@@ -193,6 +198,7 @@ void fake_kv_reset_all(void)
     s_silent_set_noops = 0u;
     s_blob_get_misses_size1 = false;
     s_get_call_count = 0u;
+    s_set_call_count = 0u;
     s_key_exists_fail_count = 0u;
     s_key_exists_fail_skip = 0u;
     s_next_open_fail_armed = false;
@@ -209,6 +215,11 @@ void fake_kv_reset_all(void)
  * flash worker, which the dispatch-count assertion alone cannot catch (a
  * caller-side load() plus a dispatched job would both count as "one
  * dispatch" and give the same answer). */
+unsigned fake_kv_set_call_count(void)
+{
+    return s_set_call_count;
+}
+
 unsigned fake_kv_get_call_count(void)
 {
     return s_get_call_count;
@@ -569,11 +580,13 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, fake_kv_k
     k->pending_kind = (uint8_t)kind;
     k->pending_len = len;
     if (len) memcpy(k->pending_data, buf, len);
+    hal_kv_wstat_note(s_partitions[hs->partition_slot].name, key); /* BW-01 */
     return HAL_OK;
 }
 
 hal_status_t hal_kv_set_blob(hal_kv_handle_t *h, const char *key, const void *buf, size_t len)
 {
+    s_set_call_count++;
     return do_set(get_handle(h), key, FAKE_KV_KIND_BLOB, buf, len);
 }
 
@@ -665,6 +678,7 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     k->pending_set = true;
     k->pending_tombstone = true;
     k->pending_len = 0;
+    hal_kv_wstat_note(s_partitions[hs->partition_slot].name, key); /* BW-01 */
     return HAL_OK;
 }
 
@@ -686,6 +700,23 @@ hal_status_t hal_kv_init_partition(const char *partition)
     s_partitions[free_slot].initialized = true;
     copy_bounded(s_partitions[free_slot].name, sizeof(s_partitions[free_slot].name), name);
     return HAL_OK;
+}
+
+void fake_kv_script_mark_auto_erased(const char *partition)
+{
+    const char *name = (partition == NULL ? "nvs" : partition);
+    for (int i = 0; i < 8; i++) {
+        if (s_fake_auto_erased[i][0] == '\0') { copy_bounded(s_fake_auto_erased[i], FAKE_KV_MAX_NAME_LEN, name); return; }
+    }
+}
+
+bool hal_kv_partition_was_auto_erased(const char *partition)
+{
+    const char *name = (partition == NULL ? "nvs" : partition);
+    for (int i = 0; i < 8; i++) {
+        if (s_fake_auto_erased[i][0] != '\0' && strcmp(s_fake_auto_erased[i], name) == 0) return true;
+    }
+    return false;
 }
 
 hal_status_t hal_kv_mount_probe(const char *partition)

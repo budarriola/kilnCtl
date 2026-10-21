@@ -477,6 +477,10 @@ typedef struct {
     size_t   heap_spiram_free;
     size_t   heap_spiram_largest_free_block;
     size_t   heap_spiram_min_free;
+    uint32_t pico_reboot_seq;           /* PF-03: heat_enable's last observed Pico reboot count */
+    bool     pico_reboot_latched;       /* PF-03: fatal verdict latched or holding heat */
+    bool     pico_reboot_lost_trip_only;/* PF-03: that latch came only from the lost-trip rule */
+    uint32_t persist_scratch_fallbacks; /* FX-05: PSRAM->internal scratch fallbacks since boot */
     size_t   heap_spiram_total;
 
     /* MALLOC_CAP_DMA (DMA-capable internal memory) -- DRAM_PSRAM_PLAN.md
@@ -696,6 +700,10 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
  * read itself: until primed, flash_size_known/flash_used_known read false.
  * Idempotent. */
 void dashboard_prime_flash_facts(void);
+
+/* OF-05: byte length of the running image (esp_image_get_metadata().image_len, the same length as the published
+ * .bin), primed once. False = unknown. */
+bool dashboard_running_image_len(uint32_t *len);
 
 /* Read-only accessor for readiness_http.c (TODO.md 8.3): the same three
  * hardware-answering flags /api/status reports as io_ready/thermo_ready/

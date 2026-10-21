@@ -1,4 +1,5 @@
 #include "ui_page_diagnostics.h"
+#include "flash_xip_lock.h"
 
 #include <math.h> /* CT_COMMISSIONING_PLAN.md step 4 -- isnan() on ct_current_a[] */
 #include <stdint.h>
@@ -18,7 +19,8 @@
 #include "hal_sysinfo.h" /* hal_sysinfo_reset_reason()/_get_build_info()/_get_running_partition() */
 #include "MAX31856.h"
 #include "board_temps.h"
-#include "crash_report.h" /* 2026-09-15 MEDIUM fix: LCD acknowledge control, see Crash Report page below */
+#include "crash_report.h"
+#include "boot_history.h" /* 2026-09-15 MEDIUM fix: LCD acknowledge control, see Crash Report page below */
 #include "dashboard_http.h"
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md -- the Relay Life page below */
 #include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
@@ -476,6 +478,7 @@ static lv_obj_t *s_rl_value_label[RELAY_CYCLES_COUNT];
  * Relay Life page's own equivalent state was removed, UI_PLAN.md section
  * 6.4). */
 static lv_obj_t *s_cr_summary_label;
+static lv_obj_t *s_cr_resets_label; /* FD-03: last 5 resets */
 static lv_obj_t *s_cr_ack_row; /* LOW-5 fix: the whole row, hidden as a unit -- see refresh_cb() */
 static lv_obj_t *s_cr_ack_btn;
 static lv_obj_t *s_cr_ack_label;
@@ -640,6 +643,27 @@ static const char *ota_state_str(esp_ota_img_states_t s)
     }
 }
 
+/* Cached OTA image state; written once by ui_page_diagnostics_prime_ota_state(). */
+static esp_ota_img_states_t s_ota_state_cached = ESP_OTA_IMG_UNDEFINED;
+static bool s_ota_state_known;
+/* PM-06: running partition cached at prime time so the LVGL task makes no esp_ota_* call. */
+static hal_sysinfo_partition_info_t s_running_info_cached;
+static bool s_running_info_known;
+
+void ui_page_diagnostics_prime_ota_state(void)
+{
+    s_running_info_known = (hal_sysinfo_get_running_partition(&s_running_info_cached) == HAL_OK);
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+    flash_xip_reader_enter();
+    esp_err_t serr = running ? esp_ota_get_state_partition(running, &st) : ESP_FAIL;
+    flash_xip_reader_exit();
+    if (serr == ESP_OK) {
+        s_ota_state_cached = st;
+        s_ota_state_known = true;
+    }
+}
+
 /* Everything on the Firmware page is set once at build time -- version,
  * build date, reset reason, running partition, OTA state, and chip/flash
  * facts are all fixed for the life of the running image, so there is
@@ -661,22 +685,19 @@ static void build_firmware_statics(void)
 
     lv_label_set_text(s_reset_reason_label, reset_reason_str(hal_sysinfo_reset_reason()));
 
-    hal_sysinfo_partition_info_t running_info;
-    bool have_running_info = (hal_sysinfo_get_running_partition(&running_info) == HAL_OK);
-    /* esp_ota_get_state_partition() below needs the real esp_partition_t
-     * pointer (an OTA-state read, not one of hal_sysinfo.h's six covered
-     * operations -- see this file's esp_ota_ops.h include comment), so the
-     * running-partition pointer is still fetched directly for that one call
-     * even though the label/size text above now comes from hal_sysinfo. */
-    const esp_partition_t *running = esp_ota_get_running_partition();
+    hal_sysinfo_partition_info_t running_info = s_running_info_cached;
+    bool have_running_info = s_running_info_known;
+    /* The OTA image state is read ONCE by ui_page_diagnostics_prime_ota_state()
+     * from the caller of kiln_ui_init(), never here: esp_ota_get_state_partition()
+     * reads otadata through esp_partition_mmap, which freezes the flash cache
+     * and asserts on a PSRAM task stack (AUDIT_INTERNAL_RAM_XIP section 1).
+     * This builder runs on the LVGL task, whose stack must be allowed in PSRAM. */
     if (have_running_info) {
         snprintf(buf, sizeof(buf), "%s (%lu KB)", running_info.label,
                  (unsigned long)(running_info.size / 1024));
         lv_label_set_text(s_partition_label, buf);
-
-        esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
-        if (running && esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-            lv_label_set_text(s_ota_state_label, ota_state_str(ota_state));
+        if (s_ota_state_known) {
+            lv_label_set_text(s_ota_state_label, ota_state_str(s_ota_state_cached));
         } else {
             /* Genuinely can't be determined (e.g. running from `factory`,
              * which carries no OTA state record) -- "n/a" rather than
@@ -706,7 +727,8 @@ static void build_firmware_statics(void)
     }
 }
 
-/* NVS usage is read once here too. nvs_get_stats() reflects live state in
+/* kiln_nvs (zones/rules/boot_history/trip_history; NOT the default "nvs"
+ * partition) usage is read once here too. nvs_get_stats() reflects live state in
  * principle, but the entries it counts (zones/rules/profiles/run_state) only
  * change on an explicit save from elsewhere in the UI, never as a
  * background process this page's 2s timer would need to catch -- so one
@@ -716,7 +738,7 @@ static void build_nvs_statics(void)
 {
     hal_kv_stats_t stats;
     char buf[64];
-    if (hal_kv_stats(NULL, &stats) == HAL_OK) {
+    if (hal_kv_stats("kiln_nvs", &stats) == HAL_OK) {
         snprintf(buf, sizeof(buf), "%u used / %u free / %u total",
                  (unsigned)stats.used_entries, (unsigned)stats.free_entries,
                  (unsigned)stats.total_entries);
@@ -1283,6 +1305,30 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_set_style_text_color(s_cr_summary_label,
                                      cr_unacked ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
     }
+    if (s_page_index == UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT) {
+        /* FD-03: five short lines ("#12 TASK_WDT up 345s a1b2c3d"), RAM cache, no NVS read. */
+        boot_history_entry_t bh[BOOT_HISTORY_RECENT];
+        unsigned bn = boot_history_recent(bh);
+        char bh_buf[BOOT_HISTORY_RECENT * 36 + 24];
+        size_t bo = (size_t)snprintf(bh_buf, sizeof(bh_buf), "Last %u resets:", (unsigned)BOOT_HISTORY_RECENT);
+        for (unsigned i = 0; i < bn && bo < sizeof(bh_buf); i++) {
+            char up[16];
+            if (bh[i].prev_uptime_known) {
+                snprintf(up, sizeof(up), "%lus", (unsigned long)bh[i].prev_uptime_s);
+            } else {
+                snprintf(up, sizeof(up), "?");
+            }
+            char fw7[8];
+            snprintf(fw7, sizeof(fw7), "%.7s", bh[i].fw);
+            int w = snprintf(bh_buf + bo, sizeof(bh_buf) - bo, "\n#%lu %s up %s %s",
+                             (unsigned long)bh[i].seq, boot_history_reason_name(bh[i].reset_reason), up, fw7);
+            if (w < 0 || (size_t)w >= sizeof(bh_buf) - bo) {
+                break;
+            }
+            bo += (size_t)w;
+        }
+        lv_label_set_text(s_cr_resets_label, bh_buf);
+    }
     /* LOW-5 fix: hide the WHOLE row (name label + button) as a unit once
      * there's no unacknowledged record any more, not just the button --
      * the row's name label is fixed "Unacknowledged crash" text, so leaving
@@ -1679,7 +1725,7 @@ lv_obj_t *ui_page_diagnostics_build(void)
     s_psram_largest_label = build_stat_row(psram_page, "PSRAM largest free block", UI_THEME_ACCENT_2);
     s_psram_min_label = build_stat_row(psram_page, "PSRAM free (worst-case)", UI_THEME_ACCENT_3);
     s_psram_total_label = build_stat_row(psram_page, "PSRAM total", UI_THEME_ACCENT_4);
-    s_nvs_stats_label = build_stat_row(psram_page, "NVS entries (used/free/total)", UI_THEME_ACCENT_1);
+    s_nvs_stats_label = build_stat_row(psram_page, "kiln_nvs used/free/total", UI_THEME_ACCENT_1);
     s_esp32_temp_label = build_stat_row(psram_page, "ESP32-S3 die temp", UI_THEME_ACCENT_2);
 
     /* Page 4: Safety & Board Health -- merged 2026-09-04 (see this file's
@@ -1756,6 +1802,8 @@ lv_obj_t *ui_page_diagnostics_build(void)
     lv_obj_t *crash_report_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_CRASH_REPORT];
     s_cr_summary_label = build_full_text_row_accent(crash_report_page, "No crash report on record.",
                                                       UI_THEME_ACCENT_1);
+    s_cr_resets_label = build_full_text_row_accent(crash_report_page, "Last resets: n/a",
+                                                    UI_THEME_ACCENT_2);
     build_crash_report_ack_row(crash_report_page);
 
     /* MUST come after content exists -- ui_topbar.h's own usage note: the

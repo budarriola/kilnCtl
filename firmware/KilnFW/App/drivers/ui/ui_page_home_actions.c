@@ -5,6 +5,7 @@
  * See ui_page_home_internal.h for the shared statics/prototypes this file
  * reaches across the split, and ui_page_home.c's own header comment for the
  * page's overall design history. */
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
 #include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
@@ -82,7 +83,7 @@ static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
      * ceiling for why it is treated as tight, not generous). Needs the full
      * struct's .state and .profile_id, so the narrow
      * profile_executor_get_active_id() accessor does not fit here. */
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (!st) {
         return false; /* out of memory -- treat as "no known profile id" */
     }
@@ -349,7 +350,7 @@ static void ui_home_pause_resume_gated_cb(void *user_data)
      * .state to distinguish RUNNING from PAUSED, which the narrow
      * profile_executor_get_active_id() accessor cannot report (it collapses
      * both into a single "active" bool). */
-    profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
     if (!st) {
         return; /* out of memory -- skip this tap, next one tries again */
     }

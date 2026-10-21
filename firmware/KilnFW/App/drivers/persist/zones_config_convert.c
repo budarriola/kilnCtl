@@ -58,6 +58,7 @@ size_t zones_cfg_expected_len_for_version(uint8_t version)
     case 23: return sizeof(zones_cfg_v23_t);
     case 24: return sizeof(zones_cfg_v24_t);
     case 25: return sizeof(zones_cfg_v25_t);
+    case 26: return sizeof(zones_cfg_v26_t);
     case ZONES_CFG_VERSION: return sizeof(zones_cfg_t);
     default: return 0;
     }

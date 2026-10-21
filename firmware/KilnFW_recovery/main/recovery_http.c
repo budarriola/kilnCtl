@@ -24,6 +24,7 @@
 // own validator and sink.
 #include "recovery_http.h"
 #include "recovery_install.h"
+#include "recovery_keepalive.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -184,6 +185,21 @@ static bool clear_boot_guard(char *msg, size_t cap);
 static bool boot_guard_clear_or_na(char *msg, size_t cap);
 static esp_err_t stage_clear_after_upload(void);
 
+// RE-01: set once by restart_soon() and never cleared (the chip restarts). Every route that writes app,
+// changes the boot target, or resets the chip, and the apply/install tasks, refuse while it is set.
+static bool s_restart_pending;
+
+bool recovery_http_restart_pending(void)
+{
+    return __atomic_load_n(&s_restart_pending, __ATOMIC_SEQ_CST);
+}
+
+// True when a mutating route must answer 409: an apply is copying into app or a restart is scheduled.
+static bool route_blocked(void)
+{
+    return recovery_apply_busy() || recovery_http_restart_pending();
+}
+
 static void restart_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS((uint32_t)(uintptr_t)arg));
@@ -195,6 +211,8 @@ static void restart_task(void *arg)
 // TCP stack can flush it. Falls back to restarting inline if no task fits.
 static void restart_soon(uint32_t delay_ms)
 {
+    // RE-01: fence every writer before the restart task exists.
+    __atomic_store_n(&s_restart_pending, true, __ATOMIC_SEQ_CST);
     if (xTaskCreate(restart_task, "rec_restart", 2048, (void *)(uintptr_t)delay_ms, 5, NULL) !=
         pdPASS) {
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
@@ -207,17 +225,17 @@ static void restart_soon(uint32_t delay_ms)
 static esp_err_t refuse_while_applying(httpd_req_t *req)
 {
     httpd_resp_set_status(req, "409 Conflict");
+    if (recovery_http_restart_pending()) {
+        return httpd_resp_send(req, "restart pending", HTTPD_RESP_USE_STRLEN);
+    }
     return httpd_resp_send(req, "staged update is being applied", HTTPD_RESP_USE_STRLEN);
 }
 
 // POST /api/ota/esp -- open, validated, streamed (recovery_upload.c).
 // Nothing is written until the first chunk passes ric_validate_first_chunk();
 // the boot partition is set only after esp_ota_end() verified the whole image.
-static esp_err_t ota_esp_post(httpd_req_t *req)
+static esp_err_t ota_esp_post_locked(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
-        return refuse_while_applying(req);
-    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -287,6 +305,18 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
+}
+
+// RC-01: hold the apply claim for the whole direct upload so recover_task (which re-checks it right before
+// selecting app or restarting) and every other mutating route see the app partition as being written.
+static esp_err_t ota_esp_post(httpd_req_t *req)
+{
+    if (recovery_http_restart_pending() || !recovery_app_write_claim()) {
+        return refuse_while_applying(req);
+    }
+    esp_err_t e = ota_esp_post_locked(req);
+    recovery_app_write_release();
+    return e;
 }
 
 // GET / -- the embedded self-contained recovery page.
@@ -580,6 +610,16 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
         }
     }
     if (e == ESP_OK) {
+        // RE-02: proof the Pico link keepalive transmits (counts and times only, nothing secret).
+        recovery_keepalive_stats_t ka;
+        recovery_keepalive_get_stats(&ka);
+        e = send_frag(req,
+                      "\"keepalive_sent\":%u,\"keepalive_send_errors\":%u,\"keepalive_last_err\":%d,"
+                      "\"keepalive_last_send_ms\":%u,\"keepalive_task\":%s,",
+                      (unsigned)ka.sent, (unsigned)ka.send_errors, (int)ka.last_err,
+                      (unsigned)ka.last_send_ms, ka.task_running ? "true" : "false");
+    }
+    if (e == ESP_OK) {
         e = send_frag(req, "%s,", bgs);
     }
     if (e == ESP_OK) {
@@ -764,7 +804,7 @@ static bool boot_guard_clear_or_na(char *msg, size_t cap)
 // POST /api/ota/esp/boot_guard_reset
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
+    if (route_blocked()) {
         return refuse_while_applying(req);
     }
     char bg_msg[96];
@@ -780,7 +820,7 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 // itself counted toward recovery, selects `app`, and restarts.
 static esp_err_t recovery_exit_post(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
+    if (route_blocked()) {
         return refuse_while_applying(req);
     }
     if (recovery_pico_busy()) {
@@ -857,7 +897,7 @@ static int erase_legacy_default_wifi(bool *skipped)
 // (WIFI_RESET_KEYS) and restart. The AP name is kept.
 static esp_err_t wifi_reset_post(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
+    if (route_blocked()) {
         return refuse_while_applying(req);
     }
     if (recovery_pico_busy()) {
@@ -917,7 +957,7 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
 // POST /api/sw_reset
 static esp_err_t sw_reset_post(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
+    if (route_blocked()) {
         return refuse_while_applying(req);
     }
     if (recovery_pico_busy()) {
@@ -1021,7 +1061,7 @@ static bool parse_pico_query(httpd_req_t *req, uint32_t *crc, int *operator_slot
 // UART while GET /api/recovery/pico/status keeps answering. 202 on start.
 static esp_err_t pico_upload_post(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
+    if (route_blocked()) {
         return refuse_while_applying(req);
     }
     uint32_t claimed_crc = 0;
@@ -1151,7 +1191,7 @@ static const char *stage_source_str(stage_source_t s)
 // the new app is verified and selected.
 static esp_err_t apply_staged_post(httpd_req_t *req)
 {
-    if (recovery_apply_busy()) {
+    if (route_blocked()) {
         return refuse_while_applying(req);
     }
     if (recovery_pico_busy()) {

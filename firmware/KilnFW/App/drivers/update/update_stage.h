@@ -72,6 +72,10 @@ typedef struct {
     int (*sha_update)(void *ctx, const void *data, size_t len);
     int (*sha_finish)(void *ctx, uint8_t out[STAGE_SHA256_LEN]);
     void (*sha_abort)(void *ctx); // may be NULL
+    // OP-01: full esp_image_verify over the staged image (partition offset STAGE_IMAGE_OFFSET, length
+    // image_len). Run by upload_finish before the VERIFIED header is written. 0 = valid. NULL skips
+    // the check (host tests that do not model it); the target always wires it.
+    int (*image_verify)(void *ctx, uint32_t image_len);
     // Optional; NULL on the host.
     void (*lock)(void *ctx);
     void (*unlock)(void *ctx);

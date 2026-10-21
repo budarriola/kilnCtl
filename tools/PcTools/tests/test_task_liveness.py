@@ -209,7 +209,6 @@ def test_load_required_task_specs_against_the_real_check_script():
     assert specs["i2c_owner_ns2009"] == "config"
     assert specs["ota_pico_rollback"] == "on-demand"
     assert specs["recovery_exit"] == "on-demand"
-    assert specs["ota_rollback_reboot"] == "on-demand"
     # An ordinary long-lived task stays untagged/"always".
     assert specs["kiln_io_owner"] == "always"
 

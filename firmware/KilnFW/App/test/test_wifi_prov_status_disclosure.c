@@ -74,6 +74,8 @@ web_auth_table_t *http_session_table(void);
 
 #include "wifi_prov.h"
 
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; } /* RS-02: http_auth_http.c refusal drain */
+
 // ---------------------------------------------------------------------------
 // esp_http_server.h stub bodies -- same minimal set as
 // test_readiness_crash_disclosure.c: only what the real auth stack touches.

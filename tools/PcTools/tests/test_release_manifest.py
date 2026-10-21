@@ -72,6 +72,12 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(rm.parse_define_int("#define AB 5\n", "A"))
         self.assertIsNone(rm.parse_define_int("// #define A 5\n", "A"))
 
+    def test_define_crlf(self):
+        # core.autocrlf checkouts: `$` does not match before \r
+        self.assertEqual(rm.parse_define_int("#define A 26\r\n#define B 3 // c\r\n", "A"), 26)
+        self.assertEqual(rm.parse_define_int("/* x */\r\n#define B 3 // c\r\n", "B"), 3)
+        self.assertEqual(rm.parse_define_int("#define A 0x10u\r\n", "A"), 16)
+
     def test_semver(self):
         for ok in ("v1.0.0", "v10.20.30", "v1.0.0-rc.1", "v0.9.0-beta"):
             rm.check_tag(ok)

@@ -24,10 +24,15 @@
 // version_once, safety_context_update_relay_recent, safety_count_cmd_byte's
 // sibling s_boot_clean statics, safety_link_mark_boot_clean's own file-local
 // state) stays exactly as private as it always was.
+#include "persist_scratch.h" /* RAM-02: status structs from PSRAM, internal fallback */
 #include "safety_link.h"
 #include "safety_link_frame.h"
 #include "safety_link_internal.h"
 #include "safety_trip_decision.h"
+#include "trip_history.h" /* FD-05 */
+#include "boot_history.h"
+#include "time_sync.h"
+#include "hal_time.h"
 #include "safety_pico_relay_mask.h"
 
 #include <inttypes.h>
@@ -368,6 +373,7 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
     uint16_t peer_min_compatible = 0;
     uint8_t peer_boot_id = 0;
     bool have_boot_id = false;
+    bool boot_id_first_sight = false;
     bool dirty = false;
     uint8_t commit[64];
     uint8_t commit_len = 0;
@@ -405,7 +411,10 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
          * (pico_boot_id_ever_seen), not pico_boot_id_known, which a ~1.5 s link blip clears
          * (safety_reset_stale_peer_info_if_link_down). pico_boot_id itself is never cleared, so a
          * same-id relink is not a reboot; only a changed id is. */
-        boot_id_changed = (!link->pico_boot_id_ever_seen) || (peer_boot_id != link->pico_boot_id);
+        /* PF-01: the first id seen after an ESP boot is the starting value, not a reboot: it still resets
+         * the per-boot bookkeeping below (as before) but must not bump pico_reboot_seq. */
+        boot_id_first_sight = !link->pico_boot_id_ever_seen;
+        boot_id_changed = boot_id_first_sight || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
         link->pico_boot_id_known = true;
         link->pico_boot_id_ever_seen = true;
@@ -434,7 +443,11 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
                  * inputs (reboot_fatal_latched, was_tripped) and erase the T3 lost-trip latch. Keep the
                  * baseline and diag_since_reboot as the uptime path left them. */
             } else {
+                const uint32_t seq_before = link->cached.pico_reboot_seq;
                 safety_note_pico_reboot_locked(link);
+                if (boot_id_first_sight) {
+                    link->cached.pico_reboot_seq = seq_before; /* PF-01: not a reboot */
+                }
                 /* The new boot's uptime baseline is not known yet; the next
                  * DIAG seeds it (kilnlink audit 2026-10-09 M1). */
                 link->pico_uptime_baseline_known = false;
@@ -542,7 +555,7 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * stack, same pattern as safety_cfg_http.c/dashboard_exec_http.c. Every
      * field below is read, not just the active-firing bool, so the narrow
      * profile_executor_get_active_id() accessor does not fit here. */
-    profile_exec_status_t *pstat = heap_caps_malloc(sizeof(*pstat), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    profile_exec_status_t *pstat = persist_scratch_alloc(sizeof(*pstat));
     if (!pstat) {
         ESP_LOGE(TAG, "safety_build_and_send_context: out of memory, skipping this PUSH_CONTEXT broadcast");
         return;
@@ -1416,6 +1429,11 @@ bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *
     safety_unlock(link);
 
     if (is_new_event) {
+        /* FD-05: RAM-only hand-off; telemetry_log task persists it (no flash from this RX context). */
+        (void)trip_history_note_event(safety_read_u32_le(&p[3]), (uint32_t)(hal_time_now_us() / 1000000),
+                                      time_sync_utc_or_zero(), boot_history_latest_seq(),
+                                      safety_tc_c, deciding_threshold, trip_reason, trip_seq,
+                                      boot_history_latest_rep());
         ESP_LOGW(TAG, "safety processor TRIPPED: reason 0x%02X, trip_seq %u, safety TC %.1f C "
                       "(threshold %.1f)",
                  (unsigned)trip_reason, (unsigned)trip_seq, (double)safety_tc_c,

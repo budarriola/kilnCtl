@@ -1,3 +1,4 @@
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR (RAM-04, 2026-10-16: task-only data, no ISR/DMA/cache-off access) */
 #include "telemetry_log.h"
 
 #include <stdint.h>
@@ -6,6 +7,7 @@
 #include "esp_heap_caps.h" /* MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT below -- was previously reached
                             * only transitively via freertos/idf_additions.h */
 #include "esp_log.h"
+#include "hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -16,6 +18,8 @@
 #include "profile_executor.h"
 #include "stack_margin.h"
 #include "telemetry_format.h"
+#include "telemetry_time_sync.h"
+#include "trip_history.h" /* FD-05: trip_history_flush() */
 
 static const char *TAG = "KTEL";
 
@@ -141,9 +145,9 @@ static void telemetry_log_task(void *arg)
      * life and never released, own it as a static instead -- .dram0.bss
      * +1512 B, but the OOM-and-vanish failure mode is gone entirely rather
      * than just retried. */
-    static profile_exec_status_t fst_storage;
+    static EXT_RAM_BSS_ATTR profile_exec_status_t fst_storage;
     profile_exec_status_t *fst = &fst_storage;
-    autotune_engine_status_t ast;
+    static EXT_RAM_BSS_ATTR autotune_engine_status_t ast; /* static: this task's stack ceiling (check_all_task_stack_budgets) */
     char line[TELEMETRY_LOG_LINE_BUF];
 
     uint32_t firing_next_s = 0;
@@ -240,6 +244,12 @@ static void telemetry_log_task(void *arg)
                             EVENT_LOG_ZONE_NONE, arg, note_ptr);
         }
         firing_prev_state = fst->state;
+
+        /* FD-04/FQ-01..03/BH-02: SYS_BOOT marker, TIME_SYNC event, boot_history wall-time backfill. */
+        telemetry_time_sync_service((uint32_t)(hal_time_now_us() / 1000000));
+
+        /* FD-05: persist any Pico trips the link RX task queued (flash hop, not the RX context). */
+        (void)trip_history_flush();
 
         /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag warning event,
          * ALWAYS checked (not gated on ramp_assist_enabled -- see
