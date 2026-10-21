@@ -62,7 +62,7 @@ typedef struct {
 #define SECURITY_HTTP_MESSAGE_MAX 160
 
 typedef struct {
-    int http_status;                         // 200/400/403/501/500
+    int http_status;                         // 200/400/403/501/500/503
     // Failure text only, from this module's own fixed set of static strings
     // (never caller-supplied). EMPTY on http_status 200 -- success needs no
     // message, and the only consumer (security_http.c) reads this field on

@@ -62,7 +62,7 @@
 #include "live_profile.h" /* live_edit_name_collides() -- Opus review finding B, the pass-1
                             * dup-name pre-check below (before pass 2 writes anything) */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
-#include "ota_http_internal.h" /* RS-02: ota_http_refusal_drain(), ota_http_esp_chunk_buf() */
+#include "ota_http_internal.h" /* RS-02: ota_http_refusal_drain() */
 #include "persist_scratch.h" /* persist_scratch_alloc() -- pass-1 validation scratch */
 #include "profiles_http.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
@@ -4566,12 +4566,7 @@ static esp_err_t backup_import_refusal_finish(httpd_req_t *req, esp_err_t sent)
     if ((size_t)req->content_len > BACKUP_BODY_MAX) {
         return ESP_FAIL;
     }
-    size_t cap = 0;
-    uint8_t *buf = ota_http_esp_chunk_buf(&cap);
-    if (buf == NULL || cap == 0) {
-        return ESP_FAIL;
-    }
-    return ota_http_refusal_drain(req, buf, cap);
+    return ota_http_refusal_drain(req); /* LK-05: own 512 B buffer, not the shared OTA chunk */
 }
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)

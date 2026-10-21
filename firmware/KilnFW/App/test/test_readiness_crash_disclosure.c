@@ -79,6 +79,8 @@ web_auth_table_t *http_session_table(void);
 
 #include "readiness_http.h"
 
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; } /* RS-02: http_auth_http.c refusal drain */
+
 // ---------------------------------------------------------------------------
 // esp_http_server.h stub bodies -- minimal set actually needed to link the
 // real auth stack (http_auth_http.c calls httpd_req_get_hdr_value_len/_str

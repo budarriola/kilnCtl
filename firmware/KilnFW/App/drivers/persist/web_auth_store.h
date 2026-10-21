@@ -376,6 +376,14 @@ typedef enum {
     WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_LCD_CREDENTIAL,
 } web_auth_policy_transition_t;
 
+// LK-01: set_policy with the enable-gate transition check made INSIDE the store lock (a credential wipe holds
+// the same lock, so it cannot land between check and write). Returns HAL_INVALID_ARG with *transition_out set
+// when the transition is refused, HAL_BUSY when the lock wait timed out (LK-02: callers report busy/retry),
+// otherwise the write result. The clear_* outputs are set only on HAL_OK. Any output pointer may be NULL.
+hal_status_t web_auth_store_set_policy_checked(const web_auth_policy_t *requested,
+                                               web_auth_policy_transition_t *transition_out,
+                                               bool *clear_web_sessions, bool *clear_lcd_session);
+
 web_auth_policy_transition_t web_auth_policy_check_transition(const web_auth_policy_t *current,
                                                                 const web_auth_policy_t *requested,
                                                                 bool admin_password_configured,

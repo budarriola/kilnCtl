@@ -589,10 +589,8 @@ bool ota_http_req_ack_no_safety(httpd_req_t *req)
 // RS-02: refusal drain seam. Counts the bytes the handler asked to drain.
 int g_stub_drain_calls = 0;
 static uint8_t s_stub_drain_buf[64];
-esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap)
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
 {
-    (void)buf;
-    (void)cap;
     g_stub_drain_calls++;
     return req->content_len > 0 ? ESP_OK : ESP_FAIL;
 }

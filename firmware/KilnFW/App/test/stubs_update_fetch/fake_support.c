@@ -1099,9 +1099,9 @@ esp_err_t ota_http_send_json_clamped(httpd_req_t *req, const char *buf, int n, s
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
-esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap)
+esp_err_t ota_http_refusal_drain(httpd_req_t *req)
 {
-    (void)req; (void)buf; (void)cap;
+    (void)req;
     return ESP_OK;
 }
 uint8_t *ota_http_esp_chunk_buf(size_t *cap)

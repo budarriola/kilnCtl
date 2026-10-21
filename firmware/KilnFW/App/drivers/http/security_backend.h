@@ -43,6 +43,7 @@ typedef enum {
     SECURITY_ERR_WEAK,            // rejected by the strength/complexity rule (item 3)
     SECURITY_ERR_STORAGE,         // the backend could not persist the change
     SECURITY_ERR_NOT_IMPLEMENTED, // placeholder backend: item 2/2b hasn't landed yet
+    SECURITY_ERR_BUSY,            // LK-02: the store was busy (lock wait timed out); nothing changed, retry
 } security_err_t;
 
 // Read-only snapshot for GET /api/auth/config -- deliberately carries no

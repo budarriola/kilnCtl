@@ -10,6 +10,8 @@
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_routes below */
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "http_auth_enforce.h"
 #include "http_origin_check.h"
@@ -298,8 +300,40 @@ static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
 // purged at 32 B per read on the CPU0 httpd task: ESP_FAIL makes httpd close
 // the socket instead (httpd_uri.c ~line 367, httpd_sess.c ~lines 428-431),
 // at the cost of a possible RST for that client.
-static esp_err_t refusal_result(const httpd_req_t *req) {
-    return http_auth_refusal_should_close(req->content_len) ? ESP_FAIL : ESP_OK;
+//
+// RS-02 (benchmain33): for an unauthenticated 23 KB POST the old code returned ESP_OK and let httpd purge
+// at 32 B per read; the purge did not finish before the close and the client saw a reset instead of the
+// 401. Now a body up to HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES is drained HERE, after the status was sent, into a
+// small own static buffer (never the shared OTA chunk, LK-05), hard-capped by bytes and by
+// HTTP_AUTH_REFUSAL_DRAIN_MAX_MS so an unauthenticated client cannot hold the single httpd worker. A
+// complete drain returns ESP_OK; a cap or socket error returns ESP_FAIL (close).
+#define AUTH_REFUSAL_DRAIN_BUF_SIZE 256
+static uint8_t s_auth_refusal_drain_buf[AUTH_REFUSAL_DRAIN_BUF_SIZE]; /* httpd task only */
+
+static esp_err_t refusal_result(httpd_req_t *req) {
+    if (http_auth_refusal_should_close(req->content_len)) {
+        return ESP_FAIL;
+    }
+    if (req->content_len == 0) {
+        return ESP_OK;
+    }
+    const TickType_t start = xTaskGetTickCount();
+    size_t total = 0;
+    for (;;) {
+        int ret = httpd_req_recv(req, (char *)s_auth_refusal_drain_buf, sizeof(s_auth_refusal_drain_buf));
+        if (ret > 0) {
+            total += (size_t)ret;
+        }
+        uint32_t elapsed_ms = (uint32_t)((xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+        http_auth_drain_step_t step = http_auth_refusal_drain_step(ret, total, elapsed_ms);
+        if (step == HTTP_AUTH_DRAIN_DONE) {
+            return ESP_OK;
+        }
+        if (step == HTTP_AUTH_DRAIN_ABORT) {
+            return ESP_FAIL;
+        }
+        vTaskDelay(1); /* let IDLE0 feed the task watchdog */
+    }
 }
 
 // MED-1 (ROUTE_TIER_REVIEW_2026-10-09): refuse a cross-origin state-changing

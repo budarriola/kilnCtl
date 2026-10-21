@@ -567,6 +567,11 @@ static esp_err_t security_post_handler(httpd_req_t *req)
     // r.status) -- the transport status stays 200 for every outcome here,
     // same as settings_http.c's POST handlers.
     httpd_resp_set_type(req, "application/json");
+    if (result.http_status == 503) {
+        /* LK-02: busy is the one outcome that carries a real transport status, so a client retries. */
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_hdr(req, "Retry-After", "1");
+    }
     return httpd_resp_sendstr(req, resp);
 }
 

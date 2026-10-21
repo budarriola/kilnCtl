@@ -638,6 +638,69 @@ static void test_http_buffer_is_the_shared_internal_chunk(void)
                "no PSRAM / heap buffer (bounce-through-stack-temp and hidden internal temp)");
     free(text);
 }
+static char *lk05_read(const char *rel)
+{
+    char alt1[160], alt2[160], alt3[160];
+    snprintf(alt1, sizeof(alt1), "../drivers/%s", rel);
+    snprintf(alt2, sizeof(alt2), "App/drivers/%s", rel);
+    snprintf(alt3, sizeof(alt3), "firmware/KilnFW/App/drivers/%s", rel);
+    const char *cands[] = {alt1, alt2, alt3};
+    return test_read_source_anchored(__FILE__, alt1, cands, 3);
+}
+
+static void test_lk05_refusal_drain_has_its_own_buffer(void)
+{
+    TEST_SECTION("LK-05 -- refusal drains never touch the shared 4 KB OTA chunk (stale_running_matches hashes through it on the ota_confirm task) (source-text scan)");
+    char *http = lk05_read("http/ota_http.c");
+    TEST_CHECK(http != NULL, "ota_http.c readable");
+    if (http != NULL) {
+        char *fn = strstr(http, "esp_err_t ota_http_refusal_drain(httpd_req_t *req)");
+        TEST_CHECK(fn != NULL, "drain takes only the request (no caller-supplied buffer)");
+        TEST_CHECK(strstr(http, "s_refusal_drain_buf[OTA_REFUSAL_DRAIN_BUF_SIZE]") != NULL &&
+                       strstr(http, "#define OTA_REFUSAL_DRAIN_BUF_SIZE 512") != NULL,
+                   "drain reads into its own 512 B static buffer");
+        if (fn != NULL) {
+            char *end = strstr(fn, "\n}\n");
+            if (end == NULL) { end = strstr(fn, "\n}\r\n"); }
+            if (end != NULL) { *end = '\0'; }
+            TEST_CHECK(strstr(fn, "ota_http_esp_chunk_buf") == NULL, "drain body does not borrow the shared chunk");
+        }
+        free(http);
+    }
+    static const char *const files[] = {"http/ota_http_esp.c", "http/ota_http_pico.c", "http/backup_import.c",
+                                         "update/update_http.c"};
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        char *t = lk05_read(files[i]);
+        TEST_CHECK(t != NULL, "caller source readable");
+        if (t == NULL) { continue; }
+        bool bad = false;
+        size_t plen = strlen("ota_http_refusal_drain(req");
+        for (char *p = t; (p = strstr(p, "ota_http_refusal_drain(req")) != NULL; p++) {
+            if (p[plen] != ')') { bad = true; }
+        }
+        TEST_CHECK(!bad, "every drain call passes only the request");
+        free(t);
+    }
+    char *bi = lk05_read("http/backup_import.c");
+    if (bi != NULL) {
+        char *fn = strstr(bi, "static esp_err_t backup_import_refusal_finish(");
+        TEST_CHECK(fn != NULL, "refusal_finish present");
+        if (fn != NULL) {
+            char *end = strstr(fn, "\n}\n");
+            if (end == NULL) { end = strstr(fn, "\n}\r\n"); }
+            if (end != NULL) { *end = '\0'; }
+            TEST_CHECK(strstr(fn, "ota_http_esp_chunk_buf") == NULL, "backup refusal drain does not use the shared chunk");
+        }
+        free(bi);
+    }
+    char *esp = lk05_read("http/ota_http_esp.c");
+    if (esp != NULL) {
+        TEST_CHECK(strstr(esp, "every user is an OTA/update handler") == NULL, "the false single-task comment is gone");
+        TEST_CHECK(strstr(esp, "NOT httpd-only (LK-05)") != NULL, "comment states the buffer is shared across tasks");
+        free(esp);
+    }
+}
+
 static void test_upload_recv_failure_clears_gate_and_has_deadline(void)
 {
     TEST_SECTION("update_http.c -- stage upload recv-failure exit clears the stack gate pointer; overall deadline (source-text scan)");
@@ -1408,6 +1471,7 @@ void run_test_update_stage(void)
     test_gate_refusal_keeps_stage();
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
+    test_lk05_refusal_drain_has_its_own_buffer();
     test_upload_recv_failure_clears_gate_and_has_deadline();
     test_status_never_trusts_a_header_alone();
     test_clear();

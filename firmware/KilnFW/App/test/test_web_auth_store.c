@@ -1245,6 +1245,63 @@ static void fs02_make_latched(void)
     TEST_CHECK(web_auth_store_storage_reset_evaluate(false), "latched");
 }
 
+/* LK-02: lock attempt #1 is set_password's own, #2 is the resolve's first set_policy (held by another writer for the
+ * whole wait -> HAL_BUSY), #3 is the resolve's retry (lock free). Each hook arms the next. */
+static void hook_lk02_free(void)
+{
+    s_cred_store_busy = 0u;
+}
+static void hook_lk02_hold(void)
+{
+    s_cred_store_busy = 1u;
+    g_web_auth_store_test_pre_lock_hook = hook_lk02_free;
+}
+static void hook_lk02_first(void)
+{
+    g_web_auth_store_test_pre_lock_hook = hook_lk02_hold;
+}
+
+static void test_lk01_lk02_checked_setter(void)
+{
+    TEST_SECTION("LK-01: set_policy_checked evaluates the gate under the lock; LK-02: contention is HAL_BUSY and persists nothing");
+    web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = 900, .lcd_timeout_s = -1};
+    web_auth_policy_t stored;
+    web_auth_policy_transition_t t;
+    bool cw = false, cl = false;
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "GoodPass123", SALT_A, false) == HAL_OK, "admin set");
+    g_web_auth_store_test_pre_lock_hook = hook_clear_all_mid_kdf; /* wipe lands just before the lock */
+    hal_status_t st = web_auth_store_set_policy_checked(&on, &t, &cw, &cl);
+    g_web_auth_store_test_pre_lock_hook = NULL;
+    TEST_CHECK(st == HAL_INVALID_ARG && t == WEB_AUTH_POLICY_TRANSITION_REFUSED_NO_WEB_CREDENTIAL, "LK-01: refused after the wipe");
+    TEST_CHECK(web_auth_store_load_policy(&stored) != WEB_AUTH_LOAD_OK || !stored.web_enabled, "LK-01: no enabled policy written");
+    TEST_CHECK(s_cred_store_busy == 0u, "LK-01: lock released");
+
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "GoodPass123", SALT_A, false) == HAL_OK, "admin set");
+    s_cred_store_busy = 1u;
+    st = web_auth_store_set_policy_checked(&on, &t, &cw, &cl);
+    s_cred_store_busy = 0u;
+    TEST_CHECK(st == HAL_BUSY, "LK-02: contention -> HAL_BUSY");
+    TEST_CHECK(web_auth_store_load_policy(&stored) != WEB_AUTH_LOAD_OK || !stored.web_enabled, "LK-02: busy persisted nothing");
+    TEST_CHECK(web_auth_store_set_policy_checked(&on, &t, &cw, &cl) == HAL_OK && cw, "retry succeeds and reports the session-clear edge");
+}
+
+static void test_lk02_resolve_retries_on_busy(void)
+{
+    TEST_SECTION("LK-02: a busy set_policy during the storage-reset resolve is retried; the latch does not stay set");
+    web_auth_policy_t pol;
+    fs02_make_latched();
+    TEST_CHECK(web_auth_store_storage_reset_latched(), "latched before the admin password");
+    g_web_auth_store_test_pre_lock_hook = hook_lk02_first;
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "GoodPass123", SALT_A, false) == HAL_OK,
+               "admin password set");
+    g_web_auth_store_test_pre_lock_hook = NULL;
+    TEST_CHECK(!web_auth_store_storage_reset_latched(), "LK-02: busy on the first policy write did not leave the latch set");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && pol.web_enabled, "LK-02: enabled policy persisted by the retry");
+    TEST_CHECK(s_cred_store_busy == 0u, "LK-02: store lock free afterwards");
+}
+
 static void test_fs02_followups(void)
 {
     TEST_SECTION("F2-01 explicit disable, F2-03 admin PIN clears latch, F2-05 gesture unlock");
@@ -1422,6 +1479,8 @@ int main(void)
     test_az01_bootstrap_only_when_never_written();
     test_fs02_storage_reset();
     test_fs02_followups();
+    test_lk02_resolve_retries_on_busy();
+    test_lk01_lk02_checked_setter();
     test_az02_read_errors_fail_closed();
     test_crc32_vector();
     test_password_strength();
