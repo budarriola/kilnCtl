@@ -1115,6 +1115,34 @@ static void test_set_password_refuses_after_wipe_during_hash(void)
                "with no wipe in the window the set succeeds");
 }
 
+static web_auth_load_status_t s_rf2_09_seen;
+static void hook_rf2_09_set_policy_at_lock(void)
+{
+    web_auth_policy_t p;
+    s_rf2_09_seen = web_auth_store_load_policy(&p);
+    web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = true, .web_timeout_s = 900, .lcd_timeout_s = 900};
+    (void)web_auth_store_set_policy(&on);
+}
+
+// RF2-09/RF3-06: the both-off pre-write is decided and written under cred_store_lock, after the
+// KDF. A set_policy landing at the lock must find the policy untouched and must not be clobbered.
+static void test_rf2_09_policy_decision_under_store_lock(void)
+{
+    TEST_SECTION("RF2-09/RF3-06: set_password policy pre-write runs under the store lock");
+    reset_all();
+    static const uint8_t salt[WEB_AUTH_SALT_LEN] = {1, 2, 3};
+    s_rf2_09_seen = WEB_AUTH_LOAD_OK;
+    g_web_auth_store_test_pre_lock_hook = hook_rf2_09_set_policy_at_lock;
+    hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "password1", salt, false);
+    g_web_auth_store_test_pre_lock_hook = NULL;
+    web_auth_policy_t pol;
+    TEST_CHECK(st == HAL_OK, "RF2-09: set_password succeeds");
+    TEST_CHECK(s_rf2_09_seen == WEB_AUTH_LOAD_ABSENT, "RF2-09: no policy was written before the lock was taken");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && pol.web_enabled && pol.lcd_enabled &&
+                   pol.web_timeout_s == 900,
+               "RF2-09: the set_policy that landed first stands (not overwritten by the both-off pre-write)");
+}
+
 // REVIEW_ALL_FIXES L1/L2: a wipe that lands after the KDF but before the setter
 // takes the store lock (the old unlocked check-then-write window) and a PIN
 // set racing a wipe must both be refused.
@@ -1403,6 +1431,7 @@ int main(void)
     test_set_verify_password();
     test_set_password_refuses_after_wipe_during_hash();
     test_setters_recheck_epoch_under_store_lock();
+    test_rf2_09_policy_decision_under_store_lock();
     test_username_exactly_max_length();
     test_verify_password_timing_oracle_closed();
     test_set_verify_pin();

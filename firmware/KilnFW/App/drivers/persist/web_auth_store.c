@@ -57,6 +57,7 @@ static void lcd_pin_pending_refresh(void);
 // RV-04: policy lost on a provisioned board (UNREADABLE, not the FS-02 latch). Cached with the PIN flag.
 static bool s_policy_lost;
 static void legacy_policy_migrate(void);
+static hal_status_t set_policy_locked(const web_auth_policy_t *policy);
 // RV-01: one-time legacy migration done marker (see legacy_policy_migrate()).
 #define WEB_AUTH_KEY_MIG "auth_mig"
 NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_MIG);
@@ -671,6 +672,20 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
     rec->must_change = must_change;
     rec->configured = true;
 
+    if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
+        memset(&blob, 0, sizeof(blob));
+        return HAL_BUSY;
+    }
+    if (cred_wipe_epoch_get() != wipe_epoch) {
+        // A credential wipe ran while the KDF was hashing: writing now would
+        // resurrect the pre-wipe blob with this password in it.
+        cred_store_unlock();
+        memset(&blob, 0, sizeof(blob));
+        return HAL_BUSY;
+    }
+    bool policy_written = false;
+    // RF2-09/RF3-06: the policy decision and write run under cred_store_lock (taken after the KDF,
+    // epoch-checked), so they cannot interleave with set_policy.
     // RV-01: never leave "credential present, policy absent". The first credential on a
     // never-provisioned board stores a both-off policy FIRST (auth stays off, as in the open
     // wizard), so ABSENT policy + credential can only mean the policy was lost, and the
@@ -682,8 +697,10 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
         if (load_blob(WEB_AUTH_KEY_POLICY, &pb0, sizeof(pb0)) == HAL_NOT_FOUND) {
             web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false,
                                      .web_timeout_s = 1800, .lcd_timeout_s = 1800};
-            hal_status_t ost = web_auth_store_set_policy(&off);
+            policy_written = true;
+            hal_status_t ost = set_policy_locked(&off);
             if (ost != HAL_OK) {
+                cred_store_unlock();
                 memset(&blob, 0, sizeof(blob));
                 return ost;
             }
@@ -699,23 +716,14 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
         if (web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE) {
             web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = true,
                                     .web_timeout_s = 1800, .lcd_timeout_s = 1800};
-            hal_status_t pst = web_auth_store_set_policy(&on);
+            policy_written = true;
+            hal_status_t pst = set_policy_locked(&on);
             if (pst != HAL_OK) {
+                cred_store_unlock();
                 memset(&blob, 0, sizeof(blob));
                 return pst;
             }
         }
-    }
-    if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
-        memset(&blob, 0, sizeof(blob));
-        return HAL_BUSY;
-    }
-    if (cred_wipe_epoch_get() != wipe_epoch) {
-        // A credential wipe ran while the KDF was hashing: writing now would
-        // resurrect the pre-wipe blob with this password in it.
-        cred_store_unlock();
-        memset(&blob, 0, sizeof(blob));
-        return HAL_BUSY;
     }
 
     blob.version = WEB_AUTH_STORE_VERSION;
@@ -723,6 +731,9 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
 
     hal_status_t wst = set_blob_verified(WEB_AUTH_KEY_WEB, &blob, sizeof(blob));
     cred_store_unlock();
+    if (policy_written) {
+        lcd_pin_pending_refresh();
+    }
     if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
         storage_reset_resolve();
     }
@@ -1146,7 +1157,8 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
     return WEB_AUTH_LOAD_OK;
 }
 
-hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
+// Caller holds cred_store_lock. Does not refresh the LCD banner flag (caller does after unlock).
+static hal_status_t set_policy_locked(const web_auth_policy_t *policy)
 {
     if (policy == NULL) {
         return HAL_INVALID_ARG;
@@ -1168,7 +1180,19 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
             return mst;
         }
     }
-    hal_status_t pst = set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+    return set_blob_verified(WEB_AUTH_KEY_POLICY, &blob, sizeof(blob));
+}
+
+hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
+{
+    if (policy == NULL) {
+        return HAL_INVALID_ARG;
+    }
+    if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
+        return HAL_BUSY;
+    }
+    hal_status_t pst = set_policy_locked(policy);
+    cred_store_unlock();
     if (pst == HAL_OK) {
         lcd_pin_pending_refresh();
     }
