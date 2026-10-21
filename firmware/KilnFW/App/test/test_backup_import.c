@@ -791,6 +791,9 @@ extern int g_relay_type_push_calls;
  * zones config holds after the import -- committed batch or rolled-back
  * snapshot. Defined below next to the guard_raise() fake. */
 static int g_apply_lower_calls;
+/* RS-01: guard owner observed when the Pico-write stubs run. */
+static safety_cfg_writer_t g_stub_lower_owner = SAFETY_CFG_WRITER_NONE;
+static safety_cfg_writer_t g_stub_pairs_owner = SAFETY_CFG_WRITER_NONE;
 static float g_apply_lower_last_max[STUB_ZONE_COUNT];
 static int g_total_write_calls;
 static int g_profile_save_calls;
@@ -1072,6 +1075,7 @@ void safety_ceiling_sync_apply_lower(SafetyLinkClass *link, const float *new_max
 {
     (void)link;
     g_apply_lower_calls++;
+    g_stub_lower_owner = safety_cfg_writer_owner();
     for (size_t i = 0; i < n && i < STUB_ZONE_COUNT; i++) {
         g_apply_lower_last_max[i] = new_max_temp_c[i];
     }
@@ -1109,6 +1113,7 @@ bool safety_cfg_write_apply_pairs(SafetyLinkClass *link, const safety_cfg_post_p
                                    safety_ceiling_refusal_class_t *out_class)
 {
     (void)link;
+    g_stub_pairs_owner = safety_cfg_writer_owner();
     g_stub_safety_cfg_write_n_pairs = n_pairs;
     g_stub_safety_cfg_write_commit_arg = commit;
     int n_copy = (n_pairs < 8) ? n_pairs : 8;
@@ -5900,6 +5905,50 @@ static void test_safety_i_normal_a_write_failure_aborts_whole_import(void)
               "since the safety write happens before the per-zone commit loop");
 }
 
+/* RS-01: the real job path. http_async_job_try_start() takes SAFETY_CFG_WRITER_ASYNC_JOB before the job runs, and
+ * the job's own Pico writes used to try_claim(HTTP_SYNC) against that single-owner guard and fail every restore
+ * ("another commissioning operation is running"). The RX-02 test below once modelled the job's own claim as a
+ * foreign holder and called backup_import_apply() directly, so it asserted the broken behaviour. */
+static void test_rs01_job_under_async_job_claim_writes_pico_and_other_writers_still_refused(void)
+{
+    TEST_SECTION("RS-01: backup_import_job under the ASYNC_JOB claim performs its Pico writes; a different "
+                 "writer holding the guard still refuses");
+    static const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":9.0,\"pid_ki\":0,\"pid_kd\":0,\"safety_i_normal_a\":3.0}]}";
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    g_stub_pairs_owner = g_stub_lower_owner = SAFETY_CFG_WRITER_NONE;
+    g_apply_lower_calls = 0;
+    s_post_last_status[0] = '\0';
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "setup: the async job claim, as try_start takes it");
+    run_backup_import_job_with_body(body);
+    TEST_CHECK(g_stub_safety_cfg_write_n_pairs > 0, "RS-01: the job staged its safety_i_normal_a pairs");
+    TEST_CHECK(strncmp(s_post_last_status, "500", 3) != 0 && strncmp(s_post_last_status, "400", 3) != 0,
+               "RS-01: the restore does not fail with a 4xx/5xx");
+    TEST_CHECK(g_stub_pairs_owner == SAFETY_CFG_WRITER_ASYNC_JOB, "RS-01: the pair write ran under the job's own claim");
+    TEST_CHECK(g_apply_lower_calls > 0 && g_stub_lower_owner == SAFETY_CFG_WRITER_ASYNC_JOB,
+               "RS-01: the ceiling lower ran under the job's own claim");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_ASYNC_JOB,
+               "RS-01: the job did not release the claim it does not own (run_job releases it)");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
+
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_SWEEP, SAFETY_CFG_WRITER_SWAP,
+                                           SAFETY_CFG_WRITER_RECONCILE, SAFETY_CFG_WRITER_HTTP_SYNC };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        reset_stub_state();
+        zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+        TEST_CHECK(safety_cfg_writer_try_claim(others[i]), "setup: a different writer holds the guard");
+        char err[256];
+        bool ok = test_backup_import_apply(body, err, sizeof(err));
+        TEST_CHECK(!ok, "RS-01: a different writer holding the guard still refuses the restore");
+        TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1, "RS-01: no pairs staged under a foreign holder");
+        TEST_CHECK(safety_cfg_writer_owner() == others[i], "RS-01: the foreign holder's claim is untouched");
+        (void)safety_cfg_writer_release(others[i]);
+    }
+}
+
 static void test_safety_i_normal_a_import_refuses_while_writer_guard_held(void)
 {
     TEST_SECTION("RX-02: backup import claims the Pico writer guard around its i_normal_a stage+commit; "
@@ -5911,13 +5960,13 @@ static void test_safety_i_normal_a_import_refuses_while_writer_guard_held(void)
     TEST_CHECK(run_export() == ESP_OK, "export must succeed");
     reset_stub_state();
     zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
-    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "another writer holds the guard");
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP), "another writer holds the guard");
     char err[256];
     bool ok = test_backup_import_apply(s_export_body, err, sizeof(err));
     TEST_CHECK(!ok, "RX-02: import refused while a bench_preset-style writer holds the guard");
     TEST_CHECK(g_stub_safety_cfg_write_n_pairs == -1, "RX-02: no pairs staged");
-    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_ASYNC_JOB, "RX-02: the holder claim is untouched");
-    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWEEP, "RX-02: the holder claim is untouched");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP);
     ok = test_backup_import_apply(s_export_body, err, sizeof(err));
     TEST_CHECK(ok, "RX-02: import succeeds once the guard is free");
     TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "RX-02: import released the guard");
@@ -7863,6 +7912,7 @@ void run_test_backup_import(void)
     test_safety_i_normal_a_write_failure_aborts_whole_import();
     test_safety_i_normal_a_absent_key_never_calls_write();
     test_safety_i_normal_a_import_refuses_while_writer_guard_held();
+    test_rs01_job_under_async_job_claim_writes_pico_and_other_writers_still_refused();
 
     test_export_never_contains_credential_markers();
 
