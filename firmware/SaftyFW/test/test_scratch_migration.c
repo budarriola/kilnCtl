@@ -16,6 +16,9 @@
 // functions (not a comment claiming they do), and that clearing one
 // module's slot never disturbs another module's, matching hal_scratch.h's
 // per-slot independence.
+#include <stdlib.h>
+#include <string.h>
+
 #include "test_common.h"
 
 #include "../src/boot_reason.h"
@@ -71,6 +74,21 @@ static void test_boot_reason_forced_reboot_is_not_watchdog(void)
     TEST_CHECK(both.watchdog_caused_reboot, "PF-04: TIMER set with FORCE also set is still a real timeout");
     saftyfw_boot_reason_t poweron = boot_reason_read_wd_reason(0u, false);
     TEST_CHECK(!poweron.watchdog_caused_reboot, "PF-04: REASON 0 (power-on) is not a watchdog reset");
+}
+
+static void test_main_classifies_boot_reason_from_wd_reason_register(void)
+{
+    static const char *candidates[] = {"../src/main.c", "src/main.c", "firmware/SaftyFW/src/main.c"};
+    char *text = test_read_source_anchored(__FILE__, candidates[0], candidates, 3);
+    TEST_CHECK(text != NULL, "PF-04: could not read SaftyFW src/main.c");
+    if (!text) {
+        return;
+    }
+    TEST_CHECK(strstr(text, "boot_reason_read_wd_reason(watchdog_hw->reason") != NULL,
+               "PF-04: main.c must classify the boot reason from the WATCHDOG.REASON register (TIMER vs FORCE)");
+    TEST_CHECK(strstr(text, "boot_reason_read(watchdog_caused_reboot()") == NULL,
+               "PF-04: main.c must not report a forced watchdog_reboot() as WATCHDOG via watchdog_caused_reboot()");
+    free(text);
 }
 
 static void test_boot_reason_unlatched_reads_invalid(void)
@@ -246,6 +264,7 @@ void run_test_scratch_migration(void)
     test_boot_reason_round_trips_through_hal_scratch();
     test_boot_reason_unlatched_reads_invalid();
     test_boot_reason_forced_reboot_is_not_watchdog();
+    test_main_classifies_boot_reason_from_wd_reason_register();
     test_clear_trip_diag_round_trips_through_hal_scratch();
     test_watchdog_overdue_diag_round_trips_through_hal_scratch();
     test_the_three_modules_do_not_collide_on_shared_backend();

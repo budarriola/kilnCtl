@@ -677,6 +677,13 @@ static void test_watchdog_loop_and_bounded_pause_wiring(void)
     TEST_CHECK(gate && note && (note - gate) < 200,
                "MUST GO RED if note_pico_boot is no longer gated on a successful status read");
     TEST_CHECK(strstr(text, "if (true)") == NULL, "no if (true) stand-in for the status gate");
+    /* PF-04 wiring: identity fed with the DIAG-uptime-vs-ESP-uptime test, and the first-sight pause reason. */
+    TEST_CHECK(strstr(text, "safety_diag_uptime_ms > wdt_now_ms") != NULL &&
+                   strstr(text, "heat_enable_note_pico_boot_identity(") != NULL,
+               "PF-04: the executor feeds the Pico boot id and 'Pico older than ESP' to heat_enable");
+    TEST_CHECK(strstr(text, "if (heat_enable_reboot_hold_first_sight())") != NULL &&
+                   strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_before_esp_boot\")") != NULL,
+               "PF-04: a first-sight fatal hold pauses with pico_fatal_before_esp_boot");
     free(text);
 
     char *st = profile_executor_status_read_source();
@@ -1813,6 +1820,13 @@ static void test_pf04_stale_first_sight_boot_reason(void)
     pf04_esp_boot_first_sight(true, 7u, true, WD, false);
     heat_enable_get_reboot_state(&seq, &latched, &lost_only);
     TEST_CHECK(latched, "PF-04: with no acted-on record (power-on) the watchdog bit latches");
+
+    /* A benign first sight also records its Pico boot id as acted on (the persistence is not fatal-only). */
+    heat_enable_forget_acted_boot_id_for_host_tests();
+    pf04_esp_boot_first_sight(true, 9u, true, 0u, false);
+    pf04_esp_boot_first_sight(true, 9u, true, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(!latched, "PF-04: a benign verdict records the Pico boot id as acted on");
 
     /* A LIVE reboot during this ESP boot is never ignored, even if its id equals the acted one (id collision). */
     heat_enable_forget_acted_boot_id_for_host_tests();
