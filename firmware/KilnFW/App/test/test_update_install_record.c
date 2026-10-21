@@ -565,6 +565,34 @@ static void test_oh04_confirm(void)
                    "OF-04: already confirmed on read-back -> no further write");
     }
 
+    /* OF-05: real string forms from benchmain30. The record keeps the staged header describe string; the running
+     * identity is the converted form. */
+    {
+        static const uint8_t id_a[UPD_INST_ID_LEN] = {0xbc, 0xa5, 0xce, 0x20};
+        static const char *const rec = "1.0.0-pre.1-2276-ga71d481";
+        static const char *const run = "1.0.0-pre.1.2276";
+        update_install_res_t z;
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, rec);
+        TEST_CHECK(update_install_res_matches_running(&z, run, NULL), "OF-05: describe record matches converted running version");
+        TEST_CHECK(strcmp(update_install_res_state(&z, run, NULL), "pending_confirm") == 0, "OF-05: state is pending_confirm, not not_running");
+        TEST_CHECK(update_install_res_derive_confirmed(&z, run, NULL, true), "OF-05: VALID running image derives confirmed");
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, rec);
+        memcpy(z.id, id_a, UPD_INST_ID_LEN);
+        TEST_CHECK(update_install_res_matches_running(&z, run, id_a), "OF-05: describe record plus matching id matches");
+        TEST_CHECK(!update_install_res_matches_running(&z, "1.0.0-pre.1.2277", id_a), "OF-05: other commit count does not match");
+        TEST_CHECK(!update_install_res_matches_running(&z, "1.0.0-pre.1.2276", (const uint8_t[]){9, 9, 9, 9}),
+                   "OF-05: same version, other id does not match");
+        TEST_CHECK(update_install_res_matches_running(&z, "v1.0.0-pre.1-2276-ga71d481", id_a), "OF-05: leading v and describe both canonicalise");
+        fake_init(&f);
+        o = ops_for(&f);
+        (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, rec, id_a);
+        TEST_CHECK(update_install_confirm_result(&o, run, id_a) == 0 && f.res_writes == 2, "OF-05: boot confirm marks the describe record confirmed");
+    }
+
     /* OC-01: retry schedule. */
     TEST_CHECK(update_install_confirm_retry_delay_ms(0) == 5000 && update_install_confirm_retry_delay_ms(119) == 5000,
                "OC-01: 5 s backoff first");

@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "dashboard_http.h"
 #include "hal_kv.h"
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "http_form.h"
@@ -139,19 +140,43 @@ static esp_ota_img_states_t running_ota_state(void)
     return st;
 }
 
-// OF-01: sha256 prefix of the running image, computed once and cached (esp_partition_get_sha256 hashes the
-// image per its own metadata, the same bytes as the published .bin). False = unknown: callers fall back to semver.
+// OF-01/OF-05: sha256 prefix of the running image, computed once and cached. It is the hash of the first
+// image_len bytes of the running partition, i.e. exactly the published .bin bytes that the staged upload hashed
+// (stale_running_matches does the same). esp_partition_get_sha256 is NOT used: for an app it returns the digest
+// appended inside the image, which differs from the .bin file hash. False = unknown: callers fall back to semver.
 static bool running_image_id(uint8_t id[UPD_INST_ID_LEN])
 {
     static uint8_t cached[UPD_INST_ID_LEN];
-    static bool have = false;
+    static volatile bool have = false;
     if (!have) {
         const esp_partition_t *run = esp_ota_get_running_partition();
-        uint8_t sha[UPD_INST_SHA_LEN];
-        if (run == NULL || esp_partition_get_sha256(run, sha) != ESP_OK) {
+        uint32_t ilen = 0;
+        if (run == NULL || !dashboard_running_image_len(&ilen) || ilen > run->size) {
             return false;
         }
-        memcpy(cached, sha, UPD_INST_ID_LEN);
+        psa_hash_operation_t sha = psa_hash_operation_init();
+        if (psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+            return false;
+        }
+        uint8_t buf[512];
+        for (uint32_t off = 0, k = 0; off < ilen; k++) {
+            size_t n = ilen - off < sizeof(buf) ? (size_t)(ilen - off) : sizeof(buf);
+            if (esp_partition_read(run, off, buf, n) != ESP_OK || psa_hash_update(&sha, buf, n) != PSA_SUCCESS) {
+                psa_hash_abort(&sha);
+                return false;
+            }
+            off += (uint32_t)n;
+            if ((k & 0x7f) == 0x7f) {
+                vTaskDelay(1);
+            }
+        }
+        uint8_t out[UPD_INST_SHA_LEN];
+        size_t outn = 0;
+        if (psa_hash_finish(&sha, out, sizeof(out), &outn) != PSA_SUCCESS || outn != sizeof(out)) {
+            psa_hash_abort(&sha);
+            return false;
+        }
+        memcpy(cached, out, UPD_INST_ID_LEN);
         have = true;
     }
     memcpy(id, cached, UPD_INST_ID_LEN);

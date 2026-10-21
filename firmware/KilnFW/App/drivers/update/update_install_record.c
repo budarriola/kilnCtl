@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "ota_image_crc.h"
+#include "update_semver.h"
 
 #define REQ_MAGIC 0x31524955u // "UIR1"
 #define RES_MAGIC 0x31535255u // "URS1"
@@ -148,11 +149,33 @@ static bool id_is_zero(const uint8_t id[UPD_INST_ID_LEN])
     return true;
 }
 
+/* OF-05: the record keeps the staged header string (git describe, "1.0.0-pre.1-2276-ga71d481") while the running
+ * identity is the converted form ("1.0.0-pre.1.2276"). Compare both in the converted form; a string that is already
+ * canonical (or not a describe) passes through unchanged. */
+static void semver_canon(const char *in, char *out, size_t cap)
+{
+    if (in != NULL && in[0] == 'v') {
+        in++;
+    }
+    if (in == NULL || !update_semver_from_describe(in, out, cap)) {
+        out[0] = '\0';
+        if (in != NULL) {
+            strncpy(out, in, cap - 1);
+            out[cap - 1] = '\0';
+        }
+    }
+}
+
 bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
                                         const uint8_t *running_id)
 {
-    if (res == NULL || running_semver == NULL || running_semver[0] == '\0' || res->semver[0] == '\0' ||
-        strncmp(res->semver, running_semver, UPD_INST_SEMVER_LEN) != 0) {
+    if (res == NULL || running_semver == NULL || running_semver[0] == '\0' || res->semver[0] == '\0') {
+        return false;
+    }
+    char a[UPD_INST_SEMVER_LEN + 8], b[UPD_INST_SEMVER_LEN + 8];
+    semver_canon(res->semver, a, sizeof(a));
+    semver_canon(running_semver, b, sizeof(b));
+    if (a[0] == '\0' || strcmp(a, b) != 0) {
         return false;
     }
     /* OF-01: same-semver builds differ by image sha256; compare the id when both sides know it. */
