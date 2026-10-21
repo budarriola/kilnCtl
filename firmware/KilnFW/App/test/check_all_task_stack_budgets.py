@@ -1314,7 +1314,9 @@ CEILING_BYTES = {
     # 2026-10-20: 3104 -> 3504 B (+400 B) measured on dev tip; load_policy -> password_configured
     # -> load_blob -> hal_kv_open -> nvs createOrOpenNamespace/writeItem path (AU-02/BW-01) is now
     # reachable from the rescan tick. Declared stack raised 4096 -> 5120 B (PSRAM, 0 B DRAM): 1.6 KB free.
-    "wifi_prov_owner": 3504,
+    # 2026-10-20: 3504 -> 3632 B (+128 B) measured on dev tip da16ba544 (OG/OF-05 running_image_id
+    # frame reachable from the rescan tick); declared 5120 B PSRAM, 1.4 KB free.
+    "wifi_prov_owner": 3632,
     # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
     # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
     # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.
