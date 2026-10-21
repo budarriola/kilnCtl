@@ -786,3 +786,11 @@ Bench soak benchmain29 (docs/BENCH_TEST_LOG.md). Found while measuring RAM-02.
 - **RF2-07** INFO (REVIEW_RV01_FIX_2026_10_20): wifi_prov_owner path unchanged. set_password callers gain about 350-450 B of stack (nested set_policy, 256 B read-back buffer, refresh). Internal RAM +1 B.
 - **RF2-08** INFO (REVIEW_RV01_FIX_2026_10_20), web_auth_store.c:977: a board that lost both keys before upgrading is migrated open (it looks like a legacy board). The clear_policy_and_marker header is stale (credentials present now give UNREADABLE). clear_policy_and_marker header comment corrected 2026-10-20.
 - **RF2-09** INFO (REVIEW_RV01_FIX_2026_10_20), web_auth_store.c:674-685: the pre-write runs outside cred_store_lock (theoretical TOCTOU with set_policy).
+## REVIEW_RF2_FIX_2026_10_20 (RF3)
+
+- **RF3-01** LOW (REVIEW_RF2_FIX_2026_10_20), web_auth_store.c:714-721: RF2-01 enabled-policy write is ignored on failure; bootstrap reports ok, board stays UNREADABLE until another gesture. Fix: propagate/log the error.
+- **RF3-02** LOW (REVIEW_RF2_FIX_2026_10_20): USER-only board with policy+marker lost: any LAN caller can still bootstrap an admin (auth stays closed; owner needs the gesture). Fix: with policy UNREADABLE allow bootstrap only from the wiped state.
+- **RF3-03** LOW (REVIEW_RF2_FIX_2026_10_20), web_auth_store.c:1092-1095: load_policy ignores the LCD PIN blob; LCD-only board losing policy+marker reads ABSENT (open). Fix: count the LCD blob as provisioned.
+- **RF3-04** INFO (REVIEW_RF2_FIX_2026_10_20): gesture on a never-provisioned store reads UNREADABLE until bootstrap, which enables web+LCD auth (LCD locked pending PIN). Judged safe; document.
+- **RF3-05** INFO (REVIEW_RF2_FIX_2026_10_20): post-gesture bootstrap stays first-LAN-client and now also enables the policy. Unchanged exposure.
+- **RF3-06** INFO (REVIEW_RF2_FIX_2026_10_20): RF2-01 load/set runs outside cred_store_lock (as RF2-09).
