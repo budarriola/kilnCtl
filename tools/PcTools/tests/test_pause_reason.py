@@ -27,6 +27,7 @@ class PauseReasonTextTests(unittest.TestCase):
         self.assertEqual(pause_reason_text(None), "")
         self.assertIn("Heat withheld", pause_reason_text("pico_reboot_undecided"))
         self.assertIn("fatal fault", pause_reason_text("pico_fatal_reboot"))
+        self.assertIn("before this restart", pause_reason_text("pico_fatal_before_esp_boot"))
         self.assertIn("twice within 15 min", pause_reason_text("pico_repeated_reboot"))
         self.assertIn("heat grant", pause_reason_text("heat_grant_unconfirmed"))
         self.assertEqual(pause_reason_text("brand_new"), "Paused: brand_new")

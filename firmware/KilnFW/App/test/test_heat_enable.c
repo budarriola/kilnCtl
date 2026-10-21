@@ -1743,6 +1743,88 @@ static void test_pf_first_boot_id_and_lost_trip_expiry(void)
     TEST_CHECK(!heat_enable_reboot_hold_lost_trip_only(), "and keeps the fatal pause reason");
 }
 
+/* PF-04: a boot-reason byte this ESP already acted on, for the SAME Pico boot (RTC-persisted boot id) and a Pico
+ * older than the ESP, does not latch a fatal reboot at the next ESP boot's first sight. */
+static void pf04_esp_boot_first_sight(bool id_valid, uint8_t id, bool older, uint8_t boot_reason, bool claim_first)
+{
+    g_fixture_unseen = true;
+    reset_all(true);
+    g_fixture_unseen = false;
+    heat_enable_note_pico_boot_identity(id_valid, id, older);
+    heat_enable_note_boot_id_seen(false);
+    heat_enable_note_pico_boot(0u, false, 0u, 1000u);
+    heat_enable_note_boot_id_seen(true);
+    if (claim_first) {
+        (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    }
+    heat_enable_note_pico_boot(1u, true, boot_reason, 1100u);
+}
+
+static void test_pf04_stale_first_sight_boot_reason(void)
+{
+    TEST_SECTION("heat_enable -- PF-04: first-sight fatal bit already acted on for the same Pico boot is ignored");
+    uint32_t seq = 0u;
+    bool latched = false;
+    bool lost_only = false;
+    const uint8_t WD = SAFETY_LINK_DIAG_BOOT_WATCHDOG;
+
+    /* ESP boot 1: Pico boot id 7 never acted on -> PR-01 still latches, and the pause names the cause. */
+    heat_enable_forget_acted_boot_id_for_host_tests();
+    pf04_esp_boot_first_sight(true, 7u, true, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched && !lost_only, "PF-04: an unseen Pico boot id with a watchdog bit still latches (PR-01)");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold() && heat_enable_reboot_hold_first_sight() && !heat_enable_is_granted(),
+               "PF-04: the first-sight fatal hold withholds heat and reports the first-sight cause");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* ESP boot 2, same Pico boot (id 7), Pico older: the byte was acted on -> no latch, heat is granted. */
+    pf04_esp_boot_first_sight(true, 7u, true, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(!latched, "PF-04: same Pico boot id, Pico older than the ESP: stale watchdog bit does not latch");
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(!heat_enable_reboot_hold(), "PF-04: no reboot hold for the already-acted Pico boot");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* Same, but a claim is already held when the first-sight DIAG arrives (classify path). */
+    pf04_esp_boot_first_sight(true, 7u, true, WD, true);
+    TEST_CHECK(!heat_enable_reboot_hold(), "PF-04: stale bit with a claim held does not hold either");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+
+    /* PR-01 kept: Pico younger than the ESP (it reset after the ESP started) with the same id still latches. */
+    pf04_esp_boot_first_sight(true, 7u, false, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PF-04: a Pico younger than the ESP latches its watchdog bit (PR-01)");
+
+    /* PR-01 kept: Pico reset while the ESP was down = a different boot id -> latches. */
+    heat_enable_forget_acted_boot_id_for_host_tests();
+    pf04_esp_boot_first_sight(true, 7u, true, 0u, false); /* benign first sight records id 7 as acted */
+    pf04_esp_boot_first_sight(true, 8u, true, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PF-04: a new Pico boot id (reset while the ESP was down) latches its watchdog bit");
+
+    /* Unknown boot id, or no RTC record (power-on): old behaviour. */
+    pf04_esp_boot_first_sight(true, 7u, true, 0u, false);
+    pf04_esp_boot_first_sight(false, 7u, true, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PF-04: an unknown Pico boot id latches");
+    pf04_esp_boot_first_sight(true, 7u, true, 0u, false);
+    heat_enable_forget_acted_boot_id_for_host_tests();
+    pf04_esp_boot_first_sight(true, 7u, true, WD, false);
+    heat_enable_get_reboot_state(&seq, &latched, &lost_only);
+    TEST_CHECK(latched, "PF-04: with no acted-on record (power-on) the watchdog bit latches");
+
+    /* A LIVE reboot during this ESP boot is never ignored, even if its id equals the acted one (id collision). */
+    heat_enable_forget_acted_boot_id_for_host_tests();
+    pf04_esp_boot_first_sight(true, 7u, true, 0u, false); /* acts on id 7 */
+    pf04_esp_boot_first_sight(true, 7u, true, 0u, true);  /* claim held, benign first sight */
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);      /* live reboot */
+    heat_enable_note_pico_boot(2u, true, WD, 2100u);
+    TEST_CHECK(heat_enable_reboot_hold() && !heat_enable_reboot_hold_first_sight(),
+               "PF-04: a live reboot with a fatal bit holds, and is not reported as a first-sight hold");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+}
+
 static void test_pr_fixes(void)
 {
     TEST_SECTION("heat_enable -- PR-01/02/04: first-sight fatal bits, expiry needs a covering clear, visible unseen");
@@ -1856,6 +1938,7 @@ void run_test_heat_enable(void)
     test_executor_autotune_and_stale_diag_wiring();
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
+    test_pf04_stale_first_sight_boot_reason();
     test_pico_repeated_benign_reboot_holds();
     test_pico_reboot_after_tripped_holds();
     test_reboot_fatal_latch_survives_newer_seq();

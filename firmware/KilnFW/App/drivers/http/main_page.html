@@ -2387,6 +2387,7 @@ function pauseReasonText(reason) {
   if (!reason) return '';
   if (reason === 'pico_reboot_undecided') return 'Heat withheld: the safety processor rebooted and the cause is not yet known';
   if (reason === 'pico_fatal_reboot') return 'Paused: the safety processor rebooted after a fatal fault';
+  if (reason === 'pico_fatal_before_esp_boot') return 'Paused: the safety processor reset after a fatal fault before this restart';
   if (reason === 'pico_repeated_reboot') return 'Paused: the safety processor rebooted twice within 15 min';
   if (reason === 'pico_lost_trip_latched') return 'Paused: a safety trip was lost across a restart; clear it and resume';
   if (reason === 'heat_grant_unconfirmed') return 'Paused: heat grant not confirmed by the safety processor';

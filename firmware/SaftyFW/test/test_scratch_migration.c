@@ -53,6 +53,26 @@ static void test_boot_reason_round_trips_through_hal_scratch(void)
                "so a later read reports invalid");
 }
 
+static void test_boot_reason_forced_reboot_is_not_watchdog(void)
+{
+    fake_scratch_reset_all();
+    saftyfw_boot_reason_t forced = boot_reason_read_wd_reason(SAFTYFW_WD_REASON_FORCE_BIT, true);
+    TEST_CHECK(!forced.watchdog_caused_reboot,
+               "PF-04: a forced watchdog_reboot() (REASON FORCE bit only) must not report watchdog_caused_reboot");
+    TEST_CHECK(!forced.watchdog_enable_caused_reboot,
+               "PF-04: a forced reboot must not report watchdog_enable_caused_reboot");
+    saftyfw_boot_reason_t timeout = boot_reason_read_wd_reason(SAFTYFW_WD_REASON_TIMER_BIT, true);
+    TEST_CHECK(timeout.watchdog_caused_reboot,
+               "PF-04: a real watchdog timeout (REASON TIMER bit) must still report watchdog_caused_reboot");
+    TEST_CHECK(timeout.watchdog_enable_caused_reboot,
+               "PF-04: a real timeout keeps the SDK enable_caused fact");
+    saftyfw_boot_reason_t both = boot_reason_read_wd_reason(
+        SAFTYFW_WD_REASON_TIMER_BIT | SAFTYFW_WD_REASON_FORCE_BIT, false);
+    TEST_CHECK(both.watchdog_caused_reboot, "PF-04: TIMER set with FORCE also set is still a real timeout");
+    saftyfw_boot_reason_t poweron = boot_reason_read_wd_reason(0u, false);
+    TEST_CHECK(!poweron.watchdog_caused_reboot, "PF-04: REASON 0 (power-on) is not a watchdog reset");
+}
+
 static void test_boot_reason_unlatched_reads_invalid(void)
 {
     fake_scratch_reset_all();
@@ -225,6 +245,7 @@ void run_test_scratch_migration(void)
 {
     test_boot_reason_round_trips_through_hal_scratch();
     test_boot_reason_unlatched_reads_invalid();
+    test_boot_reason_forced_reboot_is_not_watchdog();
     test_clear_trip_diag_round_trips_through_hal_scratch();
     test_watchdog_overdue_diag_round_trips_through_hal_scratch();
     test_the_three_modules_do_not_collide_on_shared_backend();

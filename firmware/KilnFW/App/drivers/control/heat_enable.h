@@ -287,6 +287,19 @@ bool heat_enable_reboot_hold(void);
 // PF-01: tell heat_enable whether a frame carrying a Pico boot id has arrived since the ESP booted. While
 // false, note_pico_boot takes no baseline and acquire is withheld (fail closed).
 void heat_enable_note_boot_id_seen(bool seen);
+// PF-04: feed every tick (before note_pico_boot): the Pico's current boot id (valid only while known) and whether
+// the Pico booted before this ESP (DIAG uptime greater than ESP uptime). When the PR-01 first-sight verdict of an
+// ESP boot sees the SAME boot id this ESP already acted on in an earlier boot (RTC-persisted, no NVS write), its
+// boot-reason byte is stale news and does not latch a fatal reboot. A different or unknown boot id, or a Pico
+// younger than the ESP, still latches (Pico watchdog reset while the ESP was down).
+void heat_enable_note_pico_boot_identity(bool id_valid, uint8_t boot_id, bool pico_older_than_esp);
+// PF-04: true when the current reboot hold is a fatal boot reason found at the ESP's first sight of the Pico (the
+// Pico reset before this ESP boot), not a live reboot; the executor pauses with "pico_fatal_before_esp_boot".
+bool heat_enable_reboot_hold_first_sight(void);
+#ifdef KILNCTL_HEAT_ENABLE_TEST_HOOK
+// Host tests only: forget the RTC-persisted acted-on Pico boot id (simulates a power-on of the ESP).
+void heat_enable_forget_acted_boot_id_for_host_tests(void);
+#endif
 // PF-03: true when the current reboot hold came from a claimless lost-trip latch, not a fatal reboot.
 bool heat_enable_reboot_hold_lost_trip_only(void);
 // BT-02: true when the current reboot hold is a second benign Pico reboot inside the repeat window (not fatal).
