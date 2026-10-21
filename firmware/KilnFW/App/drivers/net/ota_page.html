@@ -1133,6 +1133,8 @@ function lastInstallText(li) {
 var lastInstallTimer = null;
 function loadLastInstall() {
   if (lastInstallTimer) { clearTimeout(lastInstallTimer); lastInstallTimer = null; }
+  /* The authed-fetch helper may not be defined yet (script order, smoke harness): skip, never throw at load. */
+  if (typeof window.kcOtaAuthedFetch !== 'function') return Promise.resolve();
   return window.kcOtaAuthedFetch('/api/update/status', { method: 'GET' }).then(function (r) {
     return r.text().then(function (text) {
       if (!r.ok) return;

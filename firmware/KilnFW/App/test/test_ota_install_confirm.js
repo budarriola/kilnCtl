@@ -36,6 +36,7 @@ function run(state) {
   assert(c.timers.length === 1 && c.timers[0] === 5000, 'OC-07: pending_confirm re-polls in 5 s');
   c = await run('recorded');
   assert(c.timers.length === 0 && c.text === 'recorded', 'OC-07: final state stops polling');
+  assert(/typeof window\.kcOtaAuthedFetch !== 'function'\) return Promise\.resolve\(\)/.test(m[0]), 'loadLastInstall guards a missing kcOtaAuthedFetch');
   assert(/update_install_confirm_retry_delay_ms\(attempt\)/.test(NET) && /vTaskDelay\(pdMS_TO_TICKS\(wait_ms\)\)/.test(NET),
          'OC-01: confirm task retries the mark with backoff');
   assert(/update_install_res_derive_confirmed\(&res, run\.version, running_ota_state\(\) == ESP_OTA_IMG_VALID\)/.test(HTTP),
