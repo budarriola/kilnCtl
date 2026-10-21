@@ -1747,6 +1747,10 @@ static void test_rf2_02_user_only_lost_policy_bootstrap_does_not_open(void)
                                            TEST_SALT, false) == HAL_OK, "bootstrap admin stores");
     TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE,
                "RF2-02: bootstrap did not turn auth off (still fail-closed)");
+    s_policy_lost = false; // stale flag: set_password must refresh it (RF2-04)
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple-2",
+                                           TEST_SALT, false) == HAL_OK, "second admin write");
+    TEST_CHECK(web_auth_store_policy_lost(), "RF2-04: set_password refreshed the policy-lost flag");
 }
 
 static void test_rf2_01_gesture_then_bootstrap_writes_enabled_policy(void)
