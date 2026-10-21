@@ -53,7 +53,7 @@ function run(state) {
   const mm = HTTP.match(/int update_install_http_mark_confirmed\(void\)\s*\{[\s\S]*?\n\}/);
   assert(!!mm && mm[0].indexOf('record_needs_decision()') >= 0 && mm[0].indexOf('record_needs_decision()') < mm[0].indexOf('ota_http_update_try_begin'),
          'OG-02: id hashed only for a record needing a decision, before the update claim is taken');
-  assert(/portENTER_CRITICAL\(&s_id_mux\)/.test(HTTP), 'OG-03: cached id published under a spinlock');
+  assert(/static portMUX_TYPE s_id_mux/.test(HTTP) && /portENTER_CRITICAL\(&s_id_mux\)/.test(HTTP), 'OG-03: cached id published under a spinlock');
   assert(/UPD_INST_KEY_LEN/.test(HTTP) && /read_hashed_len\(\)/.test(HTTP), 'OG-04: hash covers the install image_length');
   assert(/high-water mark before mark loop/.test(NET), 'OF-04: stack high-water logged before the mark loop');
   console.log(passed + ' passed, ' + failed + ' failed');
