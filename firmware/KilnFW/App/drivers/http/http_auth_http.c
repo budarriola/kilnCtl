@@ -307,7 +307,11 @@ static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
 // small own static buffer (never the shared OTA chunk, LK-05), hard-capped by bytes and by
 // HTTP_AUTH_REFUSAL_DRAIN_MAX_MS so an unauthenticated client cannot hold the single httpd worker. A
 // complete drain returns ESP_OK; a cap or socket error returns ESP_FAIL (close).
+// LF-02: the time cap is checked between reads only; one httpd_req_recv can still block for
+// recv_wait_timeout (3 s, wifi_provision_http.c), so the real worst hold is about 2 s + 3 s = 5 s.
+// LF-03: yield (vTaskDelay(1)) once per AUTH_REFUSAL_YIELD_BYTES, not per read, so 32 KB fits inside the cap.
 #define AUTH_REFUSAL_DRAIN_BUF_SIZE 256
+#define AUTH_REFUSAL_YIELD_BYTES 4096
 static uint8_t s_auth_refusal_drain_buf[AUTH_REFUSAL_DRAIN_BUF_SIZE]; /* httpd task only */
 
 static esp_err_t refusal_result(httpd_req_t *req) {
@@ -319,10 +323,12 @@ static esp_err_t refusal_result(httpd_req_t *req) {
     }
     const TickType_t start = xTaskGetTickCount();
     size_t total = 0;
+    size_t since_yield = 0;
     for (;;) {
         int ret = httpd_req_recv(req, (char *)s_auth_refusal_drain_buf, sizeof(s_auth_refusal_drain_buf));
         if (ret > 0) {
             total += (size_t)ret;
+            since_yield += (size_t)ret;
         }
         uint32_t elapsed_ms = (uint32_t)((xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
         http_auth_drain_step_t step = http_auth_refusal_drain_step(ret, total, elapsed_ms);
@@ -332,7 +338,10 @@ static esp_err_t refusal_result(httpd_req_t *req) {
         if (step == HTTP_AUTH_DRAIN_ABORT) {
             return ESP_FAIL;
         }
-        vTaskDelay(1); /* let IDLE0 feed the task watchdog */
+        if (since_yield >= AUTH_REFUSAL_YIELD_BYTES) {
+            since_yield = 0;
+            vTaskDelay(1); /* let IDLE0 feed the task watchdog */
+        }
     }
 }
 

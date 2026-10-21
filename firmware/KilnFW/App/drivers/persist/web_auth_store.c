@@ -1038,6 +1038,9 @@ static void legacy_policy_migrate(void)
 // policy, then the sentinel, then drop the latch. Policy first so a crash in
 // between leaves a policy-present (healthy) board, never an open one.
 #define STORAGE_RESET_RESOLVE_BUSY_RETRIES 3
+/* LF-04: short lock wait per try, so the calling httpd worker blocks for at most about 3 x 1 s (not 3 x 5 s). */
+#define STORAGE_RESET_RESOLVE_LOCK_WAIT_MS 1000
+static hal_status_t set_policy_wait(const web_auth_policy_t *policy, int32_t wait_ms);
 static void storage_reset_resolve(void)
 {
     // F2-01: LCD lock stays ON (gated, no PIN yet) so recovery never opens the LCD silently.
@@ -1047,7 +1050,7 @@ static void storage_reset_resolve(void)
      * until the next admin write or boot: retry a bounded number of times. Any other failure stays latched. */
     hal_status_t pst = HAL_BUSY;
     for (int attempt = 0; attempt < STORAGE_RESET_RESOLVE_BUSY_RETRIES && pst == HAL_BUSY; attempt++) {
-        pst = web_auth_store_set_policy(&p);
+        pst = set_policy_wait(&p, STORAGE_RESET_RESOLVE_LOCK_WAIT_MS);
     }
     if (pst != HAL_OK) {
         return; // stays latched: fail closed (load_policy keeps reading UNREADABLE)
@@ -1245,12 +1248,12 @@ hal_status_t web_auth_store_set_policy_checked(const web_auth_policy_t *requeste
     return pst;
 }
 
-hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
+static hal_status_t set_policy_wait(const web_auth_policy_t *policy, int32_t wait_ms)
 {
     if (policy == NULL) {
         return HAL_INVALID_ARG;
     }
-    if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
+    if (!cred_store_lock(wait_ms)) {
         return HAL_BUSY;
     }
     hal_status_t pst = set_policy_locked(policy);
@@ -1259,6 +1262,11 @@ hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
         lcd_pin_pending_refresh();
     }
     return pst;
+}
+
+hal_status_t web_auth_store_set_policy(const web_auth_policy_t *policy)
+{
+    return set_policy_wait(policy, CRED_STORE_LOCK_WAIT_MS);
 }
 
 // --- Auth-off / first-boot / field-upgrade collapse (item 11) --------------

@@ -701,6 +701,58 @@ static void test_lk05_refusal_drain_has_its_own_buffer(void)
     }
 }
 
+/* Returns the body of the function starting at `sig` (copy truncated at the first closing brace in column 0). */
+static char *lf_fn_body(char *text, const char *sig)
+{
+    char *fn = text != NULL ? strstr(text, sig) : NULL;
+    if (fn == NULL) { return NULL; }
+    char *end = strstr(fn, "\n}\n");
+    if (end == NULL) { end = strstr(fn, "\n}\r\n"); }
+    if (end != NULL) { *end = '\0'; }
+    return fn;
+}
+
+static void test_lf_review_fixes(void)
+{
+    TEST_SECTION("LF-01..LF-04 -- stale hash own PSRAM buffer, drain cap comment + yield cadence, bounded resolve lock wait (source-text scan)");
+    char *ui = lk05_read("update/update_install_http.c");
+    char *fn = lf_fn_body(ui, "static bool stale_running_matches(");
+    TEST_CHECK(fn != NULL, "LF-01 stale_running_matches present");
+    if (fn != NULL) {
+        TEST_CHECK(strstr(fn, "ota_http_esp_chunk_buf") == NULL, "LF-01 stale hash does not borrow the shared 4 KB chunk");
+        TEST_CHECK(strstr(fn, "heap_caps_malloc(cap, MALLOC_CAP_SPIRAM") != NULL, "LF-01 own temporary PSRAM buffer");
+        int allocs = 0, frees = 0;
+        for (char *p = fn; (p = strstr(p, "heap_caps_free(buf)")) != NULL; p++) { frees++; }
+        for (char *p = fn; (p = strstr(p, "heap_caps_malloc(")) != NULL; p++) { allocs++; }
+        TEST_CHECK(allocs == 1 && frees >= 3, "LF-01 buffer freed on every exit path (setup fail, read fail, after loop)");
+    }
+    free(ui);
+
+    char *au = lk05_read("http/http_auth_http.c");
+    fn = lf_fn_body(au, "static esp_err_t refusal_result(httpd_req_t *req)");
+    TEST_CHECK(fn != NULL, "LF-03 refusal_result present");
+    if (fn != NULL) {
+        TEST_CHECK(strstr(fn, "since_yield >= AUTH_REFUSAL_YIELD_BYTES") != NULL, "LF-03 yields by byte count, not per read");
+        char *d = strstr(fn, "vTaskDelay(1)");
+        char *g = strstr(fn, "since_yield >= AUTH_REFUSAL_YIELD_BYTES");
+        TEST_CHECK(d != NULL && g != NULL && g < d, "LF-03 vTaskDelay sits behind the yield gate");
+    }
+    TEST_CHECK(au != NULL && strstr(au, "#define AUTH_REFUSAL_YIELD_BYTES 4096") != NULL, "LF-03 yield every 4 KB");
+    TEST_CHECK(au != NULL && strstr(au, "about 2 s + 3 s = 5 s") != NULL, "LF-02 comment states the real ~5 s bound");
+    free(au);
+
+    char *wa = lk05_read("persist/web_auth_store.c");
+    fn = lf_fn_body(wa, "#define STORAGE_RESET_RESOLVE_BUSY_RETRIES 3");
+    TEST_CHECK(fn != NULL, "LF-04 storage_reset_resolve present");
+    if (fn != NULL) {
+        TEST_CHECK(strstr(fn, "set_policy_wait(&p, STORAGE_RESET_RESOLVE_LOCK_WAIT_MS)") != NULL, "LF-04 short wait per try");
+        TEST_CHECK(strstr(fn, "web_auth_store_set_policy(") == NULL, "LF-04 does not use the 5 s lock wait");
+    }
+    TEST_CHECK(wa != NULL && strstr(wa, "#define STORAGE_RESET_RESOLVE_LOCK_WAIT_MS 1000") != NULL, "LF-04 1 s wait");
+    TEST_CHECK(wa != NULL && strstr(wa, "#define STORAGE_RESET_RESOLVE_BUSY_RETRIES 3") != NULL, "LF-04 3 tries -> ~3 s worst case");
+    free(wa);
+}
+
 static void test_upload_recv_failure_clears_gate_and_has_deadline(void)
 {
     TEST_SECTION("update_http.c -- stage upload recv-failure exit clears the stack gate pointer; overall deadline (source-text scan)");
@@ -1472,6 +1524,7 @@ void run_test_update_stage(void)
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
     test_lk05_refusal_drain_has_its_own_buffer();
+    test_lf_review_fixes();
     test_upload_recv_failure_clears_gate_and_has_deadline();
     test_status_never_trusts_a_header_alone();
     test_clear();

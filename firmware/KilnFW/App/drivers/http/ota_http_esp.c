@@ -101,10 +101,10 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 // stack would eat half of it just for this one variable. Shared
 // (also borrowed by ota_http_pico.c, update_http.c and update_install_http.c via
 // ota_http_esp_chunk_buf()). It is NOT httpd-only (LK-05): stale_running_matches
-// hashes through it on the ota_confirm task. The rule: use it only while holding the
-// update claim (ota_http_update_try_begin). Refusal drains use their own small buffer
-// (ota_http_refusal_drain). Known unclaimed readers: the stage status GET and
-// app_stage_info (KNOWN_ISSUES LK-05b).
+// used to hash through it on the ota_confirm task. LF-01: that now has its own temporary
+// PSRAM buffer, so the unclaimed stage status GET / app_stage_info readers (LK-05b) no longer race it.
+// The rule: use the chunk only while holding the update claim (ota_http_update_try_begin) or as a
+// stage-status scratch on httpd. Refusal drains use their own small buffer (ota_http_refusal_drain).
 #define OTA_ESP_CHUNK_SIZE 4096
 static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 

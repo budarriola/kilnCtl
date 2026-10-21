@@ -235,6 +235,7 @@ bool http_auth_page_shell_needs_no_store(const char *uri, httpd_method_t method,
 // connection reset; anything larger closes. 32 KB covers a first backup restore (23 KB).
 #define HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES 32768u
 // Hard wall-clock cap on the whole drain: an unauthenticated client must not hold the single httpd worker.
+// Checked between reads only (LF-02): a blocked recv adds up to recv_wait_timeout (3 s), so the real bound is ~5 s.
 #define HTTP_AUTH_REFUSAL_DRAIN_MAX_MS 2000u
 
 typedef enum {
