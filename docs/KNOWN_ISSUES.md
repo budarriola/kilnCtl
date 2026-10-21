@@ -736,3 +736,15 @@ Static review of the GitHub self-update and install path (docs/REVIEW_OTA_HEAP_2
 - **RV-07** LOW (REVIEW_AU02_BC01_2026_10_20): wait_for_boot_soak has no clamp or isfinite guard, sleeps outside the try, and does not re-read uptime after sleeping. Fix: clamp, guard, re-check once.
 - **RV-08** INFO (REVIEW_AU02_BC01_2026_10_20): checked recovery (404 gives a note), unreachable board (3 s then a note), Pico (skipped), auth-gated status (note), and callers (none pass esp). No hang.
 - **RV-09** INFO (REVIEW_AU02_BC01_2026_10_20): MAIN_OTA_CONFIRM_WARN_MS = soak+15 s = 45 s, log-only. OK.
+
+## REVIEW_OH04_2026_10_20 (OC)
+
+- **OC-01** MED, `update_install_http.c:262-278`, `main_network_http.c:305`: the confirm mark tries the update claim once. When the claim is busy (likely: the Pico auto-update at boot, `pico_auto_update_boot.c:128`, or a stage/fetch during the soak), the result stays `pending_confirm` until the next reboot. Fix: retry with backoff, or derive the state from the running partition's otadata state. Status open.
+- **OC-02** LOW, `main_network_http.c:298-305`: power loss or an NVS failure between mark-valid and the record write leaves a VALID image reported as `pending_confirm` ("a reset rolls it back" is then false). It heals on the next boot. Fix: retry rc -1, and have status cross-check otadata. Status open.
+- **OC-03** LOW, `update_install_record.c:126-161`: the mark does not check that the record names the running image. After a rollback whose best-effort `rolled_back` write failed, followed by a JTAG flash of another image, the rolled-back install is shown as confirmed. Fix: match the record's semver/id to the running app. Status open.
+- **OC-04** LOW, `update_install_http.c:131-140`: a second install during the soak is not refused. It erases the pending result, and the outcome of the first image is lost. Fix: return 409 while the running image is PENDING_VERIFY. Status open.
+- **OC-05** LOW, `mcp_server_update.py:692,797,840`: a pre-OH-04 target reports `recorded`, so the MCP says ok before the soak, and a later rollback goes unreported. Fix: add an unproven-confirm note when `detail != confirmed`. Status open.
+- **OC-06** LOW, `recovery_install.c:227`: the CONFIRMED guard and the `confirmed` detail name need a recovery image rebuilt from this commit or later, flashed separately. Fix: document the reflash; show unknown details numerically. Status open.
+- **OC-07** INFO, `ota_page.html:1124-1141`: the last-install line loads once; it does not refresh while `pending_confirm`. Status open (note).
+- **OC-08** INFO, `update_install_record.c:156-160`: wear is 1 blob write per install. Status closed (no action).
+- **OC-09** INFO, `main_network_http.c:298-306`, `recovery_install.c:224-231`: the boot_guard, otadata and rollback ordering is correct; `confirmed` is ESP-only. Status closed (no action).
