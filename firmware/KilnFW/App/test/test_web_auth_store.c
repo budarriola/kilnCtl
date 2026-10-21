@@ -532,6 +532,39 @@ static void test_au02_marker(void)
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "ABSENT, not UNREADABLE");
 }
 
+static void test_au02_provisioned_board_policy_loss_fails_closed(void)
+{
+    TEST_SECTION("AU-02 policy AND marker lost on a provisioned board fails closed");
+    reset_all();
+    static const uint8_t salt[WEB_AUTH_SALT_LEN] = {1, 2, 3};
+    web_auth_policy_t pol;
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_ABSENT, "never provisioned: ABSENT (open)");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "password1", salt, false) == HAL_OK,
+               "set admin password");
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "no marker (lost or never set)");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && !pol.web_enabled,
+               "RV-01: set_password stored a both-off policy (not UNREADABLE)");
+    drop_policy_key_only();
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "admin configured, policy and marker absent: UNREADABLE, not open");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", "password1", salt, false) == HAL_OK,
+               "set user password");
+    drop_policy_key_only();
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE, "user-only credential also fails closed");
+
+    // Unreadable (bad CRC) web credential blob counts as a credential record.
+    reset_all();
+    web_auth_web_blob_t wblob;
+    memset(&wblob, 0, sizeof(wblob));
+    wblob.version = WEB_AUTH_STORE_VERSION;
+    wblob.crc32 = web_blob_crc(&wblob) ^ 0xFFu; // bad CRC
+    TEST_CHECK(set_blob_verified(WEB_AUTH_KEY_WEB, &wblob, sizeof(wblob)) == HAL_OK, "seed bad-CRC web blob");
+    TEST_CHECK(web_auth_store_ever_enabled() == false, "no marker with corrupt web blob");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "policy+marker absent, corrupt web blob: UNREADABLE, not open");
+}
+
 static void test_policy_set_and_load(void)
 {
     TEST_SECTION("auth_policy set/load round trip");
@@ -800,8 +833,9 @@ static void test_clear_for_physical_reset_on_empty_store(void)
     TEST_CHECK(web_auth_store_clear_for_physical_reset() == true,
                "clearing an already-empty store still reports success");
     web_auth_policy_t loaded_pol;
-    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy is (still) ABSENT -- untouched, and it was never written");
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "RF2-04: the wipe leaves a present web blob (provisioned, fail closed); "
+               "no policy was written");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
                "administrator still reads as not configured");
     TEST_CHECK(web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
@@ -877,8 +911,9 @@ static void test_clear_all_credentials_on_empty_store(void)
     TEST_CHECK(web_auth_store_clear_all_credentials() == true,
                "clearing an already-empty store still reports success");
     web_auth_policy_t loaded_pol;
-    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy is (still) ABSENT -- untouched, and it was never written");
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "RF2-04: the wipe leaves a present web blob (provisioned, fail closed); "
+               "no policy was written");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false &&
                    web_auth_store_password_configured(WEB_AUTH_ROLE_USER) == false,
                "both roles still read as not configured");
@@ -1375,6 +1410,7 @@ int main(void)
     test_au02_marker();
     test_policy_absent_is_off();
     test_policy_set_and_load();
+    test_au02_provisioned_board_policy_loss_fails_closed();
     test_upgrade_path_unreadable_fails_closed();
     test_set_detects_lying_write();
     test_enable_gate_primitive();

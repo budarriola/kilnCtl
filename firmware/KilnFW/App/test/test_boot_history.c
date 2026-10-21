@@ -248,15 +248,55 @@ static void test_br01_br02(void)
     boot_history_blob_init(&b);
     boot_history_merge_live(&b);
     TEST_CHECK(b.count == 0, "BR-01: empty ring untouched");
-    char js[96];
+    char js[256];
     int n = boot_history_nvs_stats_json(js, sizeof(js));
     TEST_CHECK(n > 0 && strstr(js, "\"kiln_nvs\":{\"used\":") != NULL && strstr(js, "\"free\":") && strstr(js, "\"total\":"),
                "BR-02: stats JSON has used/free/total");
     TEST_CHECK(boot_history_nvs_stats_json(js, 8) == -1, "BR-02: too-small buffer reports -1");
 }
 
+static void test_bw01_write_counter(void)
+{
+    TEST_SECTION("boot_history: BW-01 RAM-only kiln_nvs per-key write counter");
+    reset_all();
+    hal_kv_wstat_reset();
+    char js[512];
+    char name[HAL_KV_WSTAT_NAME_MAX];
+    uint32_t cnt = 0;
+    TEST_CHECK(!hal_kv_wstat_get(0, name, &cnt), "BW-01: empty after reset");
+    boot_history_record_boot(7, false, 5, 0, false, "x-gabc", 0);
+    TEST_CHECK(hal_kv_wstat_get(0, name, &cnt) && strcmp(name, "boot_hist") == 0 && cnt == 1u,
+               "BW-01: first boot record counts one boot_hist write");
+    boot_history_record_boot(7, false, 5, 0, false, "x-gabc", 0);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "BW-01: open");
+    uint8_t v = 1;
+    hal_kv_set_blob(&h, "bootguard", &v, 1);
+    hal_kv_set_blob(&h, "bootguard", &v, 1);
+    hal_kv_set_blob(&h, "trip_hist", &v, 1);
+    hal_kv_close(&h);
+    int n = boot_history_nvs_stats_json(js, sizeof(js));
+    TEST_CHECK(n > 0 && strstr(js, "\"bootguard\":2") != NULL && strstr(js, "\"trip_hist\":1") != NULL &&
+                   strstr(js, "\"writes_this_boot\":{") != NULL && js[n - 1] == '}',
+               "BW-01: JSON carries per-key counts");
+    hal_kv_wstat_note("other_part", "zzz");
+    hal_kv_wstat_get(0, name, &cnt);
+    uint32_t c0 = cnt;
+    hal_kv_wstat_note("other_part", "boot_hist");
+    hal_kv_wstat_get(0, name, &cnt);
+    TEST_CHECK(cnt == c0, "BW-01: writes to other partitions are not counted");
+    hal_kv_wstat_reset();
+    const char *ks[] = {"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"};
+    for (unsigned i = 0; i < 8; i++) {
+        hal_kv_wstat_note(KILN_NVS_PARTITION, ks[i]);
+    }
+    TEST_CHECK(hal_kv_wstat_get(HAL_KV_WSTAT_SLOTS, name, &cnt) && strcmp(name, "other") == 0 && cnt == 2u,
+               "BW-01: keys past the slot table fold into other");
+}
+
 int main(void)
 {
+    test_bw01_write_counter();
     test_br01_br02();
     test_fv01_fv03();
     test_fw01_fw02_coalesce();

@@ -428,8 +428,6 @@ def debug_reset(
         if refusal is not None:
             return refusal
     soak_note = ""
-    if peer == debug_probe.PEER_ESP and wait_for_confirm:
-        soak_note = _wait_boot_soak()
     if peer == debug_probe.PEER_ESP and allow_dark_rereset is not True:
         dark = reset_probe.recent_dark_esp_reset(debug_probe._repo_root())
         if dark is not None:
@@ -451,6 +449,8 @@ def debug_reset(
                     if dark.uart_answered else ""
                 )
             )
+    if peer == debug_probe.PEER_ESP and wait_for_confirm and mode == "run":
+        soak_note = _wait_boot_soak()  # after all refusals; never delays a halt
     record: dict = {"peer": peer, "mode": mode, "openocd_ok": None, "probe": None}
 
     def _append() -> None:
@@ -527,17 +527,6 @@ def debug_reset(
     failed = _openocd_error_message(f"reset failed for {peer}", output)
     marker_line = _reset_marker_line(post_state)
     return f"{failed}\n{marker_line}" if marker_line else failed
-
-
-def _wait_boot_soak() -> str:
-    from .mcp_server_flash import _resolve_verify_hosts  # local: avoids a circular import
-    try:
-        hosts = _resolve_verify_hosts(None)
-    except Exception as exc:  # noqa: BLE001
-        return f"NOTE: could not resolve board host ({exc}); boot-confirm soak not checked."
-    if not hosts:
-        return ""
-    return reset_probe.wait_for_boot_soak_http(hosts[0])
 
 
 def _wait_boot_soak() -> str:

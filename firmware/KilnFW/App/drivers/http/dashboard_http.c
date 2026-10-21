@@ -141,6 +141,16 @@ void dashboard_prime_flash_facts(void)
     s_flash_facts_read = true;
 }
 
+bool dashboard_running_image_len(uint32_t *len)
+{
+    dashboard_prime_flash_facts();
+    if (!s_flash_used_known || s_flash_used == 0 || len == NULL) {
+        return false;
+    }
+    *len = s_flash_used;
+    return true;
+}
+
 void dashboard_get_status(dashboard_status_t *out)
 {
     memset(out, 0, sizeof(*out));

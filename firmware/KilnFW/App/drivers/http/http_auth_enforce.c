@@ -153,6 +153,19 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
     return tier == ROUTE_TIER_USER || tier == ROUTE_TIER_ADMIN || tier == ROUTE_TIER_WIFI_SETUP;
 }
 
+bool http_auth_request_touches_session(route_tier_t tier, http_auth_decision_t decision,
+                                       bool has_background_header, httpd_method_t method) {
+    if (!http_auth_decision_counts_as_activity(tier, decision)) {
+        return false;
+    }
+    // AF-02/AF-03: only a GET carrying X-Kiln-Background is a passive timer poll; any other
+    // method with the header is a real action and still counts.
+    if (has_background_header && method == HTTP_GET) {
+        return false;
+    }
+    return true;
+}
+
 bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
     if (uri == NULL || method != HTTP_GET || strncmp(uri, "/api/", 5) == 0) {
         return false;

@@ -70,6 +70,10 @@ static void run_job(http_async_job_run_ctx_t *rc)
     // task never touches s_task_handle again after the release. (The guard
     // replaced a local s_busy flag cleared in the same critical section as
     // the handle; ordering gives the same guarantee across the two locks.)
+    /* RS-03: record this job's stack high-water in RAM before the task goes (RAM-only last-seen minimum), so
+     * stack_margin can still report it once the task has exited. Read on this task, before the slot clears. */
+    (void)stack_margin_retain_exit("http_async_job",
+                                   stack_margin_words_to_bytes((uint32_t)uxTaskGetStackHighWaterMark(NULL)));
     portENTER_CRITICAL(&s_mux);
     stack_margin_task_exit(&s_task_handle); /* UB-01: nested spinlock, never blocks */
     portEXIT_CRITICAL(&s_mux);
@@ -149,6 +153,25 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
     // (backup_import creating a kiln_configs entry), and every NVS writer guards on
     // hal_kv_write_safe_here() (stack not in PSRAM) and REFUSES from a PSRAM stack
     // ("could not be saved to flash"). tools/check_psram_task_stacks.ps1 pins this.
+    /* RS-03: registered BEFORE xTaskCreate (a first job can finish and call stack_margin_retain_exit before a
+     * post-create registration would run). Registered unconditionally, success or not -- stack_margin_register()
+     * reads *task_handle_slot fresh at report time, and it is idempotent by
+     * (name, slot), so repeated calls across many POSTs are a no-op after
+     * the first (same reasoning as ota_rollback_reboot_task()'s own
+     * registration comment, ota_http_esp.c). stack_bytes here must match
+     * whatever the caller actually passes to xTaskCreate() just below --
+     * it's the same value, not a separate literal to keep in sync.
+     *
+     * Registered under a fixed literal name, "http_async_job", NOT the
+     * caller-supplied task_name: this helper is single-flight (the writer guard admits
+     * only one job at a time, sharing this one s_task_handle slot across
+     * every caller present and future), so one tracked entry covers all of
+     * them -- and check_stack_margin_registration.ps1's static scan requires
+     * a literal `stack_margin_register("...")` argument to see a call site
+     * at all; a variable here would be invisible to it. If a future caller
+     * needs concurrent (not single-flight) async jobs, this helper's whole
+     * one-job-at-a-time design needs revisiting, not just this literal. */
+    stack_margin_register("http_async_job", &s_task_handle, stack_bytes);
     dram_watch_log_task(task_name ? task_name : "http_async_job", "before-create");
     if (dram_watch_task_after(task_name ? task_name : "http_async_job",
                               xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx,
@@ -179,25 +202,6 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
         (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
         return HTTP_ASYNC_JOB_RESOURCE_FAILURE;
     }
-
-    /* Registered unconditionally, success or not -- stack_margin_register()
-     * reads *task_handle_slot fresh at report time, and it is idempotent by
-     * (name, slot), so repeated calls across many POSTs are a no-op after
-     * the first (same reasoning as ota_rollback_reboot_task()'s own
-     * registration comment, ota_http_esp.c). stack_bytes here must match
-     * whatever the caller actually passed to xTaskCreate() just above --
-     * it's the same value, not a separate literal to keep in sync.
-     *
-     * Registered under a fixed literal name, "http_async_job", NOT the
-     * caller-supplied task_name: this helper is single-flight (the writer guard admits
-     * only one job at a time, sharing this one s_task_handle slot across
-     * every caller present and future), so one tracked entry covers all of
-     * them -- and check_stack_margin_registration.ps1's static scan requires
-     * a literal `stack_margin_register("...")` argument to see a call site
-     * at all; a variable here would be invisible to it. If a future caller
-     * needs concurrent (not single-flight) async jobs, this helper's whole
-     * one-job-at-a-time design needs revisiting, not just this literal. */
-    stack_margin_register("http_async_job", &s_task_handle, stack_bytes);
 
     return HTTP_ASYNC_JOB_STARTED;
 }

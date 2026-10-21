@@ -127,6 +127,36 @@ typedef struct {
     size_t count;
 } import_batch_name_ctx_t;
 
+/* RS-01: backup_import_apply() runs inside backup_import_job(), i.e. on the http_async_job task, which already
+ * holds SAFETY_CFG_WRITER_ASYNC_JOB (taken by http_async_job_try_start). The guard is a single non-reentrant owner,
+ * so a nested try_claim(HTTP_SYNC) always failed and every restore died with "another commissioning operation is
+ * running". The job therefore performs its Pico writes under its OWN claim: when ASYNC_JOB is the current owner
+ * the claim is inherited (nothing taken, nothing released); any other owner (sweep, swap, reconcile, HTTP_SYNC)
+ * still refuses, and a free guard (direct callers, host tests) is claimed as HTTP_SYNC as before. */
+typedef struct {
+    bool held;     /* the caller may write */
+    bool took_own; /* we claimed it and must release it */
+} bi_writer_claim_t;
+
+static bi_writer_claim_t bi_writer_claim(void)
+{
+    bi_writer_claim_t c = { false, false };
+    if (safety_cfg_writer_owner() == SAFETY_CFG_WRITER_ASYNC_JOB) {
+        c.held = true;
+    } else if (safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+        c.held = true;
+        c.took_own = true;
+    }
+    return c;
+}
+
+static void bi_writer_release(bi_writer_claim_t c)
+{
+    if (c.took_own) {
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+    }
+}
+
 static const char *import_batch_name_at(void *ctx_v, uint8_t id)
 {
     import_batch_name_ctx_t *ctx = (import_batch_name_ctx_t *)ctx_v;
@@ -2429,14 +2459,15 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
         char ceiling_reason[128];
         /* BX-01: the raise stages abs_max_temp_c and sends COMMIT_CONFIG; hold the shared writer guard (refuse
          * before anything is committed when busy), exactly as zones_http_post.c does. */
-        if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+        const bi_writer_claim_t raise_claim = bi_writer_claim();
+        if (!raise_claim.held) {
             snprintf(err_msg, err_cap, "another commissioning operation is running; retry the restore");
             return false;
         }
         const bool raise_ok = safety_ceiling_sync_guard_raise(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT,
                                                               &ceiling_result, ceiling_reason,
                                                               sizeof(ceiling_reason), NULL);
-        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+        bi_writer_release(raise_claim);
         if (!raise_ok) {
             /* Fixed prefix alone is already ~110 chars against a 160-byte err_cap -- room
              * for ceiling_reason must be bounded explicitly (%.48s) rather than left open,
@@ -2505,13 +2536,14 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             uint64_t pico_roundtrip_start_us = hal_time_now_us();
             /* RX-02: take the shared Pico-param writer guard for the stage+commit so a bench_preset job, a sweep,
              * or an HTTP sync writer cannot interleave and have its COMMIT_CONFIG commit our half-staged set. */
-            if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+            const bi_writer_claim_t pairs_claim = bi_writer_claim();
+            if (!pairs_claim.held) {
                 snprintf(err_msg, err_cap, "another commissioning operation is running; retry the restore");
                 return false;
             }
             bool pico_ok = safety_cfg_write_apply_pairs(s_hw_safety, pairs, n_pairs, true /* commit */, reason,
                                               sizeof(reason), &out_class);
-            (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+            bi_writer_release(pairs_claim);
             ESP_LOGI(BACKUP_TAG, "backup import: Pico i_normal_a round trip (%d pairs) took %lld ms",
                     n_pairs, (long long)((hal_time_now_us() - pico_roundtrip_start_us) / 1000u));
             if (!pico_ok) {
@@ -3169,10 +3201,11 @@ static BACKUP_IMPORT_NOINLINE void backup_import_track_ceiling_lower(void)
     ceiling_reason[0] = '\0';
     /* BX-01: lower also stages + commits; claim the writer guard. Busy => skip (best effort, the Pico ceiling
      * simply stays wider until the next zones save, same as a failed lower). */
-    if (safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+    const bi_writer_claim_t lower_claim = bi_writer_claim();
+    if (lower_claim.held) {
         safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
                                          ceiling_reason, sizeof(ceiling_reason));
-        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+        bi_writer_release(lower_claim);
     } else {
         ceiling_result = SAFETY_CEILING_SYNC_LOWER_FAILED;
         snprintf(ceiling_reason, sizeof(ceiling_reason), "another commissioning operation is running");

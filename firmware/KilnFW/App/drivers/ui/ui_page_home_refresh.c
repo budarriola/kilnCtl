@@ -281,6 +281,10 @@ void ui_home_refresh_cb(lv_timer_t *timer)
              * auth is failed closed until an admin is set again. */
             lv_label_set_text(s_ui_home_trip_strip, web_auth_store_storage_reset_banner_text());
             lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (web_auth_store_policy_lost()) {
+            /* RV-04: login policy record lost; web is dashboards only and the LCD lock is on. */
+            lv_label_set_text(s_ui_home_trip_strip, web_auth_store_policy_lost_banner_text());
+            lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
         } else if (web_auth_store_lcd_pin_pending()) {
             /* F2-01: recovered board keeps the LCD lock on with no admin PIN. */
             lv_label_set_text(s_ui_home_trip_strip, web_auth_store_lcd_pin_pending_banner_text());

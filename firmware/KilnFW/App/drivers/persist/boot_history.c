@@ -178,12 +178,41 @@ int boot_history_nvs_stats_json(char *buf, size_t cap)
     hal_kv_stats_t st;
     int n;
     if (hal_kv_stats(KILN_NVS_PARTITION, &st) == HAL_OK) {
-        n = snprintf(buf, cap, "\"kiln_nvs\":{\"used\":%u,\"free\":%u,\"total\":%u}", (unsigned)st.used_entries,
+        n = snprintf(buf, cap, "\"kiln_nvs\":{\"used\":%u,\"free\":%u,\"total\":%u", (unsigned)st.used_entries,
                      (unsigned)st.free_entries, (unsigned)st.total_entries);
     } else {
         n = snprintf(buf, cap, "\"kiln_nvs\":null");
+        return (n < 0 || (size_t)n >= cap) ? -1 : n;
     }
-    return (n < 0 || (size_t)n >= cap) ? -1 : n;
+    if (n < 0 || (size_t)n >= cap) {
+        return -1;
+    }
+    /* BW-01: RAM-only per-key write counts for this boot (hal_kv_wstat), keyed by NVS key:
+     * boot_hist, bootguard, trip_hist, ...; "other" folds keys past the slot table. */
+    int w = snprintf(buf + n, cap - (size_t)n, ",\"writes_this_boot\":{");
+    if (w < 0 || (size_t)w >= cap - (size_t)n) {
+        return -1;
+    }
+    n += w;
+    bool first = true;
+    for (unsigned i = 0; i <= HAL_KV_WSTAT_SLOTS; i++) {
+        char name[HAL_KV_WSTAT_NAME_MAX];
+        uint32_t cnt;
+        if (!hal_kv_wstat_get(i, name, &cnt)) {
+            continue;
+        }
+        w = snprintf(buf + n, cap - (size_t)n, "%s\"%s\":%u", first ? "" : ",", name, (unsigned)cnt);
+        if (w < 0 || (size_t)w >= cap - (size_t)n) {
+            return -1;
+        }
+        n += w;
+        first = false;
+    }
+    w = snprintf(buf + n, cap - (size_t)n, "}}");
+    if (w < 0 || (size_t)w >= cap - (size_t)n) {
+        return -1;
+    }
+    return n + w;
 }
 
 esp_err_t boot_history_record_boot(uint8_t hal_reset_reason, bool prev_uptime_known,

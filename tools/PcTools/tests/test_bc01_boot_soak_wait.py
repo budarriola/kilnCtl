@@ -17,8 +17,13 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 class BootSoakWait(unittest.TestCase):
     def test_young_board_waits_to_35s(self):
         slept = []
-        note = reset_probe.wait_for_boot_soak(lambda h, timeout=0: {"uptime_s": 12}, "h",
-                                              sleep=slept.append)
+        t = [12.0]
+
+        def sleep(n):
+            slept.append(n)
+            t[0] += n
+        note = reset_probe.wait_for_boot_soak(lambda h, timeout=0: {"uptime_s": t[0]}, "h",
+                                              sleep=sleep, clock=lambda: t[0])
         self.assertEqual(slept, [23.0])
         self.assertIn("BC-01", note)
 

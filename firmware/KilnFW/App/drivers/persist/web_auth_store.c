@@ -54,6 +54,12 @@ static bool s_storage_reset_latched;
 static bool s_lcd_pin_pending;
 static void storage_reset_resolve(void);
 static void lcd_pin_pending_refresh(void);
+// RV-04: policy lost on a provisioned board (UNREADABLE, not the FS-02 latch). Cached with the PIN flag.
+static bool s_policy_lost;
+static void legacy_policy_migrate(void);
+// RV-01: one-time legacy migration done marker (see legacy_policy_migrate()).
+#define WEB_AUTH_KEY_MIG "auth_mig"
+NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_MIG);
 
 // --- On-disk blob layouts ----------------------------------------------------
 // Each blob is version-tagged and CRC32'd, same convention as
@@ -642,6 +648,11 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
         // "discard rather than migrate" convention as boot_guard.c.
         memset(&blob, 0, sizeof(blob));
     }
+    // RF2-01: the LCD reset gesture / clear_credentials leave a valid web blob with an
+    // unconfigured admin and must_change set. An admin bootstrap from that state may need to
+    // write the policy (below).
+    const bool wiped_state = existing == HAL_OK && !blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR].configured &&
+                             blob.roles[WEB_AUTH_ROLE_ADMINISTRATOR].must_change;
 
     web_auth_password_record_t *rec = &blob.roles[role];
     memset(rec, 0, sizeof(*rec));
@@ -660,6 +671,41 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
     rec->must_change = must_change;
     rec->configured = true;
 
+    // RV-01: never leave "credential present, policy absent". The first credential on a
+    // never-provisioned board stores a both-off policy FIRST (auth stays off, as in the open
+    // wizard), so ABSENT policy + credential can only mean the policy was lost, and the
+    // wizard's following set_policy works. RF2-02: only when NO web credential blob exists at
+    // all (a provisioned board that lost its policy must never be opened by a bootstrap).
+    // Skipped when the marker exists or the FS-02 latch is set (resolve writes it).
+    if (existing == HAL_NOT_FOUND && !s_storage_reset_latched && !web_auth_store_ever_enabled()) {
+        web_auth_policy_blob_t pb0;
+        if (load_blob(WEB_AUTH_KEY_POLICY, &pb0, sizeof(pb0)) == HAL_NOT_FOUND) {
+            web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false,
+                                     .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+            hal_status_t ost = web_auth_store_set_policy(&off);
+            if (ost != HAL_OK) {
+                memset(&blob, 0, sizeof(blob));
+                return ost;
+            }
+        }
+    }
+    if (role == WEB_AUTH_ROLE_ADMINISTRATOR && wiped_state && !s_storage_reset_latched) {
+        // RF2-01: admin re-setup after the reset gesture on a board whose policy is lost (marker
+        // kept or both keys lost): load_policy reads UNREADABLE and no session could resolve, so
+        // write an enabled policy (as storage_reset_resolve does) to give the gesture a way out.
+        // RF3-01: written BEFORE the credential and its failure is returned, so a failed policy
+        // write stores no credential and the gesture state stays re-enterable.
+        web_auth_policy_t cur;
+        if (web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE) {
+            web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = true,
+                                    .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+            hal_status_t pst = web_auth_store_set_policy(&on);
+            if (pst != HAL_OK) {
+                memset(&blob, 0, sizeof(blob));
+                return pst;
+            }
+        }
+    }
     if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
         memset(&blob, 0, sizeof(blob));
         return HAL_BUSY;
@@ -679,6 +725,9 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
     cred_store_unlock();
     if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
         storage_reset_resolve();
+    }
+    if (wst == HAL_OK) {
+        lcd_pin_pending_refresh(); // RF2-04: banner flag follows credential changes
     }
     return wst;
 }
@@ -839,6 +888,7 @@ static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere);
 bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere)
 {
     bool r = storage_reset_evaluate_impl(setup_evidence_elsewhere);
+    legacy_policy_migrate();
     lcd_pin_pending_refresh();
     return r;
 }
@@ -932,6 +982,45 @@ static void lcd_pin_pending_refresh(void)
     web_auth_policy_blob_t pb;
     s_lcd_pin_pending = load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) == HAL_OK && pb.lcd_enabled &&
                         !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    web_auth_policy_t pol;
+    s_policy_lost = !s_storage_reset_latched && web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE;
+}
+
+bool web_auth_store_policy_lost(void)
+{
+    return s_policy_lost;
+}
+
+const char *web_auth_store_policy_lost_banner_text(void)
+{
+    return "AUTH: login policy lost; use LCD password reset";
+}
+
+// RV-01: one-time boot migration. A field board that has web passwords but never stored a
+// policy (pre-policy firmware) and has no marker keeps its prior behaviour (auth off): write
+// the both-off policy. Runs once ("auth_mig" marker) so a LATER policy+marker loss on a
+// provisioned board still fails closed instead of being re-migrated to open.
+static void legacy_policy_migrate(void)
+{
+    if (s_storage_reset_latched) {
+        return;
+    }
+    web_auth_ever_blob_t m;
+    if (load_blob(WEB_AUTH_KEY_MIG, &m, sizeof(m)) != HAL_NOT_FOUND) {
+        return; // done (or unreadable: do not guess)
+    }
+    web_auth_policy_blob_t pb;
+    if (load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) == HAL_NOT_FOUND && !web_auth_store_ever_enabled() &&
+        (web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) ||
+         web_auth_store_password_configured(WEB_AUTH_ROLE_USER))) {
+        web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false,
+                                 .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+        if (web_auth_store_set_policy(&off) != HAL_OK) {
+            return; // retry next boot
+        }
+    }
+    web_auth_ever_blob_t done = {WEB_AUTH_EVER_MAGIC, ~WEB_AUTH_EVER_MAGIC};
+    (void)set_blob_verified(WEB_AUTH_KEY_MIG, &done, sizeof(done));
 }
 
 // Admin web password was just set while latched: persist an auth-enabled
@@ -999,7 +1088,24 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
         if (web_auth_store_ever_enabled() || s_storage_reset_latched) {
             return WEB_AUTH_LOAD_UNREADABLE; // FS-02: latched storage reset also fails closed
         }
-        return WEB_AUTH_LOAD_ABSENT; // item 11: absent record reads as both-off
+        // AU-02 (2026-10-20): marker also gone (both keys lost), but a web credential
+        // record exists or is unreadable: the board was provisioned, so fail closed
+        // (dashboards only). RF2-02/RF2-03: set_password writes the both-off policy only when no web
+        // blob exists at all, so a bootstrap can never turn auth off for a provisioned board. A
+        // USER-only board that lost policy+marker stays UNREADABLE; the LCD reset gesture plus an
+        // admin bootstrap then writes an enabled policy (RF2-01). A present-but-wiped web blob counts
+        // as provisioned (RF2-04).
+        web_auth_password_record_t cred;
+        web_auth_load_status_t ast = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &cred);
+        bool user_cfg = web_auth_store_password_configured(WEB_AUTH_ROLE_USER);
+        // RF3-03: a present LCD PIN blob (any state) also means the board was provisioned.
+        web_auth_lcd_blob_t lcd_probe;
+        bool lcd_present = load_blob(WEB_AUTH_KEY_LCD, &lcd_probe, sizeof(lcd_probe)) != HAL_NOT_FOUND;
+        memset(&lcd_probe, 0, sizeof(lcd_probe));
+        if (ast == WEB_AUTH_LOAD_UNREADABLE || ast == WEB_AUTH_LOAD_OK || user_cfg || lcd_present) {
+            return WEB_AUTH_LOAD_UNREADABLE;
+        }
+        return WEB_AUTH_LOAD_ABSENT; // item 11: never provisioned reads as both-off
     }
     if (blob.version != WEB_AUTH_STORE_VERSION) {
         return WEB_AUTH_LOAD_UNREADABLE;
@@ -1317,6 +1423,7 @@ bool web_auth_store_clear_for_physical_reset(void)
     bool ok = web_auth_store_clear_for_physical_reset_impl();
     cred_wipe_epoch_bump();
     cred_store_unlock();
+    lcd_pin_pending_refresh(); // RF2-04
     return ok;
 }
 
@@ -1327,5 +1434,6 @@ bool web_auth_store_clear_all_credentials(void)
     bool ok = web_auth_store_clear_all_credentials_impl();
     cred_wipe_epoch_bump();
     cred_store_unlock();
+    lcd_pin_pending_refresh(); // RF2-04
     return ok;
 }

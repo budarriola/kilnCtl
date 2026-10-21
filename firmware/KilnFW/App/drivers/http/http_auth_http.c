@@ -442,7 +442,10 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     // this can never revive an already-expired session (see its own
     // comment) -- the server, not this call site, is what makes the
     // expiry real.
-    if (token[0] != '\0' && http_auth_decision_counts_as_activity(ctx->tier, decision)) {
+    // AG-01: background timer polls (X-Kiln-Background) must not keep an idle session alive.
+    if (token[0] != '\0' && http_auth_request_touches_session(ctx->tier, decision,
+                                         httpd_req_get_hdr_value_len(req, "X-Kiln-Background") != 0,
+                                         (httpd_method_t)req->method)) {
         // Finding 3 fix (2026-09-17 review): http_auth_session_touch() now
         // enforces the same IP binding http_auth_session_resolve() already
         // does, so it needs the caller's address too -- re-extract it the

@@ -5,6 +5,7 @@
 #include "test_common.h"
 
 #include "../drivers/update/update_install_record.h"
+#include "../drivers/update/update_semver.h"
 #include "ota_image_crc.h"
 
 typedef struct {
@@ -459,6 +460,214 @@ static void test_res_versions(void)
     TEST_CHECK(!update_install_res_apply_rollback(&s, true), "ROLLBACK: a FAIL record is not rewritten");
 }
 
+/* OH-04: OK result -> pending_confirm until the app marks it confirmed; recovery never rolls back a confirmed one. */
+static void test_oh04_confirm(void)
+{
+    update_install_res_t r, d;
+    memset(&r, 0, sizeof(r));
+    r.code = UPD_INST_RES_OK;
+    strcpy(r.semver, "2.0.0");
+    TEST_CHECK(strcmp(update_install_res_state_name(&r), "pending_confirm") == 0,
+               "OH-04: unconfirmed OK reads pending_confirm");
+    TEST_CHECK(update_install_res_mark_confirmed(&r) && r.detail == UPD_INST_DETAIL_CONFIRMED &&
+                   strcmp(update_install_res_state_name(&r), "recorded") == 0,
+               "OH-04: mark_confirmed makes OK read recorded");
+    TEST_CHECK(!update_install_res_mark_confirmed(&r), "OH-04: second mark is a no-op");
+    TEST_CHECK(!update_install_res_apply_rollback(&r, true) && r.code == UPD_INST_RES_OK,
+               "OH-04: a confirmed result is never rewritten to rolled_back");
+    TEST_CHECK(strcmp(update_install_detail_name(UPD_INST_DETAIL_CONFIRMED), "confirmed") == 0,
+               "OH-04: detail name");
+    update_install_res_t f2;
+    memset(&f2, 0, sizeof(f2));
+    f2.code = UPD_INST_RES_FAIL;
+    f2.reason = UPD_INST_REASON_ROLLED_BACK;
+    TEST_CHECK(!update_install_res_mark_confirmed(&f2) && strcmp(update_install_res_state_name(&f2), "recorded") == 0,
+               "OH-04: a FAIL/rolled_back result is not confirmable");
+    /* Unconfirmed OK + last invalid partition is the app: recovery rewrites it to rolled_back. */
+    memset(&r, 0, sizeof(r));
+    r.code = UPD_INST_RES_OK;
+    strcpy(r.semver, "2.0.0");
+    TEST_CHECK(update_install_res_apply_rollback(&r, true) && r.code == UPD_INST_RES_FAIL &&
+                   r.reason == UPD_INST_REASON_ROLLED_BACK,
+               "OH-04: unconfirmed OK on a rolled-back app becomes rolled_back");
+
+    /* App side, through the IO ops. */
+    fake_t f;
+    fake_init(&f);
+    update_install_ops_t o = ops_for(&f);
+    static const uint8_t K_ID[UPD_INST_ID_LEN] = { 0x11, 0x22, 0x33, 0x44 }; /* OG-01: a confirm needs both ids known */
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 0, "OH-04: no result -> nothing written");
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", K_ID) == 0 &&
+                   f.res_writes == 1,
+               "OH-04: setup OK result");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", K_ID) == 0 && f.res_writes == 2 &&
+                   update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
+                   d.detail == UPD_INST_DETAIL_CONFIRMED && strcmp(d.semver, "2.0.0") == 0,
+               "OH-04: confirm_result rewrites the OK result as confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", K_ID) == 0 && f.res_writes == 2, "OH-04: already confirmed -> no rewrite");
+    fake_init(&f);
+    o = ops_for(&f);
+    TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_SHA_MISMATCH, "2.0.0", NULL) == 0,
+               "OH-04: setup FAIL result");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 1, "OH-04: a FAIL result is left alone");
+    fake_init(&f);
+    o = ops_for(&f);
+    (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", K_ID);
+    f.res_rc = -1;
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", K_ID) == -1, "OH-04: a failed write is reported");
+
+    /* OC-03: the record must name the running image. */
+    fake_init(&f);
+    o = ops_for(&f);
+    (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", K_ID);
+    TEST_CHECK(update_install_confirm_result(&o, "3.0.0", K_ID) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+               "OC-03: record for another version is not confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, NULL, K_ID) == UPD_INST_CONFIRM_UNVERIFIED && f.res_writes == 1,
+               "OC-03/OG-01: unknown running version is not confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, "", K_ID) == UPD_INST_CONFIRM_UNVERIFIED && f.res_writes == 1,
+               "OC-03/OG-01: empty running version is not confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", K_ID) == 0 && f.res_writes == 2, "OC-03: matching version confirms");
+
+    /* OC-02: status-time derivation from otadata. */
+    update_install_res_t q;
+    memset(&q, 0, sizeof(q));
+    q.code = UPD_INST_RES_OK;
+    strcpy(q.semver, "2.0.0");
+    memcpy(q.id, K_ID, UPD_INST_ID_LEN);
+    TEST_CHECK(!update_install_res_derive_confirmed(&q, "2.0.0", K_ID, false) && q.detail != UPD_INST_DETAIL_CONFIRMED,
+               "OC-02: not VALID in otadata leaves pending_confirm");
+    TEST_CHECK(!update_install_res_derive_confirmed(&q, "3.0.0", K_ID, true) && q.detail != UPD_INST_DETAIL_CONFIRMED,
+               "OC-02: VALID but another image leaves pending_confirm");
+    TEST_CHECK(update_install_res_derive_confirmed(&q, "2.0.0", K_ID, true) &&
+                   strcmp(update_install_res_state_name(&q), "recorded") == 0,
+               "OC-02: VALID running image that the record names reads confirmed");
+
+    /* OF-01/OF-02/OF-04: image id match, not_running state, no rewrite when already confirmed. */
+    {
+        static const uint8_t id_a[UPD_INST_ID_LEN] = {1, 2, 3, 4}, id_b[UPD_INST_ID_LEN] = {9, 9, 9, 9};
+        update_install_res_t z;
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, "2.0.0");
+        memcpy(z.id, id_a, UPD_INST_ID_LEN);
+        TEST_CHECK(update_install_res_matches_running(&z, "2.0.0", id_a), "OF-01: same semver and id matches");
+        TEST_CHECK(!update_install_res_matches_running(&z, "2.0.0", id_b), "OF-01: same semver, other id does not match");
+        TEST_CHECK(!update_install_res_matches_running(&z, "2.0.0", NULL), "OG-01: unknown running id never matches");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "2.0.0", NULL), "unverified") == 0, "OG-01: unknown running id reads unverified");
+        TEST_CHECK(!update_install_res_derive_confirmed(&z, "2.0.0", NULL, true) && z.detail != UPD_INST_DETAIL_CONFIRMED,
+                   "OG-01: status derivation never confirms with an unknown running id");
+        TEST_CHECK(!update_install_res_derive_confirmed(&z, "2.0.0", id_b, true) && z.detail != UPD_INST_DETAIL_CONFIRMED,
+                   "OF-01: status derivation refuses a same-semver other image");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "2.0.0", id_b), "not_running") == 0, "OF-02: other id reads not_running");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "3.0.0", id_a), "not_running") == 0, "OF-02: other semver reads not_running");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "2.0.0", id_a), "pending_confirm") == 0, "OF-02: matching stays pending_confirm");
+        fake_init(&f);
+        o = ops_for(&f);
+        (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", id_a);
+        TEST_CHECK(update_install_confirm_result(&o, "2.0.0", id_b) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+                   "OF-01: confirm mark refuses a same-semver other image");
+        TEST_CHECK(update_install_confirm_result(&o, "2.0.0", id_a) == 0 && f.res_writes == 2, "OF-01: confirm mark with matching id");
+        TEST_CHECK(update_install_confirm_result(&o, "2.0.0", id_a) == 0 && f.res_writes == 2,
+                   "OF-04: already confirmed on read-back -> no further write");
+    }
+
+    /* OF-05: real string forms from benchmain30. The record keeps the staged header describe string; the running
+     * identity is the converted form. */
+    {
+        static const uint8_t id_a[UPD_INST_ID_LEN] = {0xbc, 0xa5, 0xce, 0x20};
+        static const char *const rec = "1.0.0-pre.1-2276-ga71d481";
+        static const char *const run = "1.0.0-pre.1.2276";
+        update_install_res_t z;
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, rec);
+        /* OG-01: the benchmain30 record had a zero id; version equality alone must not confirm it. */
+        TEST_CHECK(!update_install_res_matches_running(&z, run, NULL), "OG-01: zero record id and unknown running id never match");
+        TEST_CHECK(!update_install_res_matches_running(&z, run, id_a), "OG-01: zero record id never matches a known running id");
+        TEST_CHECK(strcmp(update_install_res_state(&z, run, id_a), "unverified") == 0, "OG-01: zero record id reads unverified");
+        TEST_CHECK(!update_install_res_derive_confirmed(&z, run, id_a, true) && z.detail != UPD_INST_DETAIL_CONFIRMED,
+                   "OG-01: zero record id is never derived confirmed");
+        fake_init(&f);
+        o = ops_for(&f);
+        (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, rec, NULL);
+        TEST_CHECK(update_install_confirm_result(&o, run, id_a) == UPD_INST_CONFIRM_UNVERIFIED && f.res_writes == 1,
+                   "OG-01: confirm refuses a zero-id record (nothing written)");
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, rec);
+        memcpy(z.id, id_a, UPD_INST_ID_LEN);
+        TEST_CHECK(strcmp(update_install_res_state(&z, run, id_a), "pending_confirm") == 0, "OF-05: state is pending_confirm, not not_running");
+        TEST_CHECK(update_install_res_derive_confirmed(&z, run, id_a, true), "OF-05: VALID running image derives confirmed");
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, rec);
+        memcpy(z.id, id_a, UPD_INST_ID_LEN);
+        TEST_CHECK(update_install_res_matches_running(&z, run, id_a), "OF-05: describe record plus matching id matches");
+        TEST_CHECK(!update_install_res_matches_running(&z, "1.0.0-pre.1.2277", id_a), "OF-05: other commit count does not match");
+        TEST_CHECK(!update_install_res_matches_running(&z, "1.0.0-pre.1.2276", (const uint8_t[]){9, 9, 9, 9}),
+                   "OF-05: same version, other id does not match");
+        TEST_CHECK(update_install_res_matches_running(&z, "v1.0.0-pre.1-2276-ga71d481", id_a), "OF-05: leading v and describe both canonicalise");
+        fake_init(&f);
+        o = ops_for(&f);
+        (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, rec, id_a);
+        TEST_CHECK(update_install_confirm_result(&o, run, id_a) == 0 && f.res_writes == 2, "OF-05: boot confirm marks the describe record confirmed");
+    }
+
+    /* OG-01: -dirty and a no-prerelease describe string. A dev build must never equal the release or a clean build,
+     * even with equal ids (which cannot be a coincidence, but the version strings must not widen the match either). */
+    {
+        static const uint8_t id_a[UPD_INST_ID_LEN] = { 1, 2, 3, 4 };
+        update_install_res_t z;
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        memcpy(z.id, id_a, UPD_INST_ID_LEN);
+        strcpy(z.semver, "1.0.0-pre.1-2276-ga71d481-dirty");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-pre.1-2276-ga71d481-dirty", id_a) == UPD_INST_MATCH_YES,
+                   "OG-01: dirty record matches the same dirty describe");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-pre.1-2276-ga71d481", id_a) == UPD_INST_MATCH_NO,
+                   "OG-01: dirty record does not match the clean build");
+        strcpy(z.semver, "1.0.0-pre.1-2276-ga71d481");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-pre.1-2276-ga71d481-dirty", id_a) == UPD_INST_MATCH_NO,
+                   "OG-01: clean record does not match the dirty build");
+        /* No prerelease tag: N commits past release 1.0.0 must not equal the release or another count. */
+        strcpy(z.semver, "1.0.0-12-gabcdef1");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0", id_a) == UPD_INST_MATCH_NO, "OG-01: dev build past a release is not the release");
+        strcpy(z.semver, "1.0.0");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-12-gabcdef1", id_a) == UPD_INST_MATCH_NO, "OG-01: release is not a dev build past it");
+        strcpy(z.semver, "1.0.0-12-gabcdef1");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-13-gabcdef2", id_a) == UPD_INST_MATCH_NO, "OG-01: other commit count past a release differs");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-12-gabcdef1", id_a) == UPD_INST_MATCH_YES, "OG-01: same no-prerelease describe matches");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-12-gabcdef1-dirty", id_a) == UPD_INST_MATCH_NO, "OG-01: no-prerelease dirty differs from clean");
+        strcpy(z.semver, "v1.0.0");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0", id_a) == UPD_INST_MATCH_YES, "OG-01: a tagged release still matches without the v");
+        /* OG-05: strings cut at 31 characters on both sides still compare equal (same esp_app_desc field), by id. */
+        strcpy(z.semver, "1.0.0-pre.10-12345-gabcdef1-dir");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-pre.10-12345-gabcdef1-dir", id_a) == UPD_INST_MATCH_YES,
+                   "OG-05: identical truncated describe strings match");
+        TEST_CHECK(update_install_res_match(&z, "1.0.0-pre.10-12345-gabcdef1-dir", (const uint8_t[]){ 9, 9, 9, 9 }) == UPD_INST_MATCH_NO,
+                   "OG-05: a truncated string with another id does not match");
+        /* The strict form itself. */
+        char sbuf[64];
+        TEST_CHECK(update_semver_from_describe_strict("1.0.0-pre.1-2276-ga71d481-dirty", sbuf, sizeof(sbuf)) &&
+                       strcmp(sbuf, "1.0.0-pre.1.2276+dirty") == 0,
+                   "OG-01: strict form keeps -dirty");
+        TEST_CHECK(update_semver_from_describe_strict("1.0.0-12-gabcdef1-dirty", sbuf, sizeof(sbuf)) &&
+                       strcmp(sbuf, "1.0.0+c12.dirty") == 0,
+                   "OG-01: strict form keeps the commit count past a release and -dirty");
+        TEST_CHECK(update_semver_from_describe_strict("1.0.0", sbuf, sizeof(sbuf)) && strcmp(sbuf, "1.0.0") == 0,
+                   "OG-01: strict form of a release is the release");
+        TEST_CHECK(update_semver_from_describe("1.0.0-12-gabcdef1-dirty", sbuf, sizeof(sbuf)) && strcmp(sbuf, "1.0.0") == 0,
+                   "OG-01: the ordering form is unchanged");
+    }
+
+    /* OC-01: retry schedule. */
+    TEST_CHECK(update_install_confirm_retry_delay_ms(0) == 5000 && update_install_confirm_retry_delay_ms(119) == 5000,
+               "OC-01: 5 s backoff first");
+    TEST_CHECK(update_install_confirm_retry_delay_ms(120) == 60000 && update_install_confirm_retry_delay_ms(179) == 60000,
+               "OC-01: then 60 s");
+    TEST_CHECK(update_install_confirm_retry_delay_ms(180) == 0, "OC-01: then gives up");
+}
+
 /* recfx leftover: the LCD warning line (40 columns) holds "INSTALL FAILED: " plus the reason. */
 static void test_reason_lcd_fits(void)
 {
@@ -645,6 +854,25 @@ static int a_write(void *c, const uint8_t *b, size_t n)
     return a->write_rc;
 }
 
+static bool g_unconfirmed;
+static bool a_unconfirmed(void *c) { (void)c; return g_unconfirmed; }
+
+static void test_prepare_unconfirmed(void)
+{
+    app_t a;
+    char msg[96];
+    int st = 0;
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    update_install_app_ops_t o = { &a, a_safe, a_stage, a_erase, a_write, a_unconfirmed };
+    g_unconfirmed = true;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 409 && a.writes == 0 && a.n == 0,
+               "OC-04: unconfirmed running image refuses 409, nothing erased or written");
+    g_unconfirmed = false;
+    TEST_CHECK(update_install_prepare(&o, msg, sizeof(msg), &st) && a.writes == 1, "OC-04: confirmed image installs");
+}
+
 static void test_prepare(void)
 {
     TEST_SECTION("update_install_record -- app prepare hook");
@@ -820,6 +1048,8 @@ void run_test_update_install_record(void)
     test_drop_stale_recorded();
     test_reason_lcd_fits();
     test_res_versions();
+    test_oh04_confirm();
+    test_prepare_unconfirmed();
     test_refusal_clear_failure();
     test_result_identity();
     test_prepare();

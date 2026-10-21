@@ -247,7 +247,7 @@ size_t update_semver_format(const update_semver_t *v, char *buf, size_t buf_len)
 // RB-02: esp_app_desc_t.version is a fixed 32-byte field in the IDF image ABI (UPDATE_STAGE_APP_DESC_VERSION_OFFSET
 // and the bootloader read it), so it cannot be widened; a describe longer than 31 chars arrives truncated and
 // parses as unknown (fail-safe: an update then needs force, never a silent downgrade).
-bool update_semver_from_describe(const char *desc, char *out, size_t cap)
+static bool from_describe_impl(const char *desc, char *out, size_t cap, bool strict)
 {
     if (out == NULL || cap == 0) {
         return false;
@@ -267,7 +267,9 @@ bool update_semver_from_describe(const char *desc, char *out, size_t cap)
     memcpy(buf, desc, n);
     buf[n] = '\0';
     static const char dirty[] = "-dirty";
+    bool is_dirty = false;
     if (n > sizeof(dirty) - 1 && strcmp(buf + n - (sizeof(dirty) - 1), dirty) == 0) {
+        is_dirty = true;
         n -= sizeof(dirty) - 1;
         buf[n] = '\0';
     }
@@ -306,5 +308,34 @@ bool update_semver_from_describe(const char *desc, char *out, size_t cap)
         }
         memcpy(v.pre + pl, tail, (size_t)tn + 1);
     }
-    return update_semver_format(&v, out, cap) != 0;
+    size_t fl = update_semver_format(&v, out, cap);
+    if (fl == 0) {
+        return false;
+    }
+    if (strict) {
+        // OG-01: keep what the ordering form drops, as build metadata (ignored by compare, kept by strcmp):
+        // "+c<N>" for N commits past a release tag, "+dirty" for a dirty tree, "+c<N>.dirty" for both.
+        bool rel_commits = has_suffix && commits > 0 && !v.has_pre;
+        int w = 0;
+        if (rel_commits) {
+            w = snprintf(out + fl, cap - fl, "+c%u%s", (unsigned)commits, is_dirty ? ".dirty" : "");
+        } else if (is_dirty) {
+            w = snprintf(out + fl, cap - fl, "+dirty");
+        }
+        if (w < 0 || (size_t)w >= cap - fl) {
+            out[0] = '\0';
+            return false;
+        }
+    }
+    return true;
+}
+
+bool update_semver_from_describe(const char *desc, char *out, size_t cap)
+{
+    return from_describe_impl(desc, out, cap, false);
+}
+
+bool update_semver_from_describe_strict(const char *desc, char *out, size_t cap)
+{
+    return from_describe_impl(desc, out, cap, true);
 }

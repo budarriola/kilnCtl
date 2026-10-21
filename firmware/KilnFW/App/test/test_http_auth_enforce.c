@@ -428,6 +428,20 @@ static void test_every_real_route_allows_with_auth_off(void) {
     }
 }
 
+static void test_request_touches_session(void) {
+    TEST_SECTION("http_auth_request_touches_session -- AF-02/AF-03 background header skip");
+    TEST_CHECK(http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW, false, HTTP_GET),
+               "normal GET touches");
+    TEST_CHECK(!http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW, true, HTTP_GET),
+               "background GET does not touch");
+    TEST_CHECK(http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_ALLOW, true, HTTP_POST),
+               "background-header POST still touches");
+    TEST_CHECK(!http_auth_request_touches_session(ROUTE_TIER_ADMIN, HTTP_AUTH_DECISION_DENY_NO_SESSION, false, HTTP_GET),
+               "denied request never touches");
+    TEST_CHECK(!http_auth_request_touches_session(ROUTE_TIER_OPEN, HTTP_AUTH_DECISION_ALLOW, false, HTTP_GET),
+               "OPEN tier never touches");
+}
+
 static void test_decision_counts_as_activity(void) {
     TEST_SECTION("http_auth_decision_counts_as_activity -- section 8's activity predicate");
 
@@ -912,6 +926,7 @@ void run_test_http_auth_enforce(void) {
     test_every_table_row_reachable_via_lookup();
     test_every_real_route_allows_with_auth_off();
     test_decision_counts_as_activity();
+    test_request_touches_session();
     test_wifi_setup_tier_provisioned_gating();
     test_refusal_close_threshold();
 }

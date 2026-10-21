@@ -701,6 +701,10 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
  * Idempotent. */
 void dashboard_prime_flash_facts(void);
 
+/* OF-05: byte length of the running image (esp_image_get_metadata().image_len, the same length as the published
+ * .bin), primed once. False = unknown. */
+bool dashboard_running_image_len(uint32_t *len);
+
 /* Read-only accessor for readiness_http.c (TODO.md 8.3): the same three
  * hardware-answering flags /api/status reports as io_ready/thermo_ready/
  * safety_ready, without readiness_http.c needing its own copy of the

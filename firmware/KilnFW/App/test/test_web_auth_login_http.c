@@ -358,6 +358,9 @@ static void set_admin_credential(const char *username, const char *password)
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, username, password, TEST_SALT, false) ==
                    HAL_OK,
                "test setup: admin credential stores cleanly");
+    // AU-02: a provisioned board always has a policy record; without one it fails closed.
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "test setup: policy stores cleanly");
 }
 
 static esp_err_t do_login(const char *username, const char *password)
@@ -758,6 +761,8 @@ static void set_user_credential(const char *username, const char *password)
 {
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, username, password, TEST_SALT, false) == HAL_OK,
                "test setup: user credential stores cleanly");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "test setup: policy stores cleanly");
 }
 
 static void test_user_success_does_not_reset_admin_ladder(void)
@@ -1650,8 +1655,230 @@ static void test_lockout_no_phantom_lock_at_tick_wrap(void)
     }
 }
 
+// RV-01/RV-02: the REAL write orders. The setup wizard and the Security page both send
+// set_web_password first and set_policy second, on a store with no policy record.
+static void test_rv01_wizard_order_password_then_policy(void)
+{
+    TEST_SECTION("RV-01 -- wizard order (password, then policy) on a fresh store ends in a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "first admin password stores");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && !cur.web_enabled,
+               "RV-01: a credential never leaves the policy absent (stored both-off)");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set_policy after the password succeeds");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled, "web auth enabled and readable");
+    strncpy(s_stub_client_ip, "10.7.0.1", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "correct-horse-battery-staple") == ESP_OK, "admin login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rv01_security_page_order_user_then_admin(void)
+{
+    TEST_SECTION("RV-01 -- Security page order (user pw, admin pw, then policy) ends in a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "user-password-123456", TEST_SALT, false) ==
+                   HAL_OK, "user password first");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK, "policy readable between the two POSTs");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set_policy succeeds");
+    strncpy(s_stub_client_ip, "10.7.0.2", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "correct-horse-battery-staple") == ESP_OK, "admin login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rv01_legacy_board_password_no_policy_migrates_open(void)
+{
+    TEST_SECTION("RV-01 -- legacy board (password, no policy, no marker) keeps auth off after the boot migration");
+    reset_all();
+    (void)web_auth_store_storage_reset_evaluate(true); // fresh boot of the old firmware: sentinel only
+    // Simulate a pre-policy firmware: credential stored, never a policy. Drop the migration marker
+    // and the policy that this firmware's set_password wrote.
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "legacy admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "legacy: no policy, no marker");
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+        (void)hal_kv_erase_key(&h, "auth_mig");
+        (void)hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "pre-migration state reads fail-closed");
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && !cur.web_enabled && !cur.lcd_enabled,
+               "migration stored a both-off policy: prior (open) behaviour kept");
+    TEST_CHECK(!web_auth_store_policy_lost(), "no policy-lost banner on a migrated board");
+    // Migration is one-time: a later policy+marker loss on this provisioned board stays fail-closed.
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "later policy loss");
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "no re-migration: dashboards only");
+    TEST_CHECK(web_auth_store_policy_lost(), "RV-04: policy-lost banner shown");
+    TEST_CHECK(strstr(web_auth_store_policy_lost_banner_text(), "policy lost") != NULL, "RV-04 banner text");
+}
+
+
+static void rf2_kv_erase(const char *key)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+    (void)hal_kv_erase_key(&h, key);
+    (void)hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static void test_rf2_02_user_only_lost_policy_bootstrap_does_not_open(void)
+{
+    TEST_SECTION("RF2-02 -- user-only board that lost policy+marker: admin bootstrap must not write both-off");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "user-password-123456", TEST_SALT, false) ==
+                   HAL_OK, "user password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "policy and marker lost");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "RV-03 state reads fail-closed");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "bootstrap admin stores");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE,
+               "RF2-02: bootstrap did not turn auth off (still fail-closed)");
+    s_policy_lost = false; // stale flag: set_password must refresh it (RF2-04)
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple-2",
+                                           TEST_SALT, false) == HAL_OK, "second admin write");
+    TEST_CHECK(web_auth_store_policy_lost(), "RF2-04: set_password refreshed the policy-lost flag");
+}
+
+static void test_rf2_01_gesture_then_bootstrap_writes_enabled_policy(void)
+{
+    TEST_SECTION("RF2-01 -- policy lost, marker kept: gesture then bootstrap leaves a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "policy enabled (marker written)");
+    rf2_kv_erase("auth_policy");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "policy lost, marker kept: UNREADABLE");
+    TEST_CHECK(strstr(web_auth_store_policy_lost_banner_text(), "LCD password reset") != NULL, "banner names the reset");
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+    TEST_CHECK(web_auth_store_policy_lost(), "banner shown after the gesture");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "still UNREADABLE after the gesture");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "new-password-0123456789",
+                                           TEST_SALT, false) == HAL_OK, "bootstrap");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled,
+               "RF2-01: enabled policy written");
+    TEST_CHECK(!web_auth_store_policy_lost(), "RF2-04: banner cleared after set_password");
+    strncpy(s_stub_client_ip, "10.7.0.3", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "new-password-0123456789") == ESP_OK, "admin login runs");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rf2_04_both_keys_lost_gesture_is_not_open(void)
+{
+    TEST_SECTION("RF2-04 -- both keys lost, gesture: stays fail-closed with a banner, bootstrap recovers");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "both keys lost");
+    TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "wiped blob counts as provisioned");
+    TEST_CHECK(web_auth_store_policy_lost(), "banner refreshed after the wipe");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "new-password-0123456789",
+                                           TEST_SALT, false) == HAL_OK, "bootstrap");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled, "enabled policy written");
+    TEST_CHECK(!web_auth_store_policy_lost(), "banner cleared");
+}
+
+static void test_rf2_05_failed_both_off_write_and_unreadable_mig(void)
+{
+    TEST_SECTION("RF2-05 -- failed both-off write fails set_password; unreadable auth_mig is not migrated");
+    reset_all();
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) != HAL_OK, "both-off write fails: set_password fails");
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "no credential stored");
+
+    reset_all();
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "legacy admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "no policy, no marker");
+    {
+        hal_kv_handle_t h;
+        const uint8_t junk[3] = {1, 2, 3};
+        TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+        (void)hal_kv_set_blob(&h, "auth_mig", junk, sizeof(junk));
+        (void)hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+    (void)web_auth_store_storage_reset_evaluate(true);
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "unreadable auth_mig: no guess, no migration");
+}
+
+
+static void test_rf3_01_enabled_policy_write_failure_stores_no_credential(void)
+{
+    TEST_SECTION("RF3-01 -- failed RF2-01 enabled-policy write: error returned, no credential stored");
+    bool saw_policy_fail = false;
+    for (unsigned skip = 0; skip < 12; skip++) {
+        reset_all();
+        TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                               TEST_SALT, false) == HAL_OK, "admin password");
+        web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+        TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "policy enabled (marker written)");
+        rf2_kv_erase("auth_policy");
+        TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+        fake_kv_script_write_status_after(skip, HAL_IO);
+        hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin",
+                                                       "new-password-0123456789", TEST_SALT, false);
+        fake_kv_script_write_status_after(0, HAL_OK);
+        web_auth_policy_t cur;
+        web_auth_load_status_t lst = web_auth_store_load_policy(&cur);
+        if (st == HAL_OK) {
+            TEST_CHECK(lst == WEB_AUTH_LOAD_OK && cur.web_enabled, "RF3-01: ok return implies the enabled policy is stored");
+        } else {
+            if (lst == WEB_AUTH_LOAD_UNREADABLE) {
+                // policy write failed (a failed credential write may still leave staged data in the fake)
+                TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+                           "RF3-01: policy-write error stores no admin credential");
+                saw_policy_fail = true;
+            }
+        }
+    }
+    TEST_CHECK(saw_policy_fail, "RF3-01: a policy-write failure was exercised");
+}
+
+static void test_rf3_03_lcd_pin_blob_counts_as_provisioned(void)
+{
+    TEST_SECTION("RF3-03 -- LCD-PIN-only board that lost policy+marker reads UNREADABLE, not auth-off");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "123456", TEST_SALT) == HAL_OK, "admin PIN");
+    rf2_kv_erase("auth_policy");
+    rf2_kv_erase("auth_ever");
+    web_auth_policy_t cur;
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "no web credential");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "RF3-03: LCD blob present reads UNREADABLE");
+}
+
 void run_test_web_auth_login_http(void)
 {
+    test_rf3_01_enabled_policy_write_failure_stores_no_credential();
+    test_rf3_03_lcd_pin_blob_counts_as_provisioned();
+    test_rf2_02_user_only_lost_policy_bootstrap_does_not_open();
+    test_rf2_01_gesture_then_bootstrap_writes_enabled_policy();
+    test_rf2_04_both_keys_lost_gesture_is_not_open();
+    test_rf2_05_failed_both_off_write_and_unreadable_mig();
+    test_rv01_wizard_order_password_then_policy();
+    test_rv01_security_page_order_user_then_admin();
+    test_rv01_legacy_board_password_no_policy_migrates_open();
     test_lockout_no_phantom_lock_at_tick_wrap();
     test_ax02_login_straddling_reset_mints_no_session();
     test_ax04_login_refuses_on_hash_failure();

@@ -37,6 +37,9 @@ extern "C" {
 #define UPD_INST_NS "upd_inst"
 #define UPD_INST_KEY_REQ "req"
 #define UPD_INST_KEY_RES "res"
+// OG-04: app-side only. 4-byte LE image_length of the prepared install: the byte range the result id (sha256 prefix of
+// the uploaded file) covers. Kept in its own key because the request/result blob layouts are fixed for older images.
+#define UPD_INST_KEY_LEN "len"
 
 #define UPD_INST_SHA_LEN 32u
 #define UPD_INST_SEMVER_LEN 32u
@@ -90,6 +93,7 @@ typedef enum {
     UPD_INST_DETAIL_START_NO_APP = 33,    // apply_start refused: no app partition
     UPD_INST_DETAIL_START_BUSY = 34,      // apply_start refused: an apply is already running
     UPD_INST_DETAIL_START_FAILED = 35,    // apply_start refused for any other reason
+    UPD_INST_DETAIL_CONFIRMED = 36,       // OH-04: OK result only; the new app finished boot confirm (30 s soak)
     UPD_INST_DETAIL_COUNT
 } update_install_detail_t;
 
@@ -118,7 +122,15 @@ bool update_install_res_decode(const uint8_t *buf, size_t len, update_install_re
 
 // MED-3 (AUDIT_UPDATE_FAULTS): recovery found the app image was aborted by the bootloader (never
 // confirmed on its first boot). Rewrites a last OK result to FAIL/rolled_back; returns true when it changed.
+// A result already marked confirmed is never rewritten (the app proved itself; a later invalid partition is another image).
 bool update_install_res_apply_rollback(update_install_res_t *res, bool app_rolled_back);
+
+// OH-04: the app marks an OK result confirmed once boot confirm completed. Returns true when it changed
+// (OK and not yet confirmed); FAIL and none results are left alone.
+bool update_install_res_mark_confirmed(update_install_res_t *res);
+// OH-04: status state for GET /api/update/status last_install.state: "pending_confirm" for an OK result that
+// has not been confirmed (a reset inside the soak still rolls it back), else "recorded".
+const char *update_install_res_state_name(const update_install_res_t *res);
 
 // Writes the identity as UPD_INST_ID_LEN*2 lowercase hex chars plus NUL into out (needs
 // UPD_INST_ID_HEX_LEN bytes). All-zero (no identity) prints as "00000000".
@@ -165,6 +177,46 @@ typedef enum {
 // failure that was recorded (the write is attempted; it may itself have failed).
 update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t *ops,
                                                       update_install_res_t *res_out);
+
+// App side, after boot confirm: reads the result through ops->res_read and rewrites an unconfirmed OK result as
+// confirmed through ops->res_write. 0 = rewritten or already final/absent (nothing to do), <0 = IO failure.
+// OC-03: the result is rewritten only when its semver equals running_semver (the running image); a record that
+// names another image is left alone and the call returns UPD_INST_CONFIRM_NOT_RUNNING (never retried).
+// running_semver NULL or empty never matches.
+#define UPD_INST_CONFIRM_NOT_RUNNING 2
+// OG-01: the record id is zero/unknown, or the running id/version is unknown, so the record cannot be proven to name
+// the running image. Nothing is written (the record stays pending; status reads "unverified"). Final: not retried.
+#define UPD_INST_CONFIRM_UNVERIFIED 3
+int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver,
+                                  const uint8_t *running_id);
+
+// OC-03: true when the OK result names the running image: version strings equal in the strict form (keeps -dirty
+// and the commit count, OG-01) AND both ids known and equal. running_id (UPD_INST_ID_LEN bytes, sha256 prefix of the
+// running image) NULL/all-zero, or an all-zero record id, is unknown and never matches (OG-01).
+typedef enum {
+    UPD_INST_MATCH_NO = 0,     // a definite difference (version or id)
+    UPD_INST_MATCH_YES,        // version and id both equal and known
+    UPD_INST_MATCH_UNVERIFIED, // nothing differs but an id (or the version) is unknown on one side
+} update_install_match_t;
+update_install_match_t update_install_res_match(const update_install_res_t *res, const char *running_semver,
+                                                const uint8_t *running_id);
+bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
+                                        const uint8_t *running_id);
+
+// OF-02: like update_install_res_state_name, but an unconfirmed OK result that does not match the running image
+// reads "not_running" (final: this image will never confirm it). OG-01: one that cannot be proven either way
+// (an id unknown) reads "unverified" (also final: it is never marked confirmed).
+const char *update_install_res_state(const update_install_res_t *res, const char *running_semver,
+                                     const uint8_t *running_id);
+
+// OC-02: status-time cross-check. When the running partition is VALID in otadata (running_valid) and an OK
+// result that names the running image is still unconfirmed, mark it confirmed in memory (no write). True if changed.
+bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver,
+                                         const uint8_t *running_id, bool running_valid);
+
+// OC-01: delay before the next confirm-mark attempt (attempt counts from 0): 5 s for the first 10 min, then 60 s
+// for an hour, then 0 = give up (the next boot retries; status derives the state from otadata meanwhile).
+uint32_t update_install_confirm_retry_delay_ms(unsigned attempt);
 
 // Records a failure/success for the request that update_install_boot_run
 // started (apply task failed, or pre-boot success). Returns 0 when the result
@@ -231,6 +283,8 @@ typedef struct {
                        char semver[UPD_INST_SEMVER_LEN]);
     int (*res_erase)(void *ctx);                             // erase old result, read back gone
     int (*req_write)(void *ctx, const uint8_t *buf, size_t len); // write request, read back equal
+    // OC-04: optional. True while the running image is still unconfirmed (PENDING_VERIFY); the install is refused 409.
+    bool (*running_unconfirmed)(void *ctx);
 } update_install_app_ops_t;
 
 // Returns true when a fresh request (attempts 0) is stored and read back. On false

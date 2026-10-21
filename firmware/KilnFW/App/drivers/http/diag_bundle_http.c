@@ -400,7 +400,7 @@ static bool query_wants_coredump(httpd_req_t *req)
     return httpd_query_key_value(q, "coredump", v, sizeof(v)) == ESP_OK && strcmp(v, "1") == 0;
 }
 
-#define DIAG_MANIFEST_EXTRA_MAX 384u
+#define DIAG_MANIFEST_EXTRA_MAX 512u
 
 static esp_err_t diag_bundle_get_handler(httpd_req_t *req)
 {

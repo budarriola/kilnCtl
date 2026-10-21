@@ -102,6 +102,20 @@ class InstallTests(_Base):
             out = msu.update_install_staged(confirm=True, wait_s=60)
         self.assertTrue(out.startswith("ok"), out)
 
+    def test_describe_staged_version_matches_dotted_running_version(self):
+        # benchmain31: staged header is the git-describe form, the app reports the dotted form; they are one version.
+        desc, dotted = "1.0.0-pre.1-2286-g1a2b3c4", "1.0.0-pre.1.2286"
+        seq = [_st(running="1.0.0-pre.1.2000", sv=desc), _ok(running=dotted, sv=desc)]
+        with mock.patch.object(uhc, "get_install_status", side_effect=seq),              mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("ok"), out)
+
+    def test_dirty_describe_never_equals_clean_running_version(self):
+        self.assertTrue(msu._same_version("1.0.0-pre.1-2286-gabc1234-dirty", "1.0.0-pre.1.2286-dirty"))
+        self.assertFalse(msu._same_version("1.0.0-pre.1-2286-gabc1234-dirty", "1.0.0-pre.1.2286"))
+        self.assertFalse(msu._same_version("1.0.0-pre.1-2286-gabc1234", "1.0.0-pre.1.2287"))
+        self.assertFalse(msu._same_version(None, None))
+
     def test_answered_post_is_accepted_without_a_down_poll(self):
         # Mutant P3: a POST that got an answer must not need an unreachable poll or an uptime proof.
         self.uptime_readable = False
@@ -117,6 +131,47 @@ class InstallTests(_Base):
             out = msu.update_install_staged(confirm=True, wait_s=60)
         self.assertTrue(out.startswith("FAILED"), out)
         self.assertIn("apply_failed", out)
+
+    def test_pending_confirm_is_not_success_until_recorded(self):
+        # OH-04: ok but pending_confirm keeps waiting; the later confirmed record is the success.
+        pend = _st(running="1.0.1", state="pending_confirm", code="ok", rid=STAGED_ID)
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st(), pend, pend, _ok(rid=STAGED_ID)]), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("ok"), out)
+
+    def test_unverified_ok_record_is_never_success(self):
+        # OG-01: the board cannot prove the record names the running image: UNKNOWN, named, never ok.
+        unv = _st(running="1.0.1", state="unverified", code="ok", rid=STAGED_ID)
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [unv] * 100), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertFalse(out.startswith("ok"), out)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("unverified", out)
+
+    def test_pending_confirm_only_ends_unknown_with_note(self):
+        pend = _st(running="1.0.1", state="pending_confirm", code="ok", rid=STAGED_ID)
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [pend] * 100), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("30 s boot confirm", out)
+
+    def test_rolled_back_after_pending_confirm_is_failed(self):
+        pend = _st(running="1.0.1", state="pending_confirm", code="ok", rid=STAGED_ID)
+        rb = _st(running="1.0.0", state="recorded", code="fail", reason="rolled_back", rid=STAGED_ID)
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st(), pend, rb]), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("rolled_back", out)
+
+    def test_pending_confirm_with_nothing_staged_is_not_no_install(self):
+        pend = _st(running="1.0.1", staged=False, state="pending_confirm", code="ok")
+        with mock.patch.object(uhc, "get_install_status", return_value=pend):
+            out = msu.update_install_staged(confirm=False)
+        self.assertNotIn("no install recorded", out)
 
     def test_running_version_alone_is_not_success(self):
         # version matches but no OK record: keep waiting, then UNKNOWN.
@@ -305,6 +360,14 @@ class FollowUpTests(_Base):
         self.assertTrue(out.startswith("UNKNOWN"), out)
         self.assertIn("may still be running", out)
         self.assertIn("update_install_staged(confirm=False)", out)
+
+    def test_follow_up_pending_confirm_is_unknown_and_named(self):
+        self._timed_out_call()
+        pend = _st(running="1.0.1", state="pending_confirm", code="ok", rid=STAGED_ID)
+        with mock.patch.object(uhc, "get_install_status", return_value=pend):
+            out = msu.update_install_staged(confirm=False)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("30 s boot confirm", out)
 
     def test_follow_up_reports_ok_once_new_version_runs_and_reboot_proven(self):
         self._timed_out_call()

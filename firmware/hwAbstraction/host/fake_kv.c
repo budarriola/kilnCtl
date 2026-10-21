@@ -1,5 +1,6 @@
 /* fake_kv.c -- host fake backend for hal_kv.h. See fake_kv.h. */
 #include "fake_kv.h"
+#include "../common/hal_kv_wstat_impl.h" /* BW-01 */
 
 #include <string.h>
 
@@ -579,6 +580,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, fake_kv_k
     k->pending_kind = (uint8_t)kind;
     k->pending_len = len;
     if (len) memcpy(k->pending_data, buf, len);
+    hal_kv_wstat_note(s_partitions[hs->partition_slot].name, key); /* BW-01 */
     return HAL_OK;
 }
 
@@ -676,6 +678,7 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     k->pending_set = true;
     k->pending_tombstone = true;
     k->pending_len = 0;
+    hal_kv_wstat_note(s_partitions[hs->partition_slot].name, key); /* BW-01 */
     return HAL_OK;
 }
 

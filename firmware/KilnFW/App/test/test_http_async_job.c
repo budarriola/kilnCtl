@@ -4,7 +4,9 @@
 // because the host xTaskCreate() stub never actually invokes the function it
 // is given -- see stubs/freertos/task.h's own comment), same convention as
 // every other test file in this executable that needs a static seam.
+#include <string.h>
 #include "test_common.h"
+#include "../drivers/common/stack_margin.h"
 
 #include "esp_http_server.h"
 
@@ -270,6 +272,29 @@ static void test_run_job_clears_task_handle_atomically_with_busy(void)
 // guard itself and the async-job side of the contract are proven.
 // ---------------------------------------------------------------------------
 
+// RS-03: the job task's stack high-water outlives the task. run_job() records it (RAM-only last-seen minimum)
+// before the slot clears, so stack_margin can still report it when no job is alive.
+static void test_run_job_retains_stack_high_water_after_exit(void)
+{
+    TEST_SECTION("RS-03: run_job() retains the stack high-water for stack_margin after the task is gone");
+    reset_stubs();
+    TEST_CHECK(stack_margin_register("http_async_job", &s_task_handle, 10240), "http_async_job registered");
+    size_t idx = (size_t)-1;
+    for (size_t i = 0; i < stack_margin_count(); i++) {
+        const char *nm = NULL;
+        if (stack_margin_read(i, &nm, NULL, NULL, NULL, NULL) && nm && strcmp(nm, "http_async_job") == 0) idx = i;
+    }
+    TEST_CHECK(idx != (size_t)-1, "entry found");
+    uint32_t kept = 0;
+    TEST_CHECK(!stack_margin_retained(idx, &kept), "nothing retained before any job ran");
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "guard claimed as try_start does");
+    http_async_job_run_ctx_t rc = { fake_job_fn, NULL, NULL };
+    run_job(&rc);
+    bool alive = true;
+    TEST_CHECK(stack_margin_read(idx, NULL, NULL, NULL, NULL, &alive) && !alive, "task reads as not running");
+    TEST_CHECK(stack_margin_retained(idx, &kept), "RS-03: the finished job's high-water is retained");
+}
+
 static void test_guard_basic_claim_release_semantics(void)
 {
     reset_stubs();
@@ -367,6 +392,7 @@ static void test_lcd_ui_jobs_use_shared_worker(void)
 
 void run_test_http_async_job(void)
 {
+    test_run_job_retains_stack_high_water_after_exit();  // first: needs the registry entry free of earlier retains
     test_guard_basic_claim_release_semantics();
     test_async_job_refused_while_each_other_writer_holds_guard();
     test_other_writers_refused_while_async_job_runs();

@@ -2496,6 +2496,11 @@
           }
         }
         lastKnownRole = role;
+        var prevSessionRole = window.kcSessionRole;
+        window.kcSessionRole = role; // AG-01: dashboard background polls gate on this
+        if (role === 'admin' && prevSessionRole !== 'admin') {
+          try { window.dispatchEvent(new CustomEvent('kc-admin-role')); } catch (e) { /* old browser */ }
+        }
 
         // Shows/hides nav.js's Log out control for the role this poll just
         // reported -- the SAME poll response, not a second fetch, so the

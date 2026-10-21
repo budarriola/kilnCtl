@@ -1376,7 +1376,8 @@ def backup_import(
     category = backup_import_http_client.classify_refusal(status, resp_text)
     if category == backup_import_http_client.REFUSAL_PARTIAL_WRITE:
         return (
-            f"FAILED: HTTP {status} -- a PARTIAL write landed before the restore failed: "
+            f"FAILED: HTTP {status} -- the restore failed after it began writing, so some settings MAY have been applied "
+            f"(compare an export before and after; identical values change nothing): "
             f"{resp_text} (POST elapsed {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
             f"{after_readiness}"
         )

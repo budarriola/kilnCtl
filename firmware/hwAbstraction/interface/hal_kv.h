@@ -175,6 +175,20 @@ typedef struct {
 /* nvs_report's enumeration (ui_page_diagnostics.c). */
 hal_status_t hal_kv_stats(const char *partition, hal_kv_stats_t *out);
 
+/* BW-01: RAM-only per-key write counter for partition "kiln_nvs" (this boot; nothing persisted,
+ * so it adds no flash wear). Backends call hal_kv_wstat_note() on every successful set_*, erase_key
+ * and commit-free write path; writes to other partitions are ignored. Up to HAL_KV_WSTAT_SLOTS
+ * distinct keys are tracked by name, further keys fold into "other". Implemented in
+ * common/hal_kv_wstat_impl.h, included by each backend. Counts are racy-tolerant
+ * (volatile, no lock): a lost increment under contention is acceptable for a diagnostic. */
+#define HAL_KV_WSTAT_SLOTS 6
+#define HAL_KV_WSTAT_NAME_MAX 16
+void hal_kv_wstat_note(const char *partition, const char *key);
+/* Slot i (0..HAL_KV_WSTAT_SLOTS-1): false when unused. i == HAL_KV_WSTAT_SLOTS returns the
+ * "other" bucket with name "other" (false when zero). */
+bool hal_kv_wstat_get(unsigned i, char name[HAL_KV_WSTAT_NAME_MAX], uint32_t *count);
+void hal_kv_wstat_reset(void); /* host tests */
+
 /* Exposes today's caller_stack_is_external predicate so flash_worker_lint.py
  * and the existing copy-pasted guards can be rekeyed onto hal_kv_set_* /
  * hal_kv_commit / hal_kv_erase_* verbatim. See write-context safety
