@@ -795,3 +795,14 @@ Bench soak benchmain29 (docs/BENCH_TEST_LOG.md). Found while measuring RAM-02.
 - **RF3-04** INFO (REVIEW_RF2_FIX_2026_10_20): gesture on a never-provisioned store reads UNREADABLE until bootstrap, which enables web+LCD auth (LCD locked pending PIN). Judged safe; document.
 - **RF3-05** INFO (REVIEW_RF2_FIX_2026_10_20): post-gesture bootstrap stays first-LAN-client and now also enables the policy. Unchanged exposure.
 - **RF3-06** INFO (REVIEW_RF2_FIX_2026_10_20): RF2-01 load/set runs outside cred_store_lock (as RF2-09).
+## REVIEW_OF05_FIX_2026_10_20 (OG)
+
+- **OG-01** MED, `update_install_record.c:170-182`: when the record id is zero (seen on the bench) or the running id is unknown, the match falls back to semver only. Canonicalisation also strips `-dirty` and turns `X-N-gH` (no prerelease) into `X`, so a different build can be marked `confirmed`. This affects the record and status only. Fix: never write or derive `confirmed` unless both ids are known. Add tests. Status open.
+- **OG-02** LOW, `update_install_http.c:339,412`: about 3 MB is hashed on the httpd worker on the first status GET (about 0.5-1.5 s). It is also hashed on every boot under the update claim, even with no record. TWDT is not at risk (yields every 64 KB). Fix: hash only for an OK, unconfirmed record, and prime it in ota_confirm. Status open.
+- **OG-03** LOW, `update_install_http.c:150-180`: `volatile have` does not order the `cached[]` writes (dual core). A second caller can read a torn id, which gives a false not_running. Fix: release store or spinlock. Status open.
+- **OG-04** LOW, `update_install_http.c:153-170`: the running hash covers `image_len`, while the record id covers the uploaded file's `image_length`. They are equal for unsigned images, but differ with secure-boot v2 or a padded asset. That fails safe (not_running). Fix: store image_length in the result record. Status open.
+- **OG-05** LOW, `update_install_record.h:42`: the 32-byte semver field truncates long describe strings (pre.10, 5-digit counts). Canonicalisation then fails, and the record reads not_running. Fix: canonicalise before writing the record. Status open.
+- **OG-06** INFO: image_len 0 or unknown gives a NULL id and a semver-only match (see OG-01). Flash facts are primed on app_main. Status closed (note).
+- **OG-07** INFO: the new frame is about 800 B on internal stacks (httpd 8192 B, ota_confirm 5120 B), so the cache-disable is safe. Check the OF-04 high-water log on the bench. Status closed (note).
+- **OG-08** INFO: semver canonicalisation is correct for the release and dev forms and for a leading v. A recovery string passes through unchanged, and confirm is ESP-only. Status closed (no action).
+- **OG-09** INFO: OF-01..OF-04 are sound once OF-05 replaced esp_partition_get_sha256. There is no test for running_image_id, `-dirty`, or a no-prerelease describe string. Status closed (note).
