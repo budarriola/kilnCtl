@@ -139,6 +139,25 @@ static esp_ota_img_states_t running_ota_state(void)
     return st;
 }
 
+// OF-01: sha256 prefix of the running image, computed once and cached (esp_partition_get_sha256 hashes the
+// image per its own metadata, the same bytes as the published .bin). False = unknown: callers fall back to semver.
+static bool running_image_id(uint8_t id[UPD_INST_ID_LEN])
+{
+    static uint8_t cached[UPD_INST_ID_LEN];
+    static bool have = false;
+    if (!have) {
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        uint8_t sha[UPD_INST_SHA_LEN];
+        if (run == NULL || esp_partition_get_sha256(run, sha) != ESP_OK) {
+            return false;
+        }
+        memcpy(cached, sha, UPD_INST_ID_LEN);
+        have = true;
+    }
+    memcpy(id, cached, UPD_INST_ID_LEN);
+    return true;
+}
+
 static bool app_running_unconfirmed(void *ctx)
 {
     (void)ctx;
@@ -291,7 +310,8 @@ int update_install_http_mark_confirmed(void)
         update_identity_t run;
         memset(&run, 0, sizeof(run));
         update_fetch_running_identity(&run, NULL);
-        rc = update_install_confirm_result(&ops, run.version);
+        uint8_t rid[UPD_INST_ID_LEN];
+        rc = update_install_confirm_result(&ops, run.version, running_image_id(rid) ? rid : NULL);
         ota_http_update_end();
     }
     if (rc != 0) {
@@ -363,9 +383,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     json_safe(rv, sizeof(rv), run.version);
     json_safe(sv, sizeof(sv), staged_ver);
     json_safe(lv, sizeof(lv), have == 1 ? res.semver : "");
+    uint8_t rid[UPD_INST_ID_LEN];
+    const uint8_t *rid_p = running_image_id(rid) ? rid : NULL;
     /* OC-02: a VALID running image that the record names is confirmed even if the record write has not landed. */
     if (have == 1) {
-        (void)update_install_res_derive_confirmed(&res, run.version, running_ota_state() == ESP_OTA_IMG_VALID);
+        (void)update_install_res_derive_confirmed(&res, run.version, rid_p, running_ota_state() == ESP_OTA_IMG_VALID);
     }
 
     char json[512];
@@ -375,7 +397,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                      "\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\","
                      "\"detail\":\"%s\",\"app_modified\":%s}}",
                      rv, busy ? "true" : "false", staged ? "true" : "false", sv,
-                     have == 1 ? update_install_res_state_name(&res) : (have == 0 ? "none" : "unreadable"),
+                     have == 1 ? update_install_res_state(&res, run.version, rid_p) : (have == 0 ? "none" : "unreadable"),
                      have == 1 ? update_install_code_name(res.code) : "none",
                      have == 1 ? update_install_reason_name(res.reason) : "none", lv, lid,
                      have == 1 ? update_install_detail_name(res.detail) : "none",

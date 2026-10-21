@@ -181,14 +181,23 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 // names another image is left alone and the call returns UPD_INST_CONFIRM_NOT_RUNNING (never retried).
 // running_semver NULL or empty never matches.
 #define UPD_INST_CONFIRM_NOT_RUNNING 2
-int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver);
+int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver,
+                                  const uint8_t *running_id);
 
 // OC-03: true when the OK result names the running image (semver equal, both non-empty).
-bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver);
+// OF-01: running_id (UPD_INST_ID_LEN bytes, sha256 prefix of the running image) NULL/all-zero = unknown, semver only.
+bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
+                                        const uint8_t *running_id);
+
+// OF-02: like update_install_res_state_name, but an unconfirmed OK result that does not match the running image
+// reads "not_running" (final: this image will never confirm it).
+const char *update_install_res_state(const update_install_res_t *res, const char *running_semver,
+                                     const uint8_t *running_id);
 
 // OC-02: status-time cross-check. When the running partition is VALID in otadata (running_valid) and an OK
 // result that names the running image is still unconfirmed, mark it confirmed in memory (no write). True if changed.
-bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver, bool running_valid);
+bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver,
+                                         const uint8_t *running_id, bool running_valid);
 
 // OC-01: delay before the next confirm-mark attempt (attempt counts from 0): 5 s for the first 10 min, then 60 s
 // for an hour, then 0 = give up (the next boot retries; status derives the state from otadata meanwhile).

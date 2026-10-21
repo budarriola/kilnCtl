@@ -678,7 +678,7 @@ def _stale_id(li: dict, pend: dict) -> bool:
 # OH-04: last_install.state is "recorded" once the new app confirmed its boot (30 s soak), "pending_confirm"
 # for an ok result not yet confirmed (a reset inside the soak still rolls it back to recovery, result
 # FAIL/rolled_back). A board that predates OH-04 reports "recorded" at once.
-_SETTLED_STATES = ("recorded", "pending_confirm")
+_SETTLED_STATES = ("recorded", "pending_confirm", "not_running")  # OF-02: not_running = record names another image
 
 
 def _pending_confirm(li: dict) -> bool:
@@ -784,6 +784,10 @@ def _install_impl(confirm: object, wait_s: float, host: Optional[str], cap_s: fl
                 return (f"UNKNOWN: install of {pend['want']!r} is recorded ok but pending_confirm (the new image has "
                         f"not finished its 30 s boot confirm; a reset now rolls it back): {_install_line(before)}; "
                         f"poll again with update_install_staged(confirm=False) (host={resolved})")
+            if li.get("state") == "not_running" and li.get("code") == "ok":
+                return (f"UNKNOWN: the board's ok record for {pend['want']!r} names a different image than the one "
+                        f"running (state not_running; it will never confirm): {_install_line(before)} "
+                        f"(host={resolved})")
             return (f"UNKNOWN: an earlier install of {pend['want']!r} is still pending, not yet proven: "
                     f"{_install_line(before)}; poll again with update_install_staged(confirm=False) "
                     f"(host={resolved})")

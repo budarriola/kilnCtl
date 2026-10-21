@@ -138,15 +138,45 @@ const char *update_install_res_state_name(const update_install_res_t *res)
                                                                                            : "recorded";
 }
 
-bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver)
+static bool id_is_zero(const uint8_t id[UPD_INST_ID_LEN])
 {
-    return res != NULL && running_semver != NULL && running_semver[0] != '\0' && res->semver[0] != '\0' &&
-           strncmp(res->semver, running_semver, UPD_INST_SEMVER_LEN) == 0;
+    for (size_t i = 0; i < UPD_INST_ID_LEN; i++) {
+        if (id[i] != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
-bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver, bool running_valid)
+bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
+                                        const uint8_t *running_id)
 {
-    if (!running_valid || !update_install_res_matches_running(res, running_semver)) {
+    if (res == NULL || running_semver == NULL || running_semver[0] == '\0' || res->semver[0] == '\0' ||
+        strncmp(res->semver, running_semver, UPD_INST_SEMVER_LEN) != 0) {
+        return false;
+    }
+    /* OF-01: same-semver builds differ by image sha256; compare the id when both sides know it. */
+    if (running_id != NULL && !id_is_zero(running_id) && !id_is_zero(res->id) &&
+        memcmp(res->id, running_id, UPD_INST_ID_LEN) != 0) {
+        return false;
+    }
+    return true;
+}
+
+const char *update_install_res_state(const update_install_res_t *res, const char *running_semver,
+                                     const uint8_t *running_id)
+{
+    if (res != NULL && res->code == UPD_INST_RES_OK && res->detail != UPD_INST_DETAIL_CONFIRMED &&
+        !update_install_res_matches_running(res, running_semver, running_id)) {
+        return "not_running"; /* OF-02: the record names another image; it will never be confirmed by this one */
+    }
+    return update_install_res_state_name(res);
+}
+
+bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver,
+                                         const uint8_t *running_id, bool running_valid)
+{
+    if (!running_valid || !update_install_res_matches_running(res, running_semver, running_id)) {
         return false;
     }
     return update_install_res_mark_confirmed(res);
@@ -160,7 +190,8 @@ uint32_t update_install_confirm_retry_delay_ms(unsigned attempt)
     return attempt < 180u ? 60000u : 0u;
 }
 
-int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver)
+int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver,
+                                  const uint8_t *running_id)
 {
     if (!ops || !ops->res_read || !ops->res_write) {
         return -1;
@@ -178,7 +209,7 @@ int update_install_confirm_result(const update_install_ops_t *ops, const char *r
     if (res.code != UPD_INST_RES_OK || res.detail == UPD_INST_DETAIL_CONFIRMED) {
         return 0;
     }
-    if (!update_install_res_matches_running(&res, running_semver)) {
+    if (!update_install_res_matches_running(&res, running_semver, running_id)) {
         return UPD_INST_CONFIRM_NOT_RUNNING; // OC-03: the record names another image
     }
     if (!update_install_res_mark_confirmed(&res)) {
@@ -489,7 +520,7 @@ bool update_install_prepare(const update_install_app_ops_t *ops, char *msg, size
     }
     *http_status = 409;
     if (ops != NULL && ops->running_unconfirmed != NULL && ops->running_unconfirmed(ops->ctx)) {
-        set_msg(msg, cap, "running image not confirmed yet, retry in a minute");
+        set_msg(msg, cap, "the running image has not confirmed yet; wait for boot confirm to finish, or if it never completes reset the board (an unconfirmed image rolls back to recovery)");
         return false;
     }
     if (ops == NULL || ops->kv_write_safe == NULL || ops->stage_info == NULL || ops->res_erase == NULL ||

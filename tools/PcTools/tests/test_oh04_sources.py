@@ -22,7 +22,7 @@ class Oh04SourceTests(unittest.TestCase):
 
     def test_status_state_comes_from_the_result_helper(self):
         src = _read("drivers/update/update_install_http.c")
-        self.assertIn("update_install_res_state_name(&res)", src)
+        self.assertIn("update_install_res_state(&res, run.version, rid_p)", src)
         self.assertNotIn('have == 1 ? "recorded"', src)
 
     def test_page_names_pending_and_rolled_back(self):

@@ -494,50 +494,76 @@ static void test_oh04_confirm(void)
     fake_t f;
     fake_init(&f);
     update_install_ops_t o = ops_for(&f);
-    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 0, "OH-04: no result -> nothing written");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 0, "OH-04: no result -> nothing written");
     TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL) == 0 &&
                    f.res_writes == 1,
                "OH-04: setup OK result");
-    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 2 &&
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 2 &&
                    update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
                    d.detail == UPD_INST_DETAIL_CONFIRMED && strcmp(d.semver, "2.0.0") == 0,
                "OH-04: confirm_result rewrites the OK result as confirmed");
-    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 2, "OH-04: already confirmed -> no rewrite");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 2, "OH-04: already confirmed -> no rewrite");
     fake_init(&f);
     o = ops_for(&f);
     TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_SHA_MISMATCH, "2.0.0", NULL) == 0,
                "OH-04: setup FAIL result");
-    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 1, "OH-04: a FAIL result is left alone");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 1, "OH-04: a FAIL result is left alone");
     fake_init(&f);
     o = ops_for(&f);
     (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL);
     f.res_rc = -1;
-    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == -1, "OH-04: a failed write is reported");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == -1, "OH-04: a failed write is reported");
 
     /* OC-03: the record must name the running image. */
     fake_init(&f);
     o = ops_for(&f);
     (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL);
-    TEST_CHECK(update_install_confirm_result(&o, "3.0.0") == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+    TEST_CHECK(update_install_confirm_result(&o, "3.0.0", NULL) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
                "OC-03: record for another version is not confirmed");
-    TEST_CHECK(update_install_confirm_result(&o, NULL) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+    TEST_CHECK(update_install_confirm_result(&o, NULL, NULL) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
                "OC-03: unknown running version is not confirmed");
-    TEST_CHECK(update_install_confirm_result(&o, "") == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+    TEST_CHECK(update_install_confirm_result(&o, "", NULL) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
                "OC-03: empty running version is not confirmed");
-    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 2, "OC-03: matching version confirms");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0", NULL) == 0 && f.res_writes == 2, "OC-03: matching version confirms");
 
     /* OC-02: status-time derivation from otadata. */
     update_install_res_t q;
     memset(&q, 0, sizeof(q));
     q.code = UPD_INST_RES_OK;
     strcpy(q.semver, "2.0.0");
-    TEST_CHECK(!update_install_res_derive_confirmed(&q, "2.0.0", false) && q.detail != UPD_INST_DETAIL_CONFIRMED,
+    TEST_CHECK(!update_install_res_derive_confirmed(&q, "2.0.0", NULL, false) && q.detail != UPD_INST_DETAIL_CONFIRMED,
                "OC-02: not VALID in otadata leaves pending_confirm");
-    TEST_CHECK(!update_install_res_derive_confirmed(&q, "3.0.0", true) && q.detail != UPD_INST_DETAIL_CONFIRMED,
+    TEST_CHECK(!update_install_res_derive_confirmed(&q, "3.0.0", NULL, true) && q.detail != UPD_INST_DETAIL_CONFIRMED,
                "OC-02: VALID but another image leaves pending_confirm");
-    TEST_CHECK(update_install_res_derive_confirmed(&q, "2.0.0", true) &&
+    TEST_CHECK(update_install_res_derive_confirmed(&q, "2.0.0", NULL, true) &&
                    strcmp(update_install_res_state_name(&q), "recorded") == 0,
                "OC-02: VALID running image that the record names reads confirmed");
+
+    /* OF-01/OF-02/OF-04: image id match, not_running state, no rewrite when already confirmed. */
+    {
+        static const uint8_t id_a[UPD_INST_ID_LEN] = {1, 2, 3, 4}, id_b[UPD_INST_ID_LEN] = {9, 9, 9, 9};
+        update_install_res_t z;
+        memset(&z, 0, sizeof(z));
+        z.code = UPD_INST_RES_OK;
+        strcpy(z.semver, "2.0.0");
+        memcpy(z.id, id_a, UPD_INST_ID_LEN);
+        TEST_CHECK(update_install_res_matches_running(&z, "2.0.0", id_a), "OF-01: same semver and id matches");
+        TEST_CHECK(!update_install_res_matches_running(&z, "2.0.0", id_b), "OF-01: same semver, other id does not match");
+        TEST_CHECK(update_install_res_matches_running(&z, "2.0.0", NULL), "OF-01: unknown running id falls back to semver");
+        TEST_CHECK(!update_install_res_derive_confirmed(&z, "2.0.0", id_b, true) && z.detail != UPD_INST_DETAIL_CONFIRMED,
+                   "OF-01: status derivation refuses a same-semver other image");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "2.0.0", id_b), "not_running") == 0, "OF-02: other id reads not_running");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "3.0.0", id_a), "not_running") == 0, "OF-02: other semver reads not_running");
+        TEST_CHECK(strcmp(update_install_res_state(&z, "2.0.0", id_a), "pending_confirm") == 0, "OF-02: matching stays pending_confirm");
+        fake_init(&f);
+        o = ops_for(&f);
+        (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", id_a);
+        TEST_CHECK(update_install_confirm_result(&o, "2.0.0", id_b) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+                   "OF-01: confirm mark refuses a same-semver other image");
+        TEST_CHECK(update_install_confirm_result(&o, "2.0.0", id_a) == 0 && f.res_writes == 2, "OF-01: confirm mark with matching id");
+        TEST_CHECK(update_install_confirm_result(&o, "2.0.0", id_a) == 0 && f.res_writes == 2,
+                   "OF-04: already confirmed on read-back -> no further write");
+    }
 
     /* OC-01: retry schedule. */
     TEST_CHECK(update_install_confirm_retry_delay_ms(0) == 5000 && update_install_confirm_retry_delay_ms(119) == 5000,

@@ -759,10 +759,10 @@ Static review of the GitHub self-update and install path (docs/REVIEW_OTA_HEAP_2
 
 ## REVIEW_OC_FIX_2026_10_20 (OF)
 
-- **OF-01** LOW, `update_install_record.c:141-145`, `update_install_http.c:366-369`: running-image match is semver only; same-semver dev builds can show a rolled-back install as confirmed. Fix: compare record sha256/commit to the running image. Status open.
-- **OF-02** LOW, `update_install_record.c:181-183`, `ota_page.html:1144`: a record naming another image stays `pending_confirm` forever and the page polls forever. Fix: distinct `not_running` state, stop polling. Status open.
-- **OF-03** LOW, `update_install_record.c:491-494`: 409 says "retry in a minute" but refuses for the whole boot if confirm never completes (reset still rolls back). Fix: clearer message/state. Status open.
-- **OF-04** LOW, `main_network_http.c:306-313`, `update_install_http.c:291-293`: ~70 min confirm task, extra ~200 B identity per attempt on 5120-B stack, high-water logged only at the end; up to 180 rewrites on read-back failure. Fix: early high-water log, skip write when already confirmed. Status open.
+- **OF-01** LOW, `update_install_record.c:141-145`, `update_install_http.c:366-369`: running-image match is semver only; same-semver dev builds can show a rolled-back install as confirmed. Fix: compare record sha256/commit to the running image. Status fixed: match by image sha256 id (cached running-partition hash; semver-only fallback when unavailable) in mark and status.
+- **OF-02** LOW, `update_install_record.c:181-183`, `ota_page.html:1144`: a record naming another image stays `pending_confirm` forever and the page polls forever. Fix: distinct `not_running` state, stop polling. Status fixed: distinct `not_running` state; page stops polling; MCP maps it.
+- **OF-03** LOW, `update_install_record.c:491-494`: 409 says "retry in a minute" but refuses for the whole boot if confirm never completes (reset still rolls back). Fix: clearer message/state. Status fixed: 409 body names the unconfirmed running image and the reset path.
+- **OF-04** LOW, `main_network_http.c:306-313`, `update_install_http.c:291-293`: ~70 min confirm task, extra ~200 B identity per attempt on 5120-B stack, high-water logged only at the end; up to 180 rewrites on read-back failure. Fix: early high-water log, skip write when already confirmed. Status fixed: high-water logged before the mark loop; no rewrite once read-back is confirmed (tested).
 - **OF-05** INFO: no race with a new install (both under the update claim). Status closed (no action).
 - **OF-06** INFO: 409 guard keys on PENDING_VERIFY only; cannot block recovery. Status closed (no action).
 - **OF-07** INFO, `ota_page.html:1133-1148`: re-poll does not leak; polls in hidden tabs. Status closed (note).
