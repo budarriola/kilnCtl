@@ -1823,8 +1823,55 @@ static void test_rf2_05_failed_both_off_write_and_unreadable_mig(void)
     TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "unreadable auth_mig: no guess, no migration");
 }
 
+
+static void test_rf3_01_enabled_policy_write_failure_stores_no_credential(void)
+{
+    TEST_SECTION("RF3-01 -- failed RF2-01 enabled-policy write: error returned, no credential stored");
+    bool saw_policy_fail = false;
+    for (unsigned skip = 0; skip < 12; skip++) {
+        reset_all();
+        TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                               TEST_SALT, false) == HAL_OK, "admin password");
+        web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+        TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "policy enabled (marker written)");
+        rf2_kv_erase("auth_policy");
+        TEST_CHECK(web_auth_store_clear_for_physical_reset(), "gesture");
+        fake_kv_script_write_status_after(skip, HAL_IO);
+        hal_status_t st = web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin",
+                                                       "new-password-0123456789", TEST_SALT, false);
+        fake_kv_script_write_status_after(0, HAL_OK);
+        web_auth_policy_t cur;
+        web_auth_load_status_t lst = web_auth_store_load_policy(&cur);
+        if (st == HAL_OK) {
+            TEST_CHECK(lst == WEB_AUTH_LOAD_OK && cur.web_enabled, "RF3-01: ok return implies the enabled policy is stored");
+        } else {
+            if (lst == WEB_AUTH_LOAD_UNREADABLE) {
+                // policy write failed (a failed credential write may still leave staged data in the fake)
+                TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
+                           "RF3-01: policy-write error stores no admin credential");
+                saw_policy_fail = true;
+            }
+        }
+    }
+    TEST_CHECK(saw_policy_fail, "RF3-01: a policy-write failure was exercised");
+}
+
+static void test_rf3_03_lcd_pin_blob_counts_as_provisioned(void)
+{
+    TEST_SECTION("RF3-03 -- LCD-PIN-only board that lost policy+marker reads UNREADABLE, not auth-off");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_pin(WEB_AUTH_ROLE_ADMINISTRATOR, "123456", TEST_SALT) == HAL_OK, "admin PIN");
+    rf2_kv_erase("auth_policy");
+    rf2_kv_erase("auth_ever");
+    web_auth_policy_t cur;
+    TEST_CHECK(!web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR), "no web credential");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "RF3-03: LCD blob present reads UNREADABLE");
+}
+
 void run_test_web_auth_login_http(void)
 {
+    test_rf3_01_enabled_policy_write_failure_stores_no_credential();
+    test_rf3_03_lcd_pin_blob_counts_as_provisioned();
     test_rf2_02_user_only_lost_policy_bootstrap_does_not_open();
     test_rf2_01_gesture_then_bootstrap_writes_enabled_policy();
     test_rf2_04_both_keys_lost_gesture_is_not_open();

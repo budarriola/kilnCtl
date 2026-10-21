@@ -689,6 +689,23 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
             }
         }
     }
+    if (role == WEB_AUTH_ROLE_ADMINISTRATOR && wiped_state && !s_storage_reset_latched) {
+        // RF2-01: admin re-setup after the reset gesture on a board whose policy is lost (marker
+        // kept or both keys lost): load_policy reads UNREADABLE and no session could resolve, so
+        // write an enabled policy (as storage_reset_resolve does) to give the gesture a way out.
+        // RF3-01: written BEFORE the credential and its failure is returned, so a failed policy
+        // write stores no credential and the gesture state stays re-enterable.
+        web_auth_policy_t cur;
+        if (web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE) {
+            web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = true,
+                                    .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+            hal_status_t pst = web_auth_store_set_policy(&on);
+            if (pst != HAL_OK) {
+                memset(&blob, 0, sizeof(blob));
+                return pst;
+            }
+        }
+    }
     if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
         memset(&blob, 0, sizeof(blob));
         return HAL_BUSY;
@@ -708,17 +725,6 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
     cred_store_unlock();
     if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && s_storage_reset_latched) {
         storage_reset_resolve();
-    }
-    if (wst == HAL_OK && role == WEB_AUTH_ROLE_ADMINISTRATOR && wiped_state && !s_storage_reset_latched) {
-        // RF2-01: admin re-setup after the reset gesture on a board whose policy is lost (marker
-        // kept or both keys lost): load_policy reads UNREADABLE and no session could resolve, so
-        // write an enabled policy (as storage_reset_resolve does) to give the gesture a way out.
-        web_auth_policy_t cur;
-        if (web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE) {
-            web_auth_policy_t on = {.web_enabled = true, .lcd_enabled = true,
-                                    .web_timeout_s = 1800, .lcd_timeout_s = 1800};
-            (void)web_auth_store_set_policy(&on);
-        }
     }
     if (wst == HAL_OK) {
         lcd_pin_pending_refresh(); // RF2-04: banner flag follows credential changes
@@ -1092,7 +1098,11 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
         web_auth_password_record_t cred;
         web_auth_load_status_t ast = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &cred);
         bool user_cfg = web_auth_store_password_configured(WEB_AUTH_ROLE_USER);
-        if (ast == WEB_AUTH_LOAD_UNREADABLE || ast == WEB_AUTH_LOAD_OK || user_cfg) {
+        // RF3-03: a present LCD PIN blob (any state) also means the board was provisioned.
+        web_auth_lcd_blob_t lcd_probe;
+        bool lcd_present = load_blob(WEB_AUTH_KEY_LCD, &lcd_probe, sizeof(lcd_probe)) != HAL_NOT_FOUND;
+        memset(&lcd_probe, 0, sizeof(lcd_probe));
+        if (ast == WEB_AUTH_LOAD_UNREADABLE || ast == WEB_AUTH_LOAD_OK || user_cfg || lcd_present) {
             return WEB_AUTH_LOAD_UNREADABLE;
         }
         return WEB_AUTH_LOAD_ABSENT; // item 11: never provisioned reads as both-off
