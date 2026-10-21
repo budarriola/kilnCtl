@@ -312,7 +312,7 @@ static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
 // LF-03: yield (vTaskDelay(1)) once per AUTH_REFUSAL_YIELD_BYTES, not per read, so 32 KB fits inside the cap.
 #define AUTH_REFUSAL_DRAIN_BUF_SIZE 256
 #define AUTH_REFUSAL_YIELD_BYTES 4096
-static uint8_t s_auth_refusal_drain_buf[AUTH_REFUSAL_DRAIN_BUF_SIZE]; /* httpd task only */
+EXT_RAM_BSS_ATTR static uint8_t s_auth_refusal_drain_buf[AUTH_REFUSAL_DRAIN_BUF_SIZE]; /* PSRAM: DRAM .bss budget */ /* httpd task only */
 
 static esp_err_t refusal_result(httpd_req_t *req) {
     if (http_auth_refusal_should_close(req->content_len)) {
