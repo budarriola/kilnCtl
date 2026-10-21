@@ -146,10 +146,15 @@ static void test_absolute_lifetime(void)
     TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", 300, t0 + life + 1u) == WEB_AUTH_SESSION_ROLE_NONE,
                "a freshly touched session is still invalid past the absolute lifetime");
     TEST_CHECK(web_auth_table_reap_expired(&t, 300, t0 + life + 1u) == 1, "the reaper frees it");
-    // Idle policy 'never' keeps its documented never-expires meaning.
+    // AG-05 (owner 2026-10-20): idle policy 'never' still gets the absolute cap.
     idx = web_auth_table_create_session(&t, h, "1.2.3.4", WEB_AUTH_SESSION_ROLE_ADMIN, 0);
-    TEST_CHECK(web_auth_table_reap_expired(&t, WEB_AUTH_TIMEOUT_NEVER_S, life + 10u) == 0,
-               "idle timeout NEVER is not subject to the absolute cap");
+    web_auth_table_touch(&t, idx, life);
+    TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", WEB_AUTH_TIMEOUT_NEVER_S, life - 10u) == WEB_AUTH_SESSION_ROLE_ADMIN,
+               "AG-05: NEVER idle policy valid inside the absolute lifetime");
+    TEST_CHECK(web_auth_effective_role(&t, true, h, "1.2.3.4", WEB_AUTH_TIMEOUT_NEVER_S, life + 10u) == WEB_AUTH_SESSION_ROLE_NONE,
+               "AG-05: NEVER idle policy still refused past the absolute lifetime");
+    TEST_CHECK(web_auth_table_reap_expired(&t, WEB_AUTH_TIMEOUT_NEVER_S, life + 10u) == 1,
+               "AG-05: NEVER idle policy reaper frees a session past the absolute lifetime");
 }
 
 // AUDIT_LOGSTORE_TIME LOW-2: eviction must be wrap-safe.

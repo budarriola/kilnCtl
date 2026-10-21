@@ -23,13 +23,11 @@ bool web_auth_session_constant_time_equal(const uint8_t *a, const uint8_t *b, si
 // measured from issued_ms, never extended by touches) has run out. Unsigned
 // elapsed arithmetic, wrap-safe like the idle check; expired slots are reaped
 // before the 2^32 ms alias point (web_auth_table_reap_expired()).
-// Not applied when the idle policy is "never" (owner decision: a never-expire
-// session must really never expire; see web_auth_session_is_valid()).
+// AG-05 (owner 2026-10-20): applies under every idle policy; "never" disables
+// only the idle timeout (web_auth_session_is_valid()), not this cap.
 static bool slot_lifetime_exceeded(const web_auth_slot_t *slot, uint32_t timeout_s, uint32_t now_ms)
 {
-    if (timeout_s == WEB_AUTH_TIMEOUT_NEVER_S) {
-        return false;
-    }
+    (void)timeout_s;
     return (uint32_t)(now_ms - slot->issued_ms) > WEB_AUTH_SESSION_MAX_LIFETIME_MS;
 }
 
@@ -163,9 +161,6 @@ bool web_auth_table_any_ap_session_active(const web_auth_table_t *t, uint32_t ti
 size_t web_auth_table_reap_expired(web_auth_table_t *t, uint32_t timeout_s, uint32_t now_ms)
 {
     size_t freed = 0;
-    if (timeout_s == WEB_AUTH_TIMEOUT_NEVER_S) {
-        return 0;
-    }
     for (size_t i = 0; i < WEB_AUTH_WEB_SLOT_COUNT; i++) {
         if (t->slots[i].in_use && (!web_auth_session_is_valid(t->slots[i].last_seen_ms, timeout_s, now_ms) ||
                                    slot_lifetime_exceeded(&t->slots[i], timeout_s, now_ms))) {

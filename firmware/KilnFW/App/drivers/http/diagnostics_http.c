@@ -885,6 +885,16 @@ static esp_err_t watchdog_cfg_get_handler(httpd_req_t *req)
 #define WATCHDOG_CFG_BODY_MAX 32
 static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 {
+    /* AG-03 (owner 2026-10-20): HR-02 409 gate while a firing or autotune is active. */
+    {
+        sys_mode_snapshot_t snap = { 0 };
+        char reason[SYSTEM_MODE_GATE_REASON_MAX];
+        reason[0] = '\0';
+        relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &snap, reason, sizeof(reason))) {
+            return system_mode_gate_http_send_refusal(req, reason);
+        }
+    }
     if (req->content_len <= 0 || req->content_len > WATCHDOG_CFG_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
