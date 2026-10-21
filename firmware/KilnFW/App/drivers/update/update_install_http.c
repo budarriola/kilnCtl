@@ -128,6 +128,23 @@ static int app_req_write(void *ctx, const uint8_t *buf, size_t len)
     return kv_write_verified(UPD_INST_KEY_REQ, buf, len);
 }
 
+// OC-04/OC-02: otadata state of the running partition. PENDING_VERIFY = unconfirmed; VALID = confirmed.
+static esp_ota_img_states_t running_ota_state(void)
+{
+    esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    if (run == NULL || esp_ota_get_state_partition(run, &st) != ESP_OK) {
+        return ESP_OTA_IMG_UNDEFINED;
+    }
+    return st;
+}
+
+static bool app_running_unconfirmed(void *ctx)
+{
+    (void)ctx;
+    return running_ota_state() == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
 static bool install_prepare(char *msg, size_t cap, int *http_status)
 {
     static const update_install_app_ops_t ops = {
@@ -136,6 +153,7 @@ static bool install_prepare(char *msg, size_t cap, int *http_status)
         .stage_info = app_stage_info,
         .res_erase = app_res_erase,
         .req_write = app_req_write,
+        .running_unconfirmed = app_running_unconfirmed,
     };
     bool ok = update_install_prepare(&ops, msg, cap, http_status);
     if (!ok && http_status != NULL && *http_status == 500) {
@@ -258,7 +276,9 @@ int update_install_http_drop_stale_request(void)
     return rc;
 }
 
-// OH-04: boot confirm completed on an OTA slot: an unconfirmed OK result becomes confirmed. Never fails the boot.
+// OH-04: boot confirm completed on an OTA slot: an unconfirmed OK result that names the running image becomes
+// confirmed. Never fails the boot. rc 0 = done, 1 = update claim busy (OC-01: caller retries), -1 = IO failure
+// (OC-02: caller retries), UPD_INST_CONFIRM_NOT_RUNNING = the record names another image (OC-03, final).
 int update_install_http_mark_confirmed(void)
 {
     bool claimed = ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP);
@@ -268,7 +288,10 @@ int update_install_http_mark_confirmed(void)
         memset(&ops, 0, sizeof(ops));
         ops.res_write = stale_res_write;
         ops.res_read = stale_res_read;
-        rc = update_install_confirm_result(&ops);
+        update_identity_t run;
+        memset(&run, 0, sizeof(run));
+        update_fetch_running_identity(&run, NULL);
+        rc = update_install_confirm_result(&ops, run.version);
         ota_http_update_end();
     }
     if (rc != 0) {
@@ -340,6 +363,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     json_safe(rv, sizeof(rv), run.version);
     json_safe(sv, sizeof(sv), staged_ver);
     json_safe(lv, sizeof(lv), have == 1 ? res.semver : "");
+    /* OC-02: a VALID running image that the record names is confirmed even if the record write has not landed. */
+    if (have == 1) {
+        (void)update_install_res_derive_confirmed(&res, run.version, running_ota_state() == ESP_OTA_IMG_VALID);
+    }
 
     char json[512];
     int w = snprintf(json, sizeof(json),

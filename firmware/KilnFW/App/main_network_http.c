@@ -41,6 +41,7 @@
 #include "cfg_fs_format_http.h"
 #include "update_http.h"
 #include "update_install_http.h"
+#include "update_install_record.h"
 #include "update_settings.h"
 #include "update_settings_http.h"
 #include "factory_reset.h"
@@ -302,7 +303,14 @@ static void main_ota_rollback_confirm_task(void *arg)
                 /* LOW-4: a leftover install request must not replay at a later recovery entry. */
                 (void)update_install_http_drop_stale_request();
                 /* OH-04: boot confirm done, so the recorded OK install is now confirmed. */
-                (void)update_install_http_mark_confirmed();
+                for (unsigned attempt = 0;; attempt++) {
+                    int mrc = update_install_http_mark_confirmed();
+                    uint32_t wait_ms = update_install_confirm_retry_delay_ms(attempt);
+                    if (mrc == 0 || mrc == UPD_INST_CONFIRM_NOT_RUNNING || wait_ms == 0) {
+                        break; /* OC-01/OC-02: busy claim and write failures are retried with backoff */
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(wait_ms));
+                }
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
             }

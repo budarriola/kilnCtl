@@ -494,25 +494,57 @@ static void test_oh04_confirm(void)
     fake_t f;
     fake_init(&f);
     update_install_ops_t o = ops_for(&f);
-    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 0, "OH-04: no result -> nothing written");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 0, "OH-04: no result -> nothing written");
     TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL) == 0 &&
                    f.res_writes == 1,
                "OH-04: setup OK result");
-    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 2 &&
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 2 &&
                    update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
                    d.detail == UPD_INST_DETAIL_CONFIRMED && strcmp(d.semver, "2.0.0") == 0,
                "OH-04: confirm_result rewrites the OK result as confirmed");
-    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 2, "OH-04: already confirmed -> no rewrite");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 2, "OH-04: already confirmed -> no rewrite");
     fake_init(&f);
     o = ops_for(&f);
     TEST_CHECK(update_install_record_result(&o, UPD_INST_RES_FAIL, UPD_INST_REASON_SHA_MISMATCH, "2.0.0", NULL) == 0,
                "OH-04: setup FAIL result");
-    TEST_CHECK(update_install_confirm_result(&o) == 0 && f.res_writes == 1, "OH-04: a FAIL result is left alone");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 1, "OH-04: a FAIL result is left alone");
     fake_init(&f);
     o = ops_for(&f);
     (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL);
     f.res_rc = -1;
-    TEST_CHECK(update_install_confirm_result(&o) == -1, "OH-04: a failed write is reported");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == -1, "OH-04: a failed write is reported");
+
+    /* OC-03: the record must name the running image. */
+    fake_init(&f);
+    o = ops_for(&f);
+    (void)update_install_record_result(&o, UPD_INST_RES_OK, UPD_INST_REASON_NONE, "2.0.0", NULL);
+    TEST_CHECK(update_install_confirm_result(&o, "3.0.0") == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+               "OC-03: record for another version is not confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, NULL) == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+               "OC-03: unknown running version is not confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, "") == UPD_INST_CONFIRM_NOT_RUNNING && f.res_writes == 1,
+               "OC-03: empty running version is not confirmed");
+    TEST_CHECK(update_install_confirm_result(&o, "2.0.0") == 0 && f.res_writes == 2, "OC-03: matching version confirms");
+
+    /* OC-02: status-time derivation from otadata. */
+    update_install_res_t q;
+    memset(&q, 0, sizeof(q));
+    q.code = UPD_INST_RES_OK;
+    strcpy(q.semver, "2.0.0");
+    TEST_CHECK(!update_install_res_derive_confirmed(&q, "2.0.0", false) && q.detail != UPD_INST_DETAIL_CONFIRMED,
+               "OC-02: not VALID in otadata leaves pending_confirm");
+    TEST_CHECK(!update_install_res_derive_confirmed(&q, "3.0.0", true) && q.detail != UPD_INST_DETAIL_CONFIRMED,
+               "OC-02: VALID but another image leaves pending_confirm");
+    TEST_CHECK(update_install_res_derive_confirmed(&q, "2.0.0", true) &&
+                   strcmp(update_install_res_state_name(&q), "recorded") == 0,
+               "OC-02: VALID running image that the record names reads confirmed");
+
+    /* OC-01: retry schedule. */
+    TEST_CHECK(update_install_confirm_retry_delay_ms(0) == 5000 && update_install_confirm_retry_delay_ms(119) == 5000,
+               "OC-01: 5 s backoff first");
+    TEST_CHECK(update_install_confirm_retry_delay_ms(120) == 60000 && update_install_confirm_retry_delay_ms(179) == 60000,
+               "OC-01: then 60 s");
+    TEST_CHECK(update_install_confirm_retry_delay_ms(180) == 0, "OC-01: then gives up");
 }
 
 /* recfx leftover: the LCD warning line (40 columns) holds "INSTALL FAILED: " plus the reason. */
@@ -701,6 +733,25 @@ static int a_write(void *c, const uint8_t *b, size_t n)
     return a->write_rc;
 }
 
+static bool g_unconfirmed;
+static bool a_unconfirmed(void *c) { (void)c; return g_unconfirmed; }
+
+static void test_prepare_unconfirmed(void)
+{
+    app_t a;
+    char msg[96];
+    int st = 0;
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    update_install_app_ops_t o = { &a, a_safe, a_stage, a_erase, a_write, a_unconfirmed };
+    g_unconfirmed = true;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 409 && a.writes == 0 && a.n == 0,
+               "OC-04: unconfirmed running image refuses 409, nothing erased or written");
+    g_unconfirmed = false;
+    TEST_CHECK(update_install_prepare(&o, msg, sizeof(msg), &st) && a.writes == 1, "OC-04: confirmed image installs");
+}
+
 static void test_prepare(void)
 {
     TEST_SECTION("update_install_record -- app prepare hook");
@@ -877,6 +928,7 @@ void run_test_update_install_record(void)
     test_reason_lcd_fits();
     test_res_versions();
     test_oh04_confirm();
+    test_prepare_unconfirmed();
     test_refusal_clear_failure();
     test_result_identity();
     test_prepare();

@@ -26,7 +26,8 @@ esp_err_t update_install_http_start(void);
 int update_install_http_drop_stale_request(void);
 
 // OH-04: boot confirm finished: mark an unconfirmed OK install result confirmed (status leaves pending_confirm).
-// 0 = marked or nothing to mark, 1 = skipped (claim busy), -1 = IO failure.
+// 0 = marked or nothing to mark, 1 = skipped (claim busy), -1 = IO failure, 2 = record names another image.
+// Retry 1 and -1 (update_install_confirm_retry_delay_ms); status also derives confirmed from otadata (OC-02).
 int update_install_http_mark_confirmed(void);
 
 #ifdef __cplusplus

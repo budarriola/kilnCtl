@@ -177,7 +177,22 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 
 // App side, after boot confirm: reads the result through ops->res_read and rewrites an unconfirmed OK result as
 // confirmed through ops->res_write. 0 = rewritten or already final/absent (nothing to do), <0 = IO failure.
-int update_install_confirm_result(const update_install_ops_t *ops);
+// OC-03: the result is rewritten only when its semver equals running_semver (the running image); a record that
+// names another image is left alone and the call returns UPD_INST_CONFIRM_NOT_RUNNING (never retried).
+// running_semver NULL or empty never matches.
+#define UPD_INST_CONFIRM_NOT_RUNNING 2
+int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver);
+
+// OC-03: true when the OK result names the running image (semver equal, both non-empty).
+bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver);
+
+// OC-02: status-time cross-check. When the running partition is VALID in otadata (running_valid) and an OK
+// result that names the running image is still unconfirmed, mark it confirmed in memory (no write). True if changed.
+bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver, bool running_valid);
+
+// OC-01: delay before the next confirm-mark attempt (attempt counts from 0): 5 s for the first 10 min, then 60 s
+// for an hour, then 0 = give up (the next boot retries; status derives the state from otadata meanwhile).
+uint32_t update_install_confirm_retry_delay_ms(unsigned attempt);
 
 // Records a failure/success for the request that update_install_boot_run
 // started (apply task failed, or pre-boot success). Returns 0 when the result
@@ -244,6 +259,8 @@ typedef struct {
                        char semver[UPD_INST_SEMVER_LEN]);
     int (*res_erase)(void *ctx);                             // erase old result, read back gone
     int (*req_write)(void *ctx, const uint8_t *buf, size_t len); // write request, read back equal
+    // OC-04: optional. True while the running image is still unconfirmed (PENDING_VERIFY); the install is refused 409.
+    bool (*running_unconfirmed)(void *ctx);
 } update_install_app_ops_t;
 
 // Returns true when a fresh request (attempts 0) is stored and read back. On false

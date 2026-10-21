@@ -138,7 +138,29 @@ const char *update_install_res_state_name(const update_install_res_t *res)
                                                                                            : "recorded";
 }
 
-int update_install_confirm_result(const update_install_ops_t *ops)
+bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver)
+{
+    return res != NULL && running_semver != NULL && running_semver[0] != '\0' && res->semver[0] != '\0' &&
+           strncmp(res->semver, running_semver, UPD_INST_SEMVER_LEN) == 0;
+}
+
+bool update_install_res_derive_confirmed(update_install_res_t *res, const char *running_semver, bool running_valid)
+{
+    if (!running_valid || !update_install_res_matches_running(res, running_semver)) {
+        return false;
+    }
+    return update_install_res_mark_confirmed(res);
+}
+
+uint32_t update_install_confirm_retry_delay_ms(unsigned attempt)
+{
+    if (attempt < 120u) {
+        return 5000u;
+    }
+    return attempt < 180u ? 60000u : 0u;
+}
+
+int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver)
 {
     if (!ops || !ops->res_read || !ops->res_write) {
         return -1;
@@ -152,6 +174,12 @@ int update_install_confirm_result(const update_install_ops_t *ops)
     update_install_res_t res;
     if (rc < 0 || !update_install_res_decode(buf, n, &res)) {
         return -1;
+    }
+    if (res.code != UPD_INST_RES_OK || res.detail == UPD_INST_DETAIL_CONFIRMED) {
+        return 0;
+    }
+    if (!update_install_res_matches_running(&res, running_semver)) {
+        return UPD_INST_CONFIRM_NOT_RUNNING; // OC-03: the record names another image
     }
     if (!update_install_res_mark_confirmed(&res)) {
         return 0;
@@ -460,6 +488,10 @@ bool update_install_prepare(const update_install_app_ops_t *ops, char *msg, size
         http_status = &dummy;
     }
     *http_status = 409;
+    if (ops != NULL && ops->running_unconfirmed != NULL && ops->running_unconfirmed(ops->ctx)) {
+        set_msg(msg, cap, "running image not confirmed yet, retry in a minute");
+        return false;
+    }
     if (ops == NULL || ops->kv_write_safe == NULL || ops->stage_info == NULL || ops->res_erase == NULL ||
         ops->req_write == NULL) {
         *http_status = 500;
