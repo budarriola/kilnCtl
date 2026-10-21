@@ -833,8 +833,9 @@ static void test_clear_for_physical_reset_on_empty_store(void)
     TEST_CHECK(web_auth_store_clear_for_physical_reset() == true,
                "clearing an already-empty store still reports success");
     web_auth_policy_t loaded_pol;
-    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy is (still) ABSENT -- untouched, and it was never written");
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "RF2-04: the wipe leaves a present web blob (provisioned, fail closed); "
+               "no policy was written");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
                "administrator still reads as not configured");
     TEST_CHECK(web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false,
@@ -910,8 +911,9 @@ static void test_clear_all_credentials_on_empty_store(void)
     TEST_CHECK(web_auth_store_clear_all_credentials() == true,
                "clearing an already-empty store still reports success");
     web_auth_policy_t loaded_pol;
-    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_ABSENT,
-               "policy is (still) ABSENT -- untouched, and it was never written");
+    TEST_CHECK(web_auth_store_load_policy(&loaded_pol) == WEB_AUTH_LOAD_UNREADABLE,
+               "RF2-04: the wipe leaves a present web blob (provisioned, fail closed); "
+               "no policy was written");
     TEST_CHECK(web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) == false &&
                    web_auth_store_password_configured(WEB_AUTH_ROLE_USER) == false,
                "both roles still read as not configured");

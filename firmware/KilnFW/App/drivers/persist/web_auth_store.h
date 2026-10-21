@@ -314,8 +314,9 @@ const char *web_auth_store_lcd_pin_pending_banner_text(void);
 bool web_auth_store_policy_lost(void);
 const char *web_auth_store_policy_lost_banner_text(void);
 
-// Erases the policy record AND the marker (read-back verified): the only way
-// back to the fresh-board open state. For a deliberate factory reset of auth.
+// Erases the policy record AND the marker (read-back verified). On a board with no credential
+// record this is the fresh open state. Since AU-02, with credentials present load_policy reads
+// UNREADABLE (fail closed) instead. No production caller (RF2-08).
 bool web_auth_store_clear_policy_and_marker(void);
 
 // --- Auth-off / first-boot / field-upgrade collapse (plan item 11) ---------
