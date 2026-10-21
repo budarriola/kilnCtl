@@ -102,6 +102,20 @@ class InstallTests(_Base):
             out = msu.update_install_staged(confirm=True, wait_s=60)
         self.assertTrue(out.startswith("ok"), out)
 
+    def test_describe_staged_version_matches_dotted_running_version(self):
+        # benchmain31: staged header is the git-describe form, the app reports the dotted form; they are one version.
+        desc, dotted = "1.0.0-pre.1-2286-g1a2b3c4", "1.0.0-pre.1.2286"
+        seq = [_st(running="1.0.0-pre.1.2000", sv=desc), _ok(running=dotted, sv=desc)]
+        with mock.patch.object(uhc, "get_install_status", side_effect=seq),              mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("ok"), out)
+
+    def test_dirty_describe_never_equals_clean_running_version(self):
+        self.assertTrue(msu._same_version("1.0.0-pre.1-2286-gabc1234-dirty", "1.0.0-pre.1.2286-dirty"))
+        self.assertFalse(msu._same_version("1.0.0-pre.1-2286-gabc1234-dirty", "1.0.0-pre.1.2286"))
+        self.assertFalse(msu._same_version("1.0.0-pre.1-2286-gabc1234", "1.0.0-pre.1.2287"))
+        self.assertFalse(msu._same_version(None, None))
+
     def test_answered_post_is_accepted_without_a_down_poll(self):
         # Mutant P3: a POST that got an answer must not need an unreachable poll or an uptime proof.
         self.uptime_readable = False
