@@ -25,6 +25,7 @@ import datetime
 import json
 import os
 import threading
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -377,16 +378,30 @@ def wait_for_boot_soak(get_status: Callable[..., dict], host: str,
                        target_s: float = BOOT_SOAK_UPTIME_S) -> str:
     """Wait until the board's uptime_s >= target_s. Best effort: returns a note
     ("" when nothing to say) and never raises; an unreadable uptime does not block."""
+    hard_cap_s = target_s + 5.0
+    t0 = clock()
+    first_up = None
     try:
-        up = float(get_status(host, timeout=3.0).get("uptime_s"))
+        while True:
+            up = float(get_status(host, timeout=3.0).get("uptime_s"))
+            if not math.isfinite(up):
+                raise ValueError(f"non-finite uptime {up!r}")
+            if first_up is None:
+                first_up = up
+            need = target_s - up
+            if need <= 0:
+                break
+            remaining = hard_cap_s - (clock() - t0)
+            if remaining <= 0:
+                return (f"NOTE: board uptime still {up:.0f}s after {hard_cap_s:.0f}s; "
+                        "boot-confirm soak not reached, resetting anyway.")
+            sleep(min(need, remaining))
     except Exception as exc:  # noqa: BLE001
         return f"NOTE: could not read board uptime ({exc}); boot-confirm soak not checked."
-    need = target_s - up
-    if need <= 0:
+    if first_up >= target_s:
         return ""
-    sleep(need)
-    return (f"NOTE: board uptime was {up:.0f}s, younger than the 30 s boot-confirm soak; "
-            f"waited {need:.0f}s so this reset is not counted by boot_guard (BC-01).")
+    return (f"NOTE: board uptime was {first_up:.0f}s, younger than the 30 s boot-confirm soak; "
+            f"waited so this reset is not counted by boot_guard (BC-01).")
 
 
 def wait_for_boot_soak_http(host: str) -> str:

@@ -739,9 +739,9 @@ Static review of the GitHub self-update and install path (docs/REVIEW_OTA_HEAP_2
 - **RV-02** MED (REVIEW_AU02_BC01_2026_10_20): the test_web_auth_login_http.c helpers now always store a policy, which hid RV-01. No test covers credential-with-no-policy or the wizard write order. Fix: add both tests and negtest them.
 - **RV-03** LOW (REVIEW_AU02_BC01_2026_10_20): user-only credential with policy+marker lost: UNREADABLE but admin bootstrap is open to any caller. The comment overstates "fails closed". Fix: correct the comment, or gate bootstrap on the reset gesture as RT-01 does.
 - **RV-04** LOW (REVIEW_AU02_BC01_2026_10_20): in the AU-02 UNREADABLE state the LCD locks with no banner (lcd_pin_pending reads the raw blob). Fix: add a policy-lost banner.
-- **RV-05** LOW (REVIEW_AU02_BC01_2026_10_20): mcp_server_debug.py defines _wait_boot_soak twice (lines 532 and 543). Fix: delete one.
-- **RV-06** LOW (REVIEW_AU02_BC01_2026_10_20): debug_reset sleeps the soak before its dark-rereset and mode refusals, and also for mode="halt". Fix: wait after the refusals, and only for mode="run".
-- **RV-07** LOW (REVIEW_AU02_BC01_2026_10_20): wait_for_boot_soak has no clamp or isfinite guard, sleeps outside the try, and does not re-read uptime after sleeping. Fix: clamp, guard, re-check once.
+- **RV-05** FIXED LOW (REVIEW_AU02_BC01_2026_10_20): mcp_server_debug.py defines _wait_boot_soak twice (lines 532 and 543). Fix: delete one.
+- **RV-06** FIXED LOW (REVIEW_AU02_BC01_2026_10_20): debug_reset sleeps the soak before its dark-rereset and mode refusals, and also for mode="halt". Fix: wait after the refusals, and only for mode="run".
+- **RV-07** FIXED LOW (REVIEW_AU02_BC01_2026_10_20): wait_for_boot_soak has no clamp or isfinite guard, sleeps outside the try, and does not re-read uptime after sleeping. Fix: clamp, guard, re-check once.
 - **RV-08** INFO (REVIEW_AU02_BC01_2026_10_20): checked recovery (404 gives a note), unreachable board (3 s then a note), Pico (skipped), auth-gated status (note), and callers (none pass esp). No hang.
 - **RV-09** INFO (REVIEW_AU02_BC01_2026_10_20): MAIN_OTA_CONFIRM_WARN_MS = soak+15 s = 45 s, log-only. OK.
 
