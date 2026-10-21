@@ -55,8 +55,8 @@ else {
 }
 
 $specs = @(
-    @{ File = "ota_http_esp.c";  Src = $esp;  Kind = "esp";  Do = "ota_esp_do_transfer";  Ret = "return !ok;";           Args = "s_ota_esp_chunk,\s*sizeof\(s_ota_esp_chunk\)" },
-    @{ File = "ota_http_pico.c"; Src = $pico; Kind = "pico"; Do = "ota_pico_do_stage";    Ret = "return !started_relay;"; Args = "chunk,\s*chunk_cap" }
+    @{ File = "ota_http_esp.c";  Src = $esp;  Kind = "esp";  Do = "ota_esp_do_transfer";  Ret = "return !ok;" },
+    @{ File = "ota_http_pico.c"; Src = $pico; Kind = "pico"; Do = "ota_pico_do_stage";    Ret = "return !started_relay;" }
 )
 foreach ($sp in $specs) {
     $name = $sp.File; $src = $sp.Src
@@ -71,8 +71,8 @@ foreach ($sp in $specs) {
     if ($h -match "return\s+ota_http_send_interlock_refusal") { $fail += "${name}: handler returns the interlock refusal result (ESP_OK) -- body would be purged at 32 B/read" }
     if ($h -match "already in progress[^\n]*\n\s*return ESP_OK") { $fail += "${name}: 'already in progress' refusal returns ESP_OK" }
     if ($h -match "return\s+ESP_FAIL\s*;") { $fail += "${name}: handler has a bare 'return ESP_FAIL;' -- refusals must drain via ota_http_refusal_drain() (bare close RSTs the client)" }
-    $drain = [regex]::Matches($h, "return\s+ota_http_refusal_drain\(req,\s*$($sp.Args)\)\s*;").Count
-    if ($drain -lt 3) { $fail += "${name}: expected >= 3 'return ota_http_refusal_drain(req, <chunk buf>, <cap>)' (interlock, in-progress, failed transfer), found $drain" }
+    $drain = [regex]::Matches($h, "return\s+ota_http_refusal_drain\(req\)\s*;").Count
+    if ($drain -lt 3) { $fail += "${name}: expected >= 3 'return ota_http_refusal_drain(req)' (interlock, in-progress, failed transfer), found $drain" }
     if ($h -notmatch "if\s*\(\s*$($sp.Do)\(req,\s*ip\)\s*\)\s*\{\s*return\s+ota_http_refusal_drain\([^;]*;\s*\}\s*return\s+ESP_OK\s*;") {
         $fail += "${name}: handler tail must be 'if ($($sp.Do)(req, ip)) { return ota_http_refusal_drain(...); } return ESP_OK;'"
     }
