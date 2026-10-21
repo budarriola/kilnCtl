@@ -723,6 +723,14 @@ Static review of the GitHub self-update and install path (docs/REVIEW_OTA_HEAP_2
 - **AG-05** LOW, `firmware/KilnFW/App/drivers/net/web_auth_session.c:28-34`: the "never" web timeout also disables the 12 h absolute session lifetime. Fix: apply the lifetime cap regardless (or an owner call). Status open.
 - **AG-06** INFO, `firmware/KilnFW/App/drivers/http/http_auth_enforce.c:34`: with auth off, factory reset and boot_guard_reset are unauthenticated (by design, section 11). Status note.
 - **AG-07** INFO, `firmware/KilnFW/App/drivers/http/wifi_provision_http.c:288-290`: `/status` returns the AP passphrase to unauthenticated clients already on that AP. Status note.
+
+### AG fix review (docs/REVIEW_AG_FIX_2026_10_20.md, commit 8370938dd)
+
+- **AF-01** LOW, `main_page.html:4686`: the first `pollAutotune()` at load runs before `kcSessionRole` is set, so an admin gets no autotune state for up to 10 s. Fix: poll when the role first resolves to admin. Status open.
+- **AF-02** LOW, `http_auth_http.c:446-447`: the `X-Kiln-Background` activity skip is covered only by a JS source regex. Fix: move the header flag into a pure predicate in `http_auth_enforce.c`, add a host test, negtest it. Status open.
+- **AF-03** INFO, `http_auth_http.c:447`: the skip applies to any method, not only GET. It can only shorten a session, so it is harmless. Fix (optional): GET only. Status note.
+- **AF-04** INFO, `auth_totp_http.c:194-208`: AG-02 eviction lets an attacker with more than 16 LAN addresses recycle a lockout; `TOTP_FORGOT_BOARD_CAP` still bounds guesses. Accepted under the AZ-04 owner decision. Status note.
+- **AF-05** LOW, `main_page.html:4289-4296,4616`: after a logout `lastAutotuneStatus` goes stale (fast poll rate, stale chart). Fix: clear it when the role is not admin. Status open.
 - **AG-08** INFO, `firmware/KilnFW/App/drivers/http/http_auth_http.c` (`KILN_HTTP_MAX_ROUTES 192` vs 181 rows): 11 routes of headroom; overflow fails closed. Status note.
 
 ## REVIEW_AU02_BC01_2026_10_20 (RV)
