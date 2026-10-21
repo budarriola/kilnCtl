@@ -132,7 +132,7 @@ class InstallTests(_Base):
              mock.patch.object(uhc, "start_install", return_value={}):
             out = msu.update_install_staged(confirm=True, wait_s=60)
         self.assertTrue(out.startswith("UNKNOWN"), out)
-        self.assertIn("pending_confirm", out)
+        self.assertIn("30 s boot confirm", out)
 
     def test_rolled_back_after_pending_confirm_is_failed(self):
         pend = _st(running="1.0.1", state="pending_confirm", code="ok", rid=STAGED_ID)
@@ -343,7 +343,7 @@ class FollowUpTests(_Base):
         with mock.patch.object(uhc, "get_install_status", return_value=pend):
             out = msu.update_install_staged(confirm=False)
         self.assertTrue(out.startswith("UNKNOWN"), out)
-        self.assertIn("pending_confirm", out)
+        self.assertIn("30 s boot confirm", out)
 
     def test_follow_up_reports_ok_once_new_version_runs_and_reboot_proven(self):
         self._timed_out_call()
