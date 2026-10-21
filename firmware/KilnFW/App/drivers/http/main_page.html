@@ -4287,7 +4287,12 @@ var lastAutotuneStatus = null;
 var autotuneTrace = [];
 var autotuneLastFetchedCount = -1;
 function pollAutotune() {
-  fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (st) {
+  // AG-01: /api/autotune is ADMIN. Poll it only for a signed-in admin (no 401 spam when signed
+  // out) and mark it background so the server does not count it as session activity.
+  if (window.kcSessionRole !== 'admin') {
+    return;
+  }
+  fetch('/api/autotune', { headers: { 'X-Kiln-Background': '1' } }).then(function (r) { return r.json(); }).then(function (st) {
     lastAutotuneStatus = st;
     lastAutotuneStatusFetchedAtMs = Date.now();
     // New-run detection for the client-side zone/duty series (autotuneTrace

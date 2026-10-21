@@ -179,6 +179,8 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
     int free_idx = -1;
     int lru_idx = -1;
     uint32_t lru_age = 0;
+    int oldest_idx = -1; // AG-02: oldest slot of any lock state, last-resort victim
+    uint32_t oldest_age = 0;
     for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
         totp_lockout_slot_t *s = &s_totp_lockouts[i];
         login_backoff_cycle_reset_if_due(&s->backoff, now);
@@ -189,6 +191,10 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
         if (!s->in_use && free_idx < 0) {
             free_idx = (int)i;
         }
+        if (s->in_use && (oldest_idx < 0 || (uint32_t)(now - s->last_activity_ms) > oldest_age)) {
+            oldest_age = (uint32_t)(now - s->last_activity_ms);
+            oldest_idx = (int)i;
+        }
         if (s->in_use && !login_backoff_is_locked(&s->backoff, now) &&
             (lru_idx < 0 || (uint32_t)(now - s->last_activity_ms) > lru_age)) {
             /* largest unsigned elapsed wins: wrap-safe LRU */
@@ -197,6 +203,9 @@ static totp_lockout_slot_t *totp_lockout_slot_for(const char *ip, uint32_t now)
         }
     }
     int idx = (free_idx >= 0) ? free_idx : lru_idx;
+    if (idx < 0) {
+        idx = oldest_idx; // AG-02/AZ-04: all slots locked, evict the oldest
+    }
     if (idx < 0) {
         return NULL;
     }
@@ -284,25 +293,13 @@ static void totp_backoff_record(const char *ip, bool ip_known, bool ok)
 // --- ADMIN: GET /api/auth/totp_status ---------------------------------------
 
 // AUDIT_TOTP LOW-5: true when /forgot is refused board-wide until reboot -- the
-// board failure cap is spent, or every per-IP slot is in_use and locked (a new
-// client can get no slot). Lets the owner see that a reboot is needed.
+// board failure cap is spent. (AG-02: a full table of locked slots no longer
+// blocks new clients; the oldest slot is evicted.) Lets the owner see that a reboot is needed.
 static bool totp_forgot_blocked_snapshot(void)
 {
     bool blocked = false;
     if (xSemaphoreTake(s_totp_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
-        uint32_t now = now_ms();
         blocked = totp_forgot_board_cap_blocked(&s_forgot_board_cap);
-        if (!blocked) {
-            bool all_locked = true;
-            for (unsigned i = 0; i < TOTP_LOCKOUT_MAX_IPS; i++) {
-                totp_lockout_slot_t *s = &s_totp_lockouts[i];
-                if (!s->in_use || !login_backoff_is_locked(&s->backoff, now)) {
-                    all_locked = false;
-                    break;
-                }
-            }
-            blocked = all_locked;
-        }
         xSemaphoreGive(s_totp_lock);
     }
     return blocked;

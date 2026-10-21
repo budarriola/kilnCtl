@@ -2496,6 +2496,7 @@
           }
         }
         lastKnownRole = role;
+        window.kcSessionRole = role; // AG-01: dashboard background polls gate on this
 
         // Shows/hides nav.js's Log out control for the role this poll just
         // reported -- the SAME poll response, not a second fetch, so the
