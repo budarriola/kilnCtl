@@ -154,9 +154,6 @@ static bool id_is_zero(const uint8_t id[UPD_INST_ID_LEN])
  * canonical (or not a describe) passes through unchanged. */
 static void semver_canon(const char *in, char *out, size_t cap)
 {
-    if (in != NULL && in[0] == 'v') {
-        in++;
-    }
     if (in == NULL || !update_semver_from_describe(in, out, cap)) {
         out[0] = '\0';
         if (in != NULL) {
