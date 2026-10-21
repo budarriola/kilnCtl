@@ -726,11 +726,11 @@ Static review of the GitHub self-update and install path (docs/REVIEW_OTA_HEAP_2
 
 ### AG fix review (docs/REVIEW_AG_FIX_2026_10_20.md, commit 8370938dd)
 
-- **AF-01** LOW, `main_page.html:4686`: the first `pollAutotune()` at load runs before `kcSessionRole` is set, so an admin gets no autotune state for up to 10 s. Fix: poll when the role first resolves to admin. Status open.
-- **AF-02** LOW, `http_auth_http.c:446-447`: the `X-Kiln-Background` activity skip is covered only by a JS source regex. Fix: move the header flag into a pure predicate in `http_auth_enforce.c`, add a host test, negtest it. Status open.
-- **AF-03** INFO, `http_auth_http.c:447`: the skip applies to any method, not only GET. It can only shorten a session, so it is harmless. Fix (optional): GET only. Status note.
+- **AF-01** LOW, `main_page.html:4686`: the first `pollAutotune()` at load runs before `kcSessionRole` is set, so an admin gets no autotune state for up to 10 s. Fix: poll when the role first resolves to admin. Status fixed.
+- **AF-02** LOW, `http_auth_http.c:446-447`: the `X-Kiln-Background` activity skip is covered only by a JS source regex. Fix: move the header flag into a pure predicate in `http_auth_enforce.c`, add a host test, negtest it. Status fixed.
+- **AF-03** INFO, `http_auth_http.c:447`: the skip applies to any method, not only GET. It can only shorten a session, so it is harmless. Fix (optional): GET only. Status fixed.
 - **AF-04** INFO, `auth_totp_http.c:194-208`: AG-02 eviction lets an attacker with more than 16 LAN addresses recycle a lockout; `TOTP_FORGOT_BOARD_CAP` still bounds guesses. Accepted under the AZ-04 owner decision. Status note.
-- **AF-05** LOW, `main_page.html:4289-4296,4616`: after a logout `lastAutotuneStatus` goes stale (fast poll rate, stale chart). Fix: clear it when the role is not admin. Status open.
+- **AF-05** LOW, `main_page.html:4289-4296,4616`: after a logout `lastAutotuneStatus` goes stale (fast poll rate, stale chart). Fix: clear it when the role is not admin. Status fixed.
 - **AG-08** INFO, `firmware/KilnFW/App/drivers/http/http_auth_http.c` (`KILN_HTTP_MAX_ROUTES 192` vs 181 rows): 11 routes of headroom; overflow fails closed. Status note.
 
 ## REVIEW_AU02_BC01_2026_10_20 (RV)

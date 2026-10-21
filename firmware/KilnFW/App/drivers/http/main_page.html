@@ -4290,6 +4290,9 @@ function pollAutotune() {
   // AG-01: /api/autotune is ADMIN. Poll it only for a signed-in admin (no 401 spam when signed
   // out) and mark it background so the server does not count it as session activity.
   if (window.kcSessionRole !== 'admin') {
+    // AF-05: drop stale state once the role is no longer admin (logout/expiry).
+    lastAutotuneStatus = null;
+    autotuneTrace = [];
     return;
   }
   fetch('/api/autotune', { headers: { 'X-Kiln-Background': '1' } }).then(function (r) { return r.json(); }).then(function (st) {
@@ -4684,6 +4687,9 @@ loadZones().then(function () {
 });
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
 pollAutotune();
+// AF-01: the load-time poll above runs before the first session poll resolves the role; poll
+// right away the first time it becomes admin.
+window.addEventListener('kc-admin-role', function () { pollAutotune(); });
 setInterval(pollAutotune, 10000); // matches AUTOTUNE_ENGINE_SAMPLE_PERIOD_S -- the trace can't move faster than that
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);
