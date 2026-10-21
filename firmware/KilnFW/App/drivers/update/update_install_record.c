@@ -154,7 +154,10 @@ static bool id_is_zero(const uint8_t id[UPD_INST_ID_LEN])
  * canonical (or not a describe) passes through unchanged. */
 static void semver_canon(const char *in, char *out, size_t cap)
 {
-    if (in == NULL || !update_semver_from_describe(in, out, cap)) {
+    /* OG-01: the strict form keeps "-dirty" and the commit count past a release tag, so a dev build never equals the
+     * release. A string that does not parse (truncated, recovery name) compares as its raw text: record and running
+     * strings come from the same 32-byte esp_app_desc field, so equal builds still match (OG-05). */
+    if (in == NULL || !update_semver_from_describe_strict(in, out, cap)) {
         out[0] = '\0';
         if (in != NULL) {
             strncpy(out, in, cap - 1);
@@ -163,32 +166,48 @@ static void semver_canon(const char *in, char *out, size_t cap)
     }
 }
 
+/* OG-01: three-way match. YES only when version AND id both agree and both ids are known. A definite difference in
+ * either is NO. A record id of zero (legacy/unknown), an unknown running id, or a missing version string cannot
+ * prove anything: UNVERIFIED, which never confirms. */
+update_install_match_t update_install_res_match(const update_install_res_t *res, const char *running_semver,
+                                                const uint8_t *running_id)
+{
+    if (res == NULL) {
+        return UPD_INST_MATCH_NO;
+    }
+    char a[UPD_INST_SEMVER_LEN + 24], b[UPD_INST_SEMVER_LEN + 24];
+    bool have_ver = res->semver[0] != '\0' && running_semver != NULL && running_semver[0] != '\0';
+    if (have_ver) {
+        semver_canon(res->semver, a, sizeof(a));
+        semver_canon(running_semver, b, sizeof(b));
+        if (strcmp(a, b) != 0) {
+            return UPD_INST_MATCH_NO;
+        }
+    }
+    bool ids_known = running_id != NULL && !id_is_zero(running_id) && !id_is_zero(res->id);
+    if (ids_known && memcmp(res->id, running_id, UPD_INST_ID_LEN) != 0) {
+        return UPD_INST_MATCH_NO;
+    }
+    return (have_ver && ids_known) ? UPD_INST_MATCH_YES : UPD_INST_MATCH_UNVERIFIED;
+}
+
 bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
                                         const uint8_t *running_id)
 {
-    if (res == NULL || running_semver == NULL || running_semver[0] == '\0' || res->semver[0] == '\0') {
-        return false;
-    }
-    char a[UPD_INST_SEMVER_LEN + 8], b[UPD_INST_SEMVER_LEN + 8];
-    semver_canon(res->semver, a, sizeof(a));
-    semver_canon(running_semver, b, sizeof(b));
-    if (a[0] == '\0' || strcmp(a, b) != 0) {
-        return false;
-    }
-    /* OF-01: same-semver builds differ by image sha256; compare the id when both sides know it. */
-    if (running_id != NULL && !id_is_zero(running_id) && !id_is_zero(res->id) &&
-        memcmp(res->id, running_id, UPD_INST_ID_LEN) != 0) {
-        return false;
-    }
-    return true;
+    return update_install_res_match(res, running_semver, running_id) == UPD_INST_MATCH_YES;
 }
 
 const char *update_install_res_state(const update_install_res_t *res, const char *running_semver,
                                      const uint8_t *running_id)
 {
-    if (res != NULL && res->code == UPD_INST_RES_OK && res->detail != UPD_INST_DETAIL_CONFIRMED &&
-        !update_install_res_matches_running(res, running_semver, running_id)) {
-        return "not_running"; /* OF-02: the record names another image; it will never be confirmed by this one */
+    if (res != NULL && res->code == UPD_INST_RES_OK && res->detail != UPD_INST_DETAIL_CONFIRMED) {
+        update_install_match_t m = update_install_res_match(res, running_semver, running_id);
+        if (m == UPD_INST_MATCH_NO) {
+            return "not_running"; /* OF-02: the record names another image; it will never be confirmed by this one */
+        }
+        if (m == UPD_INST_MATCH_UNVERIFIED) {
+            return "unverified"; /* OG-01: cannot tell which image this is (id unknown); never confirmed */
+        }
     }
     return update_install_res_state_name(res);
 }
@@ -229,8 +248,12 @@ int update_install_confirm_result(const update_install_ops_t *ops, const char *r
     if (res.code != UPD_INST_RES_OK || res.detail == UPD_INST_DETAIL_CONFIRMED) {
         return 0;
     }
-    if (!update_install_res_matches_running(&res, running_semver, running_id)) {
+    update_install_match_t m = update_install_res_match(&res, running_semver, running_id);
+    if (m == UPD_INST_MATCH_NO) {
         return UPD_INST_CONFIRM_NOT_RUNNING; // OC-03: the record names another image
+    }
+    if (m == UPD_INST_MATCH_UNVERIFIED) {
+        return UPD_INST_CONFIRM_UNVERIFIED; // OG-01: version or id unknown on one side: never write confirmed
     }
     if (!update_install_res_mark_confirmed(&res)) {
         return 0;

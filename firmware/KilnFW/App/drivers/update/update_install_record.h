@@ -37,6 +37,9 @@ extern "C" {
 #define UPD_INST_NS "upd_inst"
 #define UPD_INST_KEY_REQ "req"
 #define UPD_INST_KEY_RES "res"
+// OG-04: app-side only. 4-byte LE image_length of the prepared install: the byte range the result id (sha256 prefix of
+// the uploaded file) covers. Kept in its own key because the request/result blob layouts are fixed for older images.
+#define UPD_INST_KEY_LEN "len"
 
 #define UPD_INST_SHA_LEN 32u
 #define UPD_INST_SEMVER_LEN 32u
@@ -181,16 +184,28 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 // names another image is left alone and the call returns UPD_INST_CONFIRM_NOT_RUNNING (never retried).
 // running_semver NULL or empty never matches.
 #define UPD_INST_CONFIRM_NOT_RUNNING 2
+// OG-01: the record id is zero/unknown, or the running id/version is unknown, so the record cannot be proven to name
+// the running image. Nothing is written (the record stays pending; status reads "unverified"). Final: not retried.
+#define UPD_INST_CONFIRM_UNVERIFIED 3
 int update_install_confirm_result(const update_install_ops_t *ops, const char *running_semver,
                                   const uint8_t *running_id);
 
-// OC-03: true when the OK result names the running image (semver equal, both non-empty).
-// OF-01: running_id (UPD_INST_ID_LEN bytes, sha256 prefix of the running image) NULL/all-zero = unknown, semver only.
+// OC-03: true when the OK result names the running image: version strings equal in the strict form (keeps -dirty
+// and the commit count, OG-01) AND both ids known and equal. running_id (UPD_INST_ID_LEN bytes, sha256 prefix of the
+// running image) NULL/all-zero, or an all-zero record id, is unknown and never matches (OG-01).
+typedef enum {
+    UPD_INST_MATCH_NO = 0,     // a definite difference (version or id)
+    UPD_INST_MATCH_YES,        // version and id both equal and known
+    UPD_INST_MATCH_UNVERIFIED, // nothing differs but an id (or the version) is unknown on one side
+} update_install_match_t;
+update_install_match_t update_install_res_match(const update_install_res_t *res, const char *running_semver,
+                                                const uint8_t *running_id);
 bool update_install_res_matches_running(const update_install_res_t *res, const char *running_semver,
                                         const uint8_t *running_id);
 
 // OF-02: like update_install_res_state_name, but an unconfirmed OK result that does not match the running image
-// reads "not_running" (final: this image will never confirm it).
+// reads "not_running" (final: this image will never confirm it). OG-01: one that cannot be proven either way
+// (an id unknown) reads "unverified" (also final: it is never marked confirmed).
 const char *update_install_res_state(const update_install_res_t *res, const char *running_semver,
                                      const uint8_t *running_id);
 

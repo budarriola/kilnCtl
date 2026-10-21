@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -120,12 +121,25 @@ static bool app_stage_info(void *ctx, bool *busy, uint32_t *len, uint8_t sha[UPD
 static int app_res_erase(void *ctx)
 {
     (void)ctx;
+    /* OG-04: the length key belongs to the result that is being replaced; a fresh one is written with the request. */
+    (void)kv_erase_verified(UPD_INST_KEY_LEN);
     return kv_erase_verified(UPD_INST_KEY_RES);
 }
 
+// OG-04: the result id is the sha256 prefix of the uploaded file, i.e. of image_length bytes. The record has no room
+// for that length (blob layout is fixed for older images), so it is kept in its own key next to the request and the
+// running-image hash covers exactly that range (not the metadata image_len, which differs for signed/padded images).
 static int app_req_write(void *ctx, const uint8_t *buf, size_t len)
 {
     (void)ctx;
+    update_install_req_t r;
+    if (update_install_req_decode(buf, len, &r)) {
+        uint8_t lb[4] = { (uint8_t)r.image_length, (uint8_t)(r.image_length >> 8), (uint8_t)(r.image_length >> 16),
+                          (uint8_t)(r.image_length >> 24) };
+        if (kv_write_verified(UPD_INST_KEY_LEN, lb, sizeof(lb)) != 0) {
+            return -1;
+        }
+    }
     return kv_write_verified(UPD_INST_KEY_REQ, buf, len);
 }
 
@@ -140,20 +154,55 @@ static esp_ota_img_states_t running_ota_state(void)
     return st;
 }
 
-// OF-01/OF-05: sha256 prefix of the running image, computed once and cached. It is the hash of the first
-// image_len bytes of the running partition, i.e. exactly the published .bin bytes that the staged upload hashed
-// (stale_running_matches does the same). esp_partition_get_sha256 is NOT used: for an app it returns the digest
-// appended inside the image, which differs from the .bin file hash. False = unknown: callers fall back to semver.
+// OG-04: image_length of the last prepared install (the range the result id covers); 0 = no such key (legacy).
+static uint32_t read_hashed_len(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, UPD_INST_NS, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION_NAME) != HAL_OK) {
+        return 0;
+    }
+    uint8_t lb[4];
+    size_t n = sizeof(lb);
+    hal_status_t e = hal_kv_get_blob(&h, UPD_INST_KEY_LEN, lb, &n);
+    hal_kv_close(&h);
+    if (e != HAL_OK || n != sizeof(lb)) {
+        return 0;
+    }
+    return (uint32_t)lb[0] | ((uint32_t)lb[1] << 8) | ((uint32_t)lb[2] << 16) | ((uint32_t)lb[3] << 24);
+}
+
+// OG-03: the cached id is published as one unit under a spinlock (dual core: httpd and ota_confirm both call).
+static portMUX_TYPE s_id_mux = portMUX_INITIALIZER_UNLOCKED;
+static struct {
+    bool have;
+    uint32_t len;
+    uint8_t id[UPD_INST_ID_LEN];
+} s_id_cache;
+
+// OF-01/OF-05/OG-04: sha256 prefix of the running image, cached per hashed length. It is the hash of the first
+// N bytes of the running partition, N = the install's image_length (the uploaded file the record id covers), else
+// the metadata image_len for a legacy record (stale_running_matches hashes the same way). esp_partition_get_sha256 is
+// NOT used: for an app it returns the digest appended inside the image, which differs from the .bin file hash.
+// False = unknown: the record then reads "unverified" and is never confirmed (OG-01).
+// OG-02: callers take this only when a record needs the decision, and never while holding the update claim.
 static bool running_image_id(uint8_t id[UPD_INST_ID_LEN])
 {
-    static uint8_t cached[UPD_INST_ID_LEN];
-    static volatile bool have = false;
-    if (!have) {
-        const esp_partition_t *run = esp_ota_get_running_partition();
-        uint32_t ilen = 0;
-        if (run == NULL || !dashboard_running_image_len(&ilen) || ilen > run->size) {
-            return false;
-        }
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    uint32_t ilen = read_hashed_len();
+    if (ilen == 0 && (run == NULL || !dashboard_running_image_len(&ilen))) {
+        return false;
+    }
+    if (run == NULL || ilen == 0 || ilen > run->size) {
+        return false;
+    }
+    bool hit = false;
+    portENTER_CRITICAL(&s_id_mux);
+    if (s_id_cache.have && s_id_cache.len == ilen) {
+        memcpy(id, s_id_cache.id, UPD_INST_ID_LEN);
+        hit = true;
+    }
+    portEXIT_CRITICAL(&s_id_mux);
+    if (!hit) {
         psa_hash_operation_t sha = psa_hash_operation_init();
         if (psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS) {
             return false;
@@ -176,11 +225,33 @@ static bool running_image_id(uint8_t id[UPD_INST_ID_LEN])
             psa_hash_abort(&sha);
             return false;
         }
-        memcpy(cached, out, UPD_INST_ID_LEN);
-        have = true;
+        portENTER_CRITICAL(&s_id_mux);
+        s_id_cache.len = ilen;
+        memcpy(s_id_cache.id, out, UPD_INST_ID_LEN);
+        s_id_cache.have = true;
+        portEXIT_CRITICAL(&s_id_mux);
+        memcpy(id, out, UPD_INST_ID_LEN);
     }
-    memcpy(id, cached, UPD_INST_ID_LEN);
     return true;
+}
+
+// OG-01: the running firmware's raw `git describe` / release version as the staged header stores it (the
+// esp_app_desc version, cut to the record's 31 characters), so record and running strings are the same form.
+static void running_describe(char out[UPD_INST_SEMVER_LEN])
+{
+    memset(out, 0, UPD_INST_SEMVER_LEN);
+    const esp_app_desc_t *d = esp_app_get_description();
+    if (d != NULL) {
+        strncpy(out, d->version, UPD_INST_SEMVER_LEN - 1);
+    }
+}
+
+// OG-02: true only when a result exists that this boot still has to decide (OK and not confirmed).
+static bool record_needs_decision(void)
+{
+    update_install_res_t res;
+    memset(&res, 0, sizeof(res));
+    return read_result(&res) == 1 && res.code == UPD_INST_RES_OK && res.detail != UPD_INST_DETAIL_CONFIRMED;
 }
 
 static bool app_running_unconfirmed(void *ctx)
@@ -325,6 +396,10 @@ int update_install_http_drop_stale_request(void)
 // (OC-02: caller retries), UPD_INST_CONFIRM_NOT_RUNNING = the record names another image (OC-03, final).
 int update_install_http_mark_confirmed(void)
 {
+    /* OG-02/OG-03: hash (once, cached) only when a record needs the decision, and BEFORE the claim is taken so a
+     * concurrent upload is not told "busy" for the ~1 s the hash takes. */
+    uint8_t rid[UPD_INST_ID_LEN];
+    bool have_id = record_needs_decision() && running_image_id(rid);
     bool claimed = ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP);
     int rc = 1;
     if (claimed) {
@@ -332,11 +407,9 @@ int update_install_http_mark_confirmed(void)
         memset(&ops, 0, sizeof(ops));
         ops.res_write = stale_res_write;
         ops.res_read = stale_res_read;
-        update_identity_t run;
-        memset(&run, 0, sizeof(run));
-        update_fetch_running_identity(&run, NULL);
-        uint8_t rid[UPD_INST_ID_LEN];
-        rc = update_install_confirm_result(&ops, run.version, running_image_id(rid) ? rid : NULL);
+        char desc[UPD_INST_SEMVER_LEN];
+        running_describe(desc);
+        rc = update_install_confirm_result(&ops, desc, have_id ? rid : NULL);
         ota_http_update_end();
     }
     if (rc != 0) {
@@ -409,10 +482,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     json_safe(sv, sizeof(sv), staged_ver);
     json_safe(lv, sizeof(lv), have == 1 ? res.semver : "");
     uint8_t rid[UPD_INST_ID_LEN];
-    const uint8_t *rid_p = running_image_id(rid) ? rid : NULL;
+    char desc[UPD_INST_SEMVER_LEN];
+    running_describe(desc);
+    /* OG-02: hash only for an OK, unconfirmed record (cached after the first time). */
+    const uint8_t *rid_p = (have == 1 && res.code == UPD_INST_RES_OK && res.detail != UPD_INST_DETAIL_CONFIRMED &&
+                            running_image_id(rid))
+                               ? rid
+                               : NULL;
     /* OC-02: a VALID running image that the record names is confirmed even if the record write has not landed. */
     if (have == 1) {
-        (void)update_install_res_derive_confirmed(&res, run.version, rid_p, running_ota_state() == ESP_OTA_IMG_VALID);
+        (void)update_install_res_derive_confirmed(&res, desc, rid_p, running_ota_state() == ESP_OTA_IMG_VALID);
     }
 
     char json[512];
@@ -422,7 +501,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                      "\"reason\":\"%s\",\"version\":\"%s\",\"id\":\"%s\","
                      "\"detail\":\"%s\",\"app_modified\":%s}}",
                      rv, busy ? "true" : "false", staged ? "true" : "false", sv,
-                     have == 1 ? update_install_res_state(&res, run.version, rid_p) : (have == 0 ? "none" : "unreadable"),
+                     have == 1 ? update_install_res_state(&res, desc, rid_p) : (have == 0 ? "none" : "unreadable"),
                      have == 1 ? update_install_code_name(res.code) : "none",
                      have == 1 ? update_install_reason_name(res.reason) : "none", lv, lid,
                      have == 1 ? update_install_detail_name(res.detail) : "none",

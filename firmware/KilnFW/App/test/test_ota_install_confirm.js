@@ -36,16 +36,25 @@ function run(state) {
   assert(c.timers.length === 1 && c.timers[0] === 5000, 'OC-07: pending_confirm re-polls in 5 s');
   c = await run('not_running');
   assert(c.timers.length === 0, 'OF-02: not_running stops polling');
+  c = await run('unverified');
+  assert(c.timers.length === 0, 'OG-01: unverified stops polling');
+  assert(/li\.state === 'unverified'\) return 'Last install'/.test(PAGE), 'OG-01: ota_page words the unverified state');
   c = await run('recorded');
   assert(c.timers.length === 0 && c.text === 'recorded', 'OC-07: final state stops polling');
   assert(/typeof window\.kcOtaAuthedFetch !== 'function'\) return Promise\.resolve\(\)/.test(m[0]), 'loadLastInstall guards a missing kcOtaAuthedFetch');
   assert(/update_install_confirm_retry_delay_ms\(attempt\)/.test(NET) && /vTaskDelay\(pdMS_TO_TICKS\(wait_ms\)\)/.test(NET),
          'OC-01: confirm task retries the mark with backoff');
-  assert(/update_install_res_derive_confirmed\(&res, run\.version, rid_p, running_ota_state\(\) == ESP_OTA_IMG_VALID\)/.test(HTTP),
+  assert(/update_install_res_derive_confirmed\(&res, desc, rid_p, running_ota_state\(\) == ESP_OTA_IMG_VALID\)/.test(HTTP),
          'OC-02: status derives confirmed from otadata');
   assert(/\.running_unconfirmed = app_running_unconfirmed/.test(HTTP) && /ESP_OTA_IMG_PENDING_VERIFY/.test(HTTP),
          'OC-04: install guard wired to PENDING_VERIFY');
-  assert(/update_install_confirm_result\(&ops, run\.version, running_image_id\(rid\) \? rid : NULL\)/.test(HTTP), 'OC-03/OF-01: confirm passes the running version and image id');
+  assert(/update_install_confirm_result\(&ops, desc, have_id \? rid : NULL\)/.test(HTTP), 'OC-03/OF-01: confirm passes the running version and image id');
+  assert(/UPD_INST_CONFIRM_UNVERIFIED/.test(NET), 'OG-01: confirm loop treats unverified as final');
+  const mm = HTTP.match(/int update_install_http_mark_confirmed\(void\)\s*\{[\s\S]*?\n\}/);
+  assert(!!mm && mm[0].indexOf('record_needs_decision()') >= 0 && mm[0].indexOf('record_needs_decision()') < mm[0].indexOf('ota_http_update_try_begin'),
+         'OG-02: id hashed only for a record needing a decision, before the update claim is taken');
+  assert(/portENTER_CRITICAL\(&s_id_mux\)/.test(HTTP), 'OG-03: cached id published under a spinlock');
+  assert(/UPD_INST_KEY_LEN/.test(HTTP) && /read_hashed_len\(\)/.test(HTTP), 'OG-04: hash covers the install image_length');
   assert(/high-water mark before mark loop/.test(NET), 'OF-04: stack high-water logged before the mark loop');
   console.log(passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

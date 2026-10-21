@@ -308,7 +308,7 @@ static void main_ota_rollback_confirm_task(void *arg)
                 for (unsigned attempt = 0;; attempt++) {
                     int mrc = update_install_http_mark_confirmed();
                     uint32_t wait_ms = update_install_confirm_retry_delay_ms(attempt);
-                    if (mrc == 0 || mrc == UPD_INST_CONFIRM_NOT_RUNNING || wait_ms == 0) {
+                    if (mrc == 0 || mrc == UPD_INST_CONFIRM_NOT_RUNNING || mrc == UPD_INST_CONFIRM_UNVERIFIED || wait_ms == 0) {
                         break; /* OC-01/OC-02: busy claim and write failures are retried with backoff */
                     }
                     vTaskDelay(pdMS_TO_TICKS(wait_ms));

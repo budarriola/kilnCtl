@@ -295,7 +295,7 @@ def sha256_hex(image: bytes) -> str:
 
 def get_install_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
     """GET /api/update/status. Keys: running_version, stage_busy, staged,
-    staged_version, last_install{state (recorded/pending_confirm/not_running/none/unreadable; not_running = ok record names another image than the running one, OF-02; pending_confirm = installed
+    staged_version, last_install{state (recorded/pending_confirm/not_running/unverified/none/unreadable; not_running = ok record names another image than the running one, OF-02; unverified = the record or running image id is unknown so it cannot be proven either way and is never marked confirmed, OG-01; pending_confirm = installed
     but the new image has not finished its boot confirm, OH-04), code, reason, version,
     id, detail, app_modified}. ``detail`` names the specific apply result (stage_hash_mismatch,
     start_low_heap, ...) and ``app_modified`` says whether the app partition had been erased when

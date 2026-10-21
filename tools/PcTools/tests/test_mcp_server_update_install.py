@@ -126,6 +126,16 @@ class InstallTests(_Base):
             out = msu.update_install_staged(confirm=True, wait_s=60)
         self.assertTrue(out.startswith("ok"), out)
 
+    def test_unverified_ok_record_is_never_success(self):
+        # OG-01: the board cannot prove the record names the running image: UNKNOWN, named, never ok.
+        unv = _st(running="1.0.1", state="unverified", code="ok", rid=STAGED_ID)
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [unv] * 100), \
+             mock.patch.object(uhc, "start_install", return_value={}):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertFalse(out.startswith("ok"), out)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("unverified", out)
+
     def test_pending_confirm_only_ends_unknown_with_note(self):
         pend = _st(running="1.0.1", state="pending_confirm", code="ok", rid=STAGED_ID)
         with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [pend] * 100), \
