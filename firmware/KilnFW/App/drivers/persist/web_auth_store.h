@@ -310,6 +310,9 @@ const char *web_auth_store_storage_reset_banner_text(void);
 // is disabled in settings. Cached, recomputed at boot and after PIN/policy writes.
 bool web_auth_store_lcd_pin_pending(void);
 const char *web_auth_store_lcd_pin_pending_banner_text(void);
+// RV-04: policy record lost on a provisioned board (load_policy UNREADABLE, not the FS-02 latch).
+bool web_auth_store_policy_lost(void);
+const char *web_auth_store_policy_lost_banner_text(void);
 
 // Erases the policy record AND the marker (read-back verified): the only way
 // back to the fresh-board open state. For a deliberate factory reset of auth.

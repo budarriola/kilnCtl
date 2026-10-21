@@ -54,6 +54,12 @@ static bool s_storage_reset_latched;
 static bool s_lcd_pin_pending;
 static void storage_reset_resolve(void);
 static void lcd_pin_pending_refresh(void);
+// RV-04: policy lost on a provisioned board (UNREADABLE, not the FS-02 latch). Cached with the PIN flag.
+static bool s_policy_lost;
+static void legacy_policy_migrate(void);
+// RV-01: one-time legacy migration done marker (see legacy_policy_migrate()).
+#define WEB_AUTH_KEY_MIG "auth_mig"
+NVS_KEY_LEN_CHECK(WEB_AUTH_KEY_MIG);
 
 // --- On-disk blob layouts ----------------------------------------------------
 // Each blob is version-tagged and CRC32'd, same convention as
@@ -660,6 +666,23 @@ hal_status_t web_auth_store_set_password(web_auth_role_t role, const char *usern
     rec->must_change = must_change;
     rec->configured = true;
 
+    // RV-01: never leave "credential present, policy absent". The first credential on a
+    // never-provisioned board stores a both-off policy FIRST (auth stays off, as in the open
+    // wizard), so ABSENT policy + credential can only mean the policy was lost, and the
+    // wizard's following set_policy works. Skipped when the marker exists (policy lost on a
+    // commissioned board: stay fail-closed) or the FS-02 latch is set (resolve writes it).
+    if (!s_storage_reset_latched && !web_auth_store_ever_enabled()) {
+        web_auth_policy_blob_t pb0;
+        if (load_blob(WEB_AUTH_KEY_POLICY, &pb0, sizeof(pb0)) == HAL_NOT_FOUND) {
+            web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false,
+                                     .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+            hal_status_t ost = web_auth_store_set_policy(&off);
+            if (ost != HAL_OK) {
+                memset(&blob, 0, sizeof(blob));
+                return ost;
+            }
+        }
+    }
     if (!cred_store_lock(CRED_STORE_LOCK_WAIT_MS)) {
         memset(&blob, 0, sizeof(blob));
         return HAL_BUSY;
@@ -839,6 +862,7 @@ static bool storage_reset_evaluate_impl(bool setup_evidence_elsewhere);
 bool web_auth_store_storage_reset_evaluate(bool setup_evidence_elsewhere)
 {
     bool r = storage_reset_evaluate_impl(setup_evidence_elsewhere);
+    legacy_policy_migrate();
     lcd_pin_pending_refresh();
     return r;
 }
@@ -932,6 +956,45 @@ static void lcd_pin_pending_refresh(void)
     web_auth_policy_blob_t pb;
     s_lcd_pin_pending = load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) == HAL_OK && pb.lcd_enabled &&
                         !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR);
+    web_auth_policy_t pol;
+    s_policy_lost = !s_storage_reset_latched && web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE;
+}
+
+bool web_auth_store_policy_lost(void)
+{
+    return s_policy_lost;
+}
+
+const char *web_auth_store_policy_lost_banner_text(void)
+{
+    return "AUTH: login policy lost; admin log in, save security";
+}
+
+// RV-01: one-time boot migration. A field board that has web passwords but never stored a
+// policy (pre-policy firmware) and has no marker keeps its prior behaviour (auth off): write
+// the both-off policy. Runs once ("auth_mig" marker) so a LATER policy+marker loss on a
+// provisioned board still fails closed instead of being re-migrated to open.
+static void legacy_policy_migrate(void)
+{
+    if (s_storage_reset_latched) {
+        return;
+    }
+    web_auth_ever_blob_t m;
+    if (load_blob(WEB_AUTH_KEY_MIG, &m, sizeof(m)) != HAL_NOT_FOUND) {
+        return; // done (or unreadable: do not guess)
+    }
+    web_auth_policy_blob_t pb;
+    if (load_blob(WEB_AUTH_KEY_POLICY, &pb, sizeof(pb)) == HAL_NOT_FOUND && !web_auth_store_ever_enabled() &&
+        (web_auth_store_password_configured(WEB_AUTH_ROLE_ADMINISTRATOR) ||
+         web_auth_store_password_configured(WEB_AUTH_ROLE_USER))) {
+        web_auth_policy_t off = {.web_enabled = false, .lcd_enabled = false,
+                                 .web_timeout_s = 1800, .lcd_timeout_s = 1800};
+        if (web_auth_store_set_policy(&off) != HAL_OK) {
+            return; // retry next boot
+        }
+    }
+    web_auth_ever_blob_t done = {WEB_AUTH_EVER_MAGIC, ~WEB_AUTH_EVER_MAGIC};
+    (void)set_blob_verified(WEB_AUTH_KEY_MIG, &done, sizeof(done));
 }
 
 // Admin web password was just set while latched: persist an auth-enabled
@@ -1001,7 +1064,11 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
         }
         // AU-02 (2026-10-20): marker also gone (both keys lost), but a web credential
         // record exists or is unreadable: the board was provisioned, so fail closed
-        // (dashboards only; admin logs in or bootstrap re-saves the policy). Only a
+        // (dashboards only; admin logs in or bootstrap re-saves the policy). RV-03: with only a
+        // USER credential left, admin bootstrap is open to any caller here. Accepted: this state
+        // was fully open before AU-02, set_password now always stores a policy first (RV-01) so
+        // it needs policy+marker loss AND an admin-less board, and the LCD shows a banner (RV-04).
+        // Only a
         // board with no credential record at all is "never provisioned" and stays open.
         web_auth_password_record_t cred;
         web_auth_load_status_t ast = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &cred);

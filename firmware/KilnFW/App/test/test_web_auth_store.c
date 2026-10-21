@@ -542,11 +542,15 @@ static void test_au02_provisioned_board_policy_loss_fails_closed(void)
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "password1", salt, false) == HAL_OK,
                "set admin password");
     TEST_CHECK(web_auth_store_ever_enabled() == false, "no marker (lost or never set)");
+    TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_OK && !pol.web_enabled,
+               "RV-01: set_password stored a both-off policy (not UNREADABLE)");
+    drop_policy_key_only();
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE,
                "admin configured, policy and marker absent: UNREADABLE, not open");
     reset_all();
     TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "user", "password1", salt, false) == HAL_OK,
                "set user password");
+    drop_policy_key_only();
     TEST_CHECK(web_auth_store_load_policy(&pol) == WEB_AUTH_LOAD_UNREADABLE, "user-only credential also fails closed");
 
     // Unreadable (bad CRC) web credential blob counts as a credential record.

@@ -1655,8 +1655,80 @@ static void test_lockout_no_phantom_lock_at_tick_wrap(void)
     }
 }
 
+// RV-01/RV-02: the REAL write orders. The setup wizard and the Security page both send
+// set_web_password first and set_policy second, on a store with no policy record.
+static void test_rv01_wizard_order_password_then_policy(void)
+{
+    TEST_SECTION("RV-01 -- wizard order (password, then policy) on a fresh store ends in a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "first admin password stores");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && !cur.web_enabled,
+               "RV-01: a credential never leaves the policy absent (stored both-off)");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set_policy after the password succeeds");
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && cur.web_enabled, "web auth enabled and readable");
+    strncpy(s_stub_client_ip, "10.7.0.1", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "correct-horse-battery-staple") == ESP_OK, "admin login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rv01_security_page_order_user_then_admin(void)
+{
+    TEST_SECTION("RV-01 -- Security page order (user pw, admin pw, then policy) ends in a working admin login");
+    reset_all();
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_USER, "operator", "user-password-123456", TEST_SALT, false) ==
+                   HAL_OK, "user password first");
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "admin password");
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK, "policy readable between the two POSTs");
+    web_auth_policy_t pol = {.web_enabled = true, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1};
+    TEST_CHECK(web_auth_store_set_policy(&pol) == HAL_OK, "set_policy succeeds");
+    strncpy(s_stub_client_ip, "10.7.0.2", sizeof(s_stub_client_ip) - 1);
+    s_last_set_cookie[0] = '\0';
+    TEST_CHECK(do_login("admin", "correct-horse-battery-staple") == ESP_OK, "admin login succeeds");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL, "admin login mints a session");
+}
+
+static void test_rv01_legacy_board_password_no_policy_migrates_open(void)
+{
+    TEST_SECTION("RV-01 -- legacy board (password, no policy, no marker) keeps auth off after the boot migration");
+    reset_all();
+    (void)web_auth_store_storage_reset_evaluate(true); // fresh boot of the old firmware: sentinel only
+    // Simulate a pre-policy firmware: credential stored, never a policy. Drop the migration marker
+    // and the policy that this firmware's set_password wrote.
+    TEST_CHECK(web_auth_store_set_password(WEB_AUTH_ROLE_ADMINISTRATOR, "admin", "correct-horse-battery-staple",
+                                           TEST_SALT, false) == HAL_OK, "legacy admin password");
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "legacy: no policy, no marker");
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, "kiln_auth", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open kiln_auth");
+        (void)hal_kv_erase_key(&h, "auth_mig");
+        (void)hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+    web_auth_policy_t cur;
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "pre-migration state reads fail-closed");
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_OK && !cur.web_enabled && !cur.lcd_enabled,
+               "migration stored a both-off policy: prior (open) behaviour kept");
+    TEST_CHECK(!web_auth_store_policy_lost(), "no policy-lost banner on a migrated board");
+    // Migration is one-time: a later policy+marker loss on this provisioned board stays fail-closed.
+    TEST_CHECK(web_auth_store_clear_policy_and_marker(), "later policy loss");
+    (void)web_auth_store_storage_reset_evaluate(true);
+    TEST_CHECK(web_auth_store_load_policy(&cur) == WEB_AUTH_LOAD_UNREADABLE, "no re-migration: dashboards only");
+    TEST_CHECK(web_auth_store_policy_lost(), "RV-04: policy-lost banner shown");
+    TEST_CHECK(strstr(web_auth_store_policy_lost_banner_text(), "policy lost") != NULL, "RV-04 banner text");
+}
+
 void run_test_web_auth_login_http(void)
 {
+    test_rv01_wizard_order_password_then_policy();
+    test_rv01_security_page_order_user_then_admin();
+    test_rv01_legacy_board_password_no_policy_migrates_open();
     test_lockout_no_phantom_lock_at_tick_wrap();
     test_ax02_login_straddling_reset_mints_no_session();
     test_ax04_login_refuses_on_hash_failure();
