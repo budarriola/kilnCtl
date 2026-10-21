@@ -1074,6 +1074,37 @@ bool web_auth_store_clear_policy_and_marker(void)
     return (a == HAL_OK || a == HAL_NOT_FOUND) && (b == HAL_OK || b == HAL_NOT_FOUND) && c == HAL_OK && gone;
 }
 
+// WP-01: portable noinline (cl.exe host tests reject the GCC attribute syntax).
+#if defined(_MSC_VER)
+#define WEB_AUTH_STORE_NOINLINE
+#else
+#define WEB_AUTH_STORE_NOINLINE __attribute__((noinline))
+#endif
+
+// WP-01: provisioned-board probes for the AU-02 lost-policy path, kept out of
+// web_auth_store_load_policy's own frame (the deepest wifi_prov_owner call chain
+// runs through it). Non-reentrant-safe: all locals are on the caller's stack.
+WEB_AUTH_STORE_NOINLINE static bool policy_lost_probe_admin(void)
+{
+    web_auth_password_record_t cred;
+    web_auth_load_status_t ast = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &cred);
+    return ast == WEB_AUTH_LOAD_UNREADABLE || ast == WEB_AUTH_LOAD_OK;
+}
+
+WEB_AUTH_STORE_NOINLINE static bool policy_lost_probe_user(void)
+{
+    return web_auth_store_password_configured(WEB_AUTH_ROLE_USER);
+}
+
+// RF3-03: a present LCD PIN blob (any state) also means the board was provisioned.
+WEB_AUTH_STORE_NOINLINE static bool policy_lost_probe_lcd(void)
+{
+    web_auth_lcd_blob_t lcd_probe;
+    bool present = load_blob(WEB_AUTH_KEY_LCD, &lcd_probe, sizeof(lcd_probe)) != HAL_NOT_FOUND;
+    memset(&lcd_probe, 0, sizeof(lcd_probe));
+    return present;
+}
+
 web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -1095,14 +1126,9 @@ web_auth_load_status_t web_auth_store_load_policy(web_auth_policy_t *out)
         // USER-only board that lost policy+marker stays UNREADABLE; the LCD reset gesture plus an
         // admin bootstrap then writes an enabled policy (RF2-01). A present-but-wiped web blob counts
         // as provisioned (RF2-04).
-        web_auth_password_record_t cred;
-        web_auth_load_status_t ast = web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &cred);
-        bool user_cfg = web_auth_store_password_configured(WEB_AUTH_ROLE_USER);
-        // RF3-03: a present LCD PIN blob (any state) also means the board was provisioned.
-        web_auth_lcd_blob_t lcd_probe;
-        bool lcd_present = load_blob(WEB_AUTH_KEY_LCD, &lcd_probe, sizeof(lcd_probe)) != HAL_NOT_FOUND;
-        memset(&lcd_probe, 0, sizeof(lcd_probe));
-        if (ast == WEB_AUTH_LOAD_UNREADABLE || ast == WEB_AUTH_LOAD_OK || user_cfg || lcd_present) {
+        // WP-01: each probe lives in its own noinline frame so load_policy's frame (on the
+        // wifi_prov_owner rescan-tick path) carries none of the credential/LCD blob locals.
+        if (policy_lost_probe_admin() || policy_lost_probe_user() || policy_lost_probe_lcd()) {
             return WEB_AUTH_LOAD_UNREADABLE;
         }
         return WEB_AUTH_LOAD_ABSENT; // item 11: never provisioned reads as both-off
