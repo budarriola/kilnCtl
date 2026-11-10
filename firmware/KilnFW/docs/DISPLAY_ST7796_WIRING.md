@@ -28,7 +28,7 @@ regardless. Two circuits deliberately cross inside that harness.
 
 | Wire | From | To | Module name | Note |
 |---|---|---|---|---|
-| 9 | ESP32-S3 DevKitC **GPIO15** (U4 pad 8 = header J1 pin 8) | mod 8 | LED | Active HIGH into the BSS138 gate (R7 10k pull-up to the module's VCC3.3). 3.3 V push-pull is fine here, and the pin is LEDC-PWM-able. Fallback: GPIO16. |
+| 9 | ESP32-S3 DevKitC **GPIO15** (U4 pad 8 = header J1 pin 8) | mod 8 | LED | Active HIGH into the BSS138 gate (R7 10k pull-up to the module's VCC3.3). 3.3 V push-pull is fine here, and the pin is LEDC-PWM-able. (GPIO16 is reserved for CTP_INT.) |
 
 Leaving module pin 8 open instead is legal and reproduces today's behaviour
 exactly: backlight permanently on.
@@ -82,11 +82,17 @@ so no 5 V appears there regardless of this rework.
 This part list comes from the vendor's V1.0 schematic (`DISPLAY_ST7796_PLAN.md`
 S3.2), not from the module in hand. The meter check below is the actual gate.
 
+## CTP_INT (reserved, not implemented)
+
+Module pin 13 (CTP_INT) goes by flying wire to ESP32-S3 DevKitC **GPIO16**
+(U4 pad 9), owner decision 2026-11-09. The pin is recorded as
+`CONFIG_KILNCTL_TOUCH_INT_GPIO` (default 16) but firmware does not read it yet;
+touch still polls over I2C. GPIO16 is no longer the backlight fallback.
+
 ## Leave unconnected
 
 | Module pin | Name | Why |
 |---|---|---|
-| 13 | CTP_INT | Touch polls instead of using INT |
 | 14 | SD_CS | No SD card use |
 
 Every J2 pin is now used. Display-only builds omit wires 10–12 and leave module

@@ -497,8 +497,8 @@ menu "KilnCtrl Hardware Configuration"
                 the DevKitC header rather than a J2 harness circuit. Checked
                 2026-09-03; see docs/MSP4031_WIRING.md, "Why GPIO15 is the
                 backlight pin", for the full pad-by-pad derivation.
-                GPIO16 (pad 9) is free by the same check and is the
-                fallback if GPIO15 is awkward to reach.
+                GPIO16 (pad 9) is no longer a fallback: it is reserved for
+                CTP_INT (KILNCTL_TOUCH_INT_GPIO, 2026-11-09).
 
         config KILNCTL_BACKLIGHT_ON_PERCENT
             int "Backlight duty while the screen is on (%)"
@@ -551,6 +551,24 @@ menu "KilnCtrl Hardware Configuration"
                 below. Off (only correct on the BIGTREETECH TFT35 board):
                 constructs an NS2009Class instead, self_calibrating = false,
                 KILNCTL_TOUCH_CAL_* knobs.
+
+        config KILNCTL_TOUCH_INT_GPIO
+            int "FT6336U CTP_INT GPIO (flying wire, RESERVED -- not used yet)"
+            default 16
+            range 0 48
+            depends on KILNCTL_TOUCH_FT6336U
+            help
+                RESERVED, NOT IMPLEMENTED. Records the pin only: no code
+                reads this symbol, and touch still polls the FT6336U over
+                I2C (GPIO8/GPIO9).
+
+                Module pin 13 (CTP_INT, active low, unbuffered 3.3 V output
+                straight from the FT6336U) is wired by flying wire to
+                ESP32-S3 GPIO16 (U4 pad 9). J2 carries no CTP_INT. GPIO16
+                was verified free 2026-11-09: kiln.kicad_pcb names U4 pad 9
+                unconnected-(U4-GPIO16/ADC2_CH5/32K_N-Pad9), and no firmware
+                source or sdkconfig assigns GPIO 16. It is therefore no
+                longer the KILNCTL_BACKLIGHT_GPIO fallback.
     endmenu
 
     menu "NS2009 Touch Controller (on the TFT35 SPI panel, J2)"
