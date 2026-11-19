@@ -433,7 +433,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                          * logged "rose only 0.5C ... need >=0.5C" read as an
                          * inclusive-boundary bug when the actual numbers were
                          * never equal -- see the bench trip this was found from. */
-                        if (delta < expected && !in->progress_rise_check_relaxed) {
+                        if (delta < expected && !in->progress_rise_check_relaxed && !in->finish_short) {
                             trip(state, THERMAL_GUARD_TRIP_HEATING_FAILED,
                                  "heating but rose only %.2fC in %.1fmin (need >=%.2fC)", (double)delta,
                                  (double)elapsed_min, (double)expected);

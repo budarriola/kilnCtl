@@ -701,6 +701,13 @@ typedef struct {
     float    settle_acc_s;
     uint8_t  settle_nb;
     bool     settle_stalled;
+    /* EA C3 finish-short latch (owner 2026-11-19): set when the arrival gate opened because this
+     * zone stalled short of target. Guard 1 stops demanding a rise from this zone for the rest of
+     * that dwell (finish_short_seg). Cleared by arrival_settle_tick (reading fell > 10 C below
+     * finish_short_c, duty < 0.5, invalid reading), segment change, resume, run start. */
+    bool     finish_short;
+    uint8_t  finish_short_seg;
+    float    finish_short_c;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. Heat-work-weighted
      * accumulator -- banked ONLY while this zone is lagging (the same
@@ -910,6 +917,8 @@ typedef struct {
     /* EA C3: segment whose dwell the stall windows were last restarted for; -1 forces a restart
      * (run start, resume). */
     int16_t arrival_gate_seg;
+    /* EA C3: a finish-short latch was set at some point this run (status flag, C6 learning exclusion). */
+    bool finish_short_run;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- last spend actually
      * applied to a dwell's timer, in seconds. 0.0f for the whole life of a
@@ -1472,6 +1481,9 @@ void ramp_assist_zone_lag_tick_ex(zone_runtime_t *z, bool lagging_now, float dt_
 /* Shared with EA C7's slow-climb floor (thermal_guard.h). */
 #define EXEC_ARRIVAL_STALL_RATE_C_PER_MIN THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN
 void arrival_settle_reset(zone_runtime_t *z);
+void arrival_finish_short_clear_all(s_exec_state_t *ex);
+#define EXEC_FINISH_SHORT_DROP_C   10.0f
+#define EXEC_FINISH_SHORT_DUTY_MIN 0.5f
 void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s);
 bool arrival_zone_ok(float actual_c, float target_c, float band_c, bool settled);
 bool arrival_segment_is_heating(const profile_segment_t *segs, uint8_t count, uint8_t index, float run_start_c);

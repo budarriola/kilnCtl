@@ -392,11 +392,22 @@ void arrival_settle_reset(zone_runtime_t *z)
     z->settle_acc = 0.0f;
     z->settle_acc_s = 0.0f;
     z->settle_stalled = false;
+    z->finish_short = false;
+}
+
+void arrival_finish_short_clear_all(s_exec_state_t *ex)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) ex->zones[zi].finish_short = false;
 }
 
 void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s)
 {
-    (void)duty; /* deliberately unused: no duty threshold (cone-10 kilns run ~100% healthy) */
+    /* No duty threshold for the stall rule (cone-10 kilns run ~100% healthy). Duty only matters to
+     * the finish-short latch: below 0.5 it clears. */
+    if (z->finish_short && !isnan(actual_c) &&
+        (actual_c < z->finish_short_c - EXEC_FINISH_SHORT_DROP_C || duty < EXEC_FINISH_SHORT_DUTY_MIN)) {
+        z->finish_short = false;
+    }
     if (isnan(actual_c)) {
         arrival_settle_reset(z);
         return;
@@ -528,6 +539,22 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
         arrival_planned_lower_bound_s(ex->profile.segments, ex->profile.segment_count, ex->run_start_c),
         stretch_max_pct);
     bool wait = arrival_gate_waits(true, true, all_ok, ex->arrival_wait_s, ex->stretch_total_s, budget_s);
+    if (!wait && all_ok) {
+        /* Gate opened by arrival or stall (not budget). Latch finish-short for each stalled zone that is
+         * outside the band. */
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            zone_runtime_t *z = &ex->zones[zi];
+            if (!z->active || z->faulted || !profile_executor_zone_drives_run(zi)) continue;
+            float band_c = (z->guard_cfg.progress_band_c > 0.0f) ? z->guard_cfg.progress_band_c : 3.0f;
+            if (!z->finish_short && z->settle_stalled && !isnan(z->actual_c) && z->actual_c < target_c - band_c &&
+                z->duty >= EXEC_FINISH_SHORT_DUTY_MIN) {
+                z->finish_short = true;
+                z->finish_short_seg = ex->segment_index;
+                z->finish_short_c = z->actual_c;
+                ex->finish_short_run = true;
+            }
+        }
+    }
     if (wait) {
         if (ex->segment_index < PROFILE_MAX_SEGMENTS) {
             ex->stretch_by_segment_s[ex->segment_index] += dt_s;

@@ -400,6 +400,7 @@ bool profile_executor_resume(void)
      * measured dt_s doesn't include the whole pause. */
     s_exec.prev_control_tick = xTaskGetTickCount();
     s_exec.arrival_gate_seg = -1; /* EA C3: restart the stall windows after a pause */
+    arrival_finish_short_clear_all(&s_exec);
     /* Bumpless transfer (TODO.md 6A.2): each active PID-mode zone resumes
      * as if it had been driving u=0 the whole pause (relays were off),
      * rather than an integral that jumps on the first post-resume tick.
@@ -518,6 +519,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
          * the dashboard note and the adaptive-tune stretched-run exclusion). */
         out->ramp_stretch_total_s = s_exec.stretch_total_s + s_exec.arrival_wait_s;
         out->target_shortfall_c = s_exec.target_shortfall_c;
+        out->finish_short = s_exec.finish_short_run;
         out->ramp_dwell_credit_applied_s = s_exec.dwell_credit_applied_s;
         out->run_start_c = s_exec.run_start_c;
         out->total_elapsed_s = s_exec.total_elapsed_s;

@@ -658,8 +658,9 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             profile_executor_get_status(est);
             // ramp_stretch_total_s is the sum of ramp-lock stretch and arrival-gate wait (status.c).
             run_stretch_s = est->ramp_stretch_total_s;
+            bool finish_short = est->finish_short;
             free(est);
-            run_stretch_excluded = adaptive_tune_run_stretch_excluded(run_stretch_s, rec->duration_s);
+            run_stretch_excluded = adaptive_tune_run_stretch_excluded(run_stretch_s, rec->duration_s) || finish_short;
         }
     }
     adaptive_tune_zone_plan_t *zone_plans;

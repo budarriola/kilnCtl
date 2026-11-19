@@ -8940,6 +8940,83 @@ static void test_ea_c7_slow_climb_floor_gates(void)
                "exactly 900 C counts as hot enough");
 }
 
+static void ea_make_heating_profile(s_exec_state_t *ex);
+// Guard 1 with the finish-short flag: climbing zone flat for secs seconds at duty 1.0.
+static int ea_guard1_finish_short(bool finish_short, float start_c, float drop_after_s, float drop_c, int secs)
+{
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.finish_short = finish_short;
+    z.finish_short_c = start_c;
+    thermal_guard_input_t in = {.sensor_ok = true, .setpoint_c = start_c + 100.0f, .commanded_duty = 1.0f,
+                                .dt_s = 1.0f};
+    for (int i = 0; i < secs; i++) {
+        float m = start_c - ((float)i >= drop_after_s ? drop_c : 0.0f) + ((i % 2) ? 0.1f : -0.1f); // jitter: guard 8 (frozen) stays live
+        arrival_settle_tick(&z, m, 1.0f, 1.0f); // the executor feeds the latch clear rules every tick
+        in.measurement_c = m;
+        in.finish_short = z.finish_short;
+        if (thermal_guard_tick(&gs, &cfg, &in)) {
+            return (int)gs.reason;
+        }
+    }
+    return (int)THERMAL_GUARD_TRIP_NONE;
+}
+
+static void test_ea_finish_short_latch(void)
+{
+    TEST_SECTION("EA C3 finish-short latch: a stalled zone at 100% duty completes the hold without a guard 1 trip; "
+                 "a >10 C drop, duty < 0.5, a dwell change or stretch off bring the guard back");
+    TEST_CHECK(ea_guard1_finish_short(false, 1000.0f, 1e9f, 0.0f, 900) == (int)THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "sanity: flat at 100% duty without the latch trips guard 1");
+    TEST_CHECK(ea_guard1_finish_short(true, 1000.0f, 1e9f, 0.0f, 900) == (int)THERMAL_GUARD_TRIP_NONE,
+               "latched: flat at 100% duty completes without a trip");
+    TEST_CHECK(ea_guard1_finish_short(true, 1000.0f, 100.0f, 11.0f, 900) != (int)THERMAL_GUARD_TRIP_NONE,
+               "reading falls 11 C during the latch: latch clears and a guard trips again");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.finish_short = true;
+    z.finish_short_c = 1000.0f;
+    arrival_settle_tick(&z, 991.0f, 1.0f, 1.0f);
+    TEST_CHECK(z.finish_short, "a 9 C drop keeps the latch");
+    arrival_settle_tick(&z, 1000.0f, 0.4f, 1.0f);
+    TEST_CHECK(!z.finish_short, "duty below 0.5 clears the latch");
+    z.finish_short = true;
+    arrival_settle_tick(&z, NAN, 1.0f, 1.0f);
+    TEST_CHECK(!z.finish_short, "an invalid reading clears the latch");
+
+    // Gate: stalled short of target at 100% duty latches when the gate opens; budget exhaustion does not.
+    s_exec_state_t ex;
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f); // dwell entry restarts windows
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "stalled: gate opens");
+    TEST_CHECK(ex.zones[0].finish_short && ex.finish_short_run, "stall-open latches finish-short and flags the run");
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 40.0f, 1e-3f, "and records the shortfall");
+    ex.arrival_gate_seg = -1; // next dwell / resume
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short, "the latch never outlives the dwell (windows restart, latch cleared)");
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 950.0f;
+    ex.zones[0].duty = 1.0f;
+    ex.arrival_wait_s = 1.0e9f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "budget exhaustion does not latch");
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    ex.arrival_gate_seg = -1;
+    (void)arrival_gate_tick(&ex, false, 100, 1.0f);
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, false, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "stretch off: no latch");
+}
+
 static void ea_make_heating_profile(s_exec_state_t *ex)
 {
     memset(ex, 0, sizeof(*ex));
@@ -13844,6 +13921,7 @@ void run_test_profile_executor_prestart(void)
     test_ea_c1_drift_band_follows_ramp_lock();
     test_ea_c4_lag_flicker_and_stretch_sanity_rate();
     test_ea_c7_slow_climb_floor_gates();
+    test_ea_finish_short_latch();
     test_ea_c3_arrival_gate();
     test_stretch_rate_returns_sentinel_when_assist_disabled();
     test_stretch_rate_returns_sentinel_when_no_zone_sustained();

@@ -314,6 +314,9 @@ typedef struct {
      * measurement_c >= THERMAL_GUARD_SLOW_CLIMB_MIN_C (saturated, hot: an aged
      * element near its ceiling). Default false = unchanged behaviour. */
     bool slow_climb_ok;
+    /* EA C3 finish-short latch (owner 2026-11-19): guard 1 demands no rise from this zone. Guard 2,
+     * guard 7 and every other guard are unchanged. The executor clears it per the latch rules. */
+    bool finish_short;
 
     /* Selects guards 1/2's RELAY-CYCLING discriminator for this tick, added
      * after review found the directional (climbing/falling) test from the
