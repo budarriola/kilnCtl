@@ -399,6 +399,7 @@ bool profile_executor_resume(void)
      * the paused duration). prev_control_tick is reset so the next tick's
      * measured dt_s doesn't include the whole pause. */
     s_exec.prev_control_tick = xTaskGetTickCount();
+    s_exec.arrival_gate_seg = -1; /* EA C3: restart the stall windows after a pause */
     /* Bumpless transfer (TODO.md 6A.2): each active PID-mode zone resumes
      * as if it had been driving u=0 the whole pause (relays were off),
      * rather than an integral that jumps on the first post-resume tick.

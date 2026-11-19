@@ -380,33 +380,46 @@ bool ramp_assist_zones_above_band(const s_exec_state_t *ex)
 
 /* ---- EA C3: arrival-gated hold (docs/ELEMENT_AGING_PLAN.md F2) ------------------------------ */
 
-/* Settled-zone detector, called every tick per active zone. A zone is settled (a healthy steady
- * offset below target) when its duty has been below EXEC_ARRIVAL_SETTLE_DUTY for a full
- * EXEC_ARRIVAL_SETTLE_WINDOW_S and the last full window's rise was under 0.1 C/min. High duty
- * restarts the evidence. */
+/* Stall detector, called every tick per active zone. No duty condition (a real cone-10 kiln runs
+ * near 100% duty at the top even healthy): a zone is "stalled" when its signed rise over the last
+ * EXEC_ARRIVAL_SETTLE_WINDOW_S, measured as a slope between the first and last 30 s averages of a
+ * 10-bucket ring (not two single samples), is under EXEC_ARRIVAL_STALL_RATE_C_PER_MIN. Falling
+ * counts as stalled. Needs a full window of valid readings; an invalid reading restarts it. The
+ * caller restarts it (arrival_settle_reset) at dwell entry, segment change and pause/resume. */
+void arrival_settle_reset(zone_runtime_t *z)
+{
+    z->settle_nb = 0;
+    z->settle_acc = 0.0f;
+    z->settle_acc_s = 0.0f;
+    z->settle_stalled = false;
+}
+
 void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s)
 {
-    /* The zone has no per-zone max-duty setting; its configured saturation threshold is guard 1's
-     * progress_duty_min (the duty at or above which the zone must be making progress). A duty at or
-     * above it is saturated, not a healthy offset. */
-    float sat_duty = z->guard_cfg.progress_duty_min;
-    bool saturated = (sat_duty > 0.0f && duty >= sat_duty);
-    if (isnan(actual_c) || saturated || !(duty < EXEC_ARRIVAL_SETTLE_DUTY)) {
-        z->settle_low_duty_s = 0.0f;
-        z->settle_win_elapsed_s = 0.0f;
-        z->settle_rise_ok = false;
+    (void)duty; /* deliberately unused: no duty threshold (cone-10 kilns run ~100% healthy) */
+    if (isnan(actual_c)) {
+        arrival_settle_reset(z);
         return;
     }
-    z->settle_low_duty_s += dt_s;
-    if (z->settle_win_elapsed_s <= 0.0f) {
-        z->settle_win_start_c = actual_c;
+    z->settle_acc += actual_c * dt_s;
+    z->settle_acc_s += dt_s;
+    if (z->settle_acc_s < EXEC_ARRIVAL_SETTLE_BUCKET_S) {
+        return;
     }
-    z->settle_win_elapsed_s += dt_s;
-    if (z->settle_win_elapsed_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S) {
-        /* Signed: a falling zone is not settled. */
-        float rise_c_per_min = (actual_c - z->settle_win_start_c) / (z->settle_win_elapsed_s / 60.0f);
-        z->settle_rise_ok = (rise_c_per_min >= 0.0f && rise_c_per_min < EXEC_ARRIVAL_SETTLE_RISE_C_PER_MIN);
-        z->settle_win_elapsed_s = 0.0f;
+    float avg = z->settle_acc / z->settle_acc_s;
+    z->settle_acc = 0.0f;
+    z->settle_acc_s = 0.0f;
+    if (z->settle_nb >= EXEC_ARRIVAL_SETTLE_BUCKETS) {
+        for (uint8_t i = 1; i < EXEC_ARRIVAL_SETTLE_BUCKETS; i++) z->settle_ring[i - 1] = z->settle_ring[i];
+        z->settle_nb = EXEC_ARRIVAL_SETTLE_BUCKETS - 1;
+    }
+    z->settle_ring[z->settle_nb++] = avg;
+    if (z->settle_nb >= EXEC_ARRIVAL_SETTLE_BUCKETS) {
+        float span_min = (float)(EXEC_ARRIVAL_SETTLE_BUCKETS - 1) * EXEC_ARRIVAL_SETTLE_BUCKET_S / 60.0f;
+        float rise = (z->settle_ring[EXEC_ARRIVAL_SETTLE_BUCKETS - 1] - z->settle_ring[0]) / span_min;
+        z->settle_stalled = rise < EXEC_ARRIVAL_STALL_RATE_C_PER_MIN;
+    } else {
+        z->settle_stalled = false;
     }
 }
 
@@ -489,6 +502,11 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
                                                    ex->segment_index, ex->run_start_c)) {
         return false;
     }
+    if (ex->arrival_gate_seg != (int16_t)ex->segment_index) {
+        /* Dwell entry (or first tick after a pause/resume/run start): restart every stall window. */
+        ex->arrival_gate_seg = (int16_t)ex->segment_index;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) arrival_settle_reset(&ex->zones[zi]);
+    }
     float target_c = ex->profile.segments[ex->segment_index].target_c;
     bool all_ok = true;
     float shortfall_c = 0.0f;
@@ -496,10 +514,13 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
         const zone_runtime_t *z = &ex->zones[zi];
         if (!z->active || z->faulted || !profile_executor_zone_drives_run(zi)) continue;
         float band_c = (z->guard_cfg.progress_band_c > 0.0f) ? z->guard_cfg.progress_band_c : 3.0f;
-        bool settled = z->settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && z->settle_rise_ok;
-        if (!arrival_zone_ok(z->actual_c, target_c, band_c, settled)) {
+        if (!arrival_zone_ok(z->actual_c, target_c, band_c, z->settle_stalled)) {
             all_ok = false;
-            float miss_c = isnan(z->actual_c) ? 0.0f : (target_c - z->actual_c);
+        }
+        /* Shortfall counts every driving zone outside the band, whether the gate opens by stall or
+         * by budget exhaustion. */
+        if (!isnan(z->actual_c) && z->actual_c < target_c - band_c) {
+            float miss_c = target_c - z->actual_c;
             if (miss_c > shortfall_c) shortfall_c = miss_c;
         }
     }
@@ -512,7 +533,7 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
             ex->stretch_by_segment_s[ex->segment_index] += dt_s;
         }
         ex->arrival_wait_s += dt_s;
-    } else if (!all_ok && shortfall_c > ex->target_shortfall_c) {
+    } else if (shortfall_c > ex->target_shortfall_c) {
         ex->target_shortfall_c = shortfall_c;
     }
     return wait;

@@ -694,12 +694,13 @@ typedef struct {
     float    lag_start_actual_c;  /* actual_c snapshot at the tick lag_held_s left 0, for the
                                    * achieved-rate arithmetic reported alongside lag_sustained */
     float    lag_clear_s;         /* EA C4: continuous seconds NOT lagging while lag_held_s > 0 (stretch on) */
-    /* EA C3 settled-zone detector (arrival_settle_tick): duty below 0.9 for 300 s and the last full
-     * 300 s window rose less than 0.1 C/min. */
-    float    settle_low_duty_s;
-    float    settle_win_start_c;
-    float    settle_win_elapsed_s;
-    bool     settle_rise_ok;
+    /* EA C3 stall detector (arrival_settle_tick): ring of ten 30 s average temperatures; stalled when
+     * the signed slope across the full 300 s is under EXEC_ARRIVAL_STALL_RATE_C_PER_MIN. */
+    float    settle_ring[10];
+    float    settle_acc;
+    float    settle_acc_s;
+    uint8_t  settle_nb;
+    bool     settle_stalled;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. Heat-work-weighted
      * accumulator -- banked ONLY while this zone is lagging (the same
@@ -906,6 +907,9 @@ typedef struct {
     float arrival_wait_s;
     /* EA C3: max (target - actual) recorded when the arrival gate's budget ran out. Per run. */
     float target_shortfall_c;
+    /* EA C3: segment whose dwell the stall windows were last restarted for; -1 forces a restart
+     * (run start, resume). */
+    int16_t arrival_gate_seg;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- last spend actually
      * applied to a dwell's timer, in seconds. 0.0f for the whole life of a
@@ -1463,8 +1467,11 @@ void ramp_assist_zone_lag_tick_ex(zone_runtime_t *z, bool lagging_now, float dt_
 
 /* EA C3 arrival-gated hold (docs/ELEMENT_AGING_PLAN.md). Pure helpers, stretch on only. */
 #define EXEC_ARRIVAL_SETTLE_WINDOW_S 300.0f
-#define EXEC_ARRIVAL_SETTLE_DUTY     0.9f
-#define EXEC_ARRIVAL_SETTLE_RISE_C_PER_MIN 0.1f
+#define EXEC_ARRIVAL_SETTLE_BUCKET_S 30.0f
+#define EXEC_ARRIVAL_SETTLE_BUCKETS  10
+/* Shared with EA C7's slow-climb floor (thermal_guard.h). */
+#define EXEC_ARRIVAL_STALL_RATE_C_PER_MIN THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN
+void arrival_settle_reset(zone_runtime_t *z);
 void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s);
 bool arrival_zone_ok(float actual_c, float target_c, float band_c, bool settled);
 bool arrival_segment_is_heating(const profile_segment_t *segs, uint8_t count, uint8_t index, float run_start_c);

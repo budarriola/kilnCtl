@@ -718,6 +718,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     memset(s_exec.stretch_by_segment_s, 0, sizeof(s_exec.stretch_by_segment_s));
     s_exec.stretch_total_s = 0.0f;
     s_exec.arrival_wait_s = 0.0f;
+    s_exec.arrival_gate_seg = -1;
     s_exec.target_shortfall_c = 0.0f; /* EA C3: per-run, like the stretch budget it reports on */
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- a previous run's last
      * applied spend has no meaning against a freshly (re)started schedule,

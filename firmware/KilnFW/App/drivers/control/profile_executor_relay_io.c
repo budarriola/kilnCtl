@@ -317,14 +317,12 @@ float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float 
  * target, so guard 4 at the same 25 C band saw more than the band on every
  * tick. Extend it to lock band + 5 C margin + the calibration/lead offset
  * (the lock reads actual_c, guard 4 reads raw_c). Never narrower than the
- * configured band (0 = guard 4's own 25 C default). NaN offset counts 0. */
+ * configured band (0 = guard 4's own 25 C default). NaN offset counts 0. Not extended: the offset
+ * term alone (base + min(max(0, actual - raw), 30)). */
 float profile_executor_guard_drift_band_c(float configured_drift_c, float lock_band_c, float actual_c,
                                           float raw_c, bool extend)
 {
     float base = (configured_drift_c > 0.0f) ? configured_drift_c : 25.0f;
-    if (!extend) {
-        return base; /* lock not held and arrival gate not waiting: plain drift band */
-    }
     float off = actual_c - raw_c;
     if (!(off > 0.0f)) {
         off = 0.0f;
@@ -332,7 +330,9 @@ float profile_executor_guard_drift_band_c(float configured_drift_c, float lock_b
     if (off > 30.0f) {
         off = 30.0f; /* a larger lead/offset must not widen guard 4 without bound */
     }
-    float ext = lock_band_c + 5.0f + off;
+    /* The offset term applies always (guard 4 reads raw_c, the error is actual-based); the lock-band
+     * extension only while the lock is held or the arrival gate waits. */
+    float ext = extend ? (lock_band_c + 5.0f + off) : (base + off);
     return (ext > base) ? ext : base;
 }
 

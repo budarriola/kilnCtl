@@ -8855,10 +8855,15 @@ static void test_ea_c1_drift_band_follows_ramp_lock(void)
     // arrival gate waits; otherwise guard 4 keeps its plain configured band.
     TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 1100.0f, 970.0f, true), 60.0f, 1e-4f,
                     "a 130 C actual-raw gap widens by at most 30 C: 25 + 5 + 30");
-    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 25.0f, 1e-4f,
-                    "lock not held and gate not waiting: plain 25 C default band");
-    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(40.0f, lock_band, 974.0f, 970.0f, false), 40.0f, 1e-4f,
-                    "lock not held: the configured band as is");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 29.0f, 1e-4f,
+                    "lock not held, offset 4: base 25 + offset 4 = 29 C");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(40.0f, lock_band, 970.0f, 970.0f, false), 40.0f, 1e-4f,
+                    "lock not held, no offset: the configured band as is");
+    // LOW-1: lock released, zone 22 C behind with +6 offset (actual 6 C above raw): raw error 28 C < 25+6.
+    float band_rel = profile_executor_guard_drift_band_c(0.0f, lock_band, 976.0f, 970.0f, false);
+    TEST_CHECK_NEAR(band_rel, 31.0f, 1e-4f, "released lock, +6 offset: band 31 C");
+    TEST_CHECK(!ea_drift_trips(band_rel, 28.0f, 1300), "released lock, +6 offset, raw error 28 C: no DRIFT");
+    TEST_CHECK(ea_drift_trips(band_rel, band_rel + 6.0f, 1300), "well beyond the band still trips DRIFT");
 }
 
 static void test_ea_c4_lag_flicker_and_stretch_sanity_rate(void)
@@ -8984,34 +8989,53 @@ static void test_ea_c3_arrival_gate(void)
     TEST_CHECK(!arrival_gate_tick(&ex, false, 100, 1.0f), "stretch off: no gate");
     TEST_CHECK(ex.arrival_wait_s == spent && ex.target_shortfall_c == 0.0f, "stretch off leaves every counter alone");
 
-    // Settled zone: duty 0.5 and flat for 600 s counts as arrived.
+    // Stall detector (no duty condition). 40 C low and stalled (flat 300 s+) counts as arrived,
+    // whatever the duty; shortfall is recorded when it opens that way.
     ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
     ex.zones[0].actual_c = 960.0f;
-    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "sanity: 40 C low and not settled waits");
-    for (int i = 0; i < 600; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 0.5f, 1.0f);
-    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "a settled-offset zone (duty < 0.9 and flat 300 s) counts");
-    zone_runtime_t busy;
-    memset(&busy, 0, sizeof(busy));
-    for (int i = 0; i < 600; i++) arrival_settle_tick(&busy, 960.0f, 0.95f, 1.0f);
-    TEST_CHECK(!(busy.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && busy.settle_rise_ok),
-               "duty 0.95 never settles");
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "sanity: 40 C low and not yet stalled waits");
+    for (int i = 0; i < 299; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "flat at duty 1.0 for 299 s: still waiting (needs the full window)");
+    for (int i = 0; i < 20; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "flat at duty 1.0 for 300 s+: stalled, gate opens");
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 40.0f, 1e-3f, "stall-open records the shortfall like budget exhaustion");
+    ex.target_shortfall_c = 0.0f;
+
+    // Climbing 0.3 C/min at duty 1.0 keeps waiting.
     zone_runtime_t climbing;
     memset(&climbing, 0, sizeof(climbing));
-    for (int i = 0; i < 600; i++) arrival_settle_tick(&climbing, 960.0f + (float)i * (0.2f / 60.0f), 0.5f, 1.0f);
-    TEST_CHECK(!(climbing.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && climbing.settle_rise_ok),
-               "a zone still rising 0.2 C/min is not settled");
-    // LOW-1: a falling zone is not settled; a duty at/above the zone's configured saturation duty is not settled.
+    for (int i = 0; i < 900; i++) arrival_settle_tick(&climbing, 960.0f + (float)i * (0.3f / 60.0f), 1.0f, 1.0f);
+    TEST_CHECK(!climbing.settle_stalled, "100% duty climbing 0.3 C/min is not stalled");
+    // Healthy 0.7 duty reaching the band opens without any stall evidence.
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 997.5f;
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "healthy zone reaching the band opens");
+    // Falling counts as stalled.
     zone_runtime_t falling;
     memset(&falling, 0, sizeof(falling));
     for (int i = 0; i < 600; i++) arrival_settle_tick(&falling, 960.0f - (float)i * (0.01f / 60.0f), 0.5f, 1.0f);
-    TEST_CHECK(!(falling.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && falling.settle_rise_ok),
-               "a falling zone is not settled (signed rise)");
-    zone_runtime_t sat;
-    memset(&sat, 0, sizeof(sat));
-    sat.guard_cfg.progress_duty_min = 0.6f;
-    for (int i = 0; i < 600; i++) arrival_settle_tick(&sat, 960.0f, 0.7f, 1.0f);
-    TEST_CHECK(!(sat.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && sat.settle_rise_ok),
-               "duty above the configured saturation duty (0.6) never settles even though it is under 0.9");
+    TEST_CHECK(falling.settle_stalled, "a falling zone counts as stalled (signed rise < threshold)");
+    // Noise 0.15 C (deterministic +/-) on a flat zone still opens; on a 0.3 C/min climb keeps waiting.
+    zone_runtime_t noisy_flat, noisy_climb;
+    memset(&noisy_flat, 0, sizeof(noisy_flat));
+    memset(&noisy_climb, 0, sizeof(noisy_climb));
+    for (int i = 0; i < 900; i++) {
+        float n = (((i * 7919) % 31) / 30.0f - 0.5f) * 0.30f; // +/-0.15 C
+        arrival_settle_tick(&noisy_flat, 960.0f + n, 1.0f, 1.0f);
+        arrival_settle_tick(&noisy_climb, 960.0f + (float)i * (0.3f / 60.0f) + n, 1.0f, 1.0f);
+    }
+    TEST_CHECK(noisy_flat.settle_stalled, "0.15 C noise on a flat zone still reads stalled");
+    TEST_CHECK(!noisy_climb.settle_stalled, "0.15 C noise on a 0.3 C/min climb keeps waiting");
+    // Invalid reading restarts the window; reset clears it.
+    arrival_settle_tick(&noisy_flat, NAN, 1.0f, 1.0f);
+    TEST_CHECK(!noisy_flat.settle_stalled && noisy_flat.settle_nb == 0, "an invalid reading restarts the window");
+    // Dwell entry restarts the windows: a stale stalled flag from the ramp does not open the gate.
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].settle_stalled = true;
+    ex.arrival_gate_seg = -1;
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "first gate tick of a dwell restarts the stall windows");
 
     // Budget exhaustion: budget = planned * pct. Spend it all; gate opens and shortfall is recorded.
     ea_make_heating_profile(&ex);

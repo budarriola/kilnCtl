@@ -33,7 +33,7 @@ Simulation: `docs/sim/aging_sim.py` and `docs/sim/proposed.py`.
 Owner decisions on 2026-11-19: C7 yes, with a floor of 0.15 C/min. C6 on by default, existing boards included.
 
 - **C1 (bug, independent of the stretch setting).**
-  - Per tick and per zone, the executor sets guard 4's band to `max(drift_hysteresis_c, EXEC_RAMP_LOCK_BAND_C(zi) + 5 + max(0, actual_c - raw_c))`. The lock reads `actual_c` (calibrated and lead-compensated); guard 4 reads `raw_c`. The value goes in `guard_cfg_this_tick` only.
+  - Per tick and per zone, the executor sets guard 4's band to `max(drift_hysteresis_c, EXEC_RAMP_LOCK_BAND_C(zi) + 5 + off)` while the lock is held or the arrival gate waits, else `drift_hysteresis_c + off`, where `off = min(max(0, actual_c - raw_c), 30)`. The lock reads `actual_c` (calibrated and lead-compensated); guard 4 reads `raw_c`. The value goes in `guard_cfg_this_tick` only.
   - On config save, reject `ramp_lock_band_c > drift_hysteresis_c - 5` whenever both are set.
   - Host tests:
     - a lock held for 1200 s with lead greater than 0 does not trip;
@@ -51,7 +51,7 @@ Owner decisions on 2026-11-19: C7 yes, with a floor of 0.15 C/min. C6 on by defa
   Every other case keeps `sanity_rate`. A constant, with no UI for it.
 - **C3. Arrival-gated hold (stretch on).** On a heating segment (ramp or step whose target is above the prior target), the dwell timer counts only when every zone that `profile_executor_zone_drives_run` counts satisfies one of:
   - `actual_c >= target - progress_band_c` (one-sided; overshoot never blocks), or
-  - it is settled: duty below 0.9 for 300 s and |300 s rise| below 0.1 C/min (healthy steady offset).
+  - it is stalled: no duty condition (a cone-10 kiln runs near 100% duty at the top even when healthy). The signed rise over the last 300 s, measured as a slope between the first and last 30 s averages of a ten-bucket ring, is under 0.15 C/min (the C7 constant). Falling counts as stalled; a full 300 s window of valid readings is needed, restarted at dwell entry, segment change and pause/resume. When the gate opens by stall (zone not within the band), `target_shortfall_c` is recorded (largest shortfall over driving zones), same as budget exhaustion. Guard 1 behaviour after a stall-open is unchanged (floor extension is a pending owner decision).
   Dwell credit is not spent while C3 is active. The stretch budget is spent while the gate waits; once it runs out, the gate opens (today's behaviour) and the run records `target_shortfall_c`.
   - Stateless per tick.
   - The budget consumed (`stretch_total_s`) must survive resume (run_state).
@@ -72,7 +72,7 @@ Owner decisions on 2026-11-19: C7 yes, with a floor of 0.15 C/min. C6 on by defa
 | cone04, power 0.58 | done, peak 1042 | done, 1064 | same |
 | cone6_med, power 0.55 | G1 trip at 1176 | done, best effort 1146 | done, 1210 |
 | cone10, power 0.58 | G1 trip at 1205 | done, best effort 1193 | done, 1239 |
-| new kiln, every profile | done | identical | identical |
+| healthy kiln, every profile | done | see note | see note |
 
 ## Pending
 - [x] Opus review of this plan
@@ -82,4 +82,10 @@ Owner decisions on 2026-11-19: C7 yes, with a floor of 0.15 C/min. C6 on by defa
 - [ ] Bench verification (4 W fixture: only C1 and C3 timing): C3 arrival hold and shortfall note, C1 no DRIFT trip with a held lock, run-state v2 record on the board
 - [ ] Opus re-review of the fix diff
 
-Notes: step segments (ramp_c_per_hr <= 0) count 0 toward the planned duration used for the stretch budget, so the budget is conservative. The arrival hold has its own budget (`arrival_wait_s`); with ramp stretch the total is capped at 2x stretch_max_pct of planned time.
+Notes: with stretch on, heating dwells start when the zone is within 3 C of target (or stalled), not when the setpoint arrives, so healthy firings may add a few minutes per heating dwell and reach peak more accurately.
+
+C7 residual risk: C7 stays active during the arrival wait (owner-approved 0.15 floor; the top dwell is where aged kilns need it). A dislodged thermocouple reading low near the top with duty >= 0.95 is caught by guard 1 at 0.15 C/min, or by the stall release within 300 s, plus the Pico guards.
+
+Rollback: an older build reads the 4-byte `ramp_assist.dat` as undecodable, runs stretch OFF and refuses saves until that boot. run_state budget persistence is a breadcrumb only; pause/resume keeps the RAM budget.
+
+Step segments (ramp_c_per_hr <= 0) count 0 toward the planned duration used for the stretch budget, so the budget is conservative. The arrival hold has its own budget (`arrival_wait_s`); with ramp stretch the total is capped at 2x stretch_max_pct of planned time.
