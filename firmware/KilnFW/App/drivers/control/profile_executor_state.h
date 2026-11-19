@@ -342,6 +342,9 @@ typedef struct {
                                  * because at least one active, non-faulted zone is outside
                                  * PROFILE_EXECUTOR_RAMP_LOCK_BAND_C of target_c */
     uint8_t  ramp_lock_lagging_mask; /* which zone(s) are the reason, if ramp_lock_held */
+    /* EA C3 finish-short (owner 2026-11-19): a stalled zone finished a hold short with guard 1's rise demand
+     * lifted for the rest of that dwell. Per run; the run is excluded from C6 learning. */
+    bool     finish_short;
 
     /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch INSTRUMENTATION -- how
      * much of segment_elapsed_s/target_c's real-world advance has been
@@ -357,9 +360,6 @@ typedef struct {
     /* EA C3 (docs/ELEMENT_AGING_PLAN.md): largest (target - actual) over the driving zones recorded
      * when the arrival-gated hold ran out of stretch budget and opened anyway; 0 when never. */
     float    target_shortfall_c;
-    /* EA C3 finish-short (owner 2026-11-19): a stalled zone finished a hold short with guard 1's rise demand
-     * lifted for the rest of that dwell. Per run; the run is excluded from C6 learning. */
-    bool     finish_short;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit actually SPENT against
      * the most recent dwell's timer, in seconds -- 0.0f for a run started
