@@ -279,6 +279,7 @@ static BACKUP_EXPORT_NOINLINE void backup_export_prefs(backup_stream_t *s)
 {
     backup_stream_printf(s, ",\"unit\":%u", (unsigned)unit_pref_get());
     backup_stream_printf(s, ",\"ramp_assist\":%s", ramp_assist_cfg_enabled() ? "true" : "false");
+    backup_stream_printf(s, ",\"ramp_assist_stretch_max_pct\":%u", (unsigned)ramp_assist_cfg_stretch_max_pct());
     backup_stream_printf(s, ",\"display_power\":{\"brightness_percent\":%u,\"timeout_setting\":%u,"
                          "\"keep_on_while_firing\":%s,\"display_on_error\":%s}",
                          (unsigned)display_power_cfg_brightness_percent(),

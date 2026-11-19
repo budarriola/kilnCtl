@@ -169,6 +169,27 @@ const STATUS_ASSIST_OFF = { ramp_assist_enabled: false };
 }
 
 // ---------------------------------------------------------------------------
+// Group 1b (ELEMENT_AGING_PLAN C2): shortfall and stretch text.
+// ---------------------------------------------------------------------------
+{
+  const { ctx, lagBannerEl } = makeContext();
+  const SHORT = Object.assign({}, ONE_ZONE_LAG, { target_shortfall_c: 12.34 });
+  vm.runInContext('renderLagBanner(SHORT, STATUS_ASSIST_ON)', Object.assign(ctx, { SHORT, STATUS_ASSIST_ON }));
+  const html = lagBannerEl.innerHTML;
+  assert(html.indexOf('Target not reached by 12.3') !== -1, 'shortfall: shows "Target not reached by 12.3"');
+  assert(html.indexOf('Stretching: +2m 25s') !== -1, 'stretch: shows "Stretching: +2m 25s"');
+}
+{
+  const { ctx, lagBannerEl } = makeContext();
+  vm.runInContext('renderLagBanner(ONE_ZONE_LAG, STATUS_ASSIST_ON)', Object.assign(ctx, { ONE_ZONE_LAG, STATUS_ASSIST_ON }));
+  assert(lagBannerEl.innerHTML.indexOf('Target not reached') === -1, 'shortfall field absent: nothing rendered');
+  const { ctx: c2, lagBannerEl: e2 } = makeContext();
+  const ZERO = Object.assign({}, ONE_ZONE_LAG, { target_shortfall_c: 0 });
+  vm.runInContext('renderLagBanner(ZERO, STATUS_ASSIST_ON)', Object.assign(c2, { ZERO, STATUS_ASSIST_ON }));
+  assert(e2.innerHTML.indexOf('Target not reached') === -1, 'shortfall 0: nothing rendered');
+}
+
+// ---------------------------------------------------------------------------
 // Group 2: all three zones lagging.
 // ---------------------------------------------------------------------------
 {

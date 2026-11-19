@@ -7607,7 +7607,7 @@ static void test_relay_cycles_bad_input_refuses_whole_restore(void)
 
 // ---- operator preferences (backup gaps 1+2): unit, ramp_assist, display_power, hidden profiles, tz, relay_names ----
 static const char *PF_FULL =
-    ",\"unit\":1,\"ramp_assist\":false,\"display_power\":{\"brightness_percent\":40,\"timeout_setting\":2,"
+    ",\"unit\":1,\"ramp_assist\":false,\"ramp_assist_stretch_max_pct\":200,\"display_power\":{\"brightness_percent\":40,\"timeout_setting\":2,"
     "\"keep_on_while_firing\":true,\"display_on_error\":true},\"hidden_builtin_profiles\":[128,130],"
     "\"tz\":\"EST5EDT,M3.2.0,M11.1.0\",\"relay_names\":[{\"relay\":1,\"name\":\"Vent \\\"fan\\\"\",\"type\":4},"
     "{\"relay\":3,\"name\":\"Lamp\",\"type\":5}]";
@@ -7621,6 +7621,7 @@ static void test_prefs_import_applies_each_key(void)
     TEST_CHECK(wp9_import_with(PF_FULL, err, sizeof(err)), "a document with all six preference keys imports");
     TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "unit applied");
     TEST_CHECK(!ramp_assist_cfg_enabled(), "ramp_assist applied");
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 200, "ramp_assist_stretch_max_pct applied");
     TEST_CHECK(display_power_cfg_brightness_percent() == 40 && display_power_cfg_timeout_setting() == DISPLAY_TIMEOUT_10_MIN &&
                    display_power_cfg_keep_on_while_firing() && display_power_cfg_display_on_error(),
                "display_power applied");
@@ -7648,12 +7649,12 @@ static void test_prefs_absent_keys_preserve(void)
     reset_stub_state();
     pf_reset();
     char err[200] = "";
-    (void)unit_pref_set(UNIT_PREF_FAHRENHEIT); (void)ramp_assist_cfg_set_enabled(false);
+    (void)unit_pref_set(UNIT_PREF_FAHRENHEIT); (void)ramp_assist_cfg_set_all(false, 175);
     (void)display_power_cfg_set(55, DISPLAY_TIMEOUT_NEVER, false, false); g_pf_hidden[1] = true;
     strcpy(g_pf_tz, "JST-9"); strcpy(g_pf_rname[1], "Keep"); g_pf_rtype[1] = RELAY_DEVICE_TYPE_OUTLET;
     TEST_CHECK(wp9_import_with("", err, sizeof(err)), "a document with none of the keys imports");
     TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT && !ramp_assist_cfg_enabled() &&
-                   display_power_cfg_brightness_percent() == 55 && g_pf_hidden[1] &&
+                   ramp_assist_cfg_stretch_max_pct() == 175 && display_power_cfg_brightness_percent() == 55 && g_pf_hidden[1] &&
                    strcmp(g_pf_tz, "JST-9") == 0 && strcmp(g_pf_rname[1], "Keep") == 0 &&
                    g_pf_rtype[1] == RELAY_DEVICE_TYPE_OUTLET,
                "all six values unchanged");
@@ -7666,6 +7667,9 @@ static void test_prefs_invalid_refuses_whole_restore(void)
         ",\"unit\":2",
         ",\"unit\":\"C\"",
         ",\"ramp_assist\":1",
+        ",\"ramp_assist_stretch_max_pct\":301",
+        ",\"ramp_assist_stretch_max_pct\":-1",
+        ",\"ramp_assist_stretch_max_pct\":\"100\"",
         ",\"display_power\":{\"brightness_percent\":101,\"timeout_setting\":0,\"keep_on_while_firing\":true,\"display_on_error\":true}",
         ",\"display_power\":{\"brightness_percent\":50,\"timeout_setting\":99,\"keep_on_while_firing\":true,\"display_on_error\":true}",
         ",\"display_power\":{\"brightness_percent\":50}",
@@ -7686,11 +7690,12 @@ static void test_prefs_invalid_refuses_whole_restore(void)
         pf_reset();
         char err[200] = "";
         bool ramp0 = ramp_assist_cfg_enabled();
+        uint16_t pct0 = ramp_assist_cfg_stretch_max_pct();
         unit_pref_t unit0 = unit_pref_get();
         bool ok = wp9_import_with(bad[i], err, sizeof(err));
         TEST_CHECK(!ok && err[0] != '\0', "invalid preference refused with a message");
         TEST_CHECK(unit_pref_get() == unit0 && g_pf_rname[0][0] == '\0' && !g_pf_hidden[0] &&
-                       ramp_assist_cfg_enabled() == ramp0,
+                       ramp_assist_cfg_enabled() == ramp0 && ramp_assist_cfg_stretch_max_pct() == pct0,
                    "nothing was written");
     }
 }
@@ -7703,7 +7708,7 @@ static void test_prefs_export_round_trip(void)
     char err[200] = "";
     TEST_CHECK(wp9_import_with(PF_FULL, err, sizeof(err)), "seed all preferences");
     TEST_CHECK(run_export() == ESP_OK, "export succeeds");
-    const char *u = strstr(s_export_body, "\"unit\":1,\"ramp_assist\":false,\"display_power\":{");
+    const char *u = strstr(s_export_body, "\"unit\":1,\"ramp_assist\":false,\"ramp_assist_stretch_max_pct\":200,\"display_power\":{");
     TEST_CHECK(u != NULL && strstr(u, "\"hidden_builtin_profiles\":[128,130]") != NULL &&
                    strstr(u, "\"tz\":\"EST5EDT,M3.2.0,M11.1.0\"") != NULL &&
                    strstr(u, "\"relay_names\":[{\"relay\":1,\"name\":\"Vent \\\"fan\\\"\",\"type\":4}") != NULL,

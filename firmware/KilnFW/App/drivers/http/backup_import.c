@@ -3368,6 +3368,8 @@ typedef struct {
     bool has_unit, has_ramp, has_display, has_hidden, has_tz, has_names;
     unit_pref_t unit;
     bool ramp;
+    bool has_ramp_pct;
+    uint16_t ramp_pct;
     uint8_t brightness;
     display_timeout_setting_t timeout;
     bool keep_on, on_error;
@@ -3435,6 +3437,15 @@ static BACKUP_IMPORT_NOINLINE bool backup_prefs_parse(const char *body, backup_p
             return false;
         }
         p->has_ramp = true;
+    }
+    v = backup_json_obj_find(body, "ramp_assist_stretch_max_pct");
+    if (v != NULL) {
+        if (!backup_prefs_int(v, 0, RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT, &d)) {
+            snprintf(err_msg, err_cap, "ramp_assist_stretch_max_pct must be 0..300");
+            return false;
+        }
+        p->has_ramp_pct = true;
+        p->ramp_pct = (uint16_t)(int)d;
     }
     v = backup_json_obj_find(body, "display_power");
     if (v != NULL) {
@@ -3542,7 +3553,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool co
         return false;
     }
     if (!commit) {
-        if (plan != NULL && (p.has_unit || p.has_ramp || p.has_display || p.has_hidden || p.has_tz || p.has_names)) {
+        if (plan != NULL && (p.has_unit || p.has_ramp || p.has_ramp_pct || p.has_display || p.has_hidden || p.has_tz || p.has_names)) {
             kiln_cfg_plan_add(plan, "preferences in this backup (unit/ramp_assist/display_power/hidden profiles/tz/"
                                     "relay names) are restored; keys absent from it are kept");
         }
@@ -3552,8 +3563,12 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool co
     if (p.has_unit && unit_pref_set(p.unit) != ESP_OK) {
         ok = false;
     }
-    if (p.has_ramp && ramp_assist_cfg_set_enabled(p.ramp) != ESP_OK) {
-        ok = false;
+    if (p.has_ramp || p.has_ramp_pct) {
+        bool en = p.has_ramp ? p.ramp : ramp_assist_cfg_enabled();
+        uint16_t pct = p.has_ramp_pct ? p.ramp_pct : ramp_assist_cfg_stretch_max_pct();
+        if (ramp_assist_cfg_set_all(en, pct) != ESP_OK) {
+            ok = false;
+        }
     }
     if (p.has_display && display_power_cfg_set(p.brightness, p.timeout, p.keep_on, p.on_error) != ESP_OK) {
         ok = false;

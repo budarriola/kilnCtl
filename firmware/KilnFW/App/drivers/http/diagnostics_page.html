@@ -427,25 +427,24 @@ e.g. sitting at a breakpoint) -- it does NOT stop the hang itself. A disabled pa
 flash and survives a reboot; the setting is shown here and in the dashboard status so it is never
 silently on. Starting a firing while this is disabled requires an extra confirmation.</p>
 
-<!-- ramp_assist_cfg.h -- the kiln-wide (not per-zone) on/off switch for the
-     "ramp assist" feature (sustained-lag detection driving auto-stretch of
-     ramps and a gated dwell credit), persisted and defaulting OFF.
-     Same GET/POST-toggle shape as the watchdog-panic control above, and the
-     same class="danger-btn" language: PID tuning and A/B controller
-     comparisons need this OFF so tracking-error numbers stay comparable
-     between runs (see the note below) -- toggling it is consequential enough
-     to read the same way every other "changes how the kiln actually runs"
-     control on this page does. -->
-<h2>Ramp assist</h2>
+<!-- ramp_assist_cfg.h -- the kiln-wide (not per-zone) "Stretch heating to reach targets" setting
+     (key "ramp_assist"; ELEMENT_AGING_PLAN C2). Persisted, ON by default (existing boards were switched
+     ON once), plus stretch_max_pct: the cap on extra heating time as a percent of the planned time.
+     Same GET/POST-toggle shape as the watchdog-panic control above. PID tuning and A/B controller
+     comparisons still need this OFF so tracking-error numbers stay comparable between runs (see the
+     note below), so turning it ON keeps its confirmation. -->
+<h2>Stretch heating to reach targets</h2>
 <div class="card">
-  <div class="row"><span class="label">Ramp assist</span><span class="value" id="rampAssistState">--</span></div>
+  <div class="row"><span class="label">Stretch heating</span><span class="value" id="rampAssistState">--</span></div>
+  <div class="row"><span class="label">Max extra time (%)</span><span class="value"><input type="number" id="rampAssistPct" min="0" max="300" step="1" value="100" style="width:5em" aria-label="Maximum extra heating time in percent"> <button type="button" id="rampAssistPctBtn">Save</button></span></div>
 </div>
 <button type="button" class="danger-btn" id="rampAssistToggleBtn">--</button>
-<p class="note">Ramp assist is for real firings, not PID tuning or A/B controller comparisons. When
-enabled, the executor may automatically stretch ramps and shorten dwells to keep up with the kiln's
-real capability -- a tuning or comparison run needs the RAW, unassisted schedule to produce
-comparable tracking-error numbers. Leave this OFF for tuning. The setting is written to flash and
-survives a reboot; it is shown here and in the dashboard status so it is never silently on.</p>
+<p class="note">When the kiln cannot keep up with a schedule (for example as the elements age), the
+executor stretches the heating time, up to the percentage above, so every target temperature is still
+reached. A target above the kiln's permitted maximum is still refused. Stretching is for real firings,
+not PID tuning or A/B controller comparisons: a tuning or comparison run needs the RAW, unstretched
+schedule to produce comparable tracking-error numbers, so turn it OFF for tuning. The setting is
+written to flash and survives a reboot; it is shown here and in the dashboard status.</p>
 
 <h2>Subsystems &amp; storage</h2>
 <div class="card">
@@ -894,37 +893,51 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
   // must never let a fetch failure read as "confirmed off" when it is really
   // "unknown". Always shows the board's ACTUAL current state, read fresh on
   // load, never an assumed default.
-  function renderRampAssist(enabled) {
+  function renderRampAssist(enabled, pct) {
     var stateEl = document.getElementById('rampAssistState');
     var btn = document.getElementById('rampAssistToggleBtn');
+    var pctEl = document.getElementById('rampAssistPct');
+    var pctBtn = document.getElementById('rampAssistPctBtn');
     if (enabled) {
-      stateEl.textContent = 'ENABLED -- the executor may stretch ramps and shorten dwells';
-      stateEl.style.color = 'var(--warn)';
-      btn.textContent = 'Disable ramp assist';
-    } else {
-      stateEl.textContent = 'disabled (default -- raw, unassisted schedule)';
+      stateEl.textContent = 'ON -- the executor may stretch heating time to reach targets';
       stateEl.style.color = '';
-      btn.textContent = 'Enable ramp assist';
+      btn.textContent = 'Turn stretch heating off';
+    } else {
+      stateEl.textContent = 'OFF -- raw, unstretched schedule';
+      stateEl.style.color = 'var(--warn)';
+      btn.textContent = 'Turn stretch heating on';
     }
+    if (pct != null) { pctEl.value = String(pct); }
     btn.disabled = false;
+    pctBtn.disabled = false;
+    function post(body) {
+      return fetch('/api/ramp_assist', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+      }).then(function (r) { return r.json(); }).then(function (result) {
+        if (result && result.ok) {
+          renderRampAssist(!!result.enabled, result.stretch_max_pct);
+        } else {
+          renderRampAssistError();
+        }
+      }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
+    }
     btn.onclick = function () {
       var nextEnabled = !enabled;
       (nextEnabled ? window.kcConfirm(
-          'Enable ramp assist? A PID tuning run or A/B controller comparison needs this OFF so ' +
-          'tracking-error numbers stay comparable between runs -- with it enabled, the executor may ' +
-          'automatically stretch ramps and shorten dwells during a firing. Continue?') : Promise.resolve(true)).then(function (ok) {
+          'Turn stretch heating on? A PID tuning run or A/B controller comparison needs this OFF so ' +
+          'tracking-error numbers stay comparable between runs -- with it on, the executor may ' +
+          'stretch the heating time during a firing to reach targets. Continue?') : Promise.resolve(true)).then(function (ok) {
         if (!ok) return;
-        fetch('/api/ramp_assist', {
-          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'enabled=' + (nextEnabled ? '1' : '0'),
-        }).then(function (r) { return r.json(); }).then(function (result) {
-          if (result && result.ok) {
-            renderRampAssist(!!result.enabled);
-          } else {
-            renderRampAssistError();
-          }
-        }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
+        post('enabled=' + (nextEnabled ? '1' : '0'));
       });
+    };
+    pctBtn.onclick = function () {
+      var v = parseInt(pctEl.value, 10);
+      if (!(v >= 0 && v <= 300) || String(v) !== String(pctEl.value).trim()) {
+        window.kcAlert ? window.kcAlert('Max extra time must be a whole number from 0 to 300.') : alert('Max extra time must be a whole number from 0 to 300.');
+        return;
+      }
+      post('stretch_max_pct=' + v);
     };
   }
   function renderRampAssistError() {
@@ -934,6 +947,7 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
     stateEl.style.color = 'var(--warn)';
     btn.textContent = 'Retry';
     btn.disabled = false;
+    document.getElementById('rampAssistPctBtn').disabled = true;
     btn.onclick = function () { pollRampAssist(); };
   }
   function pollRampAssist() {
@@ -941,7 +955,7 @@ if(c&&a)c.addEventListener('change',function(){a.setAttribute('href','/api/diag/
       if (!r.ok) { throw new Error('http ' + r.status); }
       return r.json();
     }).then(function (j) {
-      renderRampAssist(!!j.enabled);
+      renderRampAssist(!!j.enabled, j.stretch_max_pct);
     }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
   }
 

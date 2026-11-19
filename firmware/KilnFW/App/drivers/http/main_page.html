@@ -2653,14 +2653,20 @@ function renderLagBanner(st, data) {
   // known to be on; otherwise the note says nothing about a duration at all.
   if (data && data.ramp_assist_enabled && st &&
       typeof st.ramp_stretch_segment_s === 'number' && typeof st.ramp_stretch_total_s === 'number') {
-    stretchNote = ' This segment has been stretched ' + fmtDuration(Math.round(st.ramp_stretch_segment_s)) +
-      ' so far (' + fmtDuration(Math.round(st.ramp_stretch_total_s)) + ' total this run).';
+    stretchNote = ' Stretching: +' + fmtDuration(Math.round(st.ramp_stretch_total_s)) +
+      ' this run; this segment has been stretched ' + fmtDuration(Math.round(st.ramp_stretch_segment_s)) + ' so far.';
+  }
+  // ELEMENT_AGING_PLAN C2/C3: executor field target_shortfall_c (C) when the stretch cap was hit and a
+  // target was still not reached. Absent or <= 0 renders nothing (older firmware, or no shortfall).
+  var shortfallNote = '';
+  if (st && typeof st.target_shortfall_c === 'number' && st.target_shortfall_c > 0) {
+    shortfallNote = ' Target not reached by ' + Math.round(st.target_shortfall_c * 10) / 10 + '&deg;C.';
   }
   el.innerHTML = '<div class="banner lag"><h3>Kiln is falling behind schedule</h3>' +
     '<div class="row"><span>' + items.join('; ') + '</span></div>' +
     '<div class="note">This is normal ramp-lock behaviour, not a fault &mdash; ' +
     'the schedule is being stretched to give ' + (items.length > 1 ? 'these zones' : 'this zone') +
-    ' time to catch up before the next target.' + stretchNote + '</div></div>';
+    ' time to catch up before the next target.' + stretchNote + shortfallNote + '</div></div>';
 }
 
 // If a start attempt fails, decide whether it failed because the BOARD

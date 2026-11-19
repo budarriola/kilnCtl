@@ -1169,9 +1169,9 @@ static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
  * already establishes just above. */
 static esp_err_t ramp_assist_get_handler(httpd_req_t *req)
 {
-    char json[64];
-    int n = snprintf(json, sizeof(json), "{\"enabled\":%s}",
-                     ramp_assist_cfg_enabled() ? "true" : "false");
+    char json[96];
+    int n = snprintf(json, sizeof(json), "{\"enabled\":%s,\"stretch_max_pct\":%u}",
+                     ramp_assist_cfg_enabled() ? "true" : "false", (unsigned)ramp_assist_cfg_stretch_max_pct());
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }
@@ -1206,26 +1206,46 @@ static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
     }
     body[received] = '\0';
 
-    char val[4];
+    /* Both fields optional (at least one required); an absent one keeps its stored value. */
+    char val[8];
+    bool enabled = ramp_assist_cfg_enabled();
+    uint16_t pct = ramp_assist_cfg_stretch_max_pct();
     int val_len = http_form_find_field(body, "enabled", val, sizeof(val));
-    if (!http_form_is_bool01(val, val_len)) {
+    bool have_enabled = val_len != -1;
+    if (have_enabled) {
+        if (!http_form_is_bool01(val, val_len)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"enabled\" must be 0 or 1");
+            return ESP_OK;
+        }
+        enabled = (val[0] == '1');
+    }
+    int pct_len = http_form_find_field(body, "stretch_max_pct", val, sizeof(val));
+    bool have_pct = pct_len != -1;
+    if (have_pct) {
+        unsigned v = 0;
+        bool ok = pct_len >= 1 && pct_len <= 3;
+        for (int i = 0; ok && i < pct_len; i++) {
+            ok = val[i] >= '0' && val[i] <= '9';
+            v = v * 10u + (unsigned)(val[i] - '0');
+        }
+        if (!ok || v > RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"stretch_max_pct\" must be 0..300");
+            return ESP_OK;
+        }
+        pct = (uint16_t)v;
+    }
+    if (!have_enabled && !have_pct) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"enabled\" must be 0 or 1");
         return ESP_OK;
     }
-    bool enabled = (val[0] == '1');
 
-    esp_err_t err = ramp_assist_cfg_set_enabled(enabled);
+    esp_err_t err = ramp_assist_cfg_set_all(enabled, pct);
     if (err != ESP_OK) {
         return cfg_fs_http_persist_failed_for(req, RAMP_ASSIST_FILE_PATH, err);
     }
     char json[96];
-    int n;
-    if (err == ESP_OK) {
-        n = snprintf(json, sizeof(json), "{\"ok\":true,\"enabled\":%s}", enabled ? "true" : "false");
-    } else {
-        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
-        httpd_resp_set_status(req, "500 Internal Server Error");
-    }
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"enabled\":%s,\"stretch_max_pct\":%u}",
+                     enabled ? "true" : "false", (unsigned)pct);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }

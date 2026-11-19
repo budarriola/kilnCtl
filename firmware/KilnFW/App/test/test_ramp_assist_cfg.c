@@ -4,14 +4,9 @@
 // test_watchdog_cfg.c/test_unit_pref-shaped modules) to reach its
 // s_ramp_assist_enabled file-scope state for simulate_reboot() below.
 //
-// THE LOAD-BEARING PROPERTY THIS FILE EXISTS TO PROVE: the persisted default
-// is FALSE (disabled) on every path -- empty NVS, a load failure, and a
-// corrupt/out-of-range stored byte all resolve to disabled, never the other
-// way. That is what makes it safe for a PID tuning run or an A/B controller
-// comparison to trust "the board has never touched this setting" as "ramp
-// assist is off" (see ramp_assist_cfg.h's header comment for why that matters
-// -- an unassisted run silently becoming assisted invalidates every tracking-
-// error measurement it produces).
+// LOAD-BEARING PROPERTIES (ELEMENT_AGING_PLAN C2, owner 2026-11-19): the default is ON (stretch 100%) on every
+// path -- empty store, a load failure, a corrupt file -- and a legacy (pre-C2) file is turned ON exactly once with
+// a persisted marker, so a later user OFF sticks across reboots. stretch_max_pct is 0..300, out of range refused.
 //
 // Uses fake_kv.h's RAM-backed hal_kv fake to simulate actual persistence
 // across simulated reboots (HW_ABSTRACTION.md Phase 3 item 3, the
@@ -92,9 +87,23 @@ static void ra_stage_legacy_nvs(uint8_t raw, uint32_t rev)
 
 static void simulate_reboot(void)
 {
-    s_ramp_assist_enabled = true; // deliberately the WRONG value -- proves ramp_assist_cfg_start()
-                                   // actually overwrites it rather than the test happening to already
-                                   // hold the expected result before start() runs.
+    s_ramp_assist_enabled = false; // deliberately the WRONG value (default is ON) -- proves start()
+    s_stretch_max_pct = 7;         // overwrites RAM rather than the test already holding the answer.
+}
+
+/* Reads the on-disk record. Returns its item length (0 = missing/invalid). */
+static size_t ra_read_file(uint8_t out[8], uint32_t *rev)
+{
+    size_t len = 0;
+    uint32_t r = 0;
+    memset(out, 0, 8);
+    if (!pref_cfg_fs_load_var(RAMP_ASSIST_FILE_PATH, out, 8, &len, &r)) {
+        return 0;
+    }
+    if (rev != NULL) {
+        *rev = r;
+    }
+    return len;
 }
 
 extern bool g_test_reset_in_flight;
@@ -104,15 +113,15 @@ static void test_set_refused_in_reset_leaves_ram_unchanged(void)
     ra_mount_scratch();
     simulate_reboot();
     ramp_assist_cfg_start();
-    TEST_CHECK(!ramp_assist_cfg_enabled(), "precondition: disabled");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "precondition: default ON");
     g_test_reset_in_flight = true;
-    esp_err_t err = ramp_assist_cfg_set_enabled(true);
+    esp_err_t err = ramp_assist_cfg_set_enabled(false);
     g_test_reset_in_flight = false;
     TEST_CHECK(err == ESP_ERR_INVALID_STATE, "refused with ESP_ERR_INVALID_STATE");
-    TEST_CHECK(!ramp_assist_cfg_enabled(), "RAM still holds the stored (disabled) value after the refusal");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "RAM still holds the stored (ON) value after the refusal");
 }
 
-static void test_default_is_disabled_on_empty_nvs(void)
+static void test_default_is_on_on_empty_nvs(void)
 {
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
@@ -120,11 +129,8 @@ static void test_default_is_disabled_on_empty_nvs(void)
 
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "ramp_assist_cfg_start() succeeds against an empty stub");
-    TEST_CHECK(ramp_assist_cfg_enabled() == false,
-               "empty NVS (nothing ever stored, e.g. a board that predates this feature or a fresh "
-               "board) -- the safe default is DISABLED, i.e. ramp_assist_cfg_enabled() must be false. "
-               "This is the load-bearing default: a PID tuning run must be able to trust an "
-               "unconfigured board to run raw, unassisted");
+    TEST_CHECK(ramp_assist_cfg_enabled() == true, "empty store: the C2 default is ON");
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 100, "empty store: stretch_max_pct defaults to 100");
 }
 
 static void test_persistence_round_trip(void)
@@ -133,11 +139,16 @@ static void test_persistence_round_trip(void)
     simulate_reboot();
 
     ramp_assist_cfg_start();
-    TEST_CHECK(!ramp_assist_cfg_enabled(), "precondition: starts disabled (safe default)");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "precondition: starts ON (C2 default)");
 
-    esp_err_t err = ramp_assist_cfg_set_enabled(true);
-    TEST_CHECK(err == ESP_OK, "set_enabled(true) persists successfully in the stub");
-    TEST_CHECK(ramp_assist_cfg_enabled(), "immediately reflects the new value, this boot");
+    esp_err_t err = ramp_assist_cfg_set_enabled(false);
+    TEST_CHECK(err == ESP_OK, "set_enabled(false) persists successfully");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "immediately reflects the new value, this boot");
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "a user OFF sticks across a reboot (migration marker persisted)");
+    err = ramp_assist_cfg_set_enabled(true);
+    TEST_CHECK(err == ESP_OK, "set_enabled(true) persists");
 
     // Simulate a reboot -- the persisted value must survive it. This is the
     // scenario item 1 in the task ("survives a whole-page save round trip AND
@@ -145,8 +156,7 @@ static void test_persistence_round_trip(void)
     // returned ESP_OK".
     simulate_reboot();
     ramp_assist_cfg_start();
-    TEST_CHECK(ramp_assist_cfg_enabled(),
-               "ramp_assist_cfg_start() on the next boot reloads enabled=true from NVS");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "the next boot reloads enabled=true");
 
     // Flip it back and confirm THAT round-trips too, not just "true" sticking
     // (a setter that only ever writes 1 and never actually clears the byte
@@ -155,8 +165,7 @@ static void test_persistence_round_trip(void)
     TEST_CHECK(err == ESP_OK, "set_enabled(false) persists successfully");
     simulate_reboot();
     ramp_assist_cfg_start();
-    TEST_CHECK(!ramp_assist_cfg_enabled(),
-               "the re-disabled value also survives a simulated reboot, not just the enabled one");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "the re-disabled value also survives a simulated reboot");
     cfg_fs_deinit();
 }
 
@@ -175,7 +184,7 @@ static void test_set_without_cfg_partition_fails_loud(void)
                "no NVS write was made as a fallback");
 }
 
-static void test_corrupted_value_falls_back_to_safe_default(void)
+static void test_corrupted_value_falls_back_to_default(void)
 {
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
@@ -197,11 +206,8 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
 
     simulate_reboot();
     ramp_assist_cfg_start();
-    TEST_CHECK(!ramp_assist_cfg_enabled(),
-               "an out-of-range stored byte must NOT be trusted to still mean enabled=true -- this is "
-               "exactly the failure this module's explicit range check exists to catch: a corrupted "
-               "value must resolve to the SAFE default (disabled), not to whatever garbage the flash "
-               "actually held");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "frozen NVS garbage is never a source: default ON");
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 100, "frozen NVS garbage: default pct");
 }
 
 // ---------------------------------------------------------------------
@@ -221,14 +227,13 @@ static void test_save_lands_in_cfg_file_only(void)
     simulate_reboot();
     ramp_assist_cfg_start();
 
-    TEST_CHECK(ramp_assist_cfg_set_enabled(true) == ESP_OK, "set_enabled(true) succeeds with cfg_fs mounted");
+    TEST_CHECK(ramp_assist_cfg_set_all(false, 150) == ESP_OK, "set_all(false,150) succeeds with cfg_fs mounted");
 
-    uint8_t file_raw = 0;
+    uint8_t rec[8];
     uint32_t file_rev = 0;
-    bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
-                          &file_valid);
-    TEST_CHECK(file_valid && file_raw == 1, "the file was actually written and decodes to enabled=true");
+    size_t flen = ra_read_file(rec, &file_rev);
+    TEST_CHECK(flen == 4 && rec[0] == 0 && (rec[1] & 1) == 1 && (rec[2] | (rec[3] << 8)) == 150,
+               "the 4-byte record: enabled=0, migrated flag set, pct=150");
 
     hal_kv_handle_t h;
     TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
@@ -246,12 +251,12 @@ static void test_file_preferred_when_both_valid_and_equal(void)
     TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     simulate_reboot();
     ramp_assist_cfg_start();
-    ramp_assist_cfg_set_enabled(true);
+    ramp_assist_cfg_set_enabled(false);
 
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "reload with cfg_fs mounted succeeds");
-    TEST_CHECK(ramp_assist_cfg_enabled(), "reload reads the dual-written value back (file path exercised)");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "reload reads the written value back (file path exercised)");
 
     cfg_fs_deinit();
 }
@@ -266,7 +271,7 @@ static void test_nvs_fallback_when_file_absent(void)
     // Write with cfg_fs NOT mounted (partition absent this boot) -- only NVS
     // gets the value, matching every board today.
     TEST_CHECK(cfg_fs_get_status() != CFG_FS_STATUS_MOUNTED, "precondition: cfg_fs is not mounted yet");
-    ra_stage_legacy_nvs(1, 1); // legacy NVS-only board
+    ra_stage_legacy_nvs(0, 1); // legacy NVS-only board that had it OFF
 
     // NOW mount cfg_fs (simulates the partition becoming available on a
     // later boot / firmware update) and reboot -- the file is empty, so the
@@ -278,7 +283,7 @@ static void test_nvs_fallback_when_file_absent(void)
     TEST_CHECK(err == ESP_OK, "start() succeeds");
     /* persfx3 MED-3: the frozen legacy NVS copy is never re-adopted -- safe default (disabled), and nothing
      * is migrated into a file. */
-    TEST_CHECK(!ramp_assist_cfg_enabled(), "no file: the frozen NVS copy is NOT adopted (disabled default)");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "no file: the frozen NVS copy (OFF) is NOT adopted (default ON)");
 
     bool exists = true;
     cfg_fs_exists(RAMP_ASSIST_FILE_PATH, &exists);
@@ -295,14 +300,12 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     simulate_reboot();
     ramp_assist_cfg_start();
-    ramp_assist_cfg_set_enabled(true); // file+NVS both rev 1, both true
+    ramp_assist_cfg_set_enabled(false); // file rev 1 = OFF
 
-    // Simulate "a prior file write failed and only NVS advanced": bump ONLY
-    // NVS's rev+value directly, behind the file's back, exactly the
-    // divergence pref_cfg_fs_resolve()'s tie-break exists to catch.
+    // A frozen NVS copy that is strictly ahead and says ON must never win.
     hal_kv_handle_t h;
     hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, 0);
+    hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, 1);
     hal_kv_set_u32(&h, NVS_KEY_RAMP_ASSIST_REV, 5);
     hal_kv_commit(&h);
     hal_kv_close(&h);
@@ -310,17 +313,15 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() succeeds across the diverged sides");
-    TEST_CHECK(ramp_assist_cfg_enabled(),
-               "persfx3 MED-3: the file (rev 1) wins; the frozen NVS copy (rev 5) is never a source");
+    TEST_CHECK(!ramp_assist_cfg_enabled(),
+               "persfx3 MED-3: the file (rev 1, OFF) wins; the frozen NVS copy (rev 5, ON) is never a source");
 
     // The file must have been resynced to the winning (NVS) value so the
     // divergence does not persist to the next boot.
-    uint8_t file_raw = 1;
+    uint8_t rec[8];
     uint32_t file_rev = 0;
-    bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
-                          &file_valid);
-    TEST_CHECK(file_valid && file_raw == 1 && file_rev == 1, "the file is untouched (not resynced from NVS)");
+    size_t flen = ra_read_file(rec, &file_rev);
+    TEST_CHECK(flen == 4 && rec[0] == 0 && file_rev == 1, "the file is untouched (not resynced from NVS)");
     hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
     TEST_CHECK(hal_kv_key_exists(&h, NVS_KEY_RAMP_ASSIST) != HAL_OK &&
                    hal_kv_key_exists(&h, NVS_KEY_RAMP_ASSIST_REV) != HAL_OK,
@@ -350,7 +351,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     simulate_reboot();
     ramp_assist_cfg_start();
-    ramp_assist_cfg_set_enabled(true); // file+NVS both rev 1, both true
+    ramp_assist_cfg_set_enabled(false); // file rev 1 = OFF
 
     // Simulate "an edit made on rolled-back (pre-dual-write) firmware":
     // overwrite ONLY the NVS blob, leaving its rev untouched at 1 -- exactly
@@ -358,7 +359,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     // The file is left at rev 1/true, now stale relative to this edit.
     hal_kv_handle_t h;
     hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, 0);
+    hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, 1);
     hal_kv_set_u32(&h, NVS_KEY_RAMP_ASSIST_REV, 1); // legacy rev key: matches the file's rev, bytes differ
     hal_kv_commit(&h);
     hal_kv_close(&h);
@@ -376,19 +377,17 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() succeeds across the equal-rev divergence");
-    TEST_CHECK(ramp_assist_cfg_enabled(),
-               "persfx3 MED-3: equal rev, differing bytes: the file (true) wins, the frozen NVS copy (false) is "
+    TEST_CHECK(!ramp_assist_cfg_enabled(),
+               "persfx3 MED-3: equal rev, differing bytes: the file (OFF) wins, the frozen NVS copy (ON) is "
                "never re-adopted");
 
     // The file must be resynced to the winning (NVS) value, same as the
     // strictly-higher-rev case above -- the divergence must not survive to
     // the next boot.
-    uint8_t file_raw = 1;
+    uint8_t rec[8];
     uint32_t file_rev = 0;
-    bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
-                          &file_valid);
-    TEST_CHECK(file_valid && file_raw == 1 && file_rev == 1, "the file is untouched (not resynced from NVS)");
+    size_t flen = ra_read_file(rec, &file_rev);
+    TEST_CHECK(flen == 4 && rec[0] == 0 && file_rev == 1, "the file is untouched (not resynced from NVS)");
 
     cfg_fs_deinit();
 }
@@ -400,7 +399,7 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     ramp_assist_cfg_start();
-    ra_stage_legacy_nvs(1, 1);
+    ra_stage_legacy_nvs(0, 1);
 
     // A base_dir that cannot be listed at all -- cfg_fs_init() returns
     // ESP_FAIL / status UNAVAILABLE (cfg_fs.h's documented mount-failed
@@ -413,7 +412,7 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() with a FAILED mount still succeeds (non-fatal, falls back to NVS)");
-    TEST_CHECK(!ramp_assist_cfg_enabled(), "persfx3 MED-3: mount-failed: the frozen NVS value is NOT adopted (default)");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "persfx3 MED-3: mount-failed: the frozen NVS value (OFF) is NOT adopted (default ON)");
 
     cfg_fs_deinit();
 }
@@ -436,7 +435,7 @@ static void test_interrupted_write_leaves_old_file_intact(void)
     TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     simulate_reboot();
     ramp_assist_cfg_start();
-    ramp_assist_cfg_set_enabled(true); // establishes a good, committed file at rev 1
+    ramp_assist_cfg_set_enabled(false); // establishes a good, committed file at rev 1 (OFF)
 
     // Simulate an interrupted write by installing a write function that
     // always fails (stands in for a power cut between the temp-file write
@@ -446,11 +445,11 @@ static void test_interrupted_write_leaves_old_file_intact(void)
     // reported back up).
     pref_cfg_fs_set_write_fn(ra_always_fail_write);
 
-    esp_err_t err = ramp_assist_cfg_set_enabled(false);
+    esp_err_t err = ramp_assist_cfg_set_enabled(true);
     // The cfg file is the only store now, so a failed write is returned to
     // the caller (fail loud) and nothing falls back to NVS.
     TEST_CHECK(err != ESP_OK, "set_enabled() reports the failed cfg write");
-    TEST_CHECK(ramp_assist_cfg_enabled() == false,
+    TEST_CHECK(ramp_assist_cfg_enabled() == true,
                "the in-RAM value still took effect this boot (documented in-RAM-first policy); only the "
                "persistence failed, and the caller was told");
 
@@ -459,13 +458,11 @@ static void test_interrupted_write_leaves_old_file_intact(void)
     // The OLD file (rev 1, enabled=true) must still be exactly what is on
     // disk -- the failed write must not have corrupted or partially
     // overwritten it.
-    uint8_t file_raw = 0xFF;
+    uint8_t rec[8];
     uint32_t file_rev = 0;
-    bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
-                          &file_valid);
-    TEST_CHECK(file_valid && file_raw == 1 && file_rev == 1,
-               "the interrupted write left the OLD file (rev 1, enabled=true) completely intact");
+    size_t flen = ra_read_file(rec, &file_rev);
+    TEST_CHECK(flen == 4 && rec[0] == 0 && file_rev == 1,
+               "the interrupted write left the OLD file (rev 1, enabled=false) completely intact");
 
     cfg_fs_deinit();
 }
@@ -491,7 +488,7 @@ static void ra_exhaust_partition_slots(void)
 
 static void test_ra_start_partition_init_failure_returns_error_and_defaults(void)
 {
-    TEST_SECTION("ramp_assist_cfg_start: NVS partition init failure returns non-OK, disabled default still applied");
+    TEST_SECTION("ramp_assist_cfg_start: NVS partition init failure returns non-OK, default (ON) still applied");
     ra_cfg_fs_reset();
     fake_kv_reset_all();
     ra_exhaust_partition_slots();
@@ -501,7 +498,7 @@ static void test_ra_start_partition_init_failure_returns_error_and_defaults(void
 
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err != ESP_OK, "partition-init failure is reported (not swallowed as ESP_OK)");
-    TEST_CHECK(ramp_assist_cfg_enabled() == false, "partition-init failure: the disabled default is still applied");
+    TEST_CHECK(ramp_assist_cfg_enabled() == true, "partition-init failure: the default (ON) is still applied");
 }
 
 static void test_ra_start_open_error_without_file_returns_error(void)
@@ -515,7 +512,7 @@ static void test_ra_start_open_error_without_file_returns_error(void)
     TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "precondition: open failure armed");
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err != ESP_OK, "open error with nothing recoverable is reported");
-    TEST_CHECK(ramp_assist_cfg_enabled() == false, "open error: the disabled default is still applied");
+    TEST_CHECK(ramp_assist_cfg_enabled() == true, "open error: the default (ON) is still applied");
 }
 
 static void test_ra_start_read_error_without_file_returns_error(void)
@@ -526,14 +523,14 @@ static void test_ra_start_read_error_without_file_returns_error(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     ramp_assist_cfg_start();
-    ra_stage_legacy_nvs(1, 1); // precondition: enabled in the legacy NVS copy
+    ra_stage_legacy_nvs(0, 1); // precondition: OFF in the legacy NVS copy
     TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_RAMP_ASSIST),
                "precondition: the committed value is corrupted (reads return HAL_IO)");
 
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err != ESP_OK, "read error with nothing recoverable is reported");
-    TEST_CHECK(ramp_assist_cfg_enabled() == false, "read error: the disabled default is still applied");
+    TEST_CHECK(ramp_assist_cfg_enabled() == true, "read error: the default (ON) is still applied");
 }
 
 static void test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value(void)
@@ -543,16 +540,17 @@ static void test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
     TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
-    uint8_t enabled_raw = 1;
-    TEST_CHECK(pref_cfg_fs_save(RAMP_ASSIST_FILE_PATH, &enabled_raw, sizeof(enabled_raw), 2) == ESP_OK,
-               "precondition: the file holds enabled at rev 2");
+    uint8_t rec_in[4] = {0, 1, 50, 0}; /* OFF, migrated, pct 50 */
+    TEST_CHECK(pref_cfg_fs_save(RAMP_ASSIST_FILE_PATH, rec_in, sizeof(rec_in), 2) == ESP_OK,
+               "precondition: the file holds OFF/50% at rev 2");
     simulate_reboot();
-    s_ramp_assist_enabled = false; // opposite of the expected result so the check below is not vacuous
+    s_ramp_assist_enabled = true; // opposite of the expected result so the check below is not vacuous
 
     TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "precondition: open failure armed");
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "file fallback recovered a value: start() reports success despite the NVS error");
-    TEST_CHECK(ramp_assist_cfg_enabled() == true, "the file value (enabled) is applied");
+    TEST_CHECK(ramp_assist_cfg_enabled() == false, "the file value (OFF) is applied");
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 50, "the file pct is applied");
     TEST_CHECK(s_ramp_assist_rev == 2, "the file's rev is adopted");
 
     cfg_fs_deinit();
@@ -570,25 +568,154 @@ static void test_set_enabled_runs_in_save_section(void)
     ra_mount_scratch();
     simulate_reboot();
     ramp_assist_cfg_start();
-    TEST_CHECK(!ramp_assist_cfg_enabled(), "starts disabled");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "starts ON");
     ssp_install();
     g_ssp.on_enter = ra_record_ram_at_enter;
-    g_ra_ram_at_enter = true;
-    TEST_CHECK(ramp_assist_cfg_set_enabled(true) == ESP_OK, "save ok");
+    g_ra_ram_at_enter = false;
+    TEST_CHECK(ramp_assist_cfg_set_enabled(false) == ESP_OK, "save ok");
     TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
-    TEST_CHECK(g_ra_ram_at_enter == false, "RAM not yet assigned when the section opens");
-    TEST_CHECK(ramp_assist_cfg_enabled(), "RAM holds the new value after the save");
+    TEST_CHECK(g_ra_ram_at_enter == true, "RAM not yet assigned (still ON) when the section opens");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "RAM holds the new value after the save");
     ssp_uninstall();
+    cfg_fs_deinit();
+}
+
+/* ---- C2: one-shot migration, stretch_max_pct, validator ---- */
+static void ra_stage_file(const uint8_t *rec, size_t len, uint32_t rev)
+{
+    TEST_CHECK(pref_cfg_fs_save(RAMP_ASSIST_FILE_PATH, rec, len, rev) == ESP_OK, "stage: cfg file written");
+}
+
+static void test_legacy_off_file_migrates_on_once_then_user_off_sticks(void)
+{
+    TEST_SECTION("C2: legacy 1-byte OFF file -> ON once with a persisted marker; a later user OFF sticks");
+    ra_mount_scratch();
+    uint8_t legacy = 0;
+    ra_stage_file(&legacy, 1, 3);
+    simulate_reboot();
+    TEST_CHECK(ramp_assist_cfg_start() == ESP_OK, "start succeeds");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "legacy OFF is switched ON by the one-shot migration");
+    uint8_t rec[8];
+    uint32_t rev = 0;
+    TEST_CHECK(ra_read_file(rec, &rev) == 4 && rec[0] == 1 && (rec[1] & 1) == 1 && rec[2] == 100 && rev == 4,
+               "migration persisted: 4-byte record, ON, marker set, pct 100, rev advanced");
+
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ramp_assist_cfg_enabled(), "second boot: still ON, no re-migration needed");
+
+    TEST_CHECK(ramp_assist_cfg_set_enabled(false) == ESP_OK, "user turns it OFF");
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "the user OFF sticks: the marker stops the migration from re-running");
+    cfg_fs_deinit();
+}
+
+static void test_legacy_on_file_migrates_and_marker_unset_record_migrates(void)
+{
+    TEST_SECTION("C2: legacy ON file gets the marker; a 4-byte record without the marker (OFF) is turned ON once");
+    ra_mount_scratch();
+    uint8_t legacy = 1;
+    ra_stage_file(&legacy, 1, 1);
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    uint8_t rec[8];
+    TEST_CHECK(ra_read_file(rec, NULL) == 4 && rec[0] == 1 && (rec[1] & 1) == 1, "legacy ON gains the marker");
+
+    uint8_t unmarked[4] = {0, 0, 80, 0};
+    ra_stage_file(unmarked, 4, 9);
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ramp_assist_cfg_enabled(), "unmarked OFF record is turned ON");
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 80, "migration keeps the stored pct");
+    cfg_fs_deinit();
+}
+
+static void test_migration_write_failure_keeps_on_and_retries(void)
+{
+    TEST_SECTION("C2: a failed migration write still runs ON this boot and repeats on the next boot");
+    ra_mount_scratch();
+    uint8_t legacy = 0;
+    ra_stage_file(&legacy, 1, 1);
+    pref_cfg_fs_set_write_fn(ra_always_fail_write);
+    simulate_reboot();
+    TEST_CHECK(ramp_assist_cfg_start() == ESP_OK, "start still succeeds");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "ON this boot despite the failed write");
+    pref_cfg_fs_reset_write_fn_for_test();
+    uint8_t rec[8];
+    TEST_CHECK(ra_read_file(rec, NULL) == 1 && rec[0] == 0, "legacy file untouched by the failed write");
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ra_read_file(rec, NULL) == 4 && rec[0] == 1 && (rec[1] & 1), "next boot completes the migration");
+    cfg_fs_deinit();
+}
+
+static void test_stretch_pct_persists_and_rejects_out_of_range(void)
+{
+    TEST_SECTION("C2: stretch_max_pct default 100, persists, 0 and 300 accepted, 301 refused without change");
+    ra_mount_scratch();
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 100, "default 100");
+    TEST_CHECK(ramp_assist_cfg_set_stretch_max_pct(250) == ESP_OK, "250 accepted");
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 250, "250 survives a reboot");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "enabled untouched by a pct-only save");
+    TEST_CHECK(ramp_assist_cfg_set_stretch_max_pct(0) == ESP_OK && ramp_assist_cfg_stretch_max_pct() == 0, "0 accepted");
+    TEST_CHECK(ramp_assist_cfg_set_stretch_max_pct(300) == ESP_OK && ramp_assist_cfg_stretch_max_pct() == 300,
+               "300 accepted");
+    uint32_t rev_before = s_ramp_assist_rev;
+    TEST_CHECK(ramp_assist_cfg_set_stretch_max_pct(301) == ESP_ERR_INVALID_ARG, "301 refused");
+    TEST_CHECK(ramp_assist_cfg_set_all(false, 65535) == ESP_ERR_INVALID_ARG, "set_all with 65535 refused");
+    TEST_CHECK(ramp_assist_cfg_stretch_max_pct() == 300 && ramp_assist_cfg_enabled(), "refused writes change nothing");
+    TEST_CHECK(s_ramp_assist_rev == rev_before, "refused writes do not advance the rev");
+    cfg_fs_deinit();
+}
+
+static void test_file_validator_negatives(void)
+{
+    TEST_SECTION("C2: ramp_assist_cfg_file_validate accepts legacy 1-byte and the 4-byte record, refuses the rest");
+    uint8_t ok1[1] = {1}, bad1[1] = {2};
+    uint8_t ok4[4] = {1, 1, 44, 1};      /* pct 300 */
+    uint8_t bad_pct[4] = {1, 1, 45, 1};  /* pct 301 */
+    uint8_t bad_flag[4] = {1, 2, 100, 0};
+    uint8_t bad_en[4] = {2, 1, 100, 0};
+    uint8_t any[8] = {0};
+    TEST_CHECK(ramp_assist_cfg_file_validate(ok1, 1), "legacy 1 accepted");
+    TEST_CHECK(!ramp_assist_cfg_file_validate(bad1, 1), "legacy 2 refused");
+    TEST_CHECK(ramp_assist_cfg_file_validate(ok4, 4), "pct 300 record accepted");
+    TEST_CHECK(!ramp_assist_cfg_file_validate(bad_pct, 4), "pct 301 refused");
+    TEST_CHECK(!ramp_assist_cfg_file_validate(bad_flag, 4), "unknown flag bit refused");
+    TEST_CHECK(!ramp_assist_cfg_file_validate(bad_en, 4), "enabled=2 refused");
+    TEST_CHECK(!ramp_assist_cfg_file_validate(any, 2) && !ramp_assist_cfg_file_validate(any, 3) &&
+                   !ramp_assist_cfg_file_validate(any, 5),
+               "lengths 2, 3, 5 refused");
+}
+
+static void test_invalid_file_defaults_on_and_is_overwritable(void)
+{
+    TEST_SECTION("C2: an invalid file (pct 999) defaults ON/100 and a save overwrites it");
+    ra_mount_scratch();
+    uint8_t bad[4] = {0, 1, 0xE7, 0x03}; /* 999 */
+    ra_stage_file(bad, 4, 5);
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ramp_assist_cfg_enabled() && ramp_assist_cfg_stretch_max_pct() == 100, "defaults ON / 100");
+    TEST_CHECK(ramp_assist_cfg_set_enabled(false) == ESP_OK, "a save overwrites the invalid file");
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "the new value loads");
     cfg_fs_deinit();
 }
 
 void run_test_ramp_assist_cfg(void)
 {
-    test_default_is_disabled_on_empty_nvs();
+    test_default_is_on_on_empty_nvs();
     test_set_refused_in_reset_leaves_ram_unchanged();
     test_persistence_round_trip();
     test_set_without_cfg_partition_fails_loud();
-    test_corrupted_value_falls_back_to_safe_default();
+    test_corrupted_value_falls_back_to_default();
     test_save_lands_in_cfg_file_only();
     test_file_preferred_when_both_valid_and_equal();
     test_nvs_fallback_when_file_absent();
@@ -601,6 +728,12 @@ void run_test_ramp_assist_cfg(void)
     test_ra_start_read_error_without_file_returns_error();
     test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value();
     test_set_enabled_runs_in_save_section();
+    test_legacy_off_file_migrates_on_once_then_user_off_sticks();
+    test_legacy_on_file_migrates_and_marker_unset_record_migrates();
+    test_migration_write_failure_keeps_on_and_retries();
+    test_stretch_pct_persists_and_rejects_out_of_range();
+    test_file_validator_negatives();
+    test_invalid_file_defaults_on_and_is_overwritable();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

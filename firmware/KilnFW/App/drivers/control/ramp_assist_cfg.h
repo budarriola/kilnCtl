@@ -7,6 +7,15 @@
 // target. A target above the kiln's permitted maximum stays a hard refusal
 // either way -- ramp assist never stretches past that ceiling.
 //
+// 2026-11-19 (docs/ELEMENT_AGING_PLAN.md C2, owner decision): the setting is now labelled "Stretch
+// heating to reach targets" and is ON BY DEFAULT, existing boards included. A missing/unreadable file
+// means ON; a board whose file predates this change (1-byte legacy record, or a 4-byte record without
+// the migrated marker) is switched ON exactly once and the new record is persisted with the marker, so
+// a later user OFF sticks. The PID-tuning paragraph below is kept as history: tuning runs and A/B
+// comparisons must pin the flag OFF explicitly (run_queue presets already do).
+// The same record carries stretch_max_pct (default 100, 0..300): the cap on extra heating time, as a
+// percentage of the planned time, the executor may spend reaching a target.
+//
 // THIS MODULE IS THE FLAG ONLY. It owns the persisted bool, its HTTP surface,
 // and its MCP/tooling reachability -- it does NOT implement any ramp-
 // stretching or dwell-credit behaviour. That lands separately in
@@ -24,7 +33,7 @@
 // that run is comparing against the wrong target and becomes invalid, and two
 // runs with the flag in different states are not an A/B comparison of the
 // controller at all, only of whether ramp assist fired. This is why:
-//   - the persisted DEFAULT is FALSE (off) -- a board that has never heard of
+//   - (HISTORY, superseded 2026-11-19 -- the default is now ON, see above) the persisted DEFAULT was FALSE (off) -- a board that has never heard of
 //     this setting, or whose stored value failed to load, always keeps today's
 //     raw, unassisted behaviour, never opts a tuning run into assistance by
 //     surprise;
@@ -51,11 +60,17 @@
 #define RAMP_ASSIST_CFG_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
 /* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
 #define RAMP_ASSIST_FILE_PATH "ramp_assist.dat"
+
+/* stretch_max_pct range and default (ELEMENT_AGING_PLAN C2). */
+#define RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT 300u
+#define RAMP_ASSIST_STRETCH_MAX_PCT_DEFAULT 100u
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,7 +86,7 @@ extern "C" {
     "Ramp assist is for real firings, not PID tuning or A/B controller comparisons. When "         \
     "enabled, the executor may automatically stretch ramps and shorten dwells to keep up with "    \
     "the kiln's real capability -- a tuning or comparison run needs the RAW, unassisted "          \
-    "schedule to produce comparable tracking-error numbers. Leave this OFF for tuning."
+    "schedule to produce comparable tracking-error numbers. Turn this OFF for tuning."
 
 // Loads the persisted flag (or defaults to DISABLED if nothing valid is
 // stored -- see this header's PERSISTENCE note). Non-fatal: a load failure
@@ -84,6 +99,18 @@ esp_err_t ramp_assist_cfg_start(void);
 // consumer (not yet written) and every status/diagnostics reader call this
 // directly rather than re-reading flash.
 bool ramp_assist_cfg_enabled(void);
+
+// Cap on extra heating time the executor may spend reaching a target, percent of the planned time.
+// Default 100, range 0..RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT. O(1), RAM only.
+uint16_t ramp_assist_cfg_stretch_max_pct(void);
+
+// Persists stretch_max_pct (rejects > RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT with ESP_ERR_INVALID_ARG,
+// state untouched). Same in-RAM-first / refuse-in-reset semantics as ramp_assist_cfg_set_enabled().
+esp_err_t ramp_assist_cfg_set_stretch_max_pct(uint16_t pct);
+
+// Sets both fields in one persisted record (HTTP POST, backup import). Rejects pct out of range
+// before touching anything.
+esp_err_t ramp_assist_cfg_set_all(bool enabled, uint16_t pct);
 
 // Persists `enabled` to NVS and applies it live immediately (in-RAM value
 // updated before the NVS write is even attempted, same "in-RAM truth first"

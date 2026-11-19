@@ -282,7 +282,15 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *), void *arg)
 static bool g_ra_enabled;
 static esp_err_t g_ra_set_err;
 bool ramp_assist_cfg_enabled(void) { return g_ra_enabled; }
+static uint16_t g_ra_pct = 100;
+uint16_t ramp_assist_cfg_stretch_max_pct(void) { return g_ra_pct; }
 esp_err_t ramp_assist_cfg_set_enabled(bool e) { if (g_ra_set_err == ESP_OK) g_ra_enabled = e; return g_ra_set_err; }
+esp_err_t ramp_assist_cfg_set_stretch_max_pct(uint16_t p) { if (g_ra_set_err == ESP_OK) g_ra_pct = p; return g_ra_set_err; }
+esp_err_t ramp_assist_cfg_set_all(bool e, uint16_t p)
+{
+    if (g_ra_set_err == ESP_OK) { g_ra_enabled = e; g_ra_pct = p; }
+    return g_ra_set_err;
+}
 
 // cfg_fs
 static bool g_cfg_avail = true;
@@ -781,6 +789,25 @@ static void test_watchdog_ramp(void)
     set_body("enabled=1");
     ramp_assist_post_handler(&s_req);
     TEST_CHECK(s_status == 200 && g_ra_enabled, "ramp_assist POST enabled=1 applied");
+
+    /* C2: stretch_max_pct. */
+    world_reset();
+    set_body("stretch_max_pct=250");
+    ramp_assist_post_handler(&s_req);
+    TEST_CHECK(s_status == 200 && g_ra_pct == 250 && !g_ra_enabled, "ramp_assist POST pct only: pct applied, enabled kept");
+    world_reset();
+    set_body("enabled=1&stretch_max_pct=0");
+    ramp_assist_post_handler(&s_req);
+    TEST_CHECK(s_status == 200 && g_ra_pct == 0 && g_ra_enabled, "ramp_assist POST both fields applied (pct 0 is valid)");
+    const char *pbad[] = {"stretch_max_pct=301", "stretch_max_pct=1000", "stretch_max_pct=-1", "stretch_max_pct=",
+                          "stretch_max_pct=abc", "stretch_max_pct=1.5", NULL};
+    for (int i = 0; pbad[i]; i++) {
+        world_reset();
+        g_ra_pct = 100;
+        set_body(pbad[i]);
+        ramp_assist_post_handler(&s_req);
+        TEST_CHECK(s_status == 400 && g_ra_pct == 100, "ramp_assist POST: out-of-range/malformed pct refused, unchanged");
+    }
 
     world_reset();
     set_body("enabled=1");

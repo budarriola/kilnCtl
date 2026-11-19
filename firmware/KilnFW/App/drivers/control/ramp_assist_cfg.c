@@ -35,10 +35,18 @@ NVS_KEY_LEN_CHECK(NVS_KEY_RAMP_ASSIST_REV);
 // policy this module hands its NVS candidate to.
 /* RAMP_ASSIST_FILE_PATH now lives in ramp_assist_cfg.h (kiln-scope reset names it). */
 
-// SAFE DEFAULT: disabled. See ramp_assist_cfg.h's header comment -- a board
-// that has never heard of this key, or whose stored value is unreadable/
-// out-of-range, must always come up with today's raw, unassisted behaviour.
-static bool s_ramp_assist_enabled = false;
+// DEFAULT (2026-11-19, ELEMENT_AGING_PLAN C2): stretch ON, stretch_max_pct 100. A board that has
+// never heard of this key, or whose file is unreadable, runs with stretch ON.
+//
+// File item (after the 4-byte rev prefix pref_cfg_fs adds):
+//   legacy, 1 byte : enabled 0/1 (pre-C2 firmware). Read as "never migrated".
+//   current, 4 bytes: [0] enabled 0/1, [1] flags (bit0 = on-by-default migration done), [2..3] pct LE.
+// A legacy record, or a 4-byte record without the migrated flag, is turned ON once at boot and rewritten
+// with the flag set, so a later user OFF (which always writes the flag) sticks.
+#define RA_REC_LEN 4
+#define RA_FLAG_MIGRATED 0x01u
+static bool s_ramp_assist_enabled = true;
+static uint16_t s_stretch_max_pct = RAMP_ASSIST_STRETCH_MAX_PCT_DEFAULT;
 static uint32_t s_ramp_assist_rev = 0;
 
 // Copied from unit_pref.c/zones_http.c/touch_cal_store.c's identical
@@ -49,27 +57,43 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
-// Same 0/1 range check ramp_assist_cfg_start() has always applied to a
-// stored NVS byte -- reused verbatim as the pref_cfg_fs_validate_fn_t for
-// the file, so the moved item is validated exactly as its NVS path
-// validates today.
+// Accepts the legacy 1-byte 0/1 item and the 4-byte record (enabled 0/1, only known flag bits,
+// pct <= RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT). Anything else is refused.
 bool ramp_assist_cfg_file_validate(const void *bytes, size_t len)
 {
-    if (len != 1) {
-        return false;
+    const uint8_t *b = (const uint8_t *)bytes;
+    if (len == 1) {
+        return b[0] == 0 || b[0] == 1;
     }
-    uint8_t raw = *(const uint8_t *)bytes;
-    return raw == 0 || raw == 1;
+    if (len == RA_REC_LEN) {
+        uint16_t pct = (uint16_t)(b[2] | (b[3] << 8));
+        return b[0] <= 1 && (b[1] & ~RA_FLAG_MIGRATED) == 0 && pct <= RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT;
+    }
+    return false;
+}
+
+/* Persist the record (caller holds s_save_lock). rev advances only on success. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+static esp_err_t ra_persist_locked(bool enabled, uint16_t pct)
+{
+    uint8_t rec[RA_REC_LEN] = {enabled ? 1 : 0, RA_FLAG_MIGRATED, (uint8_t)(pct & 0xFF), (uint8_t)(pct >> 8)};
+    uint32_t new_rev = s_ramp_assist_rev + 1;
+    esp_err_t err = pref_cfg_fs_commit(RAMP_ASSIST_FILE_PATH, rec, sizeof(rec), new_rev, "ramp assist setting");
+    if (err == ESP_OK) {
+        s_ramp_assist_rev = new_rev;
+    }
+    return err;
 }
 
 esp_err_t ramp_assist_cfg_start(void)
 {
-    s_ramp_assist_enabled = false; // safe default stands until proven otherwise below
+    s_ramp_assist_enabled = true; // C2 default (ON) stands until a valid record says otherwise below
+    s_stretch_max_pct = RAMP_ASSIST_STRETCH_MAX_PCT_DEFAULT;
     s_ramp_assist_rev = 0;
 
     hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != HAL_OK) {
-        ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- ramp assist stays disabled this boot",
+        ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- ramp assist keeps its default (ON) this boot",
                  KILN_NVS_PARTITION, hal_status_to_name(part_err));
         return ESP_FAIL; // non-fatal to the caller (logs only); the error lets it latch a startup fault
     }
@@ -86,7 +110,7 @@ esp_err_t ramp_assist_cfg_start(void)
         // expected steady state, not an error.
     } else if (err != HAL_OK) {
         load_err = true;
-        ESP_LOGW(TAG, "hal_kv_open failed: %s -- ramp assist stays disabled this boot",
+        ESP_LOGW(TAG, "hal_kv_open failed: %s -- ramp assist keeps its default (ON) this boot",
                  hal_status_to_name(err));
     } else {
         uint8_t raw = 0;
@@ -108,7 +132,7 @@ esp_err_t ramp_assist_cfg_start(void)
             }
         } else if (rerr != HAL_NOT_FOUND) {
             load_err = true;
-            ESP_LOGW(TAG, "ramp_assist_cfg read failed: %s -- ramp assist stays disabled this boot",
+            ESP_LOGW(TAG, "ramp_assist_cfg read failed: %s -- ramp assist keeps its default (ON) this boot",
                      hal_status_to_name(rerr));
         }
         if (nvs_valid) {
@@ -120,24 +144,50 @@ esp_err_t ramp_assist_cfg_start(void)
         hal_kv_close(&h);
     }
 
-    uint8_t resolved_raw = nvs_raw;
-    uint32_t resolved_rev = nvs_rev;
-    bool used_file = false;
-    bool have_value = pref_cfg_fs_resolve_nvs_retired(RAMP_ASSIST_FILE_PATH, &nvs_raw, sizeof(nvs_raw), nvs_valid, nvs_rev,
-                                           ramp_assist_cfg_file_validate, &resolved_raw, &resolved_rev, &used_file);
-    if (used_file) {
-        /* persfx3 MED-3: retire the frozen NVS copy once the file is the adopted source. */
-        static const char *const k_legacy[] = {NVS_KEY_RAMP_ASSIST, NVS_KEY_RAMP_ASSIST_REV};
-        (void)legacy_nvs_erase_keys(TAG, KILN_NVS_PARTITION, NVS_NAMESPACE, k_legacy, 2);
+    (void)nvs_raw;
+    (void)nvs_rev;
+    /* persfx3 MED-3: the frozen NVS copy is never a source. Only the cfg file is read, as a variable-length
+     * item (legacy 1 byte or the 4-byte record), so a legacy file is migrated rather than rejected. */
+    uint8_t item[RA_REC_LEN + 4];
+    size_t item_len = 0;
+    uint32_t file_rev = 0;
+    esp_err_t lerr = pref_cfg_fs_load_var_checked(RAMP_ASSIST_FILE_PATH, item, sizeof(item), &item_len, &file_rev);
+    if (lerr != ESP_OK) {
+        if (lerr != ESP_ERR_NOT_FOUND) {
+            load_err = true;
+            ESP_LOGW(TAG, "ramp_assist file read failed: %s -- default (stretch ON) this boot", esp_err_to_name(lerr));
+        }
+        return load_err ? ESP_FAIL : ESP_OK;
     }
-    if (!have_value) {
-        return load_err ? ESP_FAIL : ESP_OK; // neither side had anything trustworthy -- disabled default stands
+    if (!ramp_assist_cfg_file_validate(item, item_len)) {
+        ESP_LOGW(TAG, "ramp_assist file (%u bytes) is not valid -- default (stretch ON) until the next save",
+                 (unsigned)item_len);
+        return ESP_OK;
     }
+    static const char *const k_legacy[] = {NVS_KEY_RAMP_ASSIST, NVS_KEY_RAMP_ASSIST_REV};
+    (void)legacy_nvs_erase_keys(TAG, KILN_NVS_PARTITION, NVS_NAMESPACE, k_legacy, 2);
 
-    s_ramp_assist_enabled = (resolved_raw != 0);
-    s_ramp_assist_rev = resolved_rev;
-    ESP_LOGI(TAG, "ramp assist: %s (source=%s, rev=%lu)", s_ramp_assist_enabled ? "ENABLED" : "disabled",
-             used_file ? "file" : "NVS", (unsigned long)s_ramp_assist_rev);
+    bool migrated = (item_len == RA_REC_LEN) && (item[1] & RA_FLAG_MIGRATED) != 0;
+    s_ramp_assist_rev = file_rev;
+    if (item_len == RA_REC_LEN) {
+        s_stretch_max_pct = (uint16_t)(item[2] | (item[3] << 8));
+    }
+    if (!migrated) {
+        /* One-shot: every pre-C2 board is switched ON once (owner 2026-11-19). The record is rewritten
+         * with the migrated flag so a later user OFF persists. A failed write only means it repeats. */
+        bool was_on = item[0] != 0;
+        s_ramp_assist_enabled = true;
+        cfg_save_lock_take(&s_save_lock);
+        esp_err_t werr = relay_authority_reset_in_flight() ? ESP_ERR_INVALID_STATE
+                                                            : ra_persist_locked(true, s_stretch_max_pct);
+        cfg_save_lock_give(&s_save_lock);
+        ESP_LOGW(TAG, "ramp assist one-shot migration: stretch %s -> ON (stretch_max_pct %u), persist %s",
+                 was_on ? "was ON" : "was OFF", (unsigned)s_stretch_max_pct, esp_err_to_name(werr));
+    } else {
+        s_ramp_assist_enabled = (item[0] != 0);
+    }
+    ESP_LOGI(TAG, "ramp assist: %s, stretch_max_pct %u (rev=%lu)", s_ramp_assist_enabled ? "ENABLED" : "disabled",
+             (unsigned)s_stretch_max_pct, (unsigned long)s_ramp_assist_rev);
     return ESP_OK;
 }
 
@@ -146,19 +196,22 @@ bool ramp_assist_cfg_enabled(void)
     return s_ramp_assist_enabled;
 }
 
+uint16_t ramp_assist_cfg_stretch_max_pct(void)
+{
+    return s_stretch_max_pct;
+}
+
 /* Callers: httpd and backup_import's own async task (http_async_job_try_start),
  * so the rev read, RAM assign, commit and rev bump are one section
  * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
  * reserves the flash worker first -- see cfg_save_lock.h. */
-static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
-
-esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
+static esp_err_t ra_set(bool enabled, uint16_t pct)
 {
+    if (pct > RAMP_ASSIST_STRETCH_MAX_PCT_LIMIT) {
+        return ESP_ERR_INVALID_ARG;
+    }
     // Live immediately, same "in-RAM truth first" reasoning unit_pref_set()/
-    // watchdog_cfg_set_panic_disabled() use -- whether or not the NVS write
-    // below succeeds, the very next reader (a status poll, or the future
-    // ramp-stretch consumer) must see this take effect for the rest of the
-    // boot.
+    // watchdog_cfg_set_panic_disabled() use.
     cfg_save_lock_take(&s_save_lock);
     /* LOW-3 (review 10): refuse BEFORE touching RAM, so a refused save leaves live == stored. */
     if (relay_authority_reset_in_flight()) {
@@ -166,24 +219,29 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
         return ESP_ERR_INVALID_STATE;
     }
     s_ramp_assist_enabled = enabled;
-    uint32_t new_rev = s_ramp_assist_rev + 1;
-    uint8_t raw = enabled ? 1 : 0;
-
-    // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md.
-    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
-     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
-    esp_err_t err = ESP_ERR_INVALID_STATE;
-    if (!relay_authority_reset_in_flight()) {
-        err = pref_cfg_fs_commit(RAMP_ASSIST_FILE_PATH, &raw, sizeof(raw), new_rev, "ramp assist setting");
-    }
-    if (err == ESP_OK) {
-        s_ramp_assist_rev = new_rev;
-    }
+    s_stretch_max_pct = pct;
+    // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md. Always writes the migrated flag.
+    esp_err_t err = ra_persist_locked(enabled, pct);
     cfg_save_lock_give(&s_save_lock);
     if (err == ESP_OK) {
-        ESP_LOGW(TAG, "ramp assist saved: %s", enabled ? "ENABLED" : "disabled");
+        ESP_LOGW(TAG, "ramp assist saved: %s, stretch_max_pct %u", enabled ? "ENABLED" : "disabled", (unsigned)pct);
     }
     return err;
+}
+
+esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
+{
+    return ra_set(enabled, s_stretch_max_pct);
+}
+
+esp_err_t ramp_assist_cfg_set_stretch_max_pct(uint16_t pct)
+{
+    return ra_set(s_ramp_assist_enabled, pct);
+}
+
+esp_err_t ramp_assist_cfg_set_all(bool enabled, uint16_t pct)
+{
+    return ra_set(enabled, pct);
 }
 
 void ramp_assist_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
@@ -205,10 +263,15 @@ void ramp_assist_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
         *diverged = false;
     }
 
-    uint8_t f_raw = 0;
+    uint8_t f_item[RA_REC_LEN + 4];
+    size_t f_len = 0;
     uint32_t f_rev = 0;
-    bool f_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(f_raw), ramp_assist_cfg_file_validate, &f_raw, &f_rev, &f_valid);
+    bool f_valid = pref_cfg_fs_load_var(RAMP_ASSIST_FILE_PATH, f_item, sizeof(f_item), &f_len, &f_rev) &&
+                   ramp_assist_cfg_file_validate(f_item, f_len);
+    uint8_t f_raw = f_valid ? f_item[0] : 0;
+    if (!f_valid) {
+        f_rev = 0;
+    }
 
     bool n_valid = false;
     uint8_t n_raw = 0;
