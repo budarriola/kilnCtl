@@ -1053,7 +1053,8 @@ void executor_task_entry(void *arg)
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
             bool lagging_now = (lagging & (1u << zi)) != 0;
-            ramp_assist_zone_lag_tick(&s_exec.zones[zi], lagging_now, dt_s);
+            ramp_assist_zone_lag_tick_ex(&s_exec.zones[zi], lagging_now, dt_s, ramp_assist_on);
+            arrival_settle_tick(&s_exec.zones[zi], s_exec.zones[zi].actual_c, s_exec.zones[zi].duty, dt_s);
         }
 
         /* --- Ramp/dwell segment stepping (shared across all active zones) - */
@@ -1090,6 +1091,11 @@ void executor_task_entry(void *arg)
          * would push duty up on exactly the zones the lock is waiting for the
          * laggards to catch up with. */
         s_exec.target_rate_c_per_s = 0.0f;
+        /* EA C3: the arrival gate pauses the dwell timer by restoring these (the stepping fragment
+         * below accumulates first and is mirror-checked, so the gate undoes it instead). */
+        const uint32_t arrival_elapsed_pre_s = s_exec.segment_elapsed_s;
+        const uint16_t arrival_rem_pre_ms = s_exec.segment_elapsed_rem_ms;
+        bool arrival_waiting_this_tick = false; /* C3 gate waiting: counts as an active stretch for C7 */
         if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
             /* Owner's request, verbatim (profiles_http.h): a relay/IO segment
              * is not a temperature step at all, so none of the ramp-lock
@@ -1233,6 +1239,17 @@ void executor_task_entry(void *arg)
                 }
             } else {
                 s_exec.target_c = seg->target_c;
+                /* EA C3 (docs/ELEMENT_AGING_PLAN.md F2), stretch on, heating segment only: the
+                 * dwell timer counts only once every driving zone has arrived (one-sided band) or
+                 * settled at a steady offset. Waiting spends the stretch budget; when it runs out
+                 * the gate opens (old behaviour) and the shortfall is recorded. Stretch off: this
+                 * block does nothing. */
+                bool arrival_wait = arrival_gate_tick(&s_exec, ramp_assist_on, ramp_assist_cfg_stretch_max_pct(), dt_s);
+                arrival_waiting_this_tick = arrival_wait;
+                if (arrival_wait) {
+                    s_exec.segment_elapsed_s = arrival_elapsed_pre_s;
+                    s_exec.segment_elapsed_rem_ms = arrival_rem_pre_ms;
+                }
                 /* CL-03: hold the dwell TIMER (not the setpoint) until every driving zone is within the
                  * band of target; restarts the count so the hold is timed at temperature. */
                 bool dwell_too_hot = ramp_assist_dwell_too_hot(&s_exec);
@@ -1260,8 +1277,8 @@ void executor_task_entry(void *arg)
                 uint32_t credited_threshold_s = (total_spend_s >= (float)nominal_s)
                     ? 0u : nominal_s - (uint32_t)total_spend_s;
                 bool target_reached = ramp_assist_dwell_target_reached(&s_exec);
-                bool dwell_done = !dwell_too_hot && ((s_exec.segment_elapsed_s >= nominal_s) ||
-                    (s_exec.segment_elapsed_s >= credited_threshold_s && target_reached));
+                bool dwell_done = exec_dwell_done(dwell_too_hot, arrival_wait, s_exec.segment_elapsed_s, nominal_s,
+                                                  credited_threshold_s, target_reached);
                 if (dwell_done) {
                     s_exec.segment_index++;
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
@@ -1794,8 +1811,17 @@ void executor_task_entry(void *arg)
             float guard_zone_rate_c_per_s = profile_executor_guard_zone_ramp_rate(
                 s_exec.target_rate_c_per_s, guard_cap_c_per_hr,
                 z->effective_target_c != s_exec.target_c);
-            guard_cfg_this_tick.sanity_rate_c_per_min =
-                profile_executor_guard_sanity_rate(z->guard_cfg.sanity_rate_c_per_min, guard_zone_rate_c_per_s);
+            /* EA C4: with a stretch driving target_rate_c_per_s (uncapped zone)
+             * that rate is the lagging zone's own achieved rate, so it must not
+             * narrow guard 1 (docs/ELEMENT_AGING_PLAN.md F5). */
+            guard_cfg_this_tick.sanity_rate_c_per_min = profile_executor_guard_sanity_rate_ex(
+                z->guard_cfg.sanity_rate_c_per_min, guard_zone_rate_c_per_s,
+                stretched_this_tick && !(guard_cap_c_per_hr > 0.0f));
+            /* EA C1 (docs/ELEMENT_AGING_PLAN.md F1): guard 4's band tracks the
+             * ramp lock band so a held lock cannot trip DRIFT. Local copy only;
+             * independent of the stretch setting. */
+            guard_cfg_this_tick.drift_hysteresis_c = profile_executor_guard_drift_band_c(
+                z->guard_cfg.drift_hysteresis_c, EXEC_RAMP_LOCK_BAND_C(zi), z->actual_c, raw_c[zi]);
             /* 2026-09-10 fix (docs/audits/esp_panic_after_zone0_guard_trip_
              * 2026-09-10.md): guard 1's climbing window must never be
              * shorter than this zone's own dead_time_s+tau_s -- see
@@ -1829,6 +1855,9 @@ void executor_task_entry(void *arg)
                  * reproducing it for the new mechanism. */
                 .setpoint_c = zone_commanded_setpoint_c(z, zi),
                 .commanded_duty = commanded_duty_for_guards,
+                /* EA C7: slow-climb floor only with stretch on and the lock held
+                 * or a stretch active (thermal_guard.c adds duty/temperature gates). */
+                .slow_climb_ok = ramp_assist_on && (s_exec.ramp_lock_held || stretched_this_tick || arrival_waiting_this_tick),
                 .dt_s = dt_s,
                 /* SR-10: positive duty rendered as relay OFF for the whole
                  * window (below the minimum on-time) still arms guard 3. */

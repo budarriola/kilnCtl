@@ -415,7 +415,15 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                          * covers exactly this branch and nothing else: guard 2
                          * below (falling while heating) and every other guard
                          * still run unconditionally. */
-                        float expected = rate_cfg * elapsed_min;
+                        float expected_rate_cfg = rate_cfg;
+                        /* EA C7: see thermal_guard_input_t.slow_climb_ok. Every
+                         * gate must hold, otherwise sanity_rate is unchanged. */
+                        if (in->slow_climb_ok && in->commanded_duty >= THERMAL_GUARD_SLOW_CLIMB_DUTY_MIN &&
+                            in->measurement_c >= THERMAL_GUARD_SLOW_CLIMB_MIN_C &&
+                            expected_rate_cfg > THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN) {
+                            expected_rate_cfg = THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN;
+                        }
+                        float expected = expected_rate_cfg * elapsed_min;
                         /* delta < expected is a STRICT inequality on purpose --
                          * delta == expected means the zone cleared the bar
                          * exactly and must NOT trip (see the test pinning this

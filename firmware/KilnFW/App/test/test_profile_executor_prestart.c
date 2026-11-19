@@ -156,6 +156,11 @@ const size_t g_builtin_profile_count = 0;
 // the real body). Settable by the ramp-assist tests further down so they
 // can exercise both the gated-on and gated-off paths.
 static bool g_stub_ramp_assist_enabled = false;
+static uint16_t g_stub_stretch_max_pct = 100;
+uint16_t ramp_assist_cfg_stretch_max_pct(void)
+{
+    return g_stub_stretch_max_pct;
+}
 bool ramp_assist_cfg_enabled(void)
 {
     return g_stub_ramp_assist_enabled;
@@ -8784,6 +8789,245 @@ static void test_firing_stats_normalized_iae_is_length_invariant(void)
 // pure functions. Order-independent: each test builds its own fresh
 // zone_runtime_t/s_exec_state_t slice and never calls profile_executor_run().
 
+// ---------------------------------------------------------------------------
+// ELEMENT_AGING_PLAN.md C1/C4/C7/C3 -- executor-side pieces. The control task has no host tick
+// loop, so each rule is a pure helper and these tests drive the helpers (plus the real
+// thermal_guard_tick for C1/C7) directly.
+// ---------------------------------------------------------------------------
+
+// One zone held by the ramp lock: a single in-band tick arms guard 4, then the raw error is
+// held at error_c for secs seconds. Returns true if DRIFT tripped.
+static bool ea_drift_trips(float drift_band_c, float error_c, int secs)
+{
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .drift_hysteresis_c = drift_band_c};
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+    thermal_guard_input_t in = {.sensor_ok = true, .setpoint_c = 1000.0f, .commanded_duty = 0.0f, .dt_s = 1.0f};
+    in.measurement_c = 999.0f;
+    (void)thermal_guard_tick(&gs, &cfg, &in);
+    in.measurement_c = 1000.0f - error_c;
+    for (int i = 0; i < secs; i++) {
+        if (thermal_guard_tick(&gs, &cfg, &in)) {
+            return gs.reason == THERMAL_GUARD_TRIP_DRIFT;
+        }
+    }
+    return false;
+}
+
+static void test_ea_c1_drift_band_follows_ramp_lock(void)
+{
+    TEST_SECTION("EA C1: guard 4 band = max(drift, lock band + 5 + max(0, actual - raw)); a held lock with "
+                 "sheath lead does not trip DRIFT in 1200 s, a negative calibration offset does not either, "
+                 "and band + 6 still trips");
+    const float lock_band = 25.0f;
+    // Lock holds at ~26 C lag as the lock sees it (actual_c); raw is 4 C lower (sheath lead).
+    const float raw_error = 30.0f;
+    float band_old = 25.0f; // today's guard 4 band (== the lock band): trips once the error exceeds it
+    TEST_CHECK(ea_drift_trips(band_old, raw_error, 1300),
+               "sanity: with guard 4 left at 25 C the held lock DOES trip DRIFT (the F1 bug)");
+    float band = profile_executor_guard_drift_band_c(0.0f, lock_band, /*actual*/ 974.0f, /*raw*/ 970.0f);
+    TEST_CHECK_NEAR(band, 34.0f, 1e-4f, "lock 25 + margin 5 + lead 4 = 34 C");
+    TEST_CHECK(!ea_drift_trips(band, raw_error, 1200), "a lock held 1200 s with lead > 0 must not trip DRIFT");
+
+    // Negative calibration offset: actual_c below raw. The offset term clamps at 0 so the band is
+    // never narrower than lock + 5, and the raw error is smaller than the actual one.
+    float band_neg = profile_executor_guard_drift_band_c(0.0f, lock_band, /*actual*/ 967.0f, /*raw*/ 970.0f);
+    TEST_CHECK_NEAR(band_neg, 30.0f, 1e-4f, "negative offset: band stays at lock 25 + 5 (term clamps to 0)");
+    TEST_CHECK(!ea_drift_trips(band_neg, 26.0f - 3.0f, 1200), "a negative calibration offset must not trip DRIFT");
+
+    TEST_CHECK(ea_drift_trips(band + 6.0f, band + 6.0f + 0.5f, 1300) == true,
+               "an error 6 C beyond the extended band still trips (sanity of the helper's own band)");
+    TEST_CHECK(ea_drift_trips(band, band + 6.0f, 1300), "band + 6 C beyond the extended band still trips DRIFT");
+
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(60.0f, lock_band, 970.0f, 970.0f), 60.0f, 1e-4f,
+                    "a configured band wider than the extension is never narrowed");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, 3.0f, NAN, 970.0f), 25.0f, 1e-4f,
+                    "NaN actual counts as zero offset; 0 configured means guard 4's own 25 C default");
+}
+
+static void test_ea_c4_lag_flicker_and_stretch_sanity_rate(void)
+{
+    TEST_SECTION("EA C4: lag_held_s resets only after 30 s continuously not lagging (stretch on); a stretched "
+                 "rate never lowers guard 1 below sanity_rate");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    // Boundary flicker: 20 s lagging, 10 s clear, repeated -- must still latch lag_sustained.
+    for (int cycle = 0; cycle < 3; cycle++) {
+        for (int i = 0; i < 20; i++) ramp_assist_zone_lag_tick_ex(&z, true, 1.0f, true);
+        for (int i = 0; i < 10; i++) ramp_assist_zone_lag_tick_ex(&z, false, 1.0f, true);
+    }
+    TEST_CHECK(z.lag_sustained, "noisy boundary flicker still latches lag_sustained with stretch on");
+    TEST_CHECK(z.lag_held_s >= EXEC_SUSTAINED_LAG_S, "lag_held_s survived the short gaps");
+    for (int i = 0; i < 30; i++) ramp_assist_zone_lag_tick_ex(&z, false, 1.0f, true);
+    TEST_CHECK(z.lag_held_s == 0.0f && !z.lag_sustained, "30 s continuously clear resets");
+
+    zone_runtime_t zo;
+    memset(&zo, 0, sizeof(zo));
+    for (int cycle = 0; cycle < 3; cycle++) {
+        for (int i = 0; i < 20; i++) ramp_assist_zone_lag_tick_ex(&zo, true, 1.0f, false);
+        for (int i = 0; i < 10; i++) ramp_assist_zone_lag_tick_ex(&zo, false, 1.0f, false);
+    }
+    TEST_CHECK(!zo.lag_sustained, "stretch off keeps the old reset-on-any-gap rule (never latches here)");
+
+    float stretch_rate_c_per_s = 0.01f / 60.0f; // a near-stalled zone's achieved rate
+    TEST_CHECK_NEAR(profile_executor_guard_sanity_rate_ex(0.5f, stretch_rate_c_per_s, true), 0.5f, 1e-6f,
+                    "a stretched rate never lowers guard 1 below the configured sanity_rate");
+    TEST_CHECK_NEAR(profile_executor_guard_sanity_rate_ex(0.0f, stretch_rate_c_per_s, true), 0.5f, 1e-6f,
+                    "unconfigured sanity_rate falls to the 0.5 default, not the stretched rate");
+    TEST_CHECK_NEAR(profile_executor_guard_sanity_rate_ex(0.3f, stretch_rate_c_per_s, true), 0.3f, 1e-6f,
+                    "a configured 0.3 stays 0.3");
+    TEST_CHECK(profile_executor_guard_sanity_rate_ex(0.5f, stretch_rate_c_per_s, false) < 0.02f,
+               "sanity: a plain (non-stretch) ramp rate still narrows the requirement as before");
+}
+
+// Guard 1 climbing for secs seconds at rise_c_per_min with the given gates. Returns the trip reason
+// (THERMAL_GUARD_TRIP_NONE if none).
+static int ea_guard1_run(bool slow_ok, float duty, float start_c, float rise_c_per_min, int secs)
+{
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+    thermal_guard_input_t in = {.sensor_ok = true, .setpoint_c = start_c + 100.0f, .commanded_duty = duty,
+                                .dt_s = 1.0f, .slow_climb_ok = slow_ok};
+    float m = start_c;
+    for (int i = 0; i < secs; i++) {
+        m += rise_c_per_min / 60.0f;
+        in.measurement_c = m;
+        if (thermal_guard_tick(&gs, &cfg, &in)) {
+            return (int)gs.reason;
+        }
+    }
+    return (int)THERMAL_GUARD_TRIP_NONE;
+}
+
+static void test_ea_c7_slow_climb_floor_gates(void)
+{
+    TEST_SECTION("EA C7: guard 1 requires only 0.15 C/min when stretch+lock/stretch active, duty >= 0.95 and "
+                 "measurement >= 900 C; every gate false keeps sanity_rate");
+    const float slow = 0.2f; // between 0.15 and 0.5 C/min
+    TEST_CHECK(ea_guard1_run(true, 1.0f, 1000.0f, slow, 900) == (int)THERMAL_GUARD_TRIP_NONE,
+               "all gates true: a 0.2 C/min climb is accepted");
+    TEST_CHECK(ea_guard1_run(true, 1.0f, 1000.0f, 0.05f, 900) == (int)THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "all gates true but below 0.15 C/min still trips (genuine failed-to-heat)");
+    TEST_CHECK(ea_guard1_run(false, 1.0f, 1000.0f, slow, 900) == (int)THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "slow_climb_ok false (stretch off, or no lock/stretch): sanity_rate kept, trips");
+    TEST_CHECK(ea_guard1_run(true, 0.9f, 1000.0f, slow, 900) == (int)THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "duty 0.9 (< 0.95): sanity_rate kept, trips");
+    TEST_CHECK(ea_guard1_run(true, 1.0f, 850.0f, slow, 900) == (int)THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "measurement below 900 C: sanity_rate kept, trips");
+    TEST_CHECK(ea_guard1_run(true, 1.0f, 900.0f, slow, 900) == (int)THERMAL_GUARD_TRIP_NONE,
+               "exactly 900 C counts as hot enough");
+}
+
+static void ea_make_heating_profile(s_exec_state_t *ex)
+{
+    memset(ex, 0, sizeof(*ex));
+    ex->profile.segment_count = 2;
+    ex->profile.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    ex->profile.segments[0].target_c = 1000.0f;
+    ex->profile.segments[0].ramp_c_per_hr = 100.0f;
+    ex->profile.segments[0].dwell_min = 10;
+    ex->profile.segments[1].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    ex->profile.segments[1].target_c = 600.0f; // cooling
+    ex->profile.segments[1].ramp_c_per_hr = 100.0f;
+    ex->profile.segments[1].dwell_min = 10;
+    ex->run_start_c = 20.0f;
+    ex->segment_index = 0;
+    ex->dwelling = true;
+    ex->target_c = 1000.0f;
+    ex->zones[0].active = true;
+    ex->zones[0].actual_valid = true;
+    ex->zones[0].actual_c = 980.0f;
+}
+
+static void test_ea_c3_arrival_gate(void)
+{
+    TEST_SECTION("EA C3: arrival-gated hold -- waits until arrival, overshoot never blocks, a settled zone counts, "
+                 "budget exhaustion opens the gate and records the shortfall, stretch off is inert, credit "
+                 "is not spent while gated, the budget lives in stretch_total_s");
+    static s_exec_state_t ex;
+    ea_make_heating_profile(&ex);
+    // Planned lower bound: ramp 980 C at 100 C/h = 35280 s + dwell 600 s + cool ramp 400 C/h... all >0.
+    float planned = arrival_planned_lower_bound_s(ex.profile.segments, ex.profile.segment_count, ex.run_start_c);
+    TEST_CHECK(planned > 35000.0f, "planned lower bound covers the ramps and dwells");
+
+    TEST_CHECK(arrival_segment_is_heating(ex.profile.segments, 2, 0, 20.0f), "first segment above the start is heating");
+    TEST_CHECK(!arrival_segment_is_heating(ex.profile.segments, 2, 1, 20.0f), "a cooling segment is unchanged");
+
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "hold waits while the zone is 20 C below target");
+    TEST_CHECK(ex.stretch_total_s == 1.0f && ex.stretch_by_segment_s[0] == 1.0f, "waiting spends the stretch budget");
+    ex.zones[0].actual_c = 997.5f;
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "within progress_band_c (3 C) of target: arrived, timer counts");
+    ex.zones[0].actual_c = 1030.0f;
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "overshoot never blocks");
+
+    // Stretch off: byte-identical -- never waits, never touches the budget.
+    ex.zones[0].actual_c = 900.0f;
+    float spent = ex.stretch_total_s;
+    TEST_CHECK(!arrival_gate_tick(&ex, false, 100, 1.0f), "stretch off: no gate");
+    TEST_CHECK(ex.stretch_total_s == spent && ex.target_shortfall_c == 0.0f, "stretch off leaves every counter alone");
+
+    // Settled zone: duty 0.5 and flat for 600 s counts as arrived.
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 960.0f;
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "sanity: 40 C low and not settled waits");
+    for (int i = 0; i < 600; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 0.5f, 1.0f);
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "a settled-offset zone (duty < 0.9 and flat 300 s) counts");
+    zone_runtime_t busy;
+    memset(&busy, 0, sizeof(busy));
+    for (int i = 0; i < 600; i++) arrival_settle_tick(&busy, 960.0f, 0.95f, 1.0f);
+    TEST_CHECK(!(busy.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && busy.settle_rise_ok),
+               "duty 0.95 never settles");
+    zone_runtime_t climbing;
+    memset(&climbing, 0, sizeof(climbing));
+    for (int i = 0; i < 600; i++) arrival_settle_tick(&climbing, 960.0f + (float)i * (0.2f / 60.0f), 0.5f, 1.0f);
+    TEST_CHECK(!(climbing.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && climbing.settle_rise_ok),
+               "a zone still rising 0.2 C/min is not settled");
+
+    // Budget exhaustion: budget = planned * pct. Spend it all; gate opens and shortfall is recorded.
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 950.0f;
+    float budget = arrival_budget_s(planned, 100);
+    ex.stretch_total_s = budget - 2.0f;
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "1st tick inside the budget waits");
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "2nd tick inside the budget waits");
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "budget exhausted: the gate opens");
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 50.0f, 1e-3f, "shortfall (target - actual) recorded when it opens");
+    TEST_CHECK(ex.stretch_total_s >= budget - 0.01f && ex.stretch_total_s <= budget + 0.01f,
+               "the opened gate spends no further budget");
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 950.0f;
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 0, 1.0f), "stretch_max_pct 0 means a zero budget: opens at once");
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 50.0f, 1e-3f, "and records the shortfall");
+
+    // Max over driving zones; a non-driving (monitor-only) zone does not hold the gate.
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 990.0f;
+    ex.zones[1].active = true;
+    ex.zones[1].actual_c = 940.0f;
+    ex.zones[2].active = true;
+    ex.zones[2].actual_c = 100.0f;
+    g_stub_zone_is_on_off[2] = true;
+    ex.stretch_total_s = 1.0e9f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    g_stub_zone_is_on_off[2] = false;
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 60.0f, 1e-3f, "max over the driving zones; an on/off zone is ignored");
+
+    // Dwell credit is not spent while gated: the credited early exit and the nominal exit both wait.
+    TEST_CHECK(!exec_dwell_done(false, true, 10000u, 600u, 0u, true), "gate waiting blocks even a credited exit");
+    TEST_CHECK(exec_dwell_done(false, false, 600u, 600u, 600u, false), "gate open: nominal exit as before");
+    TEST_CHECK(exec_dwell_done(false, false, 100u, 600u, 100u, true), "gate open: credited exit as before");
+    TEST_CHECK(!exec_dwell_done(true, false, 600u, 600u, 0u, true), "too-hot hold as before");
+
+    // Resume keeps the budget: the gate is a pure function of stretch_total_s, which only
+    // profile_executor_run() resets (pause/resume never touch it).
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 950.0f;
+    ex.stretch_total_s = budget - 1.0f; // spent before a pause
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "after resume, the unspent 1 s of budget is still there");
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "and no more than that: resume did not refund the budget");
+}
+
 static void test_ramp_assist_lag_tick_not_lagging_resets(void)
 {
     TEST_SECTION("ramp_assist_zone_lag_tick() -- lagging_now == false always resets to 0/not-sustained");
@@ -13517,6 +13761,10 @@ void run_test_profile_executor_prestart(void)
     test_ramp_assist_stretch_tick_gated_on_flag();
     test_ramp_assist_stretch_tick_requires_ramping_and_locked();
     test_ramp_assist_stretch_tick_indexes_the_right_segment();
+    test_ea_c1_drift_band_follows_ramp_lock();
+    test_ea_c4_lag_flicker_and_stretch_sanity_rate();
+    test_ea_c7_slow_climb_floor_gates();
+    test_ea_c3_arrival_gate();
     test_stretch_rate_returns_sentinel_when_assist_disabled();
     test_stretch_rate_returns_sentinel_when_no_zone_sustained();
     test_stretch_rate_computes_achieved_rate_when_sustained();

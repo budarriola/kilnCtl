@@ -135,7 +135,7 @@
 //
 // Limits (review 2026-10-07, REVIEW_UPDFX4/5/6/7).
 // ABORT_BELOW is a sampled backstop (REVIEW_UPDFX7 MED-1). Concurrent tasks allocate internal RAM in blocks larger
-// than MAX_STEP: profile_exec_status_t (1512 B) is heap_caps_malloc'd MALLOC_CAP_INTERNAL on about 10 paths
+// than MAX_STEP: profile_exec_status_t (1516 B) is heap_caps_malloc'd MALLOC_CAP_INTERNAL on about 10 paths
 // (safety_build_and_send_context, ui_page_home_refresh, screen_idle, dashboard_exec_http, ota_http,
 // safety_cfg_http, uart_bridge_ext_control), 2-3 of them can be in flight (about 3-4.5 KB), and
 // diagnostics_http.c allocates 8192 B internal; the Wi-Fi blob's own internal RX buffers are not visible from

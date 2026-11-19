@@ -31,6 +31,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* EA C7 (docs/ELEMENT_AGING_PLAN.md): constants for the slow-climb floor, no UI. */
+#define THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN 0.15f
+#define THERMAL_GUARD_SLOW_CLIMB_DUTY_MIN       0.95f
+#define THERMAL_GUARD_SLOW_CLIMB_MIN_C          900.0f
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -300,6 +305,15 @@ typedef struct {
      * construction never sets it, so an ordinary firing sees no behavior
      * change at all. */
     bool progress_rise_check_relaxed;
+
+    /* EA C7 (docs/ELEMENT_AGING_PLAN.md F4): the producer (profile_executor.c)
+     * sets this only when schedule stretch is on AND the ramp lock is held or
+     * a stretch is active this tick. Guard 1's climbing branch then lowers
+     * its required rate to min(sanity_rate, THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN)
+     * but ONLY while commanded_duty >= THERMAL_GUARD_SLOW_CLIMB_DUTY_MIN and
+     * measurement_c >= THERMAL_GUARD_SLOW_CLIMB_MIN_C (saturated, hot: an aged
+     * element near its ceiling). Default false = unchanged behaviour. */
+    bool slow_climb_ok;
 
     /* Selects guards 1/2's RELAY-CYCLING discriminator for this tick, added
      * after review found the directional (climbing/falling) test from the

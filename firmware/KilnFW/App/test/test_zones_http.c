@@ -1941,6 +1941,22 @@ static void test_zones_post_safety_tc_type_is_ignored_even_when_garbage(void)
     TEST_CHECK(s_zones.cfg.safety_tc_type == 3, "the stored value must be untouched by the submitted field");
 }
 
+// EA C1 (docs/ELEMENT_AGING_PLAN.md F1): a ramp_lock_band_c above drift_hysteresis_c - 5 makes guard 4 trip
+// certain while the lock holds, so a config save refuses it when both are set.
+static void test_zones_post_rejects_ramp_lock_band_too_close_to_drift(void)
+{
+    TEST_SECTION("zones_post_handler -- EA C1: ramp_lock_band_c > drift_hysteresis_c - 5 rejected, equal accepted");
+    run_zones_post("thermo_count=0&relay_count=0&"
+                   "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=25&"
+                   "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=21");
+    TEST_CHECK(s_test_err_called, "ramp lock 21 with drift 25 (> 25 - 5) must be rejected");
+    TEST_CHECK(strstr(s_test_err_msg, "ramp_lock_band_c") != NULL, "error must name ramp_lock_band_c");
+    run_zones_post("thermo_count=0&relay_count=0&"
+                   "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=25&"
+                   "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=20");
+    TEST_CHECK(!s_test_err_called, "ramp lock 20 with drift 25 (== 25 - 5) is the boundary and must be accepted");
+}
+
 static void test_zones_post_accepts_clean_minimal_body(void)
 {
     TEST_SECTION("zones_post_handler -- positive control: a clean submission on the other field is still accepted, "
@@ -14933,6 +14949,7 @@ void run_test_zones_http(void)
     test_parse_float_field_accepts_clean_value();
     test_zones_post_max_simultaneous_relays_rejects_trailing_garbage();
     test_zones_post_safety_tc_type_is_ignored_even_when_garbage();
+    test_zones_post_rejects_ramp_lock_band_too_close_to_drift();
     test_zones_post_accepts_clean_minimal_body();
     test_zones_post_strict_optional_keys();
     test_zones_post_blank_guard_fields_and_pc_link();

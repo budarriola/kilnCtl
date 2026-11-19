@@ -290,14 +290,44 @@ float profile_executor_guard_zone_ramp_rate(float shared_rate_c_per_s, float cap
  * (returned unchanged), not capped to zero, so a lagging DWELL still has to
  * catch up at the zone's full configured rate; the cap only ever narrows
  * the requirement while a ramp is genuinely still moving. */
-float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s)
+float profile_executor_guard_sanity_rate_ex(float configured_rate_c_per_min, float target_rate_c_per_s,
+                                            bool rate_is_stretch)
 {
     float configured = (configured_rate_c_per_min > 0.0f) ? configured_rate_c_per_min : 0.5f;
+    /* EA C4 (docs/ELEMENT_AGING_PLAN.md F5): a stretched rate is the lagging
+     * zone's own achieved rate, so narrowing guard 1 to it would let a
+     * near-stalled zone demand almost no rise. Keep the configured rate. */
+    if (rate_is_stretch) {
+        return configured;
+    }
     float ramp_rate_c_per_min = fabsf(target_rate_c_per_s) * 60.0f;
     if (ramp_rate_c_per_min > 0.0f && ramp_rate_c_per_min < configured) {
         return ramp_rate_c_per_min;
     }
     return configured;
+}
+
+float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s)
+{
+    return profile_executor_guard_sanity_rate_ex(configured_rate_c_per_min, target_rate_c_per_s, false);
+}
+
+/* EA C1 (docs/ELEMENT_AGING_PLAN.md F1): guard 4's band for this tick. The
+ * ramp lock holds a zone at lock_band_c below the (frozen, then advancing)
+ * target, so guard 4 at the same 25 C band saw more than the band on every
+ * tick. Extend it to lock band + 5 C margin + the calibration/lead offset
+ * (the lock reads actual_c, guard 4 reads raw_c). Never narrower than the
+ * configured band (0 = guard 4's own 25 C default). NaN offset counts 0. */
+float profile_executor_guard_drift_band_c(float configured_drift_c, float lock_band_c, float actual_c,
+                                          float raw_c)
+{
+    float base = (configured_drift_c > 0.0f) ? configured_drift_c : 25.0f;
+    float off = actual_c - raw_c;
+    if (!(off > 0.0f)) {
+        off = 0.0f;
+    }
+    float ext = lock_band_c + 5.0f + off;
+    return (ext > base) ? ext : base;
 }
 
 bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bool decided_on,

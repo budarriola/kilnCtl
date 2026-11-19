@@ -67,11 +67,29 @@
 
 void ramp_assist_zone_lag_tick(zone_runtime_t *z, bool lagging_now, float dt_s)
 {
+    ramp_assist_zone_lag_tick_ex(z, lagging_now, dt_s, false);
+}
+
+/* EA C4 (docs/ELEMENT_AGING_PLAN.md F3): the ramp lock holds a zone at the
+ * band edge, so sensor noise drops it out of "lagging" well inside 30 s and
+ * lag_held_s reset every time. With stretch on, lag_held_s now resets only
+ * after the zone has been continuously not lagging for EXEC_SUSTAINED_LAG_S;
+ * shorter gaps freeze it. stretch_on false = the old reset-on-any-gap rule. */
+void ramp_assist_zone_lag_tick_ex(zone_runtime_t *z, bool lagging_now, float dt_s, bool stretch_on)
+{
     if (!lagging_now) {
+        if (stretch_on && z->lag_held_s > 0.0f) {
+            z->lag_clear_s += dt_s;
+            if (z->lag_clear_s < EXEC_SUSTAINED_LAG_S) {
+                return; /* flicker: keep lag_held_s and lag_sustained */
+            }
+        }
         z->lag_held_s = 0.0f;
         z->lag_sustained = false;
+        z->lag_clear_s = 0.0f;
         return;
     }
+    z->lag_clear_s = 0.0f;
     if (z->lag_held_s <= 0.0f) {
         /* Rising edge -- snapshot the temperature this lag started from, so
          * a caller reporting an achieved rate later has a baseline. actual_c
@@ -359,3 +377,153 @@ bool ramp_assist_zones_above_band(const s_exec_state_t *ex)
     }
     return false;
 }
+
+/* ---- EA C3: arrival-gated hold (docs/ELEMENT_AGING_PLAN.md F2) ------------------------------ */
+
+/* Settled-zone detector, called every tick per active zone. A zone is settled (a healthy steady
+ * offset below target) when its duty has been below EXEC_ARRIVAL_SETTLE_DUTY for a full
+ * EXEC_ARRIVAL_SETTLE_WINDOW_S and the last full window's rise was under 0.1 C/min. High duty
+ * restarts the evidence. */
+void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s)
+{
+    if (isnan(actual_c) || !(duty < EXEC_ARRIVAL_SETTLE_DUTY)) {
+        z->settle_low_duty_s = 0.0f;
+        z->settle_win_elapsed_s = 0.0f;
+        z->settle_rise_ok = false;
+        return;
+    }
+    z->settle_low_duty_s += dt_s;
+    if (z->settle_win_elapsed_s <= 0.0f) {
+        z->settle_win_start_c = actual_c;
+    }
+    z->settle_win_elapsed_s += dt_s;
+    if (z->settle_win_elapsed_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S) {
+        float rise_c_per_min = fabsf(actual_c - z->settle_win_start_c) / (z->settle_win_elapsed_s / 60.0f);
+        z->settle_rise_ok = (rise_c_per_min < EXEC_ARRIVAL_SETTLE_RISE_C_PER_MIN);
+        z->settle_win_elapsed_s = 0.0f;
+    }
+}
+
+/* One zone satisfies the arrival gate: at or above target - band (one-sided, overshoot never
+ * blocks) or settled. An invalid (NaN) reading never satisfies. */
+bool arrival_zone_ok(float actual_c, float target_c, float band_c, bool settled)
+{
+    if (isnan(actual_c)) {
+        return false;
+    }
+    return (actual_c >= target_c - band_c) || settled;
+}
+
+/* A heating segment: ZONE_RAMP whose target is above the previous ZONE_RAMP segment's target (or
+ * above run_start_c for the first). Cooling and flat segments are untouched by C3. */
+bool arrival_segment_is_heating(const profile_segment_t *segs, uint8_t count, uint8_t index, float run_start_c)
+{
+    if (index >= count || segs[index].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+        return false;
+    }
+    float prior_c = run_start_c;
+    for (int i = (int)index - 1; i >= 0; i--) {
+        if (segs[i].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) {
+            prior_c = segs[i].target_c;
+            break;
+        }
+    }
+    return segs[index].target_c > prior_c;
+}
+
+/* Lower bound of the planned duration: every dwell plus every rate-limited ramp. A step segment
+ * (ramp_c_per_hr <= 0) has no known duration here and contributes 0, so the budget is never
+ * larger than the dashboard's plan (the gate opens sooner, never later, than intended). Kept
+ * local instead of calling profile_feasibility_plan_curve() so this module needs no extra link. */
+float arrival_planned_lower_bound_s(const profile_segment_t *segs, uint8_t count, float start_c)
+{
+    float total_s = 0.0f;
+    float prior_c = start_c;
+    for (uint8_t i = 0; i < count; i++) {
+        if (segs[i].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) {
+            if (segs[i].ramp_c_per_hr > 0.0f) {
+                total_s += fabsf(segs[i].target_c - prior_c) / segs[i].ramp_c_per_hr * 3600.0f;
+            }
+            total_s += (float)segs[i].dwell_min * 60.0f;
+            prior_c = segs[i].target_c;
+        } else if (segs[i].io_blocking) {
+            total_s += (float)segs[i].dwell_min * 60.0f;
+        }
+    }
+    return total_s;
+}
+
+float arrival_budget_s(float planned_total_s, uint16_t stretch_max_pct)
+{
+    return planned_total_s * ((float)stretch_max_pct / 100.0f);
+}
+
+/* True while the dwell timer must wait. Pure and stateless: the only memory is stretch_total_s,
+ * which is the budget already spent. Stretch off, a non-heating segment, or every zone arrived
+ * means no wait; an exhausted budget opens the gate. */
+bool arrival_gate_waits(bool stretch_on, bool heating_seg, bool all_zones_ok, float stretch_total_s,
+                        float budget_s)
+{
+    if (!stretch_on || !heating_seg || all_zones_ok) {
+        return false;
+    }
+    return stretch_total_s < budget_s;
+}
+
+/* The whole C3 decision for one dwelling tick (stretch on, heating segment): returns true while the
+ * dwell timer must wait. Waiting spends the stretch budget (stretch_total_s and the per-segment
+ * slot). When the budget is exhausted and a zone has still not arrived, the gate opens and the
+ * largest shortfall over the driving zones is recorded in ex->target_shortfall_c. The caller
+ * undoes this tick's timer accumulation when this returns true. */
+bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max_pct, float dt_s)
+{
+    if (!stretch_on || !arrival_segment_is_heating(ex->profile.segments, ex->profile.segment_count,
+                                                   ex->segment_index, ex->run_start_c)) {
+        return false;
+    }
+    float target_c = ex->profile.segments[ex->segment_index].target_c;
+    bool all_ok = true;
+    float shortfall_c = 0.0f;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        const zone_runtime_t *z = &ex->zones[zi];
+        if (!z->active || z->faulted || !profile_executor_zone_drives_run(zi)) continue;
+        float band_c = (z->guard_cfg.progress_band_c > 0.0f) ? z->guard_cfg.progress_band_c : 3.0f;
+        bool settled = z->settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && z->settle_rise_ok;
+        if (!arrival_zone_ok(z->actual_c, target_c, band_c, settled)) {
+            all_ok = false;
+            float miss_c = isnan(z->actual_c) ? 0.0f : (target_c - z->actual_c);
+            if (miss_c > shortfall_c) shortfall_c = miss_c;
+        }
+    }
+    float budget_s = arrival_budget_s(
+        arrival_planned_lower_bound_s(ex->profile.segments, ex->profile.segment_count, ex->run_start_c),
+        stretch_max_pct);
+    bool wait = arrival_gate_waits(true, true, all_ok, ex->stretch_total_s, budget_s);
+    if (wait) {
+        if (ex->segment_index < PROFILE_MAX_SEGMENTS) {
+            ex->stretch_by_segment_s[ex->segment_index] += dt_s;
+        }
+        ex->stretch_total_s += dt_s;
+    } else if (!all_ok && shortfall_c > ex->target_shortfall_c) {
+        ex->target_shortfall_c = shortfall_c;
+    }
+    return wait;
+}
+
+/* The dwell-done decision, factored so the gate's effect is testable: while the arrival gate
+ * waits, neither the nominal exit nor the credited early exit may fire (credit is not spent). */
+bool exec_dwell_done(bool too_hot, bool arrival_wait, uint32_t elapsed_s, uint32_t nominal_s,
+                     uint32_t credited_threshold_s, bool target_reached)
+{
+    return !too_hot && !arrival_wait &&
+           ((elapsed_s >= nominal_s) || (elapsed_s >= credited_threshold_s && target_reached));
+}
+
+#ifdef __GNUC__
+/* Fallback until ramp_assist_cfg.c provides the real accessor (EA C2, another change). Weak, so
+ * the real one wins at link time. Default budget is 100 percent of planned time. */
+__attribute__((weak)) uint16_t ramp_assist_cfg_stretch_max_pct(void)
+{
+    return 100;
+}
+#endif

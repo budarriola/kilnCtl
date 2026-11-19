@@ -878,5 +878,13 @@ bool zones_config_json_parse_timing_profile_fields(const char *body, uint8_t p, 
         *err_reason = "timing profile ramp_lock_band_c missing or out of range";
         return false;
     }
+    /* EA C1 (docs/ELEMENT_AGING_PLAN.md F1): guard 4 must stay wider than the
+     * ramp lock band, or a held lock certainly trips DRIFT. Config SAVE only:
+     * the load-time validate must not wipe an already stored config. */
+    if (tp->guard_drift_hysteresis_c > 0.0f && tp->ramp_lock_band_c > 0.0f &&
+        tp->ramp_lock_band_c > tp->guard_drift_hysteresis_c - 5.0f) {
+        *err_reason = "timing profile ramp_lock_band_c must be at most guard_drift_hysteresis_c - 5";
+        return false;
+    }
     return true;
 }

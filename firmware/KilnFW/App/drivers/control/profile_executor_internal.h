@@ -693,6 +693,13 @@ typedef struct {
     bool     lag_sustained;       /* lag_held_s >= EXEC_SUSTAINED_LAG_S -- the reportable condition */
     float    lag_start_actual_c;  /* actual_c snapshot at the tick lag_held_s left 0, for the
                                    * achieved-rate arithmetic reported alongside lag_sustained */
+    float    lag_clear_s;         /* EA C4: continuous seconds NOT lagging while lag_held_s > 0 (stretch on) */
+    /* EA C3 settled-zone detector (arrival_settle_tick): duty below 0.9 for 300 s and the last full
+     * 300 s window rose less than 0.1 C/min. */
+    float    settle_low_duty_s;
+    float    settle_win_start_c;
+    float    settle_win_elapsed_s;
+    bool     settle_rise_ok;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. Heat-work-weighted
      * accumulator -- banked ONLY while this zone is lagging (the same
@@ -893,6 +900,8 @@ typedef struct {
      * per-run state. */
     float stretch_by_segment_s[PROFILE_MAX_SEGMENTS];
     float stretch_total_s;
+    /* EA C3: max (target - actual) recorded when the arrival gate's budget ran out. Per run. */
+    float target_shortfall_c;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit -- last spend actually
      * applied to a dwell's timer, in seconds. 0.0f for the whole life of a
@@ -1185,6 +1194,10 @@ void firing_stats_cache_store(uint8_t profile_id, uint32_t started_unix_s);
 void apply_relay(uint8_t zi, bool want_on);
 float profile_executor_guard_commanded_duty(bool heat_blocked, float intended_duty);
 float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s);
+float profile_executor_guard_sanity_rate_ex(float configured_rate_c_per_min, float target_rate_c_per_s,
+                                            bool rate_is_stretch);
+float profile_executor_guard_drift_band_c(float configured_drift_c, float lock_band_c, float actual_c,
+                                          float raw_c);
 /* This zone's OWN commanded setpoint rate, to be passed to profile_executor_
  * guard_sanity_rate() in place of the shared s_exec.target_rate_c_per_s --
  * see that function's definition (profile_executor_relay_io.c) for why the
@@ -1442,6 +1455,25 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze,
  * configurable, same status as PROFILE_EXECUTOR_RAMP_LOCK_BAND_C. */
 #define EXEC_SUSTAINED_LAG_S 30.0f
 void ramp_assist_zone_lag_tick(zone_runtime_t *z, bool lagging_now, float dt_s);
+void ramp_assist_zone_lag_tick_ex(zone_runtime_t *z, bool lagging_now, float dt_s, bool stretch_on);
+
+/* EA C3 arrival-gated hold (docs/ELEMENT_AGING_PLAN.md). Pure helpers, stretch on only. */
+#define EXEC_ARRIVAL_SETTLE_WINDOW_S 300.0f
+#define EXEC_ARRIVAL_SETTLE_DUTY     0.9f
+#define EXEC_ARRIVAL_SETTLE_RISE_C_PER_MIN 0.1f
+void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s);
+bool arrival_zone_ok(float actual_c, float target_c, float band_c, bool settled);
+bool arrival_segment_is_heating(const profile_segment_t *segs, uint8_t count, uint8_t index, float run_start_c);
+float arrival_planned_lower_bound_s(const profile_segment_t *segs, uint8_t count, float start_c);
+float arrival_budget_s(float planned_total_s, uint16_t stretch_max_pct);
+bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max_pct, float dt_s);
+bool exec_dwell_done(bool too_hot, bool arrival_wait, uint32_t elapsed_s, uint32_t nominal_s,
+                     uint32_t credited_threshold_s, bool target_reached);
+bool arrival_gate_waits(bool stretch_on, bool heating_seg, bool all_zones_ok, float stretch_total_s,
+                        float budget_s);
+/* EA C3 budget accessor (ramp_assist_cfg.c owner adds the real one; weak fallback 100 in
+ * profile_executor_ramp_assist.c). */
+uint16_t ramp_assist_cfg_stretch_max_pct(void);
 void ramp_assist_stretch_tick(s_exec_state_t *ex, uint8_t segment_index, bool assist_enabled,
                               bool ramping_now, bool lock_held_now, float dt_s);
 

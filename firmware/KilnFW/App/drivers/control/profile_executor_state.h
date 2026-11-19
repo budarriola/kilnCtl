@@ -354,6 +354,9 @@ typedef struct {
      * per-segment array (dashboard_json.h's per-field buffer budget). */
     float    ramp_stretch_segment_s;
     float    ramp_stretch_total_s;
+    /* EA C3 (docs/ELEMENT_AGING_PLAN.md): largest (target - actual) over the driving zones recorded
+     * when the arrival-gated hold ran out of stretch budget and opened anyway; 0 when never. */
+    float    target_shortfall_c;
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit actually SPENT against
      * the most recent dwell's timer, in seconds -- 0.0f for a run started

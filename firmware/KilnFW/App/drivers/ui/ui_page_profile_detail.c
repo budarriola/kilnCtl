@@ -299,7 +299,7 @@ static void refresh_plan_chart(const profile_t *prof)
     }
 
     /* Runs on the LVGL task -- heap-allocate rather than add another
-     * 1512-byte profile_exec_status_t stack local on that task (see
+     * 1516-byte profile_exec_status_t stack local on that task (see
      * ui_page_home_refresh.c's own comment on its measured stack ceiling
      * for why this task in particular is treated as tight, not generous). */
     profile_exec_status_t *st = persist_scratch_alloc(sizeof(*st));
