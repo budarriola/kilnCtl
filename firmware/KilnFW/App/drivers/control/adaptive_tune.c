@@ -647,6 +647,20 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         return;
     }
     memset(plans, 0, sizeof(*plans));
+    // ELEMENT_AGING C6: read the executor's stretch_total_s (read-only snapshot, s_exec.lock taken and
+    // released inside the call, strictly before adaptive_tune_lock below -- the module's lock order).
+    // A 1.5 KB status struct is heap, not executor-task stack. Unreadable (no memory) = not excluded.
+    bool run_stretch_excluded = false;
+    float run_stretch_s = 0.0f;
+    if (clean) {
+        profile_exec_status_t *est = (profile_exec_status_t *)persist_scratch_alloc(sizeof(*est));
+        if (est) {
+            profile_executor_get_status(est);
+            run_stretch_s = est->ramp_stretch_total_s;
+            free(est);
+            run_stretch_excluded = adaptive_tune_run_stretch_excluded(run_stretch_s, rec->duration_s);
+        }
+    }
     adaptive_tune_zone_plan_t *zone_plans;
     adaptive_tune_coupled_plan_t *coupled_plans;
     adaptive_tune_ensure_lock();
@@ -691,6 +705,11 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             skip_reason = "zone not active in this profile's zone mask -- not used as training data";
         } else if (!clean) {
             skip_reason = "run was faulted or stopped early -- not used as training data";
+        } else if (run_stretch_excluded) {
+            snprintf(excluded_reason_buf, sizeof(excluded_reason_buf),
+                     "run stretched %.0f s (>%.0f%% of planned) -- not used as training data", (double)run_stretch_s,
+                     (double)(ADAPTIVE_TUNE_STRETCH_EXCLUDE_FRAC * 100.0f));
+            skip_reason = excluded_reason_buf;
         } else {
             uint32_t total = zr->stats.sample_count + zr->stats.excluded_sample_count;
             if (total > 0 &&
@@ -1004,10 +1023,55 @@ static void adaptive_tune_migrate_enable_flags(void)
     hal_kv_close(&h);
 }
 
+// ELEMENT_AGING_PLAN C6 one-shot (owner 2026-11-19: ON by default, existing boards included): switch
+// adaptive tune ON for every zone that already holds an accepted STEP model, once. Marker in the same
+// adap_tune namespace as the U2 migration; written only after every write succeeded, so a partial
+// failure retries whole. After the marker is set an operator's OFF is never overridden. Direct hal_kv
+// access for the same boot-order reason as adaptive_tune_migrate_enable_flags().
+// "Accepted STEP model" = model_k_dc > 0 and autotune_baseline_k_dc > 0 (the baseline is written only
+// by a full STEP Accept or the first learner refine) -- there is no per-zone tuning_method getter.
+static void adaptive_tune_migrate_c6_enable(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION) != HAL_OK) {
+        return;
+    }
+    uint8_t done = 0;
+    if (hal_kv_get_u8(&h, ADAPTIVE_TUNE_NVS_KEY_C6_MIGRATED, &done) == HAL_OK && done) {
+        hal_kv_close(&h);
+        return;
+    }
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        float k = 0.0f, t = 0.0f, d = 0.0f, base = 0.0f;
+        bool has_model = zones_config_get_model(zi, &k, &t, &d) && k > 0.0f &&
+                         zones_config_get_autotune_baseline_k_dc(zi, &base) && base > 0.0f;
+        if (!has_model || zones_config_get_adaptive_tune_enabled(zi)) {
+            continue;
+        }
+        if (!zones_config_set_adaptive_tune_enabled(zi, true)) {
+            ESP_LOGE(ADAPTIVE_TUNE_TAG, "C6 migrate: zone %u enable write failed -- retry next boot (marker not set)",
+                     (unsigned)zi);
+            hal_kv_close(&h);
+            return;
+        }
+        ESP_LOGW(ADAPTIVE_TUNE_TAG, "C6 migrate: zone %u has an accepted step model -- adaptive tune switched ON (one-shot)",
+                 (unsigned)zi);
+    }
+    hal_status_t m = hal_kv_set_u8(&h, ADAPTIVE_TUNE_NVS_KEY_C6_MIGRATED, 1);
+    if (m == HAL_OK) {
+        m = hal_kv_commit(&h);
+    }
+    if (m != HAL_OK) {
+        ESP_LOGE(ADAPTIVE_TUNE_TAG, "C6 migrate: marker write failed: %s -- retry next boot", hal_status_to_name(m));
+    }
+    hal_kv_close(&h);
+}
+
 void adaptive_tune_load_enable_flags(void)
 {
     adaptive_tune_ensure_lock();
     adaptive_tune_migrate_enable_flags();
+    adaptive_tune_migrate_c6_enable();
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zones[zi].enabled = zones_config_get_adaptive_tune_enabled(zi);
@@ -1126,6 +1190,32 @@ void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
     }
 }
 
+bool adaptive_tune_k_dc_ratio(uint8_t zone_index, float *out)
+{
+    if (out) {
+        *out = 0.0f;
+    }
+    float k_dc, tau_s, dead_time_s, baseline;
+    if (!out || zone_index >= MAX31856_CHANNEL_COUNT || !zones_config_get_model(zone_index, &k_dc, &tau_s, &dead_time_s) ||
+        !(k_dc > 0.0f) || !zones_config_get_autotune_baseline_k_dc(zone_index, &baseline) || !(baseline > 0.0f)) {
+        return false;
+    }
+    *out = k_dc / baseline;
+    return true;
+}
+
+bool adaptive_tune_run_stretch_excluded(float stretch_total_s, uint32_t duration_s)
+{
+    if (!(stretch_total_s > 0.0f)) {
+        return false;
+    }
+    float planned_s = (float)duration_s - stretch_total_s;
+    if (planned_s < 1.0f) {
+        planned_s = 1.0f;
+    }
+    return stretch_total_s > ADAPTIVE_TUNE_STRETCH_EXCLUDE_FRAC * planned_s;
+}
+
 bool adaptive_tune_get_enabled(uint8_t zone_index)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
@@ -1198,6 +1288,13 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
     out->ki_applied = z->ki_applied;
     strncpy(out->ki_refusal_reason, z->ki_refusal_reason, sizeof(out->ki_refusal_reason) - 1);
     out->revert_available = z->revert_available;
+    float kr = 0.0f;
+    if (adaptive_tune_k_dc_ratio(zone_index, &kr)) {
+        out->k_dc_ratio_known = true;
+        out->k_dc_ratio = kr;
+        out->elements_weak = kr < ADAPTIVE_TUNE_K_RATIO_WEAK;
+        out->k_dc_frozen = kr < ADAPTIVE_TUNE_K_RATIO_FREEZE;
+    }
     xSemaphoreGive(adaptive_tune_lock);
 }
 

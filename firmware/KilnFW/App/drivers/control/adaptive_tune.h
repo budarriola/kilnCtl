@@ -95,6 +95,11 @@ typedef struct {
     char     ki_refusal_reason[96];     // why a nonzero diagnosis was not applied, if it was not
 
     // -- One-click revert (PID_EXPANSION_PLAN.md 3.3) --
+    // -- ELEMENT_AGING_PLAN C6: element-health ratio, live learned K_dc / autotune_baseline_k_dc --
+    bool     k_dc_ratio_known;          // false when the zone has no model or no baseline (ratio unusable)
+    float    k_dc_ratio;                // 0 when !k_dc_ratio_known
+    bool     elements_weak;             // known and ratio < ADAPTIVE_TUNE_K_RATIO_WEAK -- alert, not a trip
+    bool     k_dc_frozen;               // known and ratio < ADAPTIVE_TUNE_K_RATIO_FREEZE -- learner skips writes
     bool     revert_available;          // true iff adaptive_tune_revert() has something to restore for
                                          // this zone THIS boot -- gates whether zones_page.html shows
                                          // the Revert control at all (see adaptive_tune_revert()'s own
@@ -264,6 +269,13 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean);
 // live flag still takes effect either way, same "applied live, logged if
 // the save failed" convention as time_sync_set_tz()).
 bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled);
+
+// C6: live learned K_dc / autotune_baseline_k_dc for a zone. False (and *out = 0) when either is
+// missing or non-positive.
+bool adaptive_tune_k_dc_ratio(uint8_t zone_index, float *out);
+// C6: true when stretch_total_s exceeds ADAPTIVE_TUNE_STRETCH_EXCLUDE_FRAC of the run's planned
+// time (duration_s minus the stretch). Pure.
+bool adaptive_tune_run_stretch_excluded(float stretch_total_s, uint32_t duration_s);
 bool adaptive_tune_get_enabled(uint8_t zone_index);
 
 // ADAPTIVE_FUZZY_EVALUATION.md sec 3: the fuzzy confidence gate's

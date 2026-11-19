@@ -1011,3 +1011,140 @@ static void test_ki_clear_gen_is_per_zone(void)
         }
     }
 }
+
+
+// ---------------------------------------------------------------------
+// ELEMENT_AGING_PLAN C6
+// ---------------------------------------------------------------------
+static void c6_feed_true_gain_15(uint8_t zi)
+{
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(zi, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+}
+
+// MUST GO RED if the ratio < ADAPTIVE_TUNE_K_RATIO_FREEZE guard is deleted: the fit (15) is plausible
+// against baseline 20 and would blend K_dc up from 10.
+static void test_c6_ratio_freeze_skips_writes(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].autotune_baseline_k_dc = 20.0f; // ratio 0.5 < 0.6
+    c6_feed_true_gain_15(1);
+    profile_firing_run_record_t rec = make_clean_record(30, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "ratio 0.5 must freeze the learner (no apply)");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-6, "a frozen zone's K_dc must not move");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "frozen") != NULL,
+               "the refusal must say learning is frozen");
+}
+
+// The negative twin: at ratio 0.71 (> 0.6) the same run applies, so the freeze test above is not vacuous.
+static void test_c6_ratio_above_freeze_still_applies(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].autotune_baseline_k_dc = 14.0f; // ratio 0.714
+    c6_feed_true_gain_15(1);
+    profile_firing_run_record_t rec = make_clean_record(31, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "ratio 0.71 must still learn");
+    TEST_CHECK(fabsf(s_fake_zone_cfg[1].k_dc - 10.0f) > 1e-3f, "K_dc must have moved");
+}
+
+static void test_c6_status_ratio_weak_and_frozen(void)
+{
+    adaptive_tune_zone_status_t st;
+    reset_module_state();
+    s_fake_zone_cfg[0].k_dc = 10.0f;
+    s_fake_zone_cfg[0].autotune_baseline_k_dc = 20.0f; // 0.5
+    adaptive_tune_get_status(0, &st);
+    TEST_CHECK(st.k_dc_ratio_known && fabsf(st.k_dc_ratio - 0.5f) < 1e-4f, "ratio 0.5 reported");
+    TEST_CHECK(st.elements_weak && st.k_dc_frozen, "0.5 is weak and frozen");
+    s_fake_zone_cfg[0].k_dc = 13.0f; // 0.65
+    adaptive_tune_get_status(0, &st);
+    TEST_CHECK(st.elements_weak && !st.k_dc_frozen, "0.65 is weak but not frozen");
+    s_fake_zone_cfg[0].k_dc = 15.0f; // 0.75
+    adaptive_tune_get_status(0, &st);
+    TEST_CHECK(!st.elements_weak && !st.k_dc_frozen, "0.75 raises no alert");
+    s_fake_zone_cfg[0].autotune_baseline_k_dc = 0.0f;
+    adaptive_tune_get_status(0, &st);
+    TEST_CHECK(!st.k_dc_ratio_known && !st.elements_weak && !st.k_dc_frozen && st.k_dc_ratio == 0.0f,
+               "no baseline: ratio unknown, no alert");
+}
+
+static void test_c6_stretch_predicate(void)
+{
+    TEST_CHECK(!adaptive_tune_run_stretch_excluded(0.0f, 3600), "no stretch is not excluded");
+    TEST_CHECK(!adaptive_tune_run_stretch_excluded(300.0f, 3600 + 300), "stretch 300 of planned 3600 (8.3%) is kept");
+    TEST_CHECK(adaptive_tune_run_stretch_excluded(400.0f, 3600 + 400), "stretch 400 of planned 3600 (11%) is excluded");
+    TEST_CHECK(adaptive_tune_run_stretch_excluded(50.0f, 10), "degenerate duration cannot divide by zero");
+}
+
+// MUST GO RED if the run_stretch_excluded skip branch in adaptive_tune_run_end() is removed.
+static void test_c6_stretched_run_not_training_data(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    c6_feed_true_gain_15(1);
+    profile_firing_run_record_t rec = make_clean_record(32, 1, 900);
+    rec.duration_s = 4000;
+    s_fake_exec_stretch_total_s = 1000.0f; // 1000 of planned 3000 = 33%
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "a heavily stretched run must not train");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-6, "K_dc untouched by a stretched run");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "stretched") != NULL, "reason names the stretch");
+
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    c6_feed_true_gain_15(1);
+    rec = make_clean_record(33, 1, 900);
+    rec.duration_s = 4000;
+    s_fake_exec_stretch_total_s = 100.0f; // 2.6% -- kept
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "a lightly stretched run still trains");
+}
+
+static bool c6_marker_set(void)
+{
+    hal_kv_handle_t h;
+    uint8_t v = 0;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_status_t e = hal_kv_get_u8(&h, ADAPTIVE_TUNE_NVS_KEY_C6_MIGRATED, &v);
+    hal_kv_close(&h);
+    return e == HAL_OK && v == 1;
+}
+
+// MUST GO RED if adaptive_tune_migrate_c6_enable() is removed, or its marker is not honoured (the user OFF
+// would be re-enabled on the second boot).
+static void test_c6_migration_enables_zones_with_model_once(void)
+{
+    reset_module_state();
+    fake_kv_reset_all();
+    hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
+    s_fake_zone_cfg[0].k_dc = 10.0f;
+    s_fake_zone_cfg[0].autotune_baseline_k_dc = 10.0f; // accepted model
+    s_fake_zone_cfg[1].k_dc = 10.0f;                   // model but no baseline: not an accepted STEP result
+    // zone 2: no model
+
+    adaptive_tune_load_enable_flags();
+    TEST_CHECK(adaptive_tune_get_enabled(0), "zone with an accepted model is switched ON");
+    TEST_CHECK(!adaptive_tune_get_enabled(1), "zone without a baseline stays off");
+    TEST_CHECK(!adaptive_tune_get_enabled(2), "zone without a model stays off");
+    TEST_CHECK(s_fake_adaptive_enabled[0], "persisted, not just cached");
+    TEST_CHECK(c6_marker_set(), "marker recorded");
+
+    TEST_CHECK(adaptive_tune_set_enabled(0, false), "operator turns it off");
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+    adaptive_tune_load_enable_flags();
+    TEST_CHECK(!adaptive_tune_get_enabled(0), "the operator's OFF survives the next boot");
+    fake_kv_reset_all();
+}

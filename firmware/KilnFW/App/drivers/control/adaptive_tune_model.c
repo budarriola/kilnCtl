@@ -133,6 +133,16 @@ bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tun
         plan->baseline_k_dc = baseline_k_dc;
     }
 
+    // ELEMENT_AGING C6: freeze on weak elements. The live learned K_dc this far under the last full
+    // autotune's K_dc means the plant has aged, not that the learner should keep tracking it down.
+    // Reads the live k_dc against the stored baseline (a just-bootstrapped baseline equals k_dc, ratio 1).
+    if (k_dc / baseline_k_dc < ADAPTIVE_TUNE_K_RATIO_FREEZE) {
+        adaptive_tune_set_refusal(z, "learned K_dc %.4f is %.0f%% of its autotune baseline %.4f (< %.0f%%) -- learning frozen, re-autotune this zone",
+                    (double)k_dc, (double)(100.0f * k_dc / baseline_k_dc), (double)baseline_k_dc,
+                    (double)(ADAPTIVE_TUNE_K_RATIO_FREEZE * 100.0f));
+        return false;
+    }
+
     // THE fix: the plausibility ratio test is anchored to baseline_k_dc (a
     // FIXED reference, never moved by this function), not to the live k_dc
     // this function itself writes. This is what turns the +-5x guard from a

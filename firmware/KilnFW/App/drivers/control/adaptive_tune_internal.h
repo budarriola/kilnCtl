@@ -229,6 +229,17 @@ extern const char *ADAPTIVE_TUNE_TAG;
 
 #define ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION 0.05f
 
+// ELEMENT_AGING_PLAN C6 guards, on k_dc_ratio = live learned K_dc / autotune_baseline_k_dc.
+//   ratio < FREEZE: the learner stops writing (a model this far under the last full autotune is
+//                   describing failing elements, not a plant to keep tracking down).
+//   ratio < WEAK:   status alert "elements weak" (not a trip, not a write block by itself).
+// A run whose executor stretch_total_s exceeds STRETCH_EXCLUDE_FRAC of its planned time is not
+// training data: stretched heating distorts the duty/rise pairs the fit assumes.
+#define ADAPTIVE_TUNE_K_RATIO_FREEZE 0.6f
+#define ADAPTIVE_TUNE_K_RATIO_WEAK 0.7f
+#define ADAPTIVE_TUNE_STRETCH_EXCLUDE_FRAC 0.10f
+
+
 // ADAPTIVE_FUZZY_EVALUATION.md sec 3: how much a refined K_dc may move
 // (percent, either direction) from the prior accepted value and still count
 // as a "good" run toward the fuzzy confidence counter. CHOSEN, not measured
@@ -256,6 +267,10 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_NAMESPACE);
 #define ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED "en_migrated"
 NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK);
 NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED);
+// One-shot C6 migration marker (adap_tune namespace, kiln_nvs): set once adaptive tune has been
+// switched ON for every zone that already had an accepted STEP model. Never read again after.
+#define ADAPTIVE_TUNE_NVS_KEY_C6_MIGRATED "c6_en_mig"
+NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_C6_MIGRATED);
 
 // P1/K6: the Ki-diagnosis baseline (adaptive_tune_zone_t.ki_baseline/
 // ki_baseline_valid) persisted alongside en_mask above -- see adaptive_

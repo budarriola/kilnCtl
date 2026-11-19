@@ -307,10 +307,12 @@ bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
 // "own it here" convention as everything else on this page. Defaults to
 // IDLE (no firing), matching a board that has never run a profile.
 static profile_exec_state_t s_fake_exec_state = PROFILE_EXEC_IDLE;
+static float s_fake_exec_stretch_total_s; // ELEMENT_AGING C6: executor's ramp_stretch_total_s for the run just ended
 void profile_executor_get_status(profile_exec_status_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->state = s_fake_exec_state;
+    out->ramp_stretch_total_s = s_fake_exec_stretch_total_s;
 }
 /* adaptive_tune_revert() now calls this narrow accessor instead of the
  * full-struct getter (2026-09-22 exec-status stack-local audit) -- derives
@@ -418,6 +420,7 @@ static void reset_module_state(void)
     memset(s_fake_zone_cfg, 0, sizeof(s_fake_zone_cfg));
     memset(s_fake_adaptive_enabled, 0, sizeof(s_fake_adaptive_enabled));
     s_fake_exec_state = PROFILE_EXEC_IDLE;
+    s_fake_exec_stretch_total_s = 0.0f;
     memset(s_fake_coupling, 0, sizeof(s_fake_coupling));
     memset(s_fake_coupling_tau, 0, sizeof(s_fake_coupling_tau));
     memset(s_fake_coupling_dead, 0, sizeof(s_fake_coupling_dead));
@@ -668,6 +671,14 @@ void run_test_adaptive_tune(void)
     test_migrate_pulls_old_mask_into_zone_config();
     test_migrate_does_not_reconsult_old_mask_after_first_migration();
     test_migrate_handles_absent_old_key();
+
+    TEST_SECTION("adaptive_tune: ELEMENT_AGING C6 (k_dc ratio guards, stretch exclusion, one-shot enable)");
+    test_c6_ratio_freeze_skips_writes();
+    test_c6_ratio_above_freeze_still_applies();
+    test_c6_status_ratio_weak_and_frozen();
+    test_c6_stretch_predicate();
+    test_c6_stretched_run_not_training_data();
+    test_c6_migration_enables_zones_with_model_once();
 
     TEST_SECTION("adaptive_tune: U1 one-click revert");
     test_revert_restores_exact_prior_gains_and_ki_baseline();

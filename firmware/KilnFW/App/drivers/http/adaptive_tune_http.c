@@ -80,6 +80,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zone_status_t st;
         adaptive_tune_get_status(zi, &st);
+        char kr_buf[16];
+        if (st.k_dc_ratio_known) {
+            snprintf(kr_buf, sizeof(kr_buf), "%.3f", (double)st.k_dc_ratio);
+        } else {
+            snprintf(kr_buf, sizeof(kr_buf), "null");
+        }
         n = snprintf(
             buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off,
             "%s{\"zone\":%u,\"enabled\":%s,\"observation_count\":%u,\"observations_lifetime\":%u,"
@@ -92,6 +98,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             "\"coupled_cells_changed\":%u,\"coupled_refusal\":\"%s\","
             // Integral (Ki) diagnosis from dwells (same section, layer 2).
             "\"ki_verdict\":%u,\"ki_correction_pct\":%.2f,\"ki_applied\":%s,\"ki_refusal\":\"%s\","
+            // ELEMENT_AGING C6: element health. k_dc_ratio is null when unknown (no model/baseline).
+            "\"k_dc_ratio\":%s,\"elements_weak\":%s,\"k_dc_frozen\":%s,"
             "\"revert_available\":%s}",
             zi == 0 ? "" : ",", (unsigned)zi, st.enabled ? "true" : "false", (unsigned)st.ring_count,
             (unsigned)st.observations_lifetime, st.has_applied ? "true" : "false", (double)st.prior_k_dc,
@@ -100,7 +108,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             (unsigned)st.joint_observations, st.coupled_attempted ? "true" : "false",
             st.coupled_applied ? "true" : "false", (unsigned)st.coupled_cells_changed, st.coupled_refusal_reason,
             (unsigned)st.ki_verdict, (double)st.ki_correction_pct, st.ki_applied ? "true" : "false",
-            st.ki_refusal_reason, st.revert_available ? "true" : "false");
+            st.ki_refusal_reason, kr_buf, st.elements_weak ? "true" : "false", st.k_dc_frozen ? "true" : "false",
+            st.revert_available ? "true" : "false");
         // Never silently truncate: a client cannot distinguish a truncated body
         // from a corrupt one, and this exact defect (the 320-byte/zone budget
         // clamping mid-key, on the wire as 1023 bytes of invalid JSON) hid

@@ -547,6 +547,13 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * section (single claim check; the adaptive run-end apply uses the same setter and its
      * plan-time stale check lives inside that section, so neither can interleave with the other).
      * A relay Accept has no model to write and stays gains-only. */
+    /* ELEMENT_AGING C6: remember whether this zone had a plant model BEFORE this Accept, for the
+     * first-model auto opt-in below. */
+    bool had_model_before = false;
+    {
+        float pk = 0.0f, pt = 0.0f, pd = 0.0f;
+        had_model_before = zones_config_get_model(zone, &pk, &pt, &pd) && pk > 0.0f;
+    }
     zones_set_result_t pid_result =
         (method == AUTOTUNE_METHOD_RELAY)
             ? zones_config_set_pid_checked(zone, g.kp, g.ki, g.kd)
@@ -698,6 +705,15 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                      "rejected or failed to persist -- adaptive_tune will keep bounding drift against the "
                      "prior (now stale) baseline until this succeeds",
                      zone, (double)m.k_gain_c_per_duty);
+        }
+        /* ELEMENT_AGING C6: adaptive tune is ON by default for a zone with an accepted STEP model.
+         * A zone's FIRST accepted model turns it on; a re-accept never touches the flag, so an
+         * operator's later OFF sticks (no separate "user chose" flag exists -- only the first-model
+         * edge is automatic). A failed write only leaves it off, which is the safe state. */
+        if (!had_model_before && !adaptive_tune_get_enabled(zone)) {
+            if (adaptive_tune_set_enabled(zone, true)) {
+                ESP_LOGW(AT_TAG, "autotune zone %u: first accepted step model -- adaptive tune enabled (C6)", zone);
+            }
         }
     }
     /* TODO.md 6A.4, "autotune's predicted ramp ceiling is shown but not

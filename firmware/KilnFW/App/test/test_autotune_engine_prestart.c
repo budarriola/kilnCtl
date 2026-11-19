@@ -213,6 +213,30 @@ void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
     g_clear_ki_baseline_last_zone = zone_index;
 }
 
+/* ELEMENT_AGING C6: autotune_engine_accept() switches adaptive tune on for a zone's FIRST accepted STEP
+ * model. Prior-model stub (k_dc 0 = no model) plus enable-flag fakes with a call counter. */
+static float s_stub_prior_model_k_dc = 0.0f;
+bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
+{
+    (void)zone_index;
+    if (out_k_dc) *out_k_dc = s_stub_prior_model_k_dc;
+    if (out_tau_s) *out_tau_s = 100.0f;
+    if (out_dead_time_s) *out_dead_time_s = 5.0f;
+    return true;
+}
+static bool s_stub_adaptive_enabled[MAX31856_CHANNEL_COUNT];
+static int s_stub_adaptive_set_enabled_calls = 0;
+bool adaptive_tune_get_enabled(uint8_t zone_index)
+{
+    return zone_index < MAX31856_CHANNEL_COUNT && s_stub_adaptive_enabled[zone_index];
+}
+bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
+{
+    s_stub_adaptive_set_enabled_calls++;
+    if (zone_index < MAX31856_CHANNEL_COUNT) s_stub_adaptive_enabled[zone_index] = enabled;
+    return true;
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     (void)profile_id;
@@ -4969,6 +4993,54 @@ static void test_autotune_engine_accept_resets_adaptive_tune_baseline_on_a_clean
     s_stub_set_model_result = false;
 }
 
+/* ELEMENT_AGING C6: a zone's FIRST accepted STEP model switches adaptive tune on; a re-accept (prior model
+ * present) never touches the flag, so an operator's later OFF sticks. MUST GO RED if the first-model branch in
+ * autotune_engine_guard.c is removed (first case) or loses its had_model_before condition (second case). */
+static void c6_prepare_step_accept(uint8_t zone)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = zone;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 33.7f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_autotune_baseline_k_dc_result = true;
+    memset(s_stub_adaptive_enabled, 0, sizeof(s_stub_adaptive_enabled));
+    s_stub_adaptive_set_enabled_calls = 0;
+}
+
+static void test_autotune_engine_accept_c6_first_model_enables_adaptive_tune(void)
+{
+    TEST_SECTION("autotune_engine_accept() C6: first accepted STEP model enables adaptive tune; a re-accept does not");
+    c6_prepare_step_accept(2);
+    s_stub_prior_model_k_dc = 0.0f; /* no model before this accept */
+    TEST_CHECK(autotune_engine_accept(NULL, NULL), "first accept succeeds");
+    TEST_CHECK(s_stub_adaptive_enabled[2] && s_stub_adaptive_set_enabled_calls == 1,
+               "a zone's first accepted model switches adaptive tune on for THAT zone");
+
+    c6_prepare_step_accept(2);
+    s_stub_prior_model_k_dc = 12.0f; /* already had a model: operator's choice stands */
+    TEST_CHECK(autotune_engine_accept(NULL, NULL), "re-accept succeeds");
+    TEST_CHECK(!s_stub_adaptive_enabled[2] && s_stub_adaptive_set_enabled_calls == 0,
+               "a re-accept must not touch the opt-in flag");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_prior_model_k_dc = 0.0f;
+}
+
 /* Negative proof: the model failing to persist must skip the baseline reset
  * too -- re-anchoring to a model that isn't actually stored would leave
  * adaptive_tune bounding drift against a fit the zone isn't running. */
@@ -7620,6 +7692,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_persist_fails();
     test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method();
     test_autotune_engine_accept_resets_adaptive_tune_baseline_on_a_clean_step_accept();
+    test_autotune_engine_accept_c6_first_model_enables_adaptive_tune();
     test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_when_model_persist_fails();
     test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_on_relay_method();
     test_autotune_engine_accept_adopts_ceiling_when_requested();
