@@ -75,10 +75,11 @@ Owner decisions on 2026-11-19: C7 yes, with a floor of 0.15 C/min. C6 on by defa
 | new kiln, every profile | done | identical | identical |
 
 ## Pending
-- [ ] Opus review of this plan
-- [ ] C1, C3, C4 (executor), with host tests and negtests
+- [x] Opus review of this plan
+- [x] C1, C3, C4, C7 (executor), host tests and negtests; review findings fixed (EA-08..EA-10)
 - [x] C2 config default, migration, backup, web label, lag banner (LCD text not added: not trivial)
-- [ ] C5 best-effort latch, status, run record, UI text
 - [x] C6 adaptive default, `k_dc_ratio` (host-tested; see KNOWN_ISSUES "ELEMENT_AGING C2/C6 limits")
-- [ ] C7, after the owner decides
-- [ ] Opus review of the diff; bench run once the bench is reconnected (4 W fixture: verify only C1 and C3 timing)
+- [ ] Bench verification (4 W fixture: only C1 and C3 timing): C3 arrival hold and shortfall note, C1 no DRIFT trip with a held lock, run-state v2 record on the board
+- [ ] Opus re-review of the fix diff
+
+Notes: step segments (ramp_c_per_hr <= 0) count 0 toward the planned duration used for the stretch budget, so the budget is conservative. The arrival hold has its own budget (`arrival_wait_s`); with ramp stretch the total is capped at 2x stretch_max_pct of planned time.

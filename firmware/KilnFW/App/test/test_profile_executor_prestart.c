@@ -4562,6 +4562,14 @@ static void test_pause_reason_reaches_status_and_undecided_reboot_is_surfaced(vo
     memset(&st, 0, sizeof(st));
     profile_executor_get_status(&st);
     TEST_CHECK(st.pause_reason[0] == 0, "healthy RUNNING shows no pause_reason");
+    /* EA MED-2: the reported (and C6-excluded) stretch is the ramp-lock stretch plus the arrival wait. */
+    s_exec.stretch_total_s = 100.0f;
+    s_exec.arrival_wait_s = 50.0f;
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.ramp_stretch_total_s == 150.0f, "ramp_stretch_total_s is stretch_total_s + arrival_wait_s");
+    s_exec.stretch_total_s = 0.0f;
+    s_exec.arrival_wait_s = 0.0f;
 
     /* Pico reboot with a claim held, new boot's DIAG not seen: undecided. */
     heat_enable_note_pico_boot(1u, true, 0u, 1000u);
@@ -8825,13 +8833,13 @@ static void test_ea_c1_drift_band_follows_ramp_lock(void)
     float band_old = 25.0f; // today's guard 4 band (== the lock band): trips once the error exceeds it
     TEST_CHECK(ea_drift_trips(band_old, raw_error, 1300),
                "sanity: with guard 4 left at 25 C the held lock DOES trip DRIFT (the F1 bug)");
-    float band = profile_executor_guard_drift_band_c(0.0f, lock_band, /*actual*/ 974.0f, /*raw*/ 970.0f);
+    float band = profile_executor_guard_drift_band_c(0.0f, lock_band, /*actual*/ 974.0f, /*raw*/ 970.0f, true);
     TEST_CHECK_NEAR(band, 34.0f, 1e-4f, "lock 25 + margin 5 + lead 4 = 34 C");
     TEST_CHECK(!ea_drift_trips(band, raw_error, 1200), "a lock held 1200 s with lead > 0 must not trip DRIFT");
 
     // Negative calibration offset: actual_c below raw. The offset term clamps at 0 so the band is
     // never narrower than lock + 5, and the raw error is smaller than the actual one.
-    float band_neg = profile_executor_guard_drift_band_c(0.0f, lock_band, /*actual*/ 967.0f, /*raw*/ 970.0f);
+    float band_neg = profile_executor_guard_drift_band_c(0.0f, lock_band, /*actual*/ 967.0f, /*raw*/ 970.0f, true);
     TEST_CHECK_NEAR(band_neg, 30.0f, 1e-4f, "negative offset: band stays at lock 25 + 5 (term clamps to 0)");
     TEST_CHECK(!ea_drift_trips(band_neg, 26.0f - 3.0f, 1200), "a negative calibration offset must not trip DRIFT");
 
@@ -8839,10 +8847,18 @@ static void test_ea_c1_drift_band_follows_ramp_lock(void)
                "an error 6 C beyond the extended band still trips (sanity of the helper's own band)");
     TEST_CHECK(ea_drift_trips(band, band + 6.0f, 1300), "band + 6 C beyond the extended band still trips DRIFT");
 
-    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(60.0f, lock_band, 970.0f, 970.0f), 60.0f, 1e-4f,
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(60.0f, lock_band, 970.0f, 970.0f, true), 60.0f, 1e-4f,
                     "a configured band wider than the extension is never narrowed");
-    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, 3.0f, NAN, 970.0f), 25.0f, 1e-4f,
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, 3.0f, NAN, 970.0f, true), 25.0f, 1e-4f,
                     "NaN actual counts as zero offset; 0 configured means guard 4's own 25 C default");
+    // LOW-2: the lead term is capped at 30 C and the extension applies only while the lock is held or the
+    // arrival gate waits; otherwise guard 4 keeps its plain configured band.
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 1100.0f, 970.0f, true), 60.0f, 1e-4f,
+                    "a 130 C actual-raw gap widens by at most 30 C: 25 + 5 + 30");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 25.0f, 1e-4f,
+                    "lock not held and gate not waiting: plain 25 C default band");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(40.0f, lock_band, 974.0f, 970.0f, false), 40.0f, 1e-4f,
+                    "lock not held: the configured band as is");
 }
 
 static void test_ea_c4_lag_flicker_and_stretch_sanity_rate(void)
@@ -8944,7 +8960,7 @@ static void test_ea_c3_arrival_gate(void)
 {
     TEST_SECTION("EA C3: arrival-gated hold -- waits until arrival, overshoot never blocks, a settled zone counts, "
                  "budget exhaustion opens the gate and records the shortfall, stretch off is inert, credit "
-                 "is not spent while gated, the budget lives in stretch_total_s");
+                 "is not spent while gated, the gate budget lives in arrival_wait_s with a 2x overall cap");
     static s_exec_state_t ex;
     ea_make_heating_profile(&ex);
     // Planned lower bound: ramp 980 C at 100 C/h = 35280 s + dwell 600 s + cool ramp 400 C/h... all >0.
@@ -8955,7 +8971,8 @@ static void test_ea_c3_arrival_gate(void)
     TEST_CHECK(!arrival_segment_is_heating(ex.profile.segments, 2, 1, 20.0f), "a cooling segment is unchanged");
 
     TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "hold waits while the zone is 20 C below target");
-    TEST_CHECK(ex.stretch_total_s == 1.0f && ex.stretch_by_segment_s[0] == 1.0f, "waiting spends the stretch budget");
+    TEST_CHECK(ex.arrival_wait_s == 1.0f && ex.stretch_total_s == 0.0f && ex.stretch_by_segment_s[0] == 1.0f,
+               "waiting spends the arrival budget, not the ramp stretch counter");
     ex.zones[0].actual_c = 997.5f;
     TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "within progress_band_c (3 C) of target: arrived, timer counts");
     ex.zones[0].actual_c = 1030.0f;
@@ -8963,9 +8980,9 @@ static void test_ea_c3_arrival_gate(void)
 
     // Stretch off: byte-identical -- never waits, never touches the budget.
     ex.zones[0].actual_c = 900.0f;
-    float spent = ex.stretch_total_s;
+    float spent = ex.arrival_wait_s;
     TEST_CHECK(!arrival_gate_tick(&ex, false, 100, 1.0f), "stretch off: no gate");
-    TEST_CHECK(ex.stretch_total_s == spent && ex.target_shortfall_c == 0.0f, "stretch off leaves every counter alone");
+    TEST_CHECK(ex.arrival_wait_s == spent && ex.target_shortfall_c == 0.0f, "stretch off leaves every counter alone");
 
     // Settled zone: duty 0.5 and flat for 600 s counts as arrived.
     ea_make_heating_profile(&ex);
@@ -8983,17 +9000,29 @@ static void test_ea_c3_arrival_gate(void)
     for (int i = 0; i < 600; i++) arrival_settle_tick(&climbing, 960.0f + (float)i * (0.2f / 60.0f), 0.5f, 1.0f);
     TEST_CHECK(!(climbing.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && climbing.settle_rise_ok),
                "a zone still rising 0.2 C/min is not settled");
+    // LOW-1: a falling zone is not settled; a duty at/above the zone's configured saturation duty is not settled.
+    zone_runtime_t falling;
+    memset(&falling, 0, sizeof(falling));
+    for (int i = 0; i < 600; i++) arrival_settle_tick(&falling, 960.0f - (float)i * (0.01f / 60.0f), 0.5f, 1.0f);
+    TEST_CHECK(!(falling.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && falling.settle_rise_ok),
+               "a falling zone is not settled (signed rise)");
+    zone_runtime_t sat;
+    memset(&sat, 0, sizeof(sat));
+    sat.guard_cfg.progress_duty_min = 0.6f;
+    for (int i = 0; i < 600; i++) arrival_settle_tick(&sat, 960.0f, 0.7f, 1.0f);
+    TEST_CHECK(!(sat.settle_low_duty_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S && sat.settle_rise_ok),
+               "duty above the configured saturation duty (0.6) never settles even though it is under 0.9");
 
     // Budget exhaustion: budget = planned * pct. Spend it all; gate opens and shortfall is recorded.
     ea_make_heating_profile(&ex);
     ex.zones[0].actual_c = 950.0f;
     float budget = arrival_budget_s(planned, 100);
-    ex.stretch_total_s = budget - 2.0f;
+    ex.arrival_wait_s = budget - 2.0f;
     TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "1st tick inside the budget waits");
     TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "2nd tick inside the budget waits");
     TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "budget exhausted: the gate opens");
     TEST_CHECK_NEAR(ex.target_shortfall_c, 50.0f, 1e-3f, "shortfall (target - actual) recorded when it opens");
-    TEST_CHECK(ex.stretch_total_s >= budget - 0.01f && ex.stretch_total_s <= budget + 0.01f,
+    TEST_CHECK(ex.arrival_wait_s >= budget - 0.01f && ex.arrival_wait_s <= budget + 0.01f,
                "the opened gate spends no further budget");
     ea_make_heating_profile(&ex);
     ex.zones[0].actual_c = 950.0f;
@@ -9008,7 +9037,7 @@ static void test_ea_c3_arrival_gate(void)
     ex.zones[2].active = true;
     ex.zones[2].actual_c = 100.0f;
     g_stub_zone_is_on_off[2] = true;
-    ex.stretch_total_s = 1.0e9f;
+    ex.arrival_wait_s = 1.0e9f;
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     g_stub_zone_is_on_off[2] = false;
     TEST_CHECK_NEAR(ex.target_shortfall_c, 60.0f, 1e-3f, "max over the driving zones; an on/off zone is ignored");
@@ -9019,13 +9048,40 @@ static void test_ea_c3_arrival_gate(void)
     TEST_CHECK(exec_dwell_done(false, false, 100u, 600u, 100u, true), "gate open: credited exit as before");
     TEST_CHECK(!exec_dwell_done(true, false, 600u, 600u, 0u, true), "too-hot hold as before");
 
-    // Resume keeps the budget: the gate is a pure function of stretch_total_s, which only
-    // profile_executor_run() resets (pause/resume never touch it).
+    // Resume keeps the budget: the gate is a pure function of arrival_wait_s/stretch_total_s, which only
+    // profile_executor_run() resets (pause/resume never touch them).
     ea_make_heating_profile(&ex);
     ex.zones[0].actual_c = 950.0f;
-    ex.stretch_total_s = budget - 1.0f; // spent before a pause
+    ex.arrival_wait_s = budget - 1.0f; // spent before a pause
     TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "after resume, the unspent 1 s of budget is still there");
     TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "and no more than that: resume did not refund the budget");
+
+    // MED-2: a ramp-time stretch does not consume the arrival hold, but the two together are capped at 2x.
+    ea_make_heating_profile(&ex);
+    ex.zones[0].actual_c = 950.0f;
+    ex.stretch_total_s = budget - 5.0f; // a ramp stretch right up to one budget
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "ramp stretch of one budget leaves the arrival hold intact");
+    TEST_CHECK(ex.arrival_wait_s == 1.0f && ex.stretch_total_s == budget - 5.0f, "only arrival_wait_s moved");
+    ex.stretch_total_s = budget; // ramp stretch spent a full budget
+    ex.arrival_wait_s = budget - 2.0f;
+    TEST_CHECK(arrival_gate_tick(&ex, true, 100, 1.0f), "arrival budget not yet spent and total < 2x: waits");
+    ex.arrival_wait_s = budget - 0.5f;
+    ex.stretch_total_s = budget + 1.0f; // sum 2*budget + 0.5 >= 2x cap
+    TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "total stretch at the 2x cap opens the gate");
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 50.0f, 1e-3f, "and records the shortfall");
+
+    // MED-1: the spent budget rides the run-state snapshot (record round trip: test_run_state.c).
+    s_exec.stretch_total_s = 11.0f;
+    s_exec.arrival_wait_s = 22.0f;
+    s_exec.target_shortfall_c = 3.5f;
+    run_snapshot_buf_t snapbuf;
+    capture_run_snapshot(&snapbuf);
+    TEST_CHECK(snapbuf.snap.stretch_total_s == 11.0f && snapbuf.snap.arrival_wait_s == 22.0f &&
+                   snapbuf.snap.target_shortfall_c == 3.5f,
+               "capture_run_snapshot carries the stretch budget and shortfall into the run-state record");
+    s_exec.stretch_total_s = 0.0f;
+    s_exec.arrival_wait_s = 0.0f;
+    s_exec.target_shortfall_c = 0.0f;
 }
 
 static void test_ramp_assist_lag_tick_not_lagging_resets(void)

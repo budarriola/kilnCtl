@@ -77,7 +77,11 @@ typedef enum {
  * discarded rather than migrated: this is a breadcrumb, and one lost
  * breadcrumb across a firmware update costs nothing, whereas mis-parsing an
  * old layout would print a confident, wrong answer to "what was it doing". */
-#define RUN_STATE_RECORD_VERSION 1
+#define RUN_STATE_RECORD_VERSION 2
+/* v1 -> v2 (EA MED-1): three floats appended (stretch_total_s, arrival_wait_s, target_shortfall_c).
+ * A v1 blob (RUN_STATE_RECORD_V1_SIZE bytes) is a strict prefix of v2 and is still loaded, the new
+ * fields reading 0. */
+#define RUN_STATE_RECORD_V1_SIZE 104
 
 /* Persisted verbatim as one fixed-size NVS blob. Field order and the
  * explicit reserved[] are chosen so the struct has no implicit padding on
@@ -102,6 +106,10 @@ typedef struct {
     uint32_t uptime_s;         /* esp_timer uptime at write -- see this header's no-wall-clock note */
     char     profile_name[PROFILE_NAME_MAX_LEN + 1];
     char     fault_reason[RUN_STATE_REASON_MAX];
+    /* v2: element-aging stretch budget, so the spent budget survives a record round trip. */
+    float    stretch_total_s;     /* ramp-lock stretch seconds spent this run */
+    float    arrival_wait_s;      /* C3 arrival-gate wait seconds spent this run */
+    float    target_shortfall_c;  /* C3 largest shortfall recorded when the gate budget ran out */
 } run_state_record_t;
 
 /* What profile_executor.c hands in on every update. Deliberately by pointer
@@ -119,6 +127,9 @@ typedef struct {
     uint32_t    segment_elapsed_s;
     uint8_t     fault_guard;    /* thermal_guard_trip_t; 0 if none */
     const char *fault_reason;   /* may be NULL */
+    float       stretch_total_s;
+    float       arrival_wait_s;
+    float       target_shortfall_c;
 } run_state_snapshot_t;
 
 /* Periodic-refresh interval while a firing is RUNNING. See run_state.c for

@@ -1821,7 +1821,8 @@ void executor_task_entry(void *arg)
              * ramp lock band so a held lock cannot trip DRIFT. Local copy only;
              * independent of the stretch setting. */
             guard_cfg_this_tick.drift_hysteresis_c = profile_executor_guard_drift_band_c(
-                z->guard_cfg.drift_hysteresis_c, EXEC_RAMP_LOCK_BAND_C(zi), z->actual_c, raw_c[zi]);
+                z->guard_cfg.drift_hysteresis_c, EXEC_RAMP_LOCK_BAND_C(zi), z->actual_c, raw_c[zi],
+                s_exec.ramp_lock_held || arrival_waiting_this_tick);
             /* 2026-09-10 fix (docs/audits/esp_panic_after_zone0_guard_trip_
              * 2026-09-10.md): guard 1's climbing window must never be
              * shorter than this zone's own dead_time_s+tau_s -- see

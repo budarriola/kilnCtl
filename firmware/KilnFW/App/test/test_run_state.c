@@ -327,9 +327,50 @@ static void test_psram_stack_run_state_note_hops_to_flash_worker(void)
     bx_stub_reset();
 }
 
+static void test_ea_med1_stretch_budget_round_trip_and_v1_compat(void)
+{
+    TEST_SECTION("EA MED-1: stretch_total_s / arrival_wait_s / target_shortfall_c persist in the run-state record "
+                 "(version 2) and survive a reload; a v1 record still loads with them reading 0");
+    reset_all();
+    TEST_CHECK(run_state_init() == ESP_OK, "fixture: run_state_init");
+    run_state_snapshot_t snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.profile_id = 5;
+    snap.zone_mask = 0x03;
+    snap.segment_count = 3;
+    snap.stretch_total_s = 1234.5f;
+    snap.arrival_wait_s = 678.25f;
+    snap.target_shortfall_c = 17.5f;
+    run_state_note(RUN_STATE_PHASE_RUNNING, &snap);
+    TEST_CHECK(run_state_init() == ESP_OK, "reboot: run_state_init reloads the record");
+    run_state_record_t rb;
+    TEST_CHECK(run_state_get_boot_record(&rb), "the interrupted record is available");
+    TEST_CHECK(rb.version == 2 && rb.stretch_total_s == 1234.5f && rb.arrival_wait_s == 678.25f &&
+                   rb.target_shortfall_c == 17.5f,
+               "the spent stretch budget and shortfall come back from flash");
+
+    // v1 blob: the first RUN_STATE_RECORD_V1_SIZE bytes of a record with version 1.
+    reset_all();
+    run_state_record_t v2 = make_sample_record();
+    v2.version = 1;
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "open for write");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_RUN, &v2, RUN_STATE_RECORD_V1_SIZE) == HAL_OK &&
+                   hal_kv_commit(&h) == HAL_OK,
+               "store a v1-sized blob");
+    hal_kv_close(&h);
+    TEST_CHECK(run_state_init() == ESP_OK, "init with a v1 blob");
+    memset(&rb, 0xAB, sizeof(rb));
+    TEST_CHECK(run_state_get_boot_record(&rb), "a v1 record is still reported");
+    TEST_CHECK(rb.profile_id == 3 && rb.segment_count == 4 && rb.stretch_total_s == 0.0f &&
+                   rb.arrival_wait_s == 0.0f && rb.target_shortfall_c == 0.0f && rb.version == 2,
+               "v1 fields kept, the v2 fields read 0");
+}
+
 void run_test_run_state(void)
 {
     test_psram_stack_run_state_note_hops_to_flash_worker();
+    test_ea_med1_stretch_budget_round_trip_and_v1_compat();
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
     test_migration_resurrects_without_legacy_erase_and_not_with();

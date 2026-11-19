@@ -513,7 +513,9 @@ void profile_executor_get_status(profile_exec_status_t *out)
         out->ramp_stretch_segment_s = (s_exec.segment_index < PROFILE_MAX_SEGMENTS)
                                            ? s_exec.stretch_by_segment_s[s_exec.segment_index]
                                            : 0.0f;
-        out->ramp_stretch_total_s = s_exec.stretch_total_s;
+        /* Total schedule stretch: ramp-lock stretch plus arrival-gate wait (separate budgets, one sum for
+         * the dashboard note and the adaptive-tune stretched-run exclusion). */
+        out->ramp_stretch_total_s = s_exec.stretch_total_s + s_exec.arrival_wait_s;
         out->target_shortfall_c = s_exec.target_shortfall_c;
         out->ramp_dwell_credit_applied_s = s_exec.dwell_credit_applied_s;
         out->run_start_c = s_exec.run_start_c;

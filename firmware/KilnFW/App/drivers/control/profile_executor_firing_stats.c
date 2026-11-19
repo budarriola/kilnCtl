@@ -1034,4 +1034,7 @@ void capture_run_snapshot(run_snapshot_buf_t *b)
     b->snap.segment_elapsed_s = s_exec.segment_elapsed_s;
     b->snap.fault_guard = (uint8_t)s_exec.fault_guard;
     b->snap.fault_reason = b->reason;
+    b->snap.stretch_total_s = s_exec.stretch_total_s;
+    b->snap.arrival_wait_s = s_exec.arrival_wait_s;
+    b->snap.target_shortfall_c = s_exec.target_shortfall_c;
 }

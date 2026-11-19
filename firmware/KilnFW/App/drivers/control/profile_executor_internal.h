@@ -900,6 +900,10 @@ typedef struct {
      * per-run state. */
     float stretch_by_segment_s[PROFILE_MAX_SEGMENTS];
     float stretch_total_s;
+    /* EA C3 (MED-2): seconds the arrival gate has held the dwell timer this run. Its own counter so a
+     * ramp-time stretch (stretch_total_s) cannot eat the top-dwell arrival hold. Budget = stretch_max_pct
+     * of planned time; stretch_total_s + arrival_wait_s is further capped at twice that. Zeroed per run. */
+    float arrival_wait_s;
     /* EA C3: max (target - actual) recorded when the arrival gate's budget ran out. Per run. */
     float target_shortfall_c;
 
@@ -1197,7 +1201,7 @@ float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float 
 float profile_executor_guard_sanity_rate_ex(float configured_rate_c_per_min, float target_rate_c_per_s,
                                             bool rate_is_stretch);
 float profile_executor_guard_drift_band_c(float configured_drift_c, float lock_band_c, float actual_c,
-                                          float raw_c);
+                                          float raw_c, bool extend);
 /* This zone's OWN commanded setpoint rate, to be passed to profile_executor_
  * guard_sanity_rate() in place of the shared s_exec.target_rate_c_per_s --
  * see that function's definition (profile_executor_relay_io.c) for why the
@@ -1469,10 +1473,10 @@ float arrival_budget_s(float planned_total_s, uint16_t stretch_max_pct);
 bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max_pct, float dt_s);
 bool exec_dwell_done(bool too_hot, bool arrival_wait, uint32_t elapsed_s, uint32_t nominal_s,
                      uint32_t credited_threshold_s, bool target_reached);
-bool arrival_gate_waits(bool stretch_on, bool heating_seg, bool all_zones_ok, float stretch_total_s,
-                        float budget_s);
-/* EA C3 budget accessor (ramp_assist_cfg.c owner adds the real one; weak fallback 100 in
- * profile_executor_ramp_assist.c). */
+bool arrival_gate_waits(bool stretch_on, bool heating_seg, bool all_zones_ok, float arrival_wait_s,
+                        float stretch_total_s, float budget_s);
+/* EA C3 budget accessor: the real one is in ramp_assist_cfg.c; host tests that link the executor
+ * without it provide their own stub (there is deliberately no weak fallback). */
 uint16_t ramp_assist_cfg_stretch_max_pct(void);
 void ramp_assist_stretch_tick(s_exec_state_t *ex, uint8_t segment_index, bool assist_enabled,
                               bool ramping_now, bool lock_held_now, float dt_s);

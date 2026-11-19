@@ -102,6 +102,23 @@ static esp_err_t nvs_partition_init(const char *partition)
  * that point in the file. See its own definition for what it checks. */
 static bool caller_stack_is_external(void);
 
+/* Decode a stored blob: a current-version record as is, or a v1 record (strict prefix of v2) with the
+ * v2 fields zeroed and the version upgraded. Anything else is "no record". */
+static bool rs_decode_blob(const void *blob, size_t len, run_state_record_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (len == sizeof(*out) && ((const uint8_t *)blob)[0] == RUN_STATE_RECORD_VERSION) {
+        memcpy(out, blob, sizeof(*out));
+        return true;
+    }
+    if (len == RUN_STATE_RECORD_V1_SIZE && ((const uint8_t *)blob)[0] == 1) {
+        memcpy(out, blob, RUN_STATE_RECORD_V1_SIZE);
+        out->version = RUN_STATE_RECORD_VERSION;
+        return true;
+    }
+    return false;
+}
+
 /* One-time, one-directional copy of the old default-partition record into
  * KILN_NVS_PARTITION, for boards provisioned by firmware predating the
  * split. Copies ONLY when KILN_NVS_PARTITION holds nothing under NVS_KEY_RUN
@@ -148,10 +165,11 @@ static void migrate_from_default_partition(void)
         return;
     }
     run_state_record_t old_rec;
-    size_t len = sizeof(old_rec);
-    err = hal_kv_get_blob(&h, NVS_KEY_RUN, &old_rec, &len);
+    uint8_t old_raw[sizeof(run_state_record_t)];
+    size_t len = sizeof(old_raw);
+    err = hal_kv_get_blob(&h, NVS_KEY_RUN, old_raw, &len);
     hal_kv_close(&h);
-    if (err != HAL_OK || len != sizeof(old_rec) || old_rec.version != RUN_STATE_RECORD_VERSION) {
+    if (err != HAL_OK || !rs_decode_blob(old_raw, len, &old_rec)) {
         /* Nothing there, wrong size, or an old/new version this build's
          * existing check wouldn't have trusted anyway -- nothing to
          * migrate. */
@@ -209,7 +227,7 @@ static void migrate_from_default_partition(void)
  * .bss, which is the entire memory cost of this feature. That budget is
  * deliberate -- this firmware was once found booting with 7 KB of free heap
  * because a static buffer was sized without anybody adding it up. */
-_Static_assert(sizeof(run_state_record_t) == 104, "run_state_record_t layout changed -- bump RUN_STATE_RECORD_VERSION");
+_Static_assert(sizeof(run_state_record_t) == 116, "run_state_record_t layout changed -- bump RUN_STATE_RECORD_VERSION");
 
 const char *run_state_phase_name(run_state_phase_t phase)
 {
@@ -371,6 +389,9 @@ static void fill_live_locked(run_state_phase_t phase, const run_state_snapshot_t
     r->target_c = snap->target_c;
     r->segment_elapsed_s = snap->segment_elapsed_s;
     r->fault_guard = snap->fault_guard;
+    r->stretch_total_s = snap->stretch_total_s;
+    r->arrival_wait_s = snap->arrival_wait_s;
+    r->target_shortfall_c = snap->target_shortfall_c;
     copy_str(r->profile_name, sizeof(r->profile_name), snap->profile_name);
     copy_str(r->fault_reason, sizeof(r->fault_reason), snap->fault_reason);
 }
@@ -405,9 +426,10 @@ esp_err_t run_state_init(void)
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
     if (kv_err == HAL_OK) {
         run_state_record_t rec;
-        size_t len = sizeof(rec);
-        kv_err = hal_kv_get_blob(&h, NVS_KEY_RUN, &rec, &len);
-        if (kv_err == HAL_OK && len == sizeof(rec) && rec.version == RUN_STATE_RECORD_VERSION) {
+        uint8_t raw[sizeof(run_state_record_t)];
+        size_t len = sizeof(raw);
+        kv_err = hal_kv_get_blob(&h, NVS_KEY_RUN, raw, &len);
+        if (kv_err == HAL_OK && rs_decode_blob(raw, len, &rec)) {
             /* Strings come out of flash and are about to be logged and later
              * emitted as JSON. Terminate them here rather than trusting the
              * blob: a truncated/garbled write is exactly the failure mode a
