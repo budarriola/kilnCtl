@@ -2332,12 +2332,21 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                         (unsigned)timing_profile_candidate_count);
                 return false;
             }
-            /* EA-12: same lock band vs guard 4 band rule as the zones POST (drift 0 = default 25 C). */
-            if (dramplock > 0.0 && dramplock > (ddrift > 0.0 ? ddrift : 25.0) - 5.0) {
-                snprintf(err_msg, err_cap,
-                         "timing profile entry %u: ramp_lock_band_c must be at most guard_drift_hysteresis_c - 5",
-                         (unsigned)timing_profile_candidate_count);
-                return false;
+            /* EA-12: old backups restore instead of refusing: clamp the lock band to (effective drift - 5),
+             * floor 0 (drift 0 = default 25 C). The zones POST / config save keeps the refusal. */
+            if (dramplock > 0.0) {
+                double eff_drift = ddrift > 0.0 ? ddrift : 25.0;
+                double cap = eff_drift - 5.0;
+                if (cap < 0.0) {
+                    cap = 0.0;
+                }
+                if (dramplock > cap) {
+                    ESP_LOGW(BACKUP_TAG,
+                             "backup import: timing profile entry %u (%s) ramp_lock_band_c %.1f clamped to %.1f "
+                             "(guard_drift_hysteresis_c %.1f - 5)",
+                             (unsigned)timing_profile_candidate_count, tp->name, dramplock, cap, eff_drift);
+                    dramplock = cap;
+                }
             }
             tp->present = true;
             tp->progress_duty_min = (float)dduty;

@@ -5079,11 +5079,11 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"timing_profiles\":["
         "{\"name\":\"Slow\",\"progress_duty_min\":0.1,\"progress_window_s\":60,"
-        "\"drift_hysteresis_c\":40,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
+        "\"drift_hysteresis_c\":1.5,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
         "\"bangbang_hysteresis_c\":2.0,\"cooling_limited_margin_c\":5.0,"
         "\"cooling_limited_hold_s\":120,\"ramp_lock_band_c\":25},"
         "{\"name\":\"Fast\",\"progress_duty_min\":0.5,\"progress_window_s\":10,"
-        "\"drift_hysteresis_c\":30,\"frozen_eps_c\":0.1,\"cross_zone_period_s\":5,"
+        "\"drift_hysteresis_c\":0.5,\"frozen_eps_c\":0.1,\"cross_zone_period_s\":5,"
         "\"bangbang_hysteresis_c\":1.0,\"cooling_limited_margin_c\":2.0,"
         "\"cooling_limited_hold_s\":30,\"ramp_lock_band_c\":25}],"
         "\"zones\":["
@@ -5106,7 +5106,7 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"timing_profiles\":["
         "{\"name\":\"Slow\",\"progress_duty_min\":0.1,\"progress_window_s\":60,"
-        "\"drift_hysteresis_c\":40,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
+        "\"drift_hysteresis_c\":1.5,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
         "\"bangbang_hysteresis_c\":2.0,\"cooling_limited_margin_c\":5.0,"
         "\"cooling_limited_hold_s\":120,\"ramp_lock_band_c\":25}],"
         "\"zones\":["
@@ -5116,23 +5116,27 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
     TEST_CHECK(!ok2, "a timing_profile index (1) that overflows a NON-empty 1-entry bundle must be refused");
     TEST_CHECK(!s_writes[0].set_timing_profile_index_called, "the refused import must not have written anything");
 
-    // EA-12: ramp_lock_band_c above drift - 5 is refused (drift 0 means 25), the boundary is accepted.
+    // EA-12: ramp_lock_band_c above drift - 5 is CLAMPED on import (old backups restore), drift 0 means 25.
     static const char *const k_tpl =
         "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
         "\"timing_profiles\":[{\"name\":\"Slow\",\"progress_duty_min\":0.1,\"progress_window_s\":60,"
         "\"drift_hysteresis_c\":%s,\"frozen_eps_c\":0.2,\"cross_zone_period_s\":30,"
         "\"bangbang_hysteresis_c\":2.0,\"cooling_limited_margin_c\":5.0,"
         "\"cooling_limited_hold_s\":120,\"ramp_lock_band_c\":%s}],\"zones\":[]}";
-    static const char *const k_cases[][3] = {{"25", "21", "0"}, {"25", "20", "1"}, {"0", "21", "0"},
-                                             {"0", "20", "1"}, {"0", "0", "1"}};
+    static const struct {
+        const char *drift, *lock;
+        float want;
+    } k_cases[] = {{"10", "25", 5.0f}, {"25", "21", 20.0f}, {"25", "20", 20.0f},
+                   {"0", "25", 20.0f}, {"0", "20", 20.0f}, {"0", "0", 0.0f}, {"40", "25", 25.0f}};
     for (size_t ci = 0; ci < sizeof(k_cases) / sizeof(k_cases[0]); ci++) {
         char tb[1024];
         char eb[256];
         reset_stub_state();
-        snprintf(tb, sizeof(tb), k_tpl, k_cases[ci][0], k_cases[ci][1]);
+        snprintf(tb, sizeof(tb), k_tpl, k_cases[ci].drift, k_cases[ci].lock);
         bool okc = test_backup_import_apply(tb, eb, sizeof(eb));
-        TEST_CHECK(okc == (k_cases[ci][2][0] == '1'),
-                   "EA-12: backup import applies the same lock band <= drift - 5 rule (drift 0 = 25)");
+        TEST_CHECK(okc, "EA-12: backup import restores instead of refusing");
+        TEST_CHECK_NEAR(s_timing_profiles[0].ramp_lock_band_c, k_cases[ci].want, 1e-6,
+                        "EA-12: lock band clamped to drift - 5 (drift 0 = 25), valid values unchanged");
     }
 }
 
