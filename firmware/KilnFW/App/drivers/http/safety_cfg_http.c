@@ -790,6 +790,20 @@ static bool commissioning_pair_range_problem(const safety_cfg_post_pair_t *pairs
     return false;
 }
 
+/* Owner decision 2026-11-19: tc_source (0x0101), borrowed_zone_index (0x0102) and tc_placement_mode (0x0103) are
+ * DEPRECATED. The Pico ignores them (own J7 plus every zone are always over-temp inputs) but its commissioning gate
+ * still needs their fields_set bits, so they stay writable -- as the fixed value 0 only. Any caller value (an old page,
+ * an old script, a backup-era client) is overwritten with "0" here, the single place every commissioning write passes. */
+static void commissioning_force_deprecated_tc_pairs(safety_cfg_post_pair_t *pairs, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (pairs[i].param_id >= 0x0101 && pairs[i].param_id <= 0x0103) {
+            pairs[i].value_text[0] = '0';
+            pairs[i].value_text[1] = '\0';
+        }
+    }
+}
+
 static esp_err_t commissioning_post_locked(httpd_req_t *req);
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
@@ -835,6 +849,8 @@ static esp_err_t commissioning_post_locked(httpd_req_t *req)
                             "no recognised id/value pairs in body -- expected id=<decimal>&value=<v>");
         return ESP_OK;
     }
+
+    commissioning_force_deprecated_tc_pairs(pairs, n);
 
     /* Entry-range refusal, before anything is staged to the Pico: a bad pair
      * must not be half-applied alongside good ones in the same body. */

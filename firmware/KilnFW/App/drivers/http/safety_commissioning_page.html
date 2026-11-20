@@ -311,8 +311,8 @@ processor is never told and does not enforce it. The safety relay does not offer
 
 <!-- ============================================================
      Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
-     parameters (abs_max_temp_c, safety_tc_installed, tc_source,
-     tc_placement_mode, mains_voltage_v, max_expected_power_w). Everything
+     parameters (abs_max_temp_c, safety_tc_installed, mains_voltage_v, max_expected_power_w; plus the deprecated tc_source/
+     tc_placement_mode/borrowed_zone_index trio sent as fixed 0 for the Pico gate bits). Everything
      else stays defaulted/derived and is only reachable in Advanced below.
      ============================================================ -->
 <div id="guided">
@@ -357,27 +357,21 @@ processor is never told and does not enforce it. The safety relay does not offer
   </div>
 
   <div class="gscreen" id="gscreen2" hidden>
-    <h3>Q4: Where is the safety processor's own thermocouple?</h3>
+    <h3>Q4: Is the safety processor's own thermocouple fitted?</h3>
+    <p class="hint">Over-temperature protection (S1, S2, S10) checks every thermocouple on the kiln: this
+    one plus every zone's own. Where the thermocouple sits no longer needs to be declared
+    (`tc_source`, `tc_placement_mode` and `borrowed_zone_index` are deprecated and ignored by the safety
+    processor).</p>
+    <label class="radio-card" id="gCardChamber">
+      <input type="radio" name="gq2" value="chamber">Fitted (J7)
+      <span class="consequence">The safety processor reads its own thermocouple and the zone readings; S2
+      and S10 compare them.</span>
+    </label>
     <label class="radio-card" id="gCardNotFitted">
       <input type="radio" name="gq2" value="not_fitted">Not fitted
-      <span class="consequence">Borrows one zone's own thermocouple reading instead (`tc_source`
-      BORROWED_ZONE) -- this trades away the sensor independence S13 exists to protect: if that
-      zone's channel ever goes bad, the safety processor loses its only temperature reading too.
-      `tc_placement_mode` is forced to CHAMBER_AGREED (S2/S10 active, same as the chamber option).
-      S13 watches the borrowed zone's own sample counter and trips if it stops advancing.</span>
-      <select id="gBorrowedZoneSelect" hidden>
-        <option value="">-- Choose the zone to borrow --</option>
-      </select>
-    </label>
-    <label class="radio-card" id="gCardChamber">
-      <input type="radio" name="gq2" value="chamber">In the kiln chamber
-      <span class="consequence">S2 and S10 active. S1's ceiling may be tightened by the running
-      profile's peak + margin.</span>
-    </label>
-    <label class="radio-card" id="gCardExternal">
-      <input type="radio" name="gq2" value="external">External overheat sensor (shell, exhaust, enclosure)
-      <span class="consequence">S2 and S10 are OFF -- an external sensor has no obligation to agree
-      with the zone readings. S1 uses your kiln maximum as a flat ceiling.</span>
+      <span class="consequence">The safety processor relies on the zone thermocouples only. Its own
+      thermocouple is reported missing; over-temperature protection keeps running while at least one zone
+      thermocouple works, and trips the moment none does.</span>
     </label>
     <div class="gnav"><button type="button" onclick="gGoto(1)">Back</button>
       <button type="button" onclick="gValidateScreen2() &amp;&amp; gGoto(3)">Next</button></div>
@@ -469,27 +463,9 @@ var GROUPS = [
     hint: 'These fields have no defensible compiled-in default. Until each ' +
       'is set, the guards named under it stay disabled and the Pico reports ' +
       'calibration_missing.',
+    // 257/258/259 (tc_source, borrowed_zone_index, tc_placement_mode) are deprecated 2026-11-19: not rendered,
+    // always sent as fixed 0 by DEPRECATED_TC_PAIRS because the Pico commissioning gate still needs their fields_set bits.
     fields: [
-      { id: 257, name: 'tc_source', type: 'enum', risk: 'dangerous', noDefault: true,
-        guards: ['S1', 'S2', 'S5', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13'],
-        enumOpts: [ [0, 'OWN_J7'], [1, 'BORROWED_ZONE'], [2, 'BOTH'] ],
-        note: 'Where the safety processor gets its temperature. BORROWED_ZONE trades ' +
-          'away sensor independence -- weigh that carefully before choosing it. ' +
-          '(Numeric codes here -- OWN_J7=0/BORROWED_ZONE=1/BOTH=2 -- are this page\'s ' +
-          'assumption, not independently confirmed; the safety processor\'s own reply is ' +
-          'the tie-breaker if these ever disagree.)' },
-      { id: 258, name: 'borrowed_zone_index', type: 'u8', risk: 'dangerous', unit: '0-2',
-        guards: ['S13'],
-        note: 'Only meaningful when tc_source is not OWN_J7. Must name a zone the ESP ' +
-          'actually reports.' },
-      { id: 259, name: 'tc_placement_mode', type: 'enum', risk: 'dangerous',
-        guards: ['S1 (ceiling mode)', 'S2', 'S10'],
-        enumOpts: [ [0, 'CHAMBER_AGREED'], [1, 'EXTERNAL_OVERHEAT'] ],
-        note: 'A statement about where the sensor physically is, not a preference. Wrong ' +
-          'in one direction silences the only cross-check; wrong the other way makes S10 ' +
-          'fire constantly on correct readings. Forced to CHAMBER_AGREED when tc_source is ' +
-          'BORROWED_ZONE (enforced client-side below AND independently by the Pico at ' +
-          'commit -- see the contradiction-check comment near the bottom of this script).' },
       { id: 260, name: 'abs_max_temp_c', type: 'f32', risk: 'dangerous', unit: '°C', noDefault: true,
         guards: ['S1'], prefillFromTcMax: true,
         note: 'In CHAMBER_AGREED: what the furniture/elements survive (~1300 for cone 10). ' +
@@ -555,9 +531,9 @@ var GROUPS = [
       { id: 529, name: 'safety_tc_installed', type: 'bool', risk: 'dangerous', noDefault: true,
         guards: ['S2', 'S10', 'S13'],
         note: 'The boolean form of ' +
-          '"where is the safety processor\'s own thermocouple": true whenever ' +
-          'tc_source is OWN_J7 or BOTH, false only for BORROWED_ZONE. Written by the guided ' +
-          'flow\'s second question, not typed here directly.' },
+          '"is the safety processor\'s own thermocouple fitted". False means it is reported ' +
+          'missing and the zone thermocouples carry over-temperature protection. Written by the ' +
+          'guided flow\'s second question, not typed here directly.' },
     ] },
 
   { title: '2. Temperature guards', fields: [
@@ -842,8 +818,8 @@ var TC_MAX_C_BY_TYPE = {
  * (ROADMAP.md M12, this table's own header comment) is "abs_max_temp_c
  * cannot contradict the sensor [tc_type]": wired here, client-side, same
  * "advisory-and-enforced on THIS side only for immediacy, NOT the safety
- * boundary" status applyContradictionRule() above already documents for the
- * tc_source/tc_placement_mode pair -- the Pico's own COMMIT_CONFIG range
+ * boundary" status the (removed) tc_source/tc_placement_mode contradiction rule had for the
+ * pair -- the Pico's own COMMIT_CONFIG range
  * check is what actually enforces abs_max_temp_c (CONFIG_REFERENCE.md sec 1),
  * this only stops an obviously-contradictory pair from ever being submitted
  * and catches the mistake immediately, by name, with both numbers, instead
@@ -1005,7 +981,7 @@ function fieldInputHtml(f, paramsById) {
     // <input> below, which IS the element the save pass's `[data-id]` walk
     // finds -- exactly one SET_PARAM candidate for this id no matter which
     // path (known voltage vs "Other...") was used. wireVoltageSelects()
-    // (called after every render, same as applyContradictionRule()) keeps
+    // (called after every render) keeps
     // the input's value in sync with the select and toggles its visibility.
     var html = '<select class="voltage-select" data-voltage-for="' + f.id + '">';
     html += '<option value="unset"' + (!isSet ? ' selected' : '') + '>-- Not set --</option>';
@@ -1234,7 +1210,6 @@ function renderGroups(data) {
       el.appendChild(fieldBlock(f, paramsById));
     });
   });
-  applyContradictionRule();
   wireVoltageSelects();
   wireCtManualToggles();
   wireCtInstalledToggle();
@@ -1542,7 +1517,7 @@ function wireCtManualToggles() {
 
 // Task 2 (COMMISSIONING_UX.md sec 2.1): wires every mains-voltage <select>
 // (there is exactly one, mains_voltage_v, but this walks all of them the
-// same way applyContradictionRule() above walks a fixed pair, in case a
+// same way the (removed) contradiction rule walked a fixed pair, in case a
 // second voltage-typed field is ever added) to its own hidden numeric
 // input -- picking a known voltage writes that number into the input and
 // hides it; picking "Other..." reveals it empty (or keeps whatever it
@@ -1761,35 +1736,6 @@ function loadCommissioning(isBg) {
   });
 }
 
-/* ---- Client-side contradiction check (COMMISSIONING.md section 4 / 3.1):
- * tc_placement_mode is forced to CHAMBER_AGREED when tc_source is
- * BORROWED_ZONE. This is advisory-and-enforced on THIS side only for
- * immediacy -- disabling the control and showing why -- but it is NOT the
- * safety boundary. The Pico validates the whole staged set again at
- * COMMIT_CONFIG independently of whatever this page did or failed to do,
- * and a browser bug, a hand-crafted POST, or a stale page here must not be
- * able to commission a contradictory pair -- see COMMISSIONING.md section 2.1's
- * "validation happens at COMMIT_CONFIG, not at SET_PARAM" and CONFIG_REFERENCE.md
- * section 1's "rejected, not silently reconciled". */
-function applyContradictionRule() {
-  var srcSel = document.querySelector('select[data-id="257"]'); // tc_source
-  var modeSel = document.querySelector('select[data-id="259"]'); // tc_placement_mode
-  if (!srcSel || !modeSel) return;
-  function sync() {
-    var forced = srcSel.value === '1'; // BORROWED_ZONE, per this page's enum-code note above
-    if (forced) {
-      modeSel.value = '0'; // CHAMBER_AGREED
-      modeSel.disabled = true;
-      modeSel.title = 'Forced to CHAMBER_AGREED because tc_source is BORROWED_ZONE.';
-    } else {
-      modeSel.disabled = false;
-      modeSel.title = '';
-    }
-  }
-  srcSel.addEventListener('change', sync);
-  sync();
-}
-
 // RELAY_LIFE_BUDGET.md: saved immediately on change, independent
 // of the guided flow's/Advanced section's own staged-and-committed writes --
 // see this control's own HTML comment for why. "ssr" is never an option in
@@ -1873,7 +1819,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   // this page's wording is the shared module's default (it is the older,
   // proven-on-hardware behaviour the defaults were set to match), so nothing
   // here should ever read differently than it did before this retrofit.
-  window.kcCommissioningCommitAndVerify(bodyPairs, criticalChanges, {
+  // Deprecated TC-source trio rides along as fixed 0 (see DEPRECATED_TC_PAIRS) so the Pico gate bits get set.
+  var sendPairs = bodyPairs.length ? bodyPairs.concat(DEPRECATED_TC_PAIRS.map(function (d) {
+    return { id: d.id, value: String(d.value), name: FIELD_BY_ID[d.id] && FIELD_BY_ID[d.id].name };
+  })) : bodyPairs;
+  window.kcCommissioningCommitAndVerify(sendPairs, criticalChanges, {
     setMsg: function (t) { msg.textContent = t; },
   }).then(function (res) {
     msg.textContent = res.message;
@@ -1923,9 +1873,7 @@ document.getElementById('benchBtn').addEventListener('click', function () {
  * typo shows up as "field not rendered" instead of a silent wrong id):
  *   260 abs_max_temp_c        (Q1)
  *   529 safety_tc_installed   (Q2, 0x0211)
- *   257 tc_source             (Q2, 0x0101)
- *   258 borrowed_zone_index   (Q2, 0x0102 -- "Not fitted" branch only)
- *   259 tc_placement_mode     (Q2, 0x0103)
+ *   257/258/259 tc_source, borrowed_zone_index, tc_placement_mode (0x0101-3): deprecated, fixed 0
  *   782 mains_voltage_v       (Q3, 0x030E)
  *   793 max_expected_power_w  (Q4, 0x0319)
  * ============================================================ */
@@ -1940,7 +1888,15 @@ var gPrefilled = false;
 // this is true, rather than let the guided flow proceed on device state it
 // never actually loaded.
 var gLoadFailed = false;
-var gQ2Choice = null; // 'chamber' | 'external' | 'not_fitted'
+var gQ2Choice = null; // 'chamber' (own TC fitted) | 'not_fitted'
+// Deprecated 2026-11-19: the Pico ignores these three, but its commissioning gate still requires their
+// fields_set bits, so every guided and Advanced commit sends them as fixed 0 (OWN_J7, J7 placement agreed, zone 0).
+// The server forces 0 too (safety_cfg_http.c), so a stale page or old client cannot store anything else.
+var DEPRECATED_TC_PAIRS = [
+  { id: 257, value: 0, label: 'tc_source (deprecated, fixed 0)' },
+  { id: 258, value: 0, label: 'borrowed_zone_index (deprecated, fixed 0)' },
+  { id: 259, value: 0, label: 'tc_placement_mode (deprecated, fixed 0)' }
+];
 // Populated from GET /api/zones (zones_http.c) -- name-by-index for the
 // "Not fitted" zone picker. borrowed_zone_index is validated 0-2 server-side
 // (config_params.c CHECK_U8_MAX(2u)), matching CONTEXT_SNAPSHOT_MAX_ZONES
@@ -1949,7 +1905,7 @@ var gQ2Choice = null; // 'chamber' | 'external' | 'not_fitted'
 // channels this board has configured -- so only indices 0-2 are ever
 // offered here even on a 5-channel board.
 var gZoneNames = [];
-var GSTEP_NAMES = ['Start', 'This kiln', 'TC location', 'Review', 'Save'];
+var GSTEP_NAMES = ['Start', 'This kiln', 'Own thermocouple', 'Review', 'Save'];
 
 function gGoto(n) {
   for (var i = 0; i <= 4; i++) {
@@ -2018,11 +1974,7 @@ function gValidateScreen2() {
   var msg = document.getElementById('g2msg');
   var checked = document.querySelector('input[name="gq2"]:checked');
   if (!checked) {
-    msg.textContent = 'Choose where the safety processor\'s own thermocouple is fitted.';
-    return false;
-  }
-  if (checked.value === 'not_fitted' && document.getElementById('gBorrowedZoneSelect').value === '') {
-    msg.textContent = 'Choose which zone\'s thermocouple to borrow.';
+    msg.textContent = 'Say whether the safety processor\'s own thermocouple is fitted.';
     return false;
   }
   gQ2Choice = checked.value;
@@ -2049,21 +2001,9 @@ function gBuildAnswers() {
   if (absMax !== '') pairs.push({ id: G_IDS.ABS_MAX, value: absMax, label: 'abs_max_temp_c' });
   if (mains !== undefined) pairs.push({ id: G_IDS.MAINS, value: mains, label: 'mains_voltage_v' });
   if (power !== '') pairs.push({ id: G_IDS.POWER, value: power, label: 'max_expected_power_w' });
-  if (gQ2Choice === 'chamber') {
-    pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
-    pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
-    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 0, label: 'tc_placement_mode (CHAMBER_AGREED)' });
-  } else if (gQ2Choice === 'external') {
-    pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
-    pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
-    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 1, label: 'tc_placement_mode (EXTERNAL_OVERHEAT)' });
-  } else if (gQ2Choice === 'not_fitted') {
-    var zoneIdx = document.getElementById('gBorrowedZoneSelect').value;
-    var zoneLabel = gZoneNames[Number(zoneIdx)] || ('Zone ' + Number(zoneIdx));
-    pairs.push({ id: G_IDS.TC_INSTALLED, value: 0, label: 'safety_tc_installed' });
-    pairs.push({ id: G_IDS.TC_SOURCE, value: 1, label: 'tc_source (BORROWED_ZONE)' });
-    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 0, label: 'tc_placement_mode (forced CHAMBER_AGREED)' });
-    pairs.push({ id: G_IDS.BORROWED_ZONE_INDEX, value: zoneIdx, label: 'borrowed_zone_index (' + zoneLabel + ')' });
+  if (gQ2Choice === 'chamber' || gQ2Choice === 'not_fitted') {
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: gQ2Choice === 'chamber' ? 1 : 0, label: 'safety_tc_installed' });
+    DEPRECATED_TC_PAIRS.forEach(function (d) { pairs.push({ id: d.id, value: d.value, label: d.label }); });
   }
   return pairs;
 }
@@ -2173,53 +2113,20 @@ function gPrefill(data) {
   if (power && power.set) document.getElementById('gPower').value = power.value;
 
   var tcInstalled = byId[G_IDS.TC_INSTALLED];
-  var tcSource = byId[G_IDS.TC_SOURCE];
-  var tcPlacement = byId[G_IDS.TC_PLACEMENT];
-  var borrowedZone = byId[G_IDS.BORROWED_ZONE_INDEX];
 
-  // "Not fitted" zone picker -- populated from gZoneNames (loadZoneNames(),
-  // GET /api/zones), falling back to a plain "Zone N" label if that fetch
-  // failed or predates this firmware. 2026-08-30: this option used to be
-  // shown-disabled ("S13 is dormant, sample_counter_advancing is hardcoded
-  // false") per spec section 2.4/OQ7 -- now that safety_core_build_input()
-  // has a real producer for it (see SAFETY_MODEL.md's guard table), the
-  // option is reachable like the other two.
-  var zoneSel = document.getElementById('gBorrowedZoneSelect');
-  for (var zi = 0; zi < 3; zi++) {
-    var opt = document.createElement('option');
-    opt.value = String(zi);
-    opt.textContent = gZoneNames[zi] || ('Zone ' + zi);
-    zoneSel.appendChild(opt);
-  }
-
-  if (tcInstalled && tcInstalled.set && tcSource && tcSource.set && tcPlacement && tcPlacement.set) {
+  if (tcInstalled && tcInstalled.set) {
     if (Number(tcInstalled.value) === 0) {
-      // safety_tc_installed==0 is Q2's "Not fitted" branch (COMMISSIONING_UX.md
-      // section 2.4) regardless of tc_source/tc_placement's own values -- those
-      // two are FORCED (BORROWED_ZONE / CHAMBER_AGREED) by this branch, not
-      // independently meaningful facts to re-derive the choice from.
       gQ2Choice = 'not_fitted';
       document.querySelector('#gCardNotFitted input').checked = true;
-      zoneSel.hidden = false;
-      if (borrowedZone && borrowedZone.set) {
-        zoneSel.value = String(borrowedZone.value);
-      }
-    } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 0) {
+    } else if (Number(tcInstalled.value) === 1) {
       gQ2Choice = 'chamber';
       document.querySelector('#gCardChamber input').checked = true;
-    } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 1) {
-      gQ2Choice = 'external';
-      document.querySelector('#gCardExternal input').checked = true;
     }
   }
   document.querySelectorAll('input[name="gq2"]').forEach(function (r) {
     r.addEventListener('change', function () {
       document.querySelectorAll('.radio-card').forEach(function (c) { c.classList.remove('selected'); });
       if (r.checked) r.closest('.radio-card').classList.add('selected');
-      // Zone picker is only meaningful for the "Not fitted" branch -- shown
-      // exactly while that radio is the checked one, same discipline
-      // #gMainsOther's own change handler uses for "Other..." mains voltage.
-      zoneSel.hidden = !(r.checked && r.value === 'not_fitted');
     });
   });
 
@@ -2403,11 +2310,6 @@ setInterval(function () { loadCurrent(true); }, 5000);
         -- they are being built in parallel against COMMISSIONING.md section
         3.1's contract, which is the exact shape this file's fetch/render/
         POST code was written against.
-     4. The tc_source / tc_placement_mode integer-to-enum mapping used above
-        is this page's best reading of COMMISSIONING.md's one worked example,
-        not a confirmed firmware fact -- see the long comment on the GROUPS
-        array's tc_source entry. Whoever wires the handler should confirm (or
-        correct) those codes against config_store.c.
      ============================================================ -->
 </body>
 </html>

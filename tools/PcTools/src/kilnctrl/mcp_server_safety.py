@@ -943,7 +943,7 @@ def _describe_commissioning(data: dict) -> str:
 
     tc_source_p = params.get("tc_source")
     if tc_source_p is not None and tc_source_p.get("set") and reliable:
-        lines.append(f"tc_source={tc_source_p.get('value')}")
+        lines.append(f"tc_source={tc_source_p.get('value')} (deprecated 2026-11-19, ignored by the Pico)")
 
     ct_installed_p = params.get("ct_installed")
     ct_installed_known = bool(ct_installed_p and ct_installed_p.get("set") and reliable)
@@ -1021,13 +1021,13 @@ def _describe_commissioning(data: dict) -> str:
         # Printed above already when borrowed_known; this covers the case
         # (tc_source=OWN_J7) where the endpoint's own borrowed/borrowed_known
         # summary omits it even though the raw param is still set.
-        lines.append(borrowed_zone_line)
+        lines.append(borrowed_zone_line + " (deprecated, ignored)")
 
     tc_placement_line = render_u8(
         "tc_placement_mode", "tc_placement_mode",
         lambda v: {0: "CHAMBER_AGREED", 1: "CHAMBER_INDEPENDENT"}.get(int(v), f"unknown({v})"))
     if tc_placement_line:
-        lines.append(tc_placement_line)
+        lines.append(tc_placement_line + " (deprecated, ignored)")
 
     mains_p = params.get("mains_voltage_v")
     if mains_p is not None:

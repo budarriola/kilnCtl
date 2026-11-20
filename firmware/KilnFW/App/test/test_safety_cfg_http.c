@@ -2773,6 +2773,34 @@ static void test_commissioning_post_failed_recapture_still_reports_ok(void)
  * repaired: cs_counts_to_amps() falls back to CS_DEFAULT_GAIN for a stored
  * value <= 0, which would leave a bad entry persisted, unused, and invisible.
  */
+static void test_commissioning_post_deprecated_tc_params_forced_to_zero(void)
+{
+    TEST_SECTION("commissioning_post_handler -- deprecated tc_source/borrowed_zone_index/tc_placement_mode "
+                 "(0x0101-0x0103) are always staged as 0 whatever the caller sent (AT-02)");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_lookup_name = "stub_field";
+    for (int i = 0; i < 3; i++) {
+        s_stub_params[i].param_id = (uint16_t)(0x0101u + i);
+        s_stub_params[i].type = KILNLINK_PARAM_TYPE_U8;
+        s_stub_params[i].set = true;
+        s_stub_params[i].value.u8_val = 0; /* what a Pico that was handed the forced 0 reports back */
+    }
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+    static char body[128];
+    snprintf(body, sizeof(body), "id=257&value=1&id=258&value=2&id=259&value=1&commit=1");
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    httpd_req_t req = { .content_len = (int)strlen(body) };
+    esp_err_t err = commissioning_post_handler(&req);
+    s_link = NULL;
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"ok\":true") != NULL,
+               "committed and read back as 0: the caller's nonzero values were replaced before staging");
+}
+
 static void test_commissioning_post_gain_zero_is_refused(void)
 {
     TEST_SECTION("commissioning_post_handler -- a gain of 0 is REFUSED with a message naming the "
@@ -3328,6 +3356,7 @@ int main(void)
     test_commissioning_post_stage_only_does_not_recapture();
     test_commissioning_post_failed_recapture_still_reports_ok();
 
+    test_commissioning_post_deprecated_tc_params_forced_to_zero();
     test_commissioning_post_gain_zero_is_refused();
     test_commissioning_post_gain_out_of_range_is_refused();
     test_commissioning_post_in_range_gain_is_accepted();
