@@ -5125,9 +5125,13 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
         "\"cooling_limited_hold_s\":120,\"ramp_lock_band_c\":%s}],\"zones\":[]}";
     static const struct {
         const char *drift, *lock;
-        float want;
-    } k_cases[] = {{"10", "25", 5.0f}, {"25", "21", 20.0f}, {"25", "20", 20.0f},
-                   {"0", "25", 20.0f}, {"0", "20", 20.0f}, {"0", "0", 0.0f}, {"40", "25", 25.0f}};
+        float want, want_drift;
+    } k_cases[] = {{"10", "25", 5.0f, 10.0f}, {"25", "21", 20.0f, 25.0f}, {"25", "20", 20.0f, 25.0f},
+                   {"0", "25", 20.0f, 0.0f}, {"0", "20", 20.0f, 0.0f}, {"40", "25", 25.0f, 40.0f},
+                   // EA-12 review: lock 0 means the default 25 C, so it clamps like an explicit 25.
+                   {"10", "0", 5.0f, 10.0f}, {"0", "0", 20.0f, 0.0f},
+                   // effective drift < 6: lock 1, drift raised to 6.
+                   {"1.5", "25", 1.0f, 6.0f}, {"1.5", "0", 1.0f, 6.0f}, {"5", "3", 1.0f, 6.0f}};
     for (size_t ci = 0; ci < sizeof(k_cases) / sizeof(k_cases[0]); ci++) {
         char tb[1024];
         char eb[256];
@@ -5136,7 +5140,9 @@ static void test_timing_profiles_bundle_round_trips_nonempty(void)
         bool okc = test_backup_import_apply(tb, eb, sizeof(eb));
         TEST_CHECK(okc, "EA-12: backup import restores instead of refusing");
         TEST_CHECK_NEAR(s_timing_profiles[0].ramp_lock_band_c, k_cases[ci].want, 1e-6,
-                        "EA-12: lock band clamped to drift - 5 (drift 0 = 25), valid values unchanged");
+                        "EA-12: lock band clamped to drift - 5 (0 = 25 C default), valid values unchanged");
+        TEST_CHECK_NEAR(s_timing_profiles[0].drift_hysteresis_c, k_cases[ci].want_drift, 1e-6,
+                        "EA-12: drift stays, or is raised to 6 when the effective drift is below 6");
     }
 }
 

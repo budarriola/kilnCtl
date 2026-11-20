@@ -330,10 +330,14 @@ float profile_executor_guard_drift_band_c(float configured_drift_c, float lock_b
     if (off > 30.0f) {
         off = 30.0f; /* a larger lead/offset must not widen guard 4 without bound */
     }
-    /* EA-12: lead/offset and lock-band extension only while the ramp lock holds this zone or the
-     * arrival gate waits; otherwise (also with stretch off) guard 4 keeps its configured band. */
-    float ext = extend ? (lock_band_c + 5.0f + off) : base;
-    return (ext > base) ? ext : base;
+    /* EA-12 review: guard 4 reads raw_c while the ramp lock and setpoint use actual_c, so the
+     * calibration/lead offset aligns the two frames and is always added (it is not a loosening).
+     * The lock-band extension applies only while the lock holds this zone or the arrival gate
+     * waits. A lock band of 0 means the default 25 C (exec_threshold). */
+    float lock = (lock_band_c > 0.0f) ? lock_band_c : 25.0f;
+    float ext = lock + 5.0f;
+    float widened = (extend && ext > base) ? ext : base;
+    return widened + off;
 }
 
 bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bool decided_on,

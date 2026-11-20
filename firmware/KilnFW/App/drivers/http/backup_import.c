@@ -2332,20 +2332,28 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                         (unsigned)timing_profile_candidate_count);
                 return false;
             }
-            /* EA-12: old backups restore instead of refusing: clamp the lock band to (effective drift - 5),
-             * floor 0 (drift 0 = default 25 C). The zones POST / config save keeps the refusal. */
-            if (dramplock > 0.0) {
+            /* EA-12: old backups restore instead of refusing: clamp to the effective pair. Lock 0 means
+             * the default 25 C and drift 0 means 25 C. If effective lock > effective drift - 5, store
+             * lock = effective drift - 5 (>= 1); if effective drift < 6, store lock 1 and drift 6.
+             * The zones POST / config save keeps the refusal. */
+            {
                 double eff_drift = ddrift > 0.0 ? ddrift : 25.0;
-                double cap = eff_drift - 5.0;
-                if (cap < 0.0) {
-                    cap = 0.0;
-                }
-                if (dramplock > cap) {
+                double eff_lock = dramplock > 0.0 ? dramplock : 25.0;
+                if (eff_lock > eff_drift - 5.0) {
+                    double new_lock, new_drift = ddrift;
+                    if (eff_drift < 6.0) {
+                        new_lock = 1.0;
+                        new_drift = 6.0;
+                    } else {
+                        new_lock = eff_drift - 5.0;
+                    }
                     ESP_LOGW(BACKUP_TAG,
-                             "backup import: timing profile entry %u (%s) ramp_lock_band_c %.1f clamped to %.1f "
-                             "(guard_drift_hysteresis_c %.1f - 5)",
-                             (unsigned)timing_profile_candidate_count, tp->name, dramplock, cap, eff_drift);
-                    dramplock = cap;
+                             "backup import: timing profile entry %u (%s) ramp_lock_band_c %.1f -> %.1f, "
+                             "guard_drift_hysteresis_c %.1f -> %.1f (lock must be <= drift - 5; 0 = 25 C default)",
+                             (unsigned)timing_profile_candidate_count, tp->name, dramplock, new_lock, ddrift,
+                             new_drift);
+                    dramplock = new_lock;
+                    ddrift = new_drift;
                 }
             }
             tp->present = true;

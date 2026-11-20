@@ -700,6 +700,7 @@ typedef struct {
     float    settle_acc;
     float    settle_acc_s;
     uint8_t  settle_nb;
+    float    g1_defer_s;          /* EA-14 review: guard 1 deferral seconds spent this dwell (cap EXEC_ARRIVAL_SETTLE_WINDOW_S) */
     bool     settle_stalled;
     /* EA C3 finish-short latch (owner 2026-11-19): set when the arrival gate opened because this
      * zone stalled short of target. Guard 1 stops demanding a rise from this zone for the rest of
@@ -1485,6 +1486,7 @@ void ramp_assist_zone_lag_tick_ex(zone_runtime_t *z, bool lagging_now, float dt_
 void arrival_settle_reset(zone_runtime_t *z);
 void arrival_finish_short_clear_all(s_exec_state_t *ex);
 bool arrival_g1_defer(bool arrival_waiting, uint8_t settle_nb);
+bool arrival_g1_defer_tick(zone_runtime_t *z, bool arrival_waiting, float dt_s);
 bool arrival_finish_short_corroborated(const s_exec_state_t *ex, uint8_t zi, float target_c);
 #define EXEC_FINISH_SHORT_DROP_C   10.0f
 #define EXEC_FINISH_SHORT_DUTY_MIN 0.5f

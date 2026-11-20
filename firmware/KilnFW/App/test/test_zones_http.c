@@ -1959,6 +1959,13 @@ static void test_zones_post_rejects_ramp_lock_band_too_close_to_drift(void)
                    "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=0&"
                    "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=21");
     TEST_CHECK(s_test_err_called, "EA-12: drift 0 means the 25 C default, so ramp lock 21 is rejected too");
+    // EA-12 review: lock 0 means the 25 C default, so drift 10 with lock 0 is rejected; all-zero stays valid.
+    run_zones_post("thermo_count=0&relay_count=0&"
+                   "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=10&"
+                   "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=0");
+    TEST_CHECK(s_test_err_called, "EA-12 review: drift 10 with lock 0 (= 25 C) must be rejected");
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY);
+    TEST_CHECK(!s_test_err_called, "EA-12 review: drift 0 and lock 0 (all defaults) stays accepted");
 }
 
 static void test_zones_post_accepts_clean_minimal_body(void)

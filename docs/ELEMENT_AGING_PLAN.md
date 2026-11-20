@@ -81,6 +81,7 @@ Owner decisions on 2026-11-19: C7 yes, with a floor of 0.15 C/min. C6 on by defa
 - [x] C6 adaptive default, `k_dc_ratio` (host-tested; see KNOWN_ISSUES "ELEMENT_AGING C2/C6 limits")
 - [ ] Bench verification (4 W fixture: only C1 and C3 timing): C3 arrival hold and shortfall note, C1 no DRIFT trip with a held lock, run-state v2 record on the board
 - [x] Opus review fixes EA-12..EA-16 (guard 4 band limited to lock/arrival, backup import clamps the lock band to drift - 5 (old backups restore), G1 defer while the stall window fills, 60 s duty clear, finish-short cross-check, adaptive freeze on result)
+- [x] Opus final-review fixes EA-18..EA-22 (guard 4 offset always added, effective lock band 0 = 25 in POST/import/extension, autotune own-TC start gate, G1 defer cap per dwell, finish-short peer must drive the run)
 - [ ] Opus re-review of the fix diff
 - 300% budget (stretch + arrival wait up to 2x the budget) is accepted as is (EA-17).
 

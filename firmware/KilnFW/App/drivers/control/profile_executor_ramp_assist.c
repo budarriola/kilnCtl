@@ -403,6 +403,17 @@ bool arrival_g1_defer(bool arrival_waiting, uint8_t settle_nb)
     return arrival_waiting && settle_nb < EXEC_ARRIVAL_SETTLE_BUCKETS;
 }
 
+/* EA-14 review: the settle window resets on every NaN reading, so intermittent NaN could re-arm the
+ * deferral indefinitely. Total deferral is capped per dwell at EXEC_ARRIVAL_SETTLE_WINDOW_S seconds;
+ * the counter resets only at dwell entry / resume / run start (arrival_gate_tick). */
+bool arrival_g1_defer_tick(zone_runtime_t *z, bool arrival_waiting, float dt_s)
+{
+    if (!arrival_g1_defer(arrival_waiting, z->settle_nb)) return false;
+    if (z->g1_defer_s >= EXEC_ARRIVAL_SETTLE_WINDOW_S) return false;
+    z->g1_defer_s += dt_s;
+    return true;
+}
+
 /* EA-11 cross-check (owner 2026-11-19): a stalled zone latches finish-short only if at least one
  * OTHER valid zone reading is within EXEC_FINISH_SHORT_PEER_C of it and is itself stalled or in
  * the arrival band. A lone low zone (slipped TC) or a single-TC kiln never latches. The Pico TC
@@ -413,6 +424,8 @@ bool arrival_finish_short_corroborated(const s_exec_state_t *ex, uint8_t zi, flo
     for (uint8_t pi = 0; pi < MAX31856_CHANNEL_COUNT; pi++) {
         const zone_runtime_t *p = &ex->zones[pi];
         if (pi == zi || !p->active || p->faulted || isnan(p->actual_c)) continue;
+        /* EA-14 review: a monitor-only (or on/off) peer does not drive the run, so it cannot corroborate. */
+        if (!profile_executor_zone_drives_run(pi)) continue;
         if (fabsf(p->actual_c - self->actual_c) > EXEC_FINISH_SHORT_PEER_C) continue;
         float band_c = (p->guard_cfg.progress_band_c > 0.0f) ? p->guard_cfg.progress_band_c : 3.0f;
         if (arrival_zone_ok(p->actual_c, target_c, band_c, p->settle_stalled)) return true;
@@ -550,6 +563,7 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
         ex->arrival_gate_seg = (int16_t)ex->segment_index;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             arrival_settle_reset(&ex->zones[zi]);
+            ex->zones[zi].g1_defer_s = 0.0f;
             ex->zones[zi].finish_short_used = false;
         }
     }

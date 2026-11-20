@@ -307,15 +307,16 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     (void)link;
     /* LOW-1 (REVIEW_LD01_WWFIX): like the real function, leave *out as garbage that LOOKS link-up on an
      * error return, so a caller that ignores the return code reads link_up and starts. */
-    if (s_stub_link_mode >= 2 && s_stub_link_mode != 5) {
+    if (s_stub_link_mode >= 2 && s_stub_link_mode != 5 && s_stub_link_mode != 6) {
         if (out) memset(out, 0xFF, sizeof(*out));
         return s_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE : ESP_FAIL;
     }
     if (out) memset(out, 0, sizeof(*out));
-    if (out) out->link_up = (s_stub_link_mode == 0 || s_stub_link_mode == 5);
+    if (out) out->link_up = (s_stub_link_mode == 0 || s_stub_link_mode == 5 || s_stub_link_mode == 6);
+    if (out && s_stub_link_mode == 6) out->tc_fault = THERMO_FAULT_OPEN; /* AT-24: own TC faulted */
     /* F5HOLDERFX4: start also needs a DIAG received since the Pico's last reboot and fresh; a link-up board
      * in this stub has one (state 0 is not TRIPPED). */
-    if (out && (s_stub_link_mode == 0 || s_stub_link_mode == 5)) {
+    if (out && (s_stub_link_mode == 0 || s_stub_link_mode == 5 || s_stub_link_mode == 6)) {
         out->diag_ever_received = true;
         out->diag_since_reboot = true;
         out->diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
@@ -4009,6 +4010,35 @@ static void test_begin_run_refuses_stale_diag(void)
     TEST_CHECK(!ok, "start refused while the DIAG is stale");
     TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
     TEST_CHECK(strstr(errbuf, "status report") != NULL, "refusal says it is waiting for the safety processor status report");
+}
+
+/* AT-24 (EA review): autotune is a new firing -- refused while the Pico own TC is faulted. */
+static void test_begin_run_refuses_own_tc_fault(void)
+{
+    TEST_SECTION("autotune begin-run: Pico own thermocouple faulted -- refuses, no heat (AT-24)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    reset_heat_enable_recorder(false);
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    safety.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 0.0f;
+    s_stub_min_temp_c = 0.0f;
+    s_stub_ch0_ok = true;
+    s_stub_blocked_real_semantics = true;
+    s_stub_link_mode = 6;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_stub_blocked_real_semantics = false;
+    s_stub_link_mode = 0;
+    TEST_CHECK(!ok, "start refused while the Pico own TC is faulted");
+    TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
+    TEST_CHECK(strstr(errbuf, "Safety thermocouple faulted") != NULL, "refusal names the safety thermocouple");
 }
 
 static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
@@ -7771,6 +7801,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_start_on_a_down_link_does_not_claim_heat();
     test_begin_run_refuses_on_down_link_with_latched_link_source();
     test_begin_run_refuses_unlatched_link_down();
+    test_begin_run_refuses_own_tc_fault();
     test_begin_run_refuses_stale_diag();
 
     // Target-temperature step mode (slice 1) -- order-independent, each

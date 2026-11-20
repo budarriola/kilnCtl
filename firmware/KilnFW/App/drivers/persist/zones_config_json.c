@@ -881,8 +881,12 @@ bool zones_config_json_parse_timing_profile_fields(const char *body, uint8_t p, 
     /* EA C1 (docs/ELEMENT_AGING_PLAN.md F1): guard 4 must stay wider than the
      * ramp lock band, or a held lock certainly trips DRIFT. Config SAVE only:
      * the load-time validate must not wipe an already stored config. */
-    if (tp->ramp_lock_band_c > 0.0f &&
-        tp->ramp_lock_band_c > (tp->guard_drift_hysteresis_c > 0.0f ? tp->guard_drift_hysteresis_c : 25.0f) - 5.0f) {
+    /* Lock band 0 means the executor default (25 C), so it is checked as 25 too. Both left at 0
+     * (all defaults) is accepted: guard 4 widens itself to lock + 5 at run time, and refusing it
+     * would make the default timing profile unsaveable. */
+    if ((tp->guard_drift_hysteresis_c > 0.0f || tp->ramp_lock_band_c > 0.0f) &&
+        (tp->ramp_lock_band_c > 0.0f ? tp->ramp_lock_band_c : 25.0f) >
+            (tp->guard_drift_hysteresis_c > 0.0f ? tp->guard_drift_hysteresis_c : 25.0f) - 5.0f) {
         *err_reason = "timing profile ramp_lock_band_c must be at most guard_drift_hysteresis_c - 5";
         return false;
     }

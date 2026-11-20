@@ -8855,14 +8855,19 @@ static void test_ea_c1_drift_band_follows_ramp_lock(void)
     // arrival gate waits; otherwise guard 4 keeps its plain configured band.
     TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 1100.0f, 970.0f, true), 60.0f, 1e-4f,
                     "a 130 C actual-raw gap widens by at most 30 C: 25 + 5 + 30");
-    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 25.0f, 1e-4f,
-                    "EA-12: lock not held, offset 4: the plain base band (no offset widening)");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 29.0f, 1e-4f,
+                    "EA-12 review: lock not held, offset 4: base band + offset (frames aligned, not loosened)");
     TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(40.0f, lock_band, 970.0f, 970.0f, false), 40.0f, 1e-4f,
                     "lock not held, no offset: the configured band as is");
     // EA-12: lock released, +6 offset: guard 4 keeps its base band, so a raw error of 28 C trips.
     float band_rel = profile_executor_guard_drift_band_c(0.0f, lock_band, 976.0f, 970.0f, false);
-    TEST_CHECK_NEAR(band_rel, 25.0f, 1e-4f, "EA-12: released lock, +6 offset: band stays 25 C");
-    TEST_CHECK(ea_drift_trips(band_rel, 28.0f, 1300), "EA-12: released lock, raw error 28 C: DRIFT trips");
+    TEST_CHECK_NEAR(band_rel, 31.0f, 1e-4f, "EA-12 review: released lock, +6 offset: band is 25 + 6");
+    TEST_CHECK(ea_drift_trips(band_rel, 35.0f, 1300), "released lock, raw error beyond band + offset: DRIFT trips");
+    // Normal ramp, actual 10 C above raw, 16 C actual lag: raw error 26 C, drift 25, lock 20 -> no trip.
+    float band_norm = profile_executor_guard_drift_band_c(25.0f, 20.0f, 980.0f, 970.0f, false);
+    TEST_CHECK_NEAR(band_norm, 35.0f, 1e-4f, "drift 25 + offset 10 = 35");
+    TEST_CHECK(!ea_drift_trips(band_norm, 26.0f, 1300), "actual 10 above raw with 16 C lag: no DRIFT trip");
+    TEST_CHECK(ea_drift_trips(band_norm, 36.0f, 1300), "real drift beyond band + offset still trips");
     TEST_CHECK(!ea_drift_trips(band_rel, 20.0f, 1300), "released lock, raw error inside the base band: no DRIFT");
 }
 
@@ -9153,6 +9158,34 @@ static void test_ea_finish_short_cross_check_and_g1_defer(void)
     for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     TEST_CHECK(ex.zones[0].finish_short, "stalled peer within 25 C: latch");
+    // EA-14 review: a monitor-only peer does not drive the run, so it must not corroborate.
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    ea_add_peer(&ex, 950.0f);
+    g_stub_zone_monitor_only[1] = true;
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    g_stub_zone_monitor_only[1] = false;
+    TEST_CHECK(!ex.zones[0].finish_short, "monitor-only stalled peer within 25 C: no latch");
+
+    // EA-14 review: guard 1 deferral is capped at 300 s per dwell even when NaN resets re-arm the window.
+    {
+        zone_runtime_t zd;
+        memset(&zd, 0, sizeof(zd));
+        float spent = 0.0f;
+        for (int i = 0; i < 1000; i++) {
+            if (i % 100 == 99) arrival_settle_reset(&zd); // intermittent NaN resets the window
+            if (arrival_g1_defer_tick(&zd, true, 1.0f)) spent += 1.0f;
+        }
+        TEST_CHECK_NEAR(spent, 300.0f, 1e-3f, "deferral totals 300 s per dwell despite NaN window resets");
+        zd.g1_defer_s = 0.0f; // dwell entry re-arms it
+        TEST_CHECK(arrival_g1_defer_tick(&zd, true, 1.0f), "new dwell: deferral available again");
+        zd.settle_nb = EXEC_ARRIVAL_SETTLE_BUCKETS;
+        TEST_CHECK(!arrival_g1_defer_tick(&zd, true, 1.0f), "window filled: no deferral");
+    }
 
     // EA-14 pure predicate and guard 1 deferral.
     TEST_CHECK(arrival_g1_defer(true, 3), "arrival wait with a filling window defers guard 1");

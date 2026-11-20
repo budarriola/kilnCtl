@@ -2,6 +2,7 @@
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
                                     * A4 review follow-up A */
 #include "heat_enable.h"
+#include "own_tc_start_gate.h" /* AT-24: autotune is a new firing */
 #include "danger_mode.h" /* danger_mode_blocks_start(): LCD review R1/R2 */
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_at's definition below */
@@ -1101,6 +1102,18 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
     {
         if (relay_authority_start_blocked(s_at.safety, err_msg, err_cap,
                                           "autotune cannot drive the element")) {
+            return false;
+        }
+    }
+
+    /* AT-24 (EA review): autotune is a new firing, so it gets the same own-TC start refusal as
+     * profile_executor_run(): the Pico cannot tell a new start from a resume and rides through a
+     * faulted own thermocouple for 60..120 s. Fail-open on unknown state (link down is refused above). */
+    if (s_at.safety != NULL) {
+        safety_link_status_t own_tc_st;
+        if (safety_link_get_status(s_at.safety, &own_tc_st) == ESP_OK &&
+            own_tc_start_must_refuse(own_tc_st.link_up, own_tc_st.flags, own_tc_st.tc_fault)) {
+            if (err_msg) snprintf(err_msg, err_cap, "%s", OWN_TC_START_REFUSAL_MSG);
             return false;
         }
     }
