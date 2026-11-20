@@ -708,6 +708,7 @@ typedef struct {
     bool     finish_short;
     uint8_t  finish_short_seg;
     float    finish_short_c;
+    bool     finish_short_used; /* gate already opened this dwell: no (re)latch until dwell entry/resume/run start */
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. Heat-work-weighted
      * accumulator -- banked ONLY while this zone is lagging (the same

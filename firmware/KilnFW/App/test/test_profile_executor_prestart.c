@@ -9007,6 +9007,59 @@ static void test_ea_finish_short_latch(void)
     ex.arrival_wait_s = 1.0e9f;
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "budget exhaustion does not latch");
+    // EA-11 HIGH-1: a cleared latch never re-arms from later gate ticks (drop clear, duty clear).
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(ex.zones[0].finish_short, "HIGH-1: latched on open");
+    arrival_settle_tick(&ex.zones[0], 940.0f, 1.0f, 1.0f); // >10 C drop clears
+    TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: drop clears");
+    ex.zones[0].actual_c = 940.0f;
+    for (int i = 0; i < 5; i++) {
+        (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+        arrival_settle_tick(&ex.zones[0], 940.0f, 1.0f, 1.0f);
+    }
+    TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: gate tick after drop clear does not re-latch");
+    TEST_CHECK(ea_guard1_finish_short(false, 1000.0f, 1e9f, 0.0f, 900) == (int)THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "HIGH-1: guard 1 can trip with the latch cleared");
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    arrival_settle_tick(&ex.zones[0], 960.0f, 0.2f, 1.0f); // duty clear
+    TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: duty clears");
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: gate tick after duty clear does not re-latch");
+    // Budget exhausted opening, zone stalls minutes later: no latch (LOW-1).
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 950.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f); // dwell entry
+    ex.arrival_wait_s = 1.0e9f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f); // budget opens
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 950.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "LOW-1: stall after budget opening does not latch");
+    // In band at open, then sags during the dwell: no latch.
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 999.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f); // arrived: gate open
+    ex.zones[0].actual_c = 940.0f;
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 940.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "in band then sag: no latch");
     ea_make_heating_profile(&ex);
     ex.zones[0].actual_c = 960.0f;
     ex.zones[0].duty = 1.0f;

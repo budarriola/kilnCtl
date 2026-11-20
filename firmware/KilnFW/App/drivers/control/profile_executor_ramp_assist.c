@@ -397,7 +397,10 @@ void arrival_settle_reset(zone_runtime_t *z)
 
 void arrival_finish_short_clear_all(s_exec_state_t *ex)
 {
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) ex->zones[zi].finish_short = false;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        ex->zones[zi].finish_short = false;
+        ex->zones[zi].finish_short_used = false;
+    }
 }
 
 void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s)
@@ -516,7 +519,10 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
     if (ex->arrival_gate_seg != (int16_t)ex->segment_index) {
         /* Dwell entry (or first tick after a pause/resume/run start): restart every stall window. */
         ex->arrival_gate_seg = (int16_t)ex->segment_index;
-        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) arrival_settle_reset(&ex->zones[zi]);
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            arrival_settle_reset(&ex->zones[zi]);
+            ex->zones[zi].finish_short_used = false;
+        }
     }
     float target_c = ex->profile.segments[ex->segment_index].target_c;
     bool all_ok = true;
@@ -539,14 +545,18 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
         arrival_planned_lower_bound_s(ex->profile.segments, ex->profile.segment_count, ex->run_start_c),
         stretch_max_pct);
     bool wait = arrival_gate_waits(true, true, all_ok, ex->arrival_wait_s, ex->stretch_total_s, budget_s);
-    if (!wait && all_ok) {
-        /* Gate opened by arrival or stall (not budget). Latch finish-short for each stalled zone that is
-         * outside the band. */
+    if (!wait) {
+        /* The gate just opened (closed-to-open, once per zone per dwell). Only an arrival/stall opening
+         * (all_ok) may latch a stalled zone outside the band; budget exhaustion never does. Either way
+         * every zone is marked used so a cleared latch cannot re-arm and a later stall or sag cannot
+         * latch. finish_short_used resets at dwell entry, resume and run start. */
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             zone_runtime_t *z = &ex->zones[zi];
-            if (!z->active || z->faulted || !profile_executor_zone_drives_run(zi)) continue;
+            if (z->finish_short_used) continue;
+            z->finish_short_used = true;
+            if (!all_ok || !z->active || z->faulted || !profile_executor_zone_drives_run(zi)) continue;
             float band_c = (z->guard_cfg.progress_band_c > 0.0f) ? z->guard_cfg.progress_band_c : 3.0f;
-            if (!z->finish_short && z->settle_stalled && !isnan(z->actual_c) && z->actual_c < target_c - band_c &&
+            if (z->settle_stalled && !isnan(z->actual_c) && z->actual_c < target_c - band_c &&
                 z->duty >= EXEC_FINISH_SHORT_DUTY_MIN) {
                 z->finish_short = true;
                 z->finish_short_seg = ex->segment_index;
