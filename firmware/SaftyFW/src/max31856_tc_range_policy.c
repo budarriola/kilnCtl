@@ -44,6 +44,17 @@ bool max31856_tc_range_is_plausible(uint8_t tc_type, float tc_c)
     return tc_c >= r->min_c && tc_c <= r->max_c; // inclusive both ends -- see header comment
 }
 
+bool max31856_tc_range_is_above_max(uint8_t tc_type, float tc_c)
+{
+    if (isnan(tc_c)) {
+        return false;
+    }
+    if (tc_type > MAX31856_TC_TYPE_T) {
+        return true;
+    }
+    return tc_c > TC_RANGES[tc_type].max_c;
+}
+
 // Union of all eight TC_RANGES rows -- computed by inspection, not at
 // runtime: min_c is J's -210 (the lowest of the eight), max_c is B's 1820
 // (the highest). Kept as a named constant, not folded into the loop below,

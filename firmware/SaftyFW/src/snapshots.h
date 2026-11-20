@@ -468,6 +468,8 @@ typedef struct {
 typedef struct {
     float   hot_max_c;     /* hottest WORKING zone reading; meaningless when working_count == 0 */
     uint8_t working_count; /* zones passing every test above */
+    bool    over_any;      /* MED-2: measured-valid finite zone above its type's max (or out-of-table type), no fault bits */
+    float   over_c;        /* hottest such value */
     bool    stalled_any;   /* a zone is otherwise good but its sample_counter has not advanced in time */
     bool    working[CONTEXT_SNAPSHOT_MAX_ZONES]; /* by zone_index */
     float   c[CONTEXT_SNAPSHOT_MAX_ZONES];       /* measured_c where working[] */
@@ -502,10 +504,11 @@ static inline bool context_zone_working(const context_zone_t *z, bool context_va
 // present in the frame; a zone missing from a frame keeps its tracker (a
 // single-tick drop does not forge a fresh "just advanced"). stale_s <= 0 is
 // treated as 10 s.
-static inline void context_reduce_hottest(const context_snapshot_t *ctx, bool context_valid, bool s6b_active,
-                                           uint32_t now_ms, float stale_s,
-                                           context_zone_track_t track[CONTEXT_SNAPSHOT_MAX_ZONES],
-                                           context_plausible_fn plausible, context_zone_reduction_t *out)
+static inline void context_reduce_hottest_ex(const context_snapshot_t *ctx, bool context_valid, bool s6b_active,
+                                              uint32_t now_ms, float stale_s,
+                                              context_zone_track_t track[CONTEXT_SNAPSHOT_MAX_ZONES],
+                                              context_plausible_fn plausible, context_plausible_fn above_max,
+                                              context_zone_reduction_t *out)
 {
     if (out == NULL) {
         return;
@@ -513,6 +516,8 @@ static inline void context_reduce_hottest(const context_snapshot_t *ctx, bool co
     out->hot_max_c = 0.0f;
     out->working_count = 0u;
     out->stalled_any = false;
+    out->over_any = false;
+    out->over_c = 0.0f;
     for (uint8_t i = 0; i < CONTEXT_SNAPSHOT_MAX_ZONES; i++) {
         out->working[i] = false;
         out->c[i] = 0.0f;
@@ -554,12 +559,29 @@ static inline void context_reduce_hottest(const context_snapshot_t *ctx, bool co
                 }
                 out->working_count++;
             }
+        } else if (above_max != NULL && context_valid && !s6b_active &&
+                   (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u && isfinite(z->measured_c) &&
+                   (z->tc_fault & CONTEXT_ZONE_FAULT_MASK) == 0u && above_max(z->tc_type, z->measured_c)) {
+            /* MED-2: implausibly HIGH is not dropped; S1 sees it (freshness not required: a
+             * high value is never made safer by being old). */
+            if (!out->over_any || z->measured_c > out->over_c) {
+                out->over_c = z->measured_c;
+            }
+            out->over_any = true;
         } else if (context_valid && !s6b_active && !fresh &&
                    (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u && isfinite(z->measured_c) &&
                    (z->tc_fault & CONTEXT_ZONE_FAULT_MASK) == 0u) {
             out->stalled_any = true;
         }
     }
+}
+
+static inline void context_reduce_hottest(const context_snapshot_t *ctx, bool context_valid, bool s6b_active,
+                                           uint32_t now_ms, float stale_s,
+                                           context_zone_track_t track[CONTEXT_SNAPSHOT_MAX_ZONES],
+                                           context_plausible_fn plausible, context_zone_reduction_t *out)
+{
+    context_reduce_hottest_ex(ctx, context_valid, s6b_active, now_ms, stale_s, track, plausible, NULL, out);
 }
 
 // --- Link-task boundary getters ---------------------------------------------

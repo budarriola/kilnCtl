@@ -227,8 +227,19 @@ static void test_cr1_readback_dead_bus(void)
                "0x00 readback is DEAD_BUS even when the intended type's own nibble is 0x0 (B)");
 }
 
+static void test_above_max_policy(void)
+{
+    TEST_SECTION("MED-2: above-max helper (above type max or out-of-table only)");
+    TEST_CHECK(max31856_tc_range_is_above_max(3, 1380.0f), "type K 1380 C is above max");
+    TEST_CHECK(!max31856_tc_range_is_above_max(3, -300.0f), "implausibly low K is not 'above'");
+    TEST_CHECK(!max31856_tc_range_is_above_max(3, 900.0f), "in-range K is not 'above'");
+    TEST_CHECK(max31856_tc_range_is_above_max(9, 20.0f), "out-of-table type is handed to S1");
+    TEST_CHECK(!max31856_tc_range_is_above_max(3, NAN), "NaN never");
+}
+
 void run_test_max31856_tc_range_policy(void)
 {
+    test_above_max_policy();
     test_in_range_accepted_every_type();
     test_out_of_range_rejected_every_type();
     test_boundary_inclusive_every_type();

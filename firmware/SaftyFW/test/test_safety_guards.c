@@ -3662,6 +3662,133 @@ static void test_at_all_tc_guards(void)
  * boundary, and is asserted below: given those facts as SAFETY_MODEL.md's
  * table says they should look, S6 and S13 never both fire for one event,
  * and neither guard's accumulator drifts based on what the other is doing. */
+/* Review fixes for AT (ad3913ba5): MED-1, MED-2, LOW-3, LOW-4. */
+static void test_at_review_fixes(void)
+{
+    TEST_SECTION("AT review fixes -- S8 post state, over-range zone, flapping zone, zone S11");
+
+    /* MED-1: a prior trip held 30 min must not dilute a later S8 clear check. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.max_rate_c_per_min = 100.0f;
+        cfg.rate_window_s = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 300.0f;
+        at_own_open(&in);
+        at_zone(&in, 0, 500.0f); /* S2 over setpoint + margin */
+        in.dt_s = 10.0f;
+        for (int i = 0; i < 40 && !s.is_tripped; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVER_SETPOINT, "MED-1 sanity: S2 latched first");
+        for (int i = 0; i < 180; i++) { /* held 30 min */
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        s.is_tripped = false; /* operator cleared it (the clear path itself is tested elsewhere) */
+        s.reason = SAFETY_TRIP_NONE;
+        in.max_zone_setpoint_c = 5000.0f;
+        in.dt_s = 1.0f;
+        float c = 500.0f;
+        bool tripped = false;
+        for (int i = 0; i < 80 && !tripped; i++) {
+            c += 5.0f; /* 300 C/min */
+            at_zone(&in, 0, c);
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_RATE, "MED-1 sanity: zone runaway latches S8 with own TC open");
+        for (int i = 0; i < 3; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in),
+                   "MED-1: S8 clear refused while the zone is still over the rate limit (stale post time zeroed)");
+    }
+
+    /* MED-2: an over-range zone value is not dropped; S1 trips on it. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 1300.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        at_zone(&in, 1, 900.0f); /* zone B works */
+        in.zone_over_any = true; /* zone A: 1380 C type K, no TCRANGE bit */
+        in.zone_over_c = 1380.0f;
+        in.dt_s = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP, "MED-2: over-range zone value trips S1 with own TC open");
+        safety_guard_state_t s2;
+        safety_guards_reset(&s2);
+        in.zone_over_any = false;
+        tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s2, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "MED-2: without the over-range zone, 900 C does not trip S1");
+    }
+
+    /* LOW-3: a flapping zone keeps its S8 window and is still rate-checked. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 100.0f;
+        cfg.rate_window_s = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        in.dt_s = 1.0f;
+        float c = 200.0f;
+        bool tripped = false;
+        for (int i = 0; i < 80 && !tripped; i++) {
+            c += 5.0f;
+            at_zone(&in, 2, c);
+            if (i % 4 == 3) { /* one missed freshness tick in four */
+                in.zone_ok[2] = false;
+                in.zone_working_count = 0;
+            }
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_RATE, "LOW-3: flapping zone still trips S8");
+    }
+
+    /* LOW-4: own TC faulted, a working zone frozen while heating trips S11. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.frozen_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.heat_commanded = true;
+        at_own_open(&in);
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "LOW-4: frozen zone value trips S11");
+        safety_guard_state_t s2;
+        safety_guards_reset(&s2);
+        tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            at_zone(&in, 0, 600.0f + (float)i * 0.25f);
+            tripped = safety_guards_tick(&s2, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "LOW-4: a changing zone value does not trip S11");
+    }
+}
+
 static void test_s6_s13_split(void)
 {
     TEST_SECTION("S6/S13 split -- borrowed staleness attributed to the right guard");
@@ -5921,6 +6048,7 @@ void run_test_safety_guards(void)
     test_s10();
     test_s13();
     test_at_all_tc_guards();
+    test_at_review_fixes();
     test_s6_s13_split();
     test_context_gating();
     test_independence_invariant();

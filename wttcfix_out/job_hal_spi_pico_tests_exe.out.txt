@@ -1,0 +1,4 @@
+test_hal_spi_pico_main.c
+test_hal_spi_pico.c
+hal_spi_pico.c
+spi_owner_stub.c

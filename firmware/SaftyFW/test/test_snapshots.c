@@ -598,6 +598,30 @@ static void at_make_ctx(context_snapshot_t *ctx, float c0, float c1)
     }
 }
 
+static bool at_above_k(uint8_t tc_type, float c)
+{
+    (void)tc_type;
+    return c > 1372.0f;
+}
+
+static void test_at_over_range_zone(void)
+{
+    context_snapshot_t ctx;
+    context_zone_track_t tr[CONTEXT_SNAPSHOT_MAX_ZONES];
+    context_zone_reduction_t r;
+    memset(tr, 0, sizeof(tr));
+    at_make_ctx(&ctx, 1380.0f, 900.0f);
+    context_reduce_hottest_ex(&ctx, true, false, 1000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+    ctx.zones[0].sample_counter++;
+    ctx.zones[1].sample_counter++;
+    context_reduce_hottest_ex(&ctx, true, false, 1100u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+    TEST_CHECK(r.over_any && r.over_c == 1380.0f, "MED-2: over-range zone value reported, not dropped");
+    TEST_CHECK(r.working_count == 1u && r.hot_max_c == 900.0f, "MED-2: over-range zone is not a working zone");
+    at_make_ctx(&ctx, -300.0f, 900.0f);
+    context_reduce_hottest_ex(&ctx, true, false, 1200u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+    TEST_CHECK(!r.over_any, "MED-2: an implausibly LOW zone value stays excluded");
+}
+
 static void test_at_zone_reduction(void)
 {
     context_snapshot_t ctx;
@@ -647,6 +671,7 @@ static void test_at_zone_reduction(void)
 
 void run_test_snapshots(void)
 {
+    test_at_over_range_zone();
     test_at_zone_reduction();
     test_reduce_zones_invalid_context();
     test_reduce_zones_non_finite_floats_ineligible();

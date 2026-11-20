@@ -1,0 +1,2 @@
+build gate: acquired heavy slot 0 for 'saftyfw_host_tests' (slots=3)
+build gate: released heavy slot 0 for 'saftyfw_host_tests' (held 1s)

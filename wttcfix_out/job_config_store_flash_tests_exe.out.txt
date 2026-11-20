@@ -1,0 +1,11 @@
+test_config_store_flash.c
+config_store_flash_host_stubs.c
+config_store.c
+fake_log_task.c
+config_store_flash.c
+config_params.c
+link_task_commit_reject.c
+crc32.c
+kilnlink_commit_config_rejected.c
+fake_flash.c
+hal_status.c

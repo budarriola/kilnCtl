@@ -1,0 +1,7 @@
+test_discrete_task_loop.c
+task_harness.c
+discrete_task.c
+discrete_pin_policy.c
+debounce_policy.c
+fake_gpio.c
+hal_status.c

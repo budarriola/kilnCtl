@@ -1090,9 +1090,10 @@ static safety_guard_input_t safety_core_build_input(void)
     // AT: reduce every zone TC (hottest working reading, working count, stall flag) for
     // S1/S2/S8/S13. s6b_active is the link-dead condition S6b trips on.
     context_zone_reduction_t zone_red;
-    context_reduce_hottest(&ctx, context_valid, !link_task_link_up(), now_ms,
-                           cfg_rec.borrowed_stale_s > 0u ? (float)cfg_rec.borrowed_stale_s : 10.0f,
-                           s_zone_track, max31856_tc_range_is_plausible, &zone_red);
+    context_reduce_hottest_ex(&ctx, context_valid, !link_task_link_up(), now_ms,
+                              cfg_rec.borrowed_stale_s > 0u ? (float)cfg_rec.borrowed_stale_s : 10.0f,
+                              s_zone_track, max31856_tc_range_is_plausible, max31856_tc_range_is_above_max,
+                              &zone_red);
 
     // docs/THERMOCOUPLE.md "Type checking a borrowed channel" / THERMOCOUPLE.md's
     // own open checklist item -- same have_index gate as sample_counter_advancing
@@ -1370,7 +1371,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .tc_lead_c = (!thermo_fresh) ? 0.0f : thermo.tc_lead_c,
         .cj_c = thermo.cj_c,
         .cj_invalid = !thermo.cj_valid || !thermo_fresh, // review saftyfx6 F5
-        .fault_bits = thermo.fault_bits,
+        .fault_bits = thermo_fresh ? thermo.fault_bits : 0u, /* LOW-5: a stale snapshot grants no own-fault tolerance */
         .spi_failed = thermo.spi_failed,
         .safety_tc_not_installed_declared = safety_tc_not_installed_declared,
         .estop_pressed = discrete_task_estop_pressed(),
@@ -1398,6 +1399,8 @@ static safety_guard_input_t safety_core_build_input(void)
         .zone_c = {zone_red.c[0], zone_red.c[1], zone_red.c[2]},
         .zone_tcrange = {zone_red.tcrange[0], zone_red.tcrange[1], zone_red.tcrange[2]},
         .zone_stalled_any = zone_red.stalled_any,
+        .zone_over_any = zone_red.over_any,
+        .zone_over_c = zone_red.over_c,
         .link_up = link_task_link_up(),
         .reboot_grace_active = reboot_grace_active,
         // S9's "did the hardware actually respond". The INVERSE of

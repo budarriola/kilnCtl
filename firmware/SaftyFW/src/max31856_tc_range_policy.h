@@ -121,6 +121,11 @@ extern "C" {
 //     board, so this is a defensive floor, not an expected path.
 bool max31856_tc_range_is_plausible(uint8_t tc_type, float tc_c);
 
+// MED-2: true iff tc_c is ABOVE the type's datasheet max, or tc_type has no table row (any finite
+// value of such a zone is handed to S1, which compares it with abs_max). False for NaN and for
+// implausibly LOW values of a tabled type (those stay excluded).
+bool max31856_tc_range_is_above_max(uint8_t tc_type, float tc_c);
+
 // True iff tc_c falls within the union of all eight types' TEMP RANGEs
 // (min across B/E/J/K/N/R/S/T's own lower bounds .. max across their upper
 // bounds), for use when tc_type has NOT been commissioned

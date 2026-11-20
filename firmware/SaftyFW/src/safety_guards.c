@@ -207,6 +207,17 @@ static bool guard_s13_condition(const safety_guard_input_t *in)
     return !guard_own_ok(in) && !guard_zones_work(in) && in->zone_stalled_any;
 }
 
+/* MED-2: hottest TC for S1 = hottest working TC, or an over-range zone value if hotter. */
+static bool guard_hot_s1(const safety_guard_input_t *in, float *hot)
+{
+    bool any = guard_hot_all(in, hot);
+    if (in->zone_over_any && isfinite(in->zone_over_c) && (!any || in->zone_over_c > *hot)) {
+        *hot = in->zone_over_c;
+        any = true;
+    }
+    return any;
+}
+
 /* S1 over the hottest working TC. have=false means no TC works: the streak resets (S5 owns that). */
 static bool s1_eval(safety_guard_state_t *state, const safety_guard_cfg_t *cfg, bool have, float hot)
 {
@@ -256,16 +267,32 @@ static bool zone_guards_eval(safety_guard_state_t *state, const safety_guard_cfg
             state->s1z_tcrange_near_ceiling_streak[z] = 0;
         }
 
-        if (!(cfg->max_rate_c_per_min > 0.0f) || !in->zone_ok[z] || isnan(in->zone_c[z])) {
+        if (!(cfg->max_rate_c_per_min > 0.0f)) {
             state->s8z_window_active[z] = false;
             state->s8z_window_elapsed_s[z] = 0.0f;
             state->s8z_over_rate_streak[z] = 0;
+            state->s8z_post_elapsed_s[z] = 0.0f;
+            state->s8z_notok_elapsed_s[z] = 0.0f;
             continue;
         }
+        if (!in->zone_ok[z] || isnan(in->zone_c[z])) {
+            /* LOW-3: survive short freshness misses; reset only after the zone has been
+             * not-working for more than borrowed_stale_s continuously. */
+            state->s8z_notok_elapsed_s[z] += in->dt_s;
+            if (state->s8z_notok_elapsed_s[z] > effective_f(cfg->borrowed_stale_s, 10.0f)) {
+                state->s8z_window_active[z] = false;
+                state->s8z_window_elapsed_s[z] = 0.0f;
+                state->s8z_over_rate_streak[z] = 0;
+                state->s8z_post_elapsed_s[z] = 0.0f;
+            }
+            continue;
+        }
+        state->s8z_notok_elapsed_s[z] = 0.0f;
         if (!state->s8z_window_active[z]) {
             state->s8z_window_active[z] = true;
             state->s8z_window_start_c[z] = in->zone_c[z];
             state->s8z_window_elapsed_s[z] = 0.0f;
+            state->s8z_post_elapsed_s[z] = 0.0f;
             continue;
         }
         state->s8z_window_elapsed_s[z] += in->dt_s;
@@ -280,6 +307,9 @@ static bool zone_guards_eval(safety_guard_state_t *state, const safety_guard_cfg
                 state->s8z_over_rate_streak[z] = 0;
             }
             if (state->s8z_over_rate_streak[z] >= S8_OVER_RATE_STREAK_TO_TRIP) {
+                for (int zz = 0; zz < 3; zz++) {
+                    state->s8z_post_elapsed_s[zz] = 0.0f; /* MED-1: post-latch hold starts now */
+                }
                 trip(state, SAFETY_TRIP_RATE,
                      "zone %d %.1fC/min > max_rate_c_per_min %.1fC/min over %.0fs window, %u consecutive windows", z,
                      (double)rate, (double)cfg->max_rate_c_per_min, (double)state->s8z_window_elapsed_s[z],
@@ -288,6 +318,7 @@ static bool zone_guards_eval(safety_guard_state_t *state, const safety_guard_cfg
             }
             state->s8z_window_start_c[z] = in->zone_c[z];
             state->s8z_window_elapsed_s[z] = 0.0f;
+            state->s8z_post_elapsed_s[z] = 0.0f;
         }
     }
     return false;
@@ -1080,9 +1111,29 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* AT: S1 on the working zone TCs (the own reading is unusable). */
         {
             float zhot = 0.0f;
-            bool zany = guard_hot_all(in, &zhot);
+            bool zany = guard_hot_s1(in, &zhot);
             if (s1_eval(state, cfg, zany, zhot)) {
                 return true;
+            }
+        }
+        /* LOW-4: own TC faulted -> S11 (frozen value) on each working zone while heating. */
+        for (int z = 0; z < 3; z++) {
+            if (in->zone_ok[z] && !isnan(in->zone_c[z]) && in->heat_commanded) {
+                if (!state->s11z_active[z] || in->zone_c[z] != state->s11z_last_c[z]) {
+                    state->s11z_active[z] = true;
+                    state->s11z_last_c[z] = in->zone_c[z];
+                    state->s11z_elapsed_s[z] = 0.0f;
+                } else {
+                    state->s11z_elapsed_s[z] += in->dt_s;
+                    if (state->s11z_elapsed_s[z] >= effective_f(cfg->frozen_window_s, FROZEN_WINDOW_S_DEFAULT)) {
+                        trip(state, SAFETY_TRIP_FROZEN_SENSOR,
+                             "zone %d reading unchanged at %.1fC for %.0fs while heat commanded", z,
+                             (double)in->zone_c[z], (double)state->s11z_elapsed_s[z]);
+                        return true;
+                    }
+                }
+            } else {
+                state->s11z_active[z] = false;
             }
         }
         /* A11 (guard audit 2026-10-14): keep the S8 window's wall-clock honest across
@@ -1106,6 +1157,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     state->s5_bad_elapsed_s = 0.0f;
     state->s5_warn = false;
     state->s5_not_installed = false;
+    for (int z = 0; z < 3; z++) {
+        state->s11z_active[z] = false; /* LOW-4: zone S11 runs only while the own TC is faulted */
+    }
 
     /* --- S1: absolute over-temperature ---------------------------------------
      * abs_max_temp_c == 0 means "not commissioned" -- never trip, and never
@@ -1113,7 +1167,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * no default and must be commissioned"). */
     {
         float hot_all = 0.0f;
-        bool have_hot = guard_hot_all(in, &hot_all);
+        bool have_hot = guard_hot_s1(in, &hot_all);
         if (s1_eval(state, cfg, have_hot, hot_all)) {
             return true;
         }

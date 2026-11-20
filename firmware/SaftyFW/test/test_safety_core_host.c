@@ -1121,6 +1121,23 @@ static void at_run(unsigned n, unsigned adv)
     }
 }
 
+static void test_at_stale_own_snapshot_no_tolerance(void)
+{
+    TEST_SECTION("AT LOW-5: a stale own snapshot with OPEN latched grants no fault tolerance");
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    W.relay_energized = true;
+    at_run(50, 1);
+    at_own_open();
+    at_run(1000, 1); // 100 s: past blind_grace_s, tolerated
+    TEST_CHECK(!is_tripped(), "LOW-5 sanity: fresh own OPEN is tolerated while a zone works");
+    W.thermo_publish = false; // own snapshot goes stale, OPEN bit stays latched in it
+    at_run(300, 1);
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_SENSOR_INVALID,
+               "LOW-5: stale own snapshot is not tolerated (S5 trips)");
+}
+
 static void test_at_own_open_cool_zone_keeps_firing(void)
 {
     TEST_SECTION("AT: own TC open, zone TC cool and working: firing continues past blind_grace (no time cap)");
@@ -1356,6 +1373,7 @@ int main(void)
     test_s9_ineffective_trip();
     test_s16_config_corrupt();
     test_at_own_open_cool_zone_keeps_firing();
+    test_at_stale_own_snapshot_no_tolerance();
     test_at_own_open_hot_zone_trips_s1();
     test_at_hottest_of_three_zones();
     test_at_zone_tcrange_near_ceiling();

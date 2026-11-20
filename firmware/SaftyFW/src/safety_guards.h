@@ -560,6 +560,11 @@ typedef struct {
     float   zone_c[3];
     bool    zone_tcrange[3];
     bool    zone_stalled_any;
+    /* MED-2: a measured-valid finite zone reading ABOVE its type's range (or any reading of an
+     * out-of-table tc_type), fresh context, link up, no fault bits. Counts as over the ceiling for
+     * S1 only (never dropped, never feeds S2). zone_over_c is the hottest such value. */
+    bool    zone_over_any;
+    float   zone_over_c;
 
     /* S6a. mainFault (GPIO10, active low), already debounced 200ms by
      * discrete_task -- same division as estop_pressed above. */
@@ -727,6 +732,10 @@ typedef struct {
     float   s8z_window_elapsed_s[3];
     uint8_t s8z_over_rate_streak[3];
     float   s8z_post_elapsed_s[3];
+    float   s8z_notok_elapsed_s[3]; /* LOW-3: continuous not-working time; window resets only after borrowed_stale_s */
+    bool    s11z_active[3];         /* LOW-4: S11 frozen-value window per zone, only while the own TC is faulted */
+    float   s11z_last_c[3];
+    float   s11z_elapsed_s[3];
 
     /* S2: sustained-over-setpoint timer. */
     float s2_over_elapsed_s;

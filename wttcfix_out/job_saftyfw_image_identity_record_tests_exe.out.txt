@@ -1,0 +1,3 @@
+test_saftyfw_image_identity_record.c
+saftyfw_image_identity_record.c
+saftyfw_image_identity.c
