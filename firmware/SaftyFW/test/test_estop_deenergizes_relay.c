@@ -62,7 +62,6 @@ static safety_guard_input_t estop_base_input(void)
     in.tc_c = 20.0f;
     in.cj_c = 25.0f;
     in.current_sensing_commissioned = true;
-    in.sample_counter_advancing = true;
     in.link_up = true;
     in.dt_s = 0.1f;
     return in;

@@ -72,6 +72,7 @@
                               // link->safety_core boundary tools/check_isolation.ps1 enforces.
 #include "relay_grace.h" // relay_energize_allowed_during_update() -- see safety_core_request_enable()
 #include "relay_owner.h"
+#include "max31856_tc_range_policy.h" // AT: zone TC plausibility for the zone reduction
 #include "safety_guards.h"
 #include "snapshots.h" // context_snapshot_t + link_task_get_context_snapshot()/
                         // link_task_get_degraded_no_context()/link_task_link_up()/
@@ -283,8 +284,9 @@ static safety_guard_cfg_t s_guard_cfg;
 // boot, so the very first sighting of a zone can never manufacture a false
 // "advancing" (or "stalled") verdict by comparing against zero-initialized
 // state that was never a real reading.
-static uint8_t s_borrowed_last_sample_counter[CONTEXT_SNAPSHOT_MAX_ZONES];
-static bool    s_borrowed_sample_counter_known[CONTEXT_SNAPSHOT_MAX_ZONES];
+// AT (owner 2026-11-19): per-zone freshness trackers for the zone TC reduction
+// (context_reduce_hottest()). Every fitted zone is an in-chamber TC for S1/S2/S8.
+static context_zone_track_t s_zone_track[CONTEXT_SNAPSHOT_MAX_ZONES];
 
 // Edge-latch for the borrowed-channel tc_type mismatch diagnostic
 // (context_borrowed_type_mismatch(), snapshots.h) -- docs/THERMOCOUPLE.md
@@ -355,23 +357,12 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     // cannot express "unset" (CHAMBER_AGREED is 0, which is also the
     // zero-init value AND the value that arms S2/S10), so the validity flag
     // carries that -- see safety_guards.h's tc_placement_valid comment.
-    s_guard_cfg.tc_placement_valid = (rec->fields_set & CONFIG_STORE_SET_TC_PLACEMENT_MODE) != 0u;
-    s_guard_cfg.tc_placement_mode = (rec->tc_placement_mode == CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT)
-                                         ? SAFETY_TC_EXTERNAL_OVERHEAT
-                                         : SAFETY_TC_CHAMBER_AGREED;
-
-    // tc_source gates S13. OWN_J7 is the conservative uncommissioned reading
-    // (safety_guards.h). sample_counter_advancing (safety_core_build_input())
-    // now has a real producer -- see that call site -- so BORROWED_ZONE/BOTH
-    // is safe to commission once borrowed_zone_index is also set.
+    // AT (owner 2026-11-19): tc_placement_mode and tc_source are DEPRECATED and ignored.
+    // The own J7 TC is always an in-chamber TC alongside the zones, so S2/S10 always run
+    // (CHAMBER_AGREED); the stored values stay readable for backup round trips only.
+    s_guard_cfg.tc_placement_valid = true;
+    s_guard_cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
     s_guard_cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
-    if (rec->fields_set & CONFIG_STORE_SET_TC_SOURCE) {
-        if (rec->tc_source == CONFIG_STORE_TC_SOURCE_BORROWED_ZONE) {
-            s_guard_cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
-        } else if (rec->tc_source == CONFIG_STORE_TC_SOURCE_BOTH) {
-            s_guard_cfg.tc_source = SAFETY_TC_SOURCE_BOTH;
-        }
-    }
 
     // S5 / S11 / S12 / S13 / S2 / S3 / S6b / S9 / S10 windows and thresholds.
     // Each of these is a "0 -> documented default" field in safety_guards.c's
@@ -1096,35 +1087,12 @@ static safety_guard_input_t safety_core_build_input(void)
         safety_tc_not_installed_declared = s_last_good_tc_not_installed_declared;
     }
 
-    // S13's sample_counter_advancing. GUARD_TEST_MATRIX.md section 6 (row
-    // S13) found the actual gap: `borrowed_zone_index` IS a real config_store
-    // field (config_store.h/.c, config_params.c param 0x0102) -- the comment
-    // that used to sit here, claiming it "does not exist anywhere in this
-    // codebase yet", was written before that field landed and went stale.
-    // The real gap was always the one-step plumbing GUARD_TEST_MATRIX.md
-    // describes: nothing read it back out to decide whether the context
-    // frame's per-zone sample_counter was moving. Fixed here by calling
-    // snapshots.h's context_borrowed_sample_counter_advancing() -- see that
-    // function's own doc comment for the zone_index-vs-array-position
-    // subtlety and the "missing zone doesn't reset the remembered counter"
-    // rule. Indexed into the file-static last-seen arrays by
-    // cfg_rec.borrowed_zone_index itself (always 0..2, config_params.c's
-    // CHECK_U8_MAX(2u) on param 0x0102), which is safe to do even when the
-    // index is uncommissioned (defaults to 0, config_store.c's zero-record) --
-    // have_index below is what actually gates whether the result means
-    // anything, not the array indexing.
-    bool sample_counter_advancing = context_borrowed_sample_counter_advancing(
-        &ctx, context_valid, (cfg_rec.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u,
-        cfg_rec.borrowed_zone_index, &s_borrowed_sample_counter_known[cfg_rec.borrowed_zone_index],
-        &s_borrowed_last_sample_counter[cfg_rec.borrowed_zone_index]);
-
-    // PN-01 inputs (consumed in the guard input below).
-    bool    use_borrowed_tc = (s_guard_cfg.tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE);
-    float   borrowed_c = 0.0f;
-    uint8_t borrowed_fault = 0u;
-    bool    borrowed_ok = use_borrowed_tc && context_borrowed_guard_reading(
-        &ctx, context_valid, (cfg_rec.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u,
-        cfg_rec.borrowed_zone_index, &borrowed_c, &borrowed_fault);
+    // AT: reduce every zone TC (hottest working reading, working count, stall flag) for
+    // S1/S2/S8/S13. s6b_active is the link-dead condition S6b trips on.
+    context_zone_reduction_t zone_red;
+    context_reduce_hottest(&ctx, context_valid, !link_task_link_up(), now_ms,
+                           cfg_rec.borrowed_stale_s > 0u ? (float)cfg_rec.borrowed_stale_s : 10.0f,
+                           s_zone_track, max31856_tc_range_is_plausible, &zone_red);
 
     // docs/THERMOCOUPLE.md "Type checking a borrowed channel" / THERMOCOUPLE.md's
     // own open checklist item -- same have_index gate as sample_counter_advancing
@@ -1395,16 +1363,16 @@ static safety_guard_input_t safety_core_build_input(void)
         // PN-01: in BORROWED_ZONE mode S1/S5/S11/S12 run on the borrowed zone's
         // measured_c (invalid when absent/stale/non-finite -> S5 handles it),
         // not the Pico's own J7. The cold junction stays the Pico's own.
-        .tc_valid = use_borrowed_tc ? borrowed_ok : (thermo.valid && thermo_fresh),
-        .tc_c = use_borrowed_tc ? (borrowed_ok ? borrowed_c : NAN) : thermo.tc_c,
+        .tc_valid = thermo.valid && thermo_fresh,
+        .tc_c = thermo.tc_c,
         // TC sheath lag (0x010B) is a fact about the Pico's own J7 probe:
         // none for a borrowed zone reading, none for a stale snapshot.
-        .tc_lead_c = (use_borrowed_tc || !thermo_fresh) ? 0.0f : thermo.tc_lead_c,
+        .tc_lead_c = (!thermo_fresh) ? 0.0f : thermo.tc_lead_c,
         .cj_c = thermo.cj_c,
         .cj_invalid = !thermo.cj_valid || !thermo_fresh, // review saftyfx6 F5
-        .fault_bits = use_borrowed_tc ? (borrowed_ok ? borrowed_fault : 0u) : thermo.fault_bits,
-        .spi_failed = use_borrowed_tc ? false : thermo.spi_failed,
-        .safety_tc_not_installed_declared = safety_tc_not_installed_declared && !use_borrowed_tc,
+        .fault_bits = thermo.fault_bits,
+        .spi_failed = thermo.spi_failed,
+        .safety_tc_not_installed_declared = safety_tc_not_installed_declared,
         .estop_pressed = discrete_task_estop_pressed(),
         // S6a, the sibling of estop_pressed above and read exactly the same
         // way: discrete_task samples GPIO10 as `!gpio_get(...)` (active low)
@@ -1424,7 +1392,12 @@ static safety_guard_input_t safety_core_build_input(void)
         .current_sensing_disabled = cts_disabled,
         .relay_commanded_recently = relay_commanded_recently,
         .relay_commanded_continuously = relay_commanded_continuously,
-        .sample_counter_advancing = sample_counter_advancing,
+        .zone_hot_max_c = zone_red.hot_max_c,
+        .zone_working_count = zone_red.working_count,
+        .zone_ok = {zone_red.working[0], zone_red.working[1], zone_red.working[2]},
+        .zone_c = {zone_red.c[0], zone_red.c[1], zone_red.c[2]},
+        .zone_tcrange = {zone_red.tcrange[0], zone_red.tcrange[1], zone_red.tcrange[2]},
+        .zone_stalled_any = zone_red.stalled_any,
         .link_up = link_task_link_up(),
         .reboot_grace_active = reboot_grace_active,
         // S9's "did the hardware actually respond". The INVERSE of

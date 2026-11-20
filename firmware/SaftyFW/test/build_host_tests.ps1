@@ -495,6 +495,7 @@ try {
         (Join-Path $srcDir "ct_blind_policy.c"),
         (Join-Path $srcDir "tasks\safety_core.c"),
         (Join-Path $srcDir "safety_guards.c"),
+        (Join-Path $srcDir "max31856_tc_range_policy.c"),
         (Join-Path $srcDir "config_store.c"),
         (Join-Path $srcDir "tasks\link_frame.c"),
         (Join-Path $srcDir "tasks\clock_health.c"),

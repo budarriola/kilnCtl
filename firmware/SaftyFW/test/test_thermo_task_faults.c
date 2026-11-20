@@ -498,7 +498,6 @@ static void s1_stuck_on(float tau_true, float tau_set, float *t_true, float *t_r
         in.cj_c = 25.0f;
         in.dt_s = dt;
         in.current_sensing_commissioned = true;
-        in.sample_counter_advancing = true;
         in.link_up = true;
         if (*t_true < 0.0f && T >= 1250.0f) *t_true = t;
         if (*t_raw < 0.0f && safety_guards_tick(&g_raw, &cfg, &in) && g_raw.reason == SAFETY_TRIP_OVERTEMP)

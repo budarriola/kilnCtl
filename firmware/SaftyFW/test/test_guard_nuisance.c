@@ -108,7 +108,6 @@ static safety_guard_input_t nuisance_base_input(void)
     in.relay_commanded_recently = false;
     in.relay_commanded_continuously = false;
     in.current_sensing_commissioned = true;
-    in.sample_counter_advancing = true;
     in.link_up = true;
     in.dt_s = 0.1f; /* safety_core's real tick period */
     return in;

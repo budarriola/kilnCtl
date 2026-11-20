@@ -913,8 +913,9 @@ static void link_task_send_status(void)
     // ZONE_INDEX set); otherwise LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN is
     // sent rather than the field's uninitialized-to-0 default, which would
     // otherwise look exactly like a real, commissioned "zone 0".
-    bool is_borrowed = (status_cfg.tc_source == CONFIG_STORE_TC_SOURCE_BORROWED_ZONE) ||
-                        (status_cfg.tc_source == CONFIG_STORE_TC_SOURCE_BOTH);
+    // AT (owner 2026-11-19): tc_source is deprecated and ignored; the own TC is never replaced by a zone,
+    // so the Pico never reports the borrowed mode. The stored value stays readable for backups.
+    bool is_borrowed = false;
     bool borrowed_zone_index_known =
         (status_cfg.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u;
     uint8_t borrowed_zone_index_wire = borrowed_zone_index_known

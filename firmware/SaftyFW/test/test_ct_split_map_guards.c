@@ -87,7 +87,6 @@ static void test_split_map_fitted_and_presence(void)
     in.tc_c = 20.0f;
     in.cj_c = 25.0f;
     in.current_sensing_commissioned = true;
-    in.sample_counter_advancing = true;
     in.link_up = true;
     in.context_valid = true;
     in.any_current_present = config_store_mask_current_present_to_fitted_mask(p0, mask);
@@ -125,7 +124,6 @@ static void test_split_map_s14_arm_gets_amps_valid(void)
     in.tc_valid = true;
     in.tc_c = 20.0f;
     in.cj_c = 25.0f;
-    in.sample_counter_advancing = true;
     in.link_up = true;
     in.context_valid = true;
     in.dt_s = 5.0f;

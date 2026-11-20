@@ -579,8 +579,75 @@ static void test_borrowed_type_zone_index_not_array_position(void)
                          "mismatch");
 }
 
+/* AT: zone TC reduction (context_reduce_hottest / context_zone_working). */
+static bool at_plausible_k(uint8_t tc_type, float c)
+{
+    (void)tc_type;
+    return c >= -200.0f && c <= 1372.0f;
+}
+
+static void at_make_ctx(context_snapshot_t *ctx, float c0, float c1)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->valid = true;
+    ctx->zone_count = 2;
+    for (int i = 0; i < 2; i++) {
+        ctx->zones[i].zone_index = (uint8_t)i;
+        ctx->zones[i].flags = CONTEXT_ZONE_FLAG_ACTIVE | CONTEXT_ZONE_FLAG_MEASURED_VALID;
+        ctx->zones[i].measured_c = (i == 0) ? c0 : c1;
+    }
+}
+
+static void test_at_zone_reduction(void)
+{
+    context_snapshot_t ctx;
+    context_zone_track_t tr[CONTEXT_SNAPSHOT_MAX_ZONES];
+    context_zone_reduction_t r;
+    memset(tr, 0, sizeof(tr));
+
+    at_make_ctx(&ctx, 500.0f, 900.0f);
+    context_reduce_hottest(&ctx, true, false, 1000u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(r.working_count == 0u, "AT: first sight is not working (no advance seen yet)");
+    ctx.zones[0].sample_counter = 1;
+    ctx.zones[1].sample_counter = 1;
+    context_reduce_hottest(&ctx, true, false, 1100u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(r.working_count == 2u && r.hot_max_c == 900.0f, "AT: advancing zones work, hottest reported");
+
+    /* zone 1 stops advancing: after stale_s it is excluded and flagged stalled */
+    ctx.zones[0].sample_counter = 2;
+    context_reduce_hottest(&ctx, true, false, 11200u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(r.working[0] && !r.working[1] && r.stalled_any, "AT: stalled zone excluded and flagged");
+    TEST_CHECK(r.hot_max_c == 500.0f, "AT: excluded zone does not drive the hottest value");
+
+    /* faults, NaN, implausible, s6b, invalid context */
+    ctx.zones[0].sample_counter = 3;
+    ctx.zones[1].sample_counter = 3;
+    ctx.zones[1].tc_fault = CONTEXT_ZONE_FAULT_OPEN;
+    context_reduce_hottest(&ctx, true, false, 11300u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(!r.working[1], "AT: OPEN fault zone not working");
+    ctx.zones[1].tc_fault = CONTEXT_ZONE_FAULT_TCRANGE;
+    ctx.zones[1].sample_counter = 4;
+    context_reduce_hottest(&ctx, true, false, 11400u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(!r.working[1] && r.tcrange[1], "AT: TCRANGE fault zone not working, flagged tcrange");
+    ctx.zones[1].tc_fault = 0;
+    ctx.zones[1].measured_c = NAN;
+    ctx.zones[1].sample_counter = 5;
+    context_reduce_hottest(&ctx, true, false, 11500u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(!r.working[1], "AT: NaN zone not working");
+    ctx.zones[1].measured_c = 5000.0f;
+    ctx.zones[1].sample_counter = 6;
+    context_reduce_hottest(&ctx, true, false, 11600u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(!r.working[1], "AT: implausible zone not working");
+    ctx.zones[0].sample_counter = 7;
+    context_reduce_hottest(&ctx, true, true, 11700u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(r.working_count == 0u, "AT: S6b active leaves no working zone");
+    context_reduce_hottest(&ctx, false, false, 11800u, 10.0f, tr, at_plausible_k, &r);
+    TEST_CHECK(r.working_count == 0u, "AT: invalid context leaves no working zone");
+}
+
 void run_test_snapshots(void)
 {
+    test_at_zone_reduction();
     test_reduce_zones_invalid_context();
     test_reduce_zones_non_finite_floats_ineligible();
     test_reduce_zones_null_context();

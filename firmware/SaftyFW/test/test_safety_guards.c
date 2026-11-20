@@ -36,7 +36,6 @@ static safety_guard_input_t base_input(void)
      * tests override this to false to exercise the uncommissioned/WARN
      * path deliberately. */
     in.current_sensing_commissioned = true;
-    in.sample_counter_advancing = true;
     in.main_fault_asserted = false;
     in.link_up = true;
     in.relay_deenergized = false;
@@ -3270,102 +3269,377 @@ static void test_s10(void)
     }
 }
 
+/* AT helpers: an input whose own TC reports an OPEN fault. */
+static void at_own_open(safety_guard_input_t *in)
+{
+    in->tc_valid = false;
+    in->tc_c = NAN;
+    in->fault_bits = SAFETY_THERMO_FAULT_OPEN;
+}
+
+/* AT helper: zone z working at c degC. */
+static void at_zone(safety_guard_input_t *in, int z, float c)
+{
+    in->zone_ok[z] = true;
+    in->zone_c[z] = c;
+    in->zone_working_count = 0;
+    in->zone_hot_max_c = -1000.0f;
+    for (int i = 0; i < 3; i++) {
+        if (in->zone_ok[i]) {
+            in->zone_working_count++;
+            if (in->zone_c[i] > in->zone_hot_max_c) {
+                in->zone_hot_max_c = in->zone_c[i];
+            }
+        }
+    }
+}
+
 static void test_s13(void)
 {
-    TEST_SECTION("S13 -- borrowed channel not updating (graduated, context)");
+    TEST_SECTION("S13 -- zone TC channel stalled (graduated, context)");
 
-    /* Nuisance: OWN_J7 (not borrowing) never engages S13 at all, no matter
-     * what sample_counter_advancing says. */
+    /* Nuisance: the own TC works, so a stalled zone is only excluded (WARN), never a trip. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
-        cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        in.sample_counter_advancing = false;
+        in.zone_stalled_any = true;
         in.dt_s = 60.0f;
         bool tripped = false;
         for (int i = 0; i < 20 && !tripped; i++) {
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
-        TEST_CHECK(!tripped, "OWN_J7 mode never engages S13");
-        TEST_CHECK(!s.s13_warn, "OWN_J7 mode: no WARN either");
+        TEST_CHECK(!tripped, "own TC ok: a stalled zone never trips S13");
+        TEST_CHECK(s.s13_warn, "own TC ok: a stalled zone raises the S13 WARN");
+        TEST_CHECK(s.s13_stale_elapsed_s == 0.0f, "own TC ok: no S13 elapsed accumulation");
     }
 
-    /* Nuisance: an advancing sample_counter never warns or trips, even
-     * sustained. */
+    /* Nuisance: nothing stalled never warns or trips. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
-        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        in.sample_counter_advancing = true;
         in.dt_s = 60.0f;
         bool tripped = false;
         for (int i = 0; i < 20 && !tripped; i++) {
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
-        TEST_CHECK(!tripped, "an advancing sample_counter never trips S13");
-        TEST_CHECK(!s.s13_warn, "an advancing sample_counter never warns either");
+        TEST_CHECK(!tripped, "no stalled zone never trips S13");
+        TEST_CHECK(!s.s13_warn, "no stalled zone never warns either");
     }
 
-    /* Graduated: WARN at borrowed_stale_s (10s), TRIP at
-     * borrowed_stale_trip_s (60s). */
+    /* Graduated: own TC open, no zone works, a zone stalled: WARN at borrowed_stale_s (10 s),
+     * TRIP at borrowed_stale_trip_s (60 s). S5's blind grace is pushed out so S13 is isolated. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
-        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        cfg.blind_grace_s = 1000.0f;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        in.sample_counter_advancing = false;
+        at_own_open(&in);
+        in.zone_stalled_any = true;
         in.dt_s = 5.0f;
         bool tripped = false;
-        for (int i = 0; i < 2; i++) { /* 10s: reaches borrowed_stale_s exactly */
+        for (int i = 0; i < 2; i++) {
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
         TEST_CHECK(!tripped, "10s stale: not yet tripped");
         TEST_CHECK(s.s13_warn, "10s stale: WARN active (>= borrowed_stale_s)");
-        for (int i = 0; i < 10 && !tripped; i++) { /* continue to 60s total */
+        for (int i = 0; i < 10 && !tripped; i++) {
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
         TEST_CHECK(tripped, "60s stale (>= borrowed_stale_trip_s) trips S13");
         TEST_CHECK(s.reason == SAFETY_TRIP_BORROWED_STALE, "reason is SAFETY_TRIP_BORROWED_STALE");
     }
 
-    /* BOTH mode also engages S13. */
+    /* A zone that works again resets the elapsed timer, clearing WARN. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
-        cfg.tc_source = SAFETY_TC_SOURCE_BOTH;
-        safety_guard_input_t in = base_input();
-        in.context_valid = true;
-        in.sample_counter_advancing = false;
-        in.dt_s = 61.0f;
-        bool tripped = safety_guards_tick(&s, &cfg, &in);
-        TEST_CHECK(tripped, "BOTH mode engages S13 the same as BORROWED_ZONE");
-    }
-
-    /* A resumed sample_counter resets the elapsed timer, clearing WARN. */
-    {
-        safety_guard_state_t s;
-        safety_guards_reset(&s);
-        safety_guard_cfg_t cfg = base_cfg();
-        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        cfg.blind_grace_s = 1000.0f;
         safety_guard_input_t stale = base_input();
         stale.context_valid = true;
-        stale.sample_counter_advancing = false;
+        at_own_open(&stale);
+        stale.zone_stalled_any = true;
         stale.dt_s = 15.0f;
-        safety_guards_tick(&s, &cfg, &stale); /* 15s stale: WARN */
+        safety_guards_tick(&s, &cfg, &stale);
         TEST_CHECK(s.s13_warn, "sanity: WARN set");
         safety_guard_input_t fresh = stale;
-        fresh.sample_counter_advancing = true;
+        fresh.zone_stalled_any = false;
+        at_zone(&fresh, 0, 500.0f);
         safety_guards_tick(&s, &cfg, &fresh);
-        TEST_CHECK(!s.s13_warn, "a resumed sample_counter clears S13's WARN immediately");
+        TEST_CHECK(!s.s13_warn, "a zone working again clears S13's WARN immediately");
+        TEST_CHECK(s.s13_stale_elapsed_s == 0.0f, "a zone working again resets S13's timer");
+    }
+}
+
+/* AT (owner 2026-11-19): own-IC fault tolerated while a zone works; S1/S2/S8 on every TC. */
+static void test_at_all_tc_guards(void)
+{
+    TEST_SECTION("AT -- every TC checked by S1/S2/S8, own-IC fault tolerated while a zone works");
+
+    /* Own open + cool working zone: no S5 trip however long (no time cap), warn only. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 400 && !tripped; i++) { /* 4000 s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "AT: own open + cool zone never trips S5 (no time cap)");
+        TEST_CHECK(s.s5_warn, "AT: own open + cool zone reports the S5 warn");
+    }
+    /* Same, then the zone fails: trips at once (S5 time already past grace). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.is_tripped, "AT: tolerated so far");
+        in.zone_ok[0] = false;
+        in.zone_working_count = 0;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "AT: last working zone lost, own still open: S5 trips");
+    }
+    /* Zero working zones, own open: trips as before. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "AT: own open and no working zone trips S5");
+    }
+    /* SPI failure is never tolerated. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        in.spi_failed = true;
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "AT: an SPI failure is not tolerated even with a working zone");
+    }
+    /* A stale/NaN own reading with no fault bit is not tolerated. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_valid = false;
+        in.tc_c = NAN;
+        in.fault_bits = 0;
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "AT: an invalid own reading without a fault bit is not tolerated");
+    }
+    /* S1: own open, hot zone trips; hottest of three drives S1. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        at_zone(&in, 0, 500.0f);
+        at_zone(&in, 1, cfg.abs_max_temp_c + 20.0f);
+        at_zone(&in, 2, 400.0f);
+        in.dt_s = 0.1f;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP, "AT: hot zone trips S1 while own TC is open");
+    }
+    /* S1: own cool but a zone hot, own ok. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        at_zone(&in, 2, cfg.abs_max_temp_c + 20.0f);
+        in.dt_s = 0.1f;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP, "AT: hottest zone trips S1 with a healthy cool own TC");
+    }
+    /* S1: a hot zone that is NOT working is ignored (frozen/implausible zones do not count). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        in.zone_ok[1] = false;
+        in.zone_c[1] = cfg.abs_max_temp_c + 20.0f;
+        in.dt_s = 0.1f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "AT: a zone not working is excluded from S1");
+    }
+    /* SR-33 per zone: TCRANGE right after a near-ceiling reading. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        at_zone(&in, 1, cfg.abs_max_temp_c - 20.0f);
+        in.dt_s = 0.1f;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.is_tripped, "AT: sane near-ceiling zone, no trip");
+        in.zone_ok[1] = false;
+        in.zone_working_count = 0;
+        in.zone_tcrange[1] = true;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP, "AT: zone TCRANGE near the ceiling trips S1");
+    }
+    /* S8 per zone: zone 2 climbs, own TC flat. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 100.0f;
+        cfg.rate_window_s = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        in.dt_s = 1.0f;
+        float c = 200.0f;
+        bool tripped = false;
+        for (int i = 0; i < 60 && !tripped; i++) {
+            c += 5.0f; /* 300 C/min */
+            at_zone(&in, 2, c);
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_RATE, "AT: per-zone S8 trips on a fast zone while the own TC is flat");
+    }
+    /* S8 per zone: a zone dropping out resets its window (no false rate across the gap). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 100.0f;
+        cfg.rate_window_s = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        in.dt_s = 1.0f;
+        at_zone(&in, 0, 100.0f);
+        for (int i = 0; i < 5; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        in.zone_ok[0] = false;
+        in.zone_working_count = 0;
+        for (int i = 0; i < 30; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        at_zone(&in, 0, 900.0f); /* back far hotter, window must restart */
+        bool tripped = false;
+        for (int i = 0; i < 30 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "AT: a zone returning after a gap starts a fresh S8 window (no false rate trip)");
+    }
+    /* S2 uses the hottest TC; with the own TC open and zones hot it still runs. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 300.0f;
+        at_own_open(&in);
+        at_zone(&in, 0, 300.0f + 200.0f); /* well over setpoint + margin */
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 30 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVER_SETPOINT, "AT: S2 trips on a hot zone with the own TC open");
+    }
+    /* Clear refused while any zone is above abs_max; granted when it falls and own is ok. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = 100.0f;
+        at_zone(&in, 1, cfg.abs_max_temp_c + 20.0f);
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 5 && !s.is_tripped; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped, "AT: sanity, S1 latched by a zone");
+        bool cleared = safety_guards_try_clear(&s, &cfg, &in);
+        TEST_CHECK(!cleared, "AT: clear refused while a zone is above abs_max");
+    }
+    /* Clear refused while no TC works at all after an S1 trip. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.tc_c = cfg.abs_max_temp_c + 50.0f;
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 5 && !s.is_tripped; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped, "AT: sanity, own S1 latched");
+        at_own_open(&in);
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "AT: clear refused when no TC works");
     }
 }
 
@@ -3405,7 +3679,7 @@ static void test_s6_s13_split(void)
         safety_guard_input_t in = base_input();
         in.link_up = false;
         in.context_valid = false;         /* caller's job: dead link => no context */
-        in.sample_counter_advancing = false; /* even so, must not leak into S13 */
+        in.zone_stalled_any = true; /* even so, must not leak into S13 */
         in.any_current_present = true;    /* arms S6b's soft (10s) path */
         in.dt_s = 11.0f;
         bool tripped = safety_guards_tick(&s, &cfg, &in);
@@ -3426,7 +3700,7 @@ static void test_s6_s13_split(void)
         safety_guard_input_t in = base_input();
         in.link_up = true;
         in.context_valid = true;
-        in.sample_counter_advancing = false;
+        at_own_open(&in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
         in.dt_s = 61.0f;
         bool tripped = safety_guards_tick(&s, &cfg, &in);
         TEST_CHECK(tripped, "channel-stale-only: S13 trips");
@@ -3449,7 +3723,7 @@ static void test_s6_s13_split(void)
         safety_guard_input_t in = base_input();
         in.link_up = false;
         in.context_valid = true;          /* deliberately stale-caller edge case */
-        in.sample_counter_advancing = false;
+        at_own_open(&in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
         in.any_current_present = true;
         in.dt_s = 11.0f;
         bool tripped = safety_guards_tick(&s, &cfg, &in);
@@ -3974,7 +4248,7 @@ static void test_try_clear(void)
         cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
         safety_guard_input_t stale = base_input();
         stale.context_valid = true; /* S13 lives in the context-dependent block -- see safety_guards.c */
-        stale.sample_counter_advancing = false;
+        at_own_open(&stale); stale.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
         stale.dt_s = 61.0f; /* > borrowed_stale_trip_s default (60) in one tick */
         bool tripped = safety_guards_tick(&s, &cfg, &stale);
         TEST_CHECK(tripped && s.reason == SAFETY_TRIP_BORROWED_STALE, "sanity: S13 tripped");
@@ -3985,7 +4259,6 @@ static void test_try_clear(void)
 
         safety_guard_input_t advancing = base_input();
         advancing.context_valid = true;
-        advancing.sample_counter_advancing = true;
         cleared = safety_guards_try_clear(&s, &cfg, &advancing);
         TEST_CHECK(cleared, "S13 clear succeeds once the channel is advancing again");
     }
@@ -4389,7 +4662,7 @@ static void test_context_gating(void)
         in.nearest_zone_measured_c = 50.0f; /* huge disagreement -- would warn S10 */
         in.any_current_present = true; /* with nothing commanded -- would trip S3 */
         in.relay_commanded_recently = false;
-        in.sample_counter_advancing = false; /* would eventually trip S13 */
+        at_own_open(&in); in.safety_tc_not_installed_declared = true; in.zone_stalled_any = true; /* would eventually trip S13 */
         in.dt_s = 61.0f; /* one tick alone exceeds S3's stuck_on_time_s (20s) and S13's borrowed_stale_trip_s (60s) if context were valid */
         bool tripped = false;
         for (int i = 0; i < 10 && !tripped; i++) {
@@ -5045,7 +5318,7 @@ static void test_test_trip_loses_to_every_real_guard(void)
         case 3: in.cj_c = 90.0f; in.dt_s = 61.0f; want = SAFETY_TRIP_ENCLOSURE_TEMP; name = "S12"; break;
         default:
             cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE; in.context_valid = true;
-            in.sample_counter_advancing = false; in.dt_s = 61.0f;
+            at_own_open(&in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f; in.dt_s = 61.0f;
             want = SAFETY_TRIP_BORROWED_STALE; name = "S13 (last guard)"; break;
         }
         /* Twin run without a request finds the tick the real guard fires on. */
@@ -5123,7 +5396,7 @@ static void test_test_trip_clear_refuses_real_conditions(void)
         if (k == 3) { c.tc_valid = false; }
         if (k == 4) { c.tc_c = 50.0f; }
         if (k == 5) { c.cj_c = 90.0f; }
-        if (k == 6) { c.sample_counter_advancing = false; }
+        if (k == 6) { at_own_open(&c); c.zone_stalled_any = true; }
         if (k == 7) { c.link_up = false; }
         if (k == 8) { c.tc_c = (float)NAN; c.tc_valid = false; }
         if (k == 9) { c.main_fault_asserted = true; }
@@ -5647,6 +5920,7 @@ void run_test_safety_guards(void)
     test_s9();
     test_s10();
     test_s13();
+    test_at_all_tc_guards();
     test_s6_s13_split();
     test_context_gating();
     test_independence_invariant();

@@ -120,7 +120,8 @@ typedef enum {
     SAFETY_TC_EXTERNAL_OVERHEAT = 1,
 } safety_tc_placement_mode_t;
 
-/* SAFETY_MODEL.md section 3, "tc_source" -- which sensor is the active
+/* DEPRECATED (AT, owner 2026-11-19), ignored by every guard: tc_source no longer selects anything.
+ * SAFETY_MODEL.md section 3, "tc_source" -- which sensor was the active
  * safety reading. Only S13 (borrowed-channel staleness) and S11's "which
  * source is active" note care about this; S1/S5/S12 above operate on
  * whatever in->tc_c/cj_c/tc_valid the caller hands them regardless of where
@@ -218,9 +219,9 @@ typedef struct {
     float cj_max_c;
     float cj_time_s;
 
-    /* S13. tc_source picks whether S13 can be active at all -- WARN/TRIP
-     * (SAFETY_MODEL.md section 4, S13: "BORROWED_ZONE/BOTH only"). 0 ->
-     * borrowed_stale_s=10.0s, borrowed_stale_trip_s=60.0s. */
+    /* S13. tc_source is DEPRECATED (AT, owner 2026-11-19) and IGNORED: the own J7 TC and every
+     * zone are always used. The field stays only so a stored config and old callers still compile.
+     * 0 -> borrowed_stale_s=10.0s, borrowed_stale_trip_s=60.0s. */
     safety_tc_source_t tc_source;
     float borrowed_stale_s;
     float borrowed_stale_trip_s;
@@ -541,13 +542,24 @@ typedef struct {
      * running without CTs. */
     bool current_sensing_disabled;
 
-    /* S13. sample_counter_advancing is already the caller's comparison of
-     * this tick's context frame's per-zone sample_counter against the last
-     * one seen (SAFETY_MODEL.md section 4, S13) -- this module has no
-     * notion of "last frame" to compare against on its own, by design (it
-     * has no I/O and would have to keep frame history to do that itself,
-     * which is exactly the kind of state this module tries not to own). */
-    bool sample_counter_advancing;
+    /* AT (owner 2026-11-19): every thermocouple is an in-chamber TC. The Pico's own J7 reading
+     * (tc_valid/tc_c/tc_lead_c/fault_bits/spi_failed above) is always used, alongside EVERY
+     * working ESP zone reading, already reduced by the caller (snapshots.h
+     * context_reduce_hottest(); "working" is defined there: fresh context, link up, measured-valid,
+     * finite, no OPEN/OVUV/TCRANGE, sample_counter advancing, plausible for its tc_type; idle zones
+     * count). The own-TC "ok" verdict is derived here from the existing fields (it is exactly
+     * !s5_bad_read_now()), so there is one definition.
+     * zone_hot_max_c / zone_working_count: the hottest working zone and how many work (0 -> the
+     * zone side contributes nothing and the guards behave exactly as the own-TC-only guards did).
+     * zone_ok/zone_c/zone_tcrange: the same facts per zone_index for S8's per-TC windows and the
+     * SR-33 near-ceiling TCRANGE rule. zone_stalled_any: some zone looks otherwise good but its
+     * sample_counter has not advanced in time (S13). All must be false/0 when context_valid is false. */
+    float   zone_hot_max_c;
+    uint8_t zone_working_count;
+    bool    zone_ok[3];
+    float   zone_c[3];
+    bool    zone_tcrange[3];
+    bool    zone_stalled_any;
 
     /* S6a. mainFault (GPIO10, active low), already debounced 200ms by
      * discrete_task -- same division as estop_pressed above. */
@@ -701,6 +713,20 @@ typedef struct {
     float   s8_post_start_c;
     float   s8_post_elapsed_s;
     float   s8_post_last_rate_c_per_min;
+
+    /* AT: per-zone TC state, indexed by zone_index. SR-33 (last good zone reading and the
+     * consecutive TCRANGE reads after one near the ceiling) and S8's per-TC rate window (same
+     * algorithm as the own-TC window above; a zone window RESETS whenever its reading is not ok).
+     * s8z_post_elapsed_s: time the zone's frozen tripping window has been held since the latch,
+     * for the whole-hold average in the S8 clear check. */
+    float   s1z_last_valid_c[3];
+    bool    s1z_last_valid_known[3];
+    uint8_t s1z_tcrange_near_ceiling_streak[3];
+    bool    s8z_window_active[3];
+    float   s8z_window_start_c[3];
+    float   s8z_window_elapsed_s[3];
+    uint8_t s8z_over_rate_streak[3];
+    float   s8z_post_elapsed_s[3];
 
     /* S2: sustained-over-setpoint timer. */
     float s2_over_elapsed_s;

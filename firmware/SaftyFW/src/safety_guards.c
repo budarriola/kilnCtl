@@ -148,6 +148,151 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
                                 SAFETY_THERMO_FAULT_TCRANGE)) != 0u);
 }
 
+/* AT (owner 2026-11-19): every thermocouple is an in-chamber TC. The own J7 TC and the ESP
+ * zone readings (reduced by context_reduce_hottest() into zone_hot_max_c / zone_working_count)
+ * are all checked by S1/S2/S8. The helpers below are the single definition of "which TCs
+ * work right now" used by the tick and by the immediate-clear checks. */
+static bool guard_own_ok(const safety_guard_input_t *in)
+{
+    return !s5_bad_read_now(in);
+}
+
+static bool guard_zones_work(const safety_guard_input_t *in)
+{
+    return in->zone_working_count >= 1u && !isnan(in->zone_hot_max_c);
+}
+
+/* An own-IC fault (OPEN/OVUV/TCRANGE bits, SPI itself fine) is tolerated for the rest of the
+ * firing while at least one zone TC works. A stale/NaN own reading with no fault bit, an SPI
+ * failure, or zero working zones is not tolerated (S5 trips as before). */
+static bool guard_own_fault_tolerated(const safety_guard_input_t *in)
+{
+    return s5_bad_read_now(in) && !in->spi_failed &&
+           ((in->fault_bits & (SAFETY_THERMO_FAULT_OPEN | SAFETY_THERMO_FAULT_OVUV |
+                                SAFETY_THERMO_FAULT_TCRANGE)) != 0u) &&
+           guard_zones_work(in);
+}
+
+/* Hottest reading among every working TC (own with sheath lead, zones). false = none works. */
+static bool guard_hot_all(const safety_guard_input_t *in, float *hot)
+{
+    bool any = false;
+    float h = 0.0f;
+    if (guard_own_ok(in)) {
+        h = guard_hot_c(in);
+        any = true;
+    }
+    if (guard_zones_work(in) && (!any || in->zone_hot_max_c > h)) {
+        h = in->zone_hot_max_c;
+        any = true;
+    }
+    *hot = h;
+    return any;
+}
+
+/* S2 immediate condition: hottest working TC still over max setpoint + margin, or no TC works. */
+static bool guard_s2_still_over(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in)
+{
+    float hot = 0.0f;
+    if (!guard_hot_all(in, &hot)) {
+        return true; /* A8: an unknown reading is not a pass */
+    }
+    return hot > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
+}
+
+/* S13 condition: the own TC is bad, no zone works, and a zone is stalled (its sample_counter
+ * stopped advancing). With the own TC ok a stalled zone is merely excluded (warn). */
+static bool guard_s13_condition(const safety_guard_input_t *in)
+{
+    return !guard_own_ok(in) && !guard_zones_work(in) && in->zone_stalled_any;
+}
+
+/* S1 over the hottest working TC. have=false means no TC works: the streak resets (S5 owns that). */
+static bool s1_eval(safety_guard_state_t *state, const safety_guard_cfg_t *cfg, bool have, float hot)
+{
+    if (!(cfg->abs_max_temp_c > 0.0f)) {
+        state->s1_over_ceiling_streak = 0;
+        return false;
+    }
+    /* Owner decision 2026-09-24: S1 trips at abs_max_temp_c alone (no tighter limit). */
+    float ceiling = cfg->abs_max_temp_c;
+    if (have && hot > ceiling) {
+        if (state->s1_over_ceiling_streak < UINT8_MAX) {
+            state->s1_over_ceiling_streak++;
+        }
+        if (state->s1_over_ceiling_streak >= S1_OVER_CEILING_STREAK_TO_TRIP) {
+            trip(state, SAFETY_TRIP_OVERTEMP, "%.1fC > ceiling %.1fC for %u consecutive valid readings",
+                 (double)hot, (double)ceiling, (unsigned)state->s1_over_ceiling_streak);
+            return true;
+        }
+    } else {
+        state->s1_over_ceiling_streak = 0;
+    }
+    return false;
+}
+
+/* AT: per-zone SR-33 (TCRANGE near the ceiling counts toward S1) and per-zone S8 (each zone TC
+ * has its own rate window, reset when the zone is not usable and when it becomes usable again). */
+static bool zone_guards_eval(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
+                             const safety_guard_input_t *in)
+{
+    for (int z = 0; z < 3; z++) {
+        if (in->zone_ok[z] && !isnan(in->zone_c[z])) {
+            state->s1z_last_valid_c[z] = in->zone_c[z];
+            state->s1z_last_valid_known[z] = true;
+            state->s1z_tcrange_near_ceiling_streak[z] = 0;
+        } else if (cfg->abs_max_temp_c > 0.0f && in->zone_tcrange[z] && state->s1z_last_valid_known[z] &&
+                   state->s1z_last_valid_c[z] >= cfg->abs_max_temp_c - S1_TCRANGE_NEAR_CEILING_MARGIN_C) {
+            if (state->s1z_tcrange_near_ceiling_streak[z] < UINT8_MAX) {
+                state->s1z_tcrange_near_ceiling_streak[z]++;
+            }
+            if (state->s1z_tcrange_near_ceiling_streak[z] >= S1_OVER_CEILING_STREAK_TO_TRIP) {
+                trip(state, SAFETY_TRIP_OVERTEMP,
+                     "zone %d TCRANGE after %.1fC (ceiling %.1fC): converter range exceeded near the ceiling", z,
+                     (double)state->s1z_last_valid_c[z], (double)cfg->abs_max_temp_c);
+                return true;
+            }
+        } else {
+            state->s1z_tcrange_near_ceiling_streak[z] = 0;
+        }
+
+        if (!(cfg->max_rate_c_per_min > 0.0f) || !in->zone_ok[z] || isnan(in->zone_c[z])) {
+            state->s8z_window_active[z] = false;
+            state->s8z_window_elapsed_s[z] = 0.0f;
+            state->s8z_over_rate_streak[z] = 0;
+            continue;
+        }
+        if (!state->s8z_window_active[z]) {
+            state->s8z_window_active[z] = true;
+            state->s8z_window_start_c[z] = in->zone_c[z];
+            state->s8z_window_elapsed_s[z] = 0.0f;
+            continue;
+        }
+        state->s8z_window_elapsed_s[z] += in->dt_s;
+        float window_th = effective_f(cfg->rate_window_s, RATE_WINDOW_S_DEFAULT);
+        if (state->s8z_window_elapsed_s[z] >= window_th) {
+            float rate = (in->zone_c[z] - state->s8z_window_start_c[z]) / (state->s8z_window_elapsed_s[z] / 60.0f);
+            if (rate > cfg->max_rate_c_per_min) {
+                if (state->s8z_over_rate_streak[z] < UINT8_MAX) {
+                    state->s8z_over_rate_streak[z]++;
+                }
+            } else {
+                state->s8z_over_rate_streak[z] = 0;
+            }
+            if (state->s8z_over_rate_streak[z] >= S8_OVER_RATE_STREAK_TO_TRIP) {
+                trip(state, SAFETY_TRIP_RATE,
+                     "zone %d %.1fC/min > max_rate_c_per_min %.1fC/min over %.0fs window, %u consecutive windows", z,
+                     (double)rate, (double)cfg->max_rate_c_per_min, (double)state->s8z_window_elapsed_s[z],
+                     (unsigned)state->s8z_over_rate_streak[z]);
+                return true;
+            }
+            state->s8z_window_start_c[z] = in->zone_c[z];
+            state->s8z_window_elapsed_s[z] = 0.0f;
+        }
+    }
+    return false;
+}
+
 /* S8 clear test. strict=true: a RATE trip is latched (post-trip window state valid).
  * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1). The s8_post_* windows are
  * tracked for TEST latches too (saftyfx3 LOW-1) and are checked here, in addition to the
@@ -158,9 +303,30 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
     if (cfg->max_rate_c_per_min <= 0.0f) {
         return false;
     }
-    /* review saftyfx6 F4: unknown reading refuses; s8clrfx2 LOW-3: so does NaN flagged valid. */
-    if (!in->tc_valid || isnan(in->tc_c)) {
+    /* review saftyfx6 F4: unknown reading refuses; s8clrfx2 LOW-3: so does NaN flagged valid.
+     * AT: that now means NO TC works (own unusable and no working zone). */
+    bool own_num = in->tc_valid && !isnan(in->tc_c);
+    if (!own_num && !guard_zones_work(in)) {
         return true;
+    }
+    /* AT: every zone TC with a frozen S8 window is checked the same way (whole-hold average
+     * from the window start, floored at S8_POST_MIN_S). The strict two-window post streak
+     * stays own-TC only (known gap, KNOWN_ISSUES AT-). */
+    for (int z = 0; z < 3; z++) {
+        if (state->s8z_window_active[z] && in->zone_ok[z] && !isnan(in->zone_c[z])) {
+            float held = state->s9_verify_elapsed_s > state->s8z_post_elapsed_s[z]
+                             ? state->s9_verify_elapsed_s : state->s8z_post_elapsed_s[z];
+            float el = state->s8z_window_elapsed_s[z] + held;
+            if (el < S8_POST_MIN_S) {
+                el = S8_POST_MIN_S;
+            }
+            if (((in->zone_c[z] - state->s8z_window_start_c[z]) / (el / 60.0f)) > cfg->max_rate_c_per_min) {
+                return true;
+            }
+        }
+    }
+    if (!own_num) {
+        return false; /* own windows need an own reading; the zones were checked above */
     }
     if (strict) {
         /* review s8clrfx2 LOW-1: a grant needs TWO consecutive full post-trip windows
@@ -325,20 +491,23 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
          * one. (S9 is not listed: it escalates by itself in the tripped path.) */
         return test_trip_masks_real_condition(cfg, in, state);
     case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
-        return s5_bad_read_now(in);
+        return s5_bad_read_now(in) && !guard_own_fault_tolerated(in);
     case SAFETY_TRIP_OVERTEMP: /* S1 -- reading still above the absolute ceiling right now
                                 * (REVIEW_SAFTYFW_TRIP_PATH T1: the S1 debounce counts exactly
                                 * this level; refusing here never loosens the guard). */
         /* Review saftyfx6 F4: an unknown reading (bad TC) is not a pass -- refuse. */
-        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || guard_hot_c(in) > cfg->abs_max_temp_c);
+        {
+            float hot_all = 0.0f;
+            return cfg->abs_max_temp_c > 0.0f &&
+                   (!guard_hot_all(in, &hot_all) || hot_all > cfg->abs_max_temp_c);
+        }
     case SAFETY_TRIP_RATE: /* S8 -- see s8_clear_refuse(); strict = a real RATE trip is latched */
         return s8_clear_refuse(cfg, in, state, true);
     case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
         return in->context_valid && cfg->tc_placement_valid &&
                cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
                /* A8 (guard audit 2026-10-14): an unknown reading is not a pass -- refuse, as S1 does. */
-               (!in->tc_valid ||
-                guard_hot_c(in) > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT));
+               guard_s2_still_over(cfg, in);
     case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 -- current still present with nothing commanded on */
         return in->context_valid && in->any_current_present && !in->relay_commanded_recently;
     case SAFETY_TRIP_FROZEN_SENSOR: /* S11 -- reading still sitting at the value that tripped it.
@@ -384,9 +553,7 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
         return in->cj_invalid || isnan(in->cj_c) ||
                (in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT));
     case SAFETY_TRIP_BORROWED_STALE: /* S13 -- channel still not producing fresh samples */
-        return (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE ||
-                cfg->tc_source == SAFETY_TC_SOURCE_BOTH) &&
-               !in->sample_counter_advancing;
+        return guard_s13_condition(in);
     case SAFETY_TRIP_LINK_DEAD: /* S6b -- link still silent right now */
         return !in->link_up;
     default:
@@ -565,6 +732,12 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     state->ct_guards_disabled = in->current_sensing_disabled;
 
     if (state->is_tripped) {
+        /* AT: time since the per-zone S8 windows froze (clear check, see s8_clear_refuse). */
+        for (int z = 0; z < 3; z++) {
+            if (state->s8z_window_active[z] && in->dt_s > 0.0f) {
+                state->s8z_post_elapsed_s[z] += in->dt_s;
+            }
+        }
         /* Review saftyfx6 F2: after an S8 trip keep measuring a fresh rate so the
          * clear refusal in guard_condition_still_immediate() is bounded in time.
          * Only used by the clear check; never touches the trip path. */
@@ -876,6 +1049,11 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * been blind" -- are unaffected. */
                 if (in->safety_tc_not_installed_declared) {
                     state->s5_not_installed = true;
+                } else if (guard_own_fault_tolerated(in)) {
+                    /* AT (owner 2026-11-19): the own IC reports a fault but a zone TC still
+                     * works. Warn only (s5_warn above); S1/S2/S8 keep running on the zones
+                     * below. The elapsed time keeps accumulating, so the moment no TC works
+                     * any more this trips at once. */
                 } else {
                     trip(state, SAFETY_TRIP_SENSOR_INVALID,
                          "blind for %.1fs (>= blind_grace_s %.1fs), %u consecutive bad reads",
@@ -899,6 +1077,14 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         if (s12_evaluate(state, cfg, in)) { /* PN-04: also runs on an unknown CJ */
             return true;
         }
+        /* AT: S1 on the working zone TCs (the own reading is unusable). */
+        {
+            float zhot = 0.0f;
+            bool zany = guard_hot_all(in, &zhot);
+            if (s1_eval(state, cfg, zany, zhot)) {
+                return true;
+            }
+        }
         /* A11 (guard audit 2026-10-14): keep the S8 window's wall-clock honest across
          * a bad read. Skipping dt here made elapsed shorter than real time while
          * delta_c kept growing, inflating the rate (nuisance trip). The window stays
@@ -906,7 +1092,10 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         if (state->s8_window_active && in->dt_s > 0.0f) {
             state->s8_window_elapsed_s += in->dt_s;
         }
-        tc_usable = false;
+        if (zone_guards_eval(state, cfg, in)) {
+            return true;
+        }
+        tc_usable = guard_zones_work(in);
         goto context_guards;
     }
 
@@ -922,29 +1111,12 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * abs_max_temp_c == 0 means "not commissioned" -- never trip, and never
      * accumulate a streak toward one (SAFETY_MODEL.md section 4, S1: "has
      * no default and must be commissioned"). */
-    if (cfg->abs_max_temp_c > 0.0f) {
-        /* Owner decision 2026-09-24: the safety processor is a backup in
-         * case the ESP fails, and must not run a tighter limit than the
-         * ESP's own ceiling. S1 always trips at abs_max_temp_c alone --
-         * the SET_FIRING_CEILING (0x09) tightening layered on top of it
-         * (firing_max_c + firing_margin_c, min()'d against abs_max_temp_c)
-         * has been removed. */
-        float ceiling = cfg->abs_max_temp_c;
-
-        if (in->tc_valid && guard_hot_c(in) > ceiling) {
-            if (state->s1_over_ceiling_streak < UINT8_MAX) {
-                state->s1_over_ceiling_streak++;
-            }
-            if (state->s1_over_ceiling_streak >= S1_OVER_CEILING_STREAK_TO_TRIP) {
-                trip(state, SAFETY_TRIP_OVERTEMP, "%.1fC > ceiling %.1fC for %u consecutive valid readings",
-                     (double)guard_hot_c(in), (double)ceiling, (unsigned)state->s1_over_ceiling_streak);
-                return true;
-            }
-        } else {
-            state->s1_over_ceiling_streak = 0;
+    {
+        float hot_all = 0.0f;
+        bool have_hot = guard_hot_all(in, &hot_all);
+        if (s1_eval(state, cfg, have_hot, hot_all)) {
+            return true;
         }
-    } else {
-        state->s1_over_ceiling_streak = 0;
     }
 
     /* --- S11: frozen safety reading -------------------------------------------
@@ -1073,6 +1245,10 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * value at all until S5 either clears or this whole guard set is
      * latched by S5's own trip. */
 
+    if (zone_guards_eval(state, cfg, in)) {
+        return true;
+    }
+
 context_guards:
     /* --- Context-dependent guards: S2, S3, S4, S10, S13 -----------------------
      * SAFETY_MODEL.md section 5, rule 2: "stale context is no context" -- and
@@ -1122,18 +1298,19 @@ context_guards:
          * chamber setpoint is meaningless (SAFETY_MODEL.md section 4, S2).
          * zone_count == 0 means "no active zones this tick", same inactive
          * treatment as stale context. */
+        float s2_hot = 0.0f;
         if (!tc_usable) {
-            /* bad TC read: hold the S2 accumulator (F6), as before this tick's early return */
+            /* no TC works: hold the S2 accumulator (F6), as before this tick's early return */
         } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
-            in->zone_count > 0u && in->tc_valid) {
+            in->zone_count > 0u && guard_hot_all(in, &s2_hot)) {
             float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
-            if (guard_hot_c(in) > in->max_zone_setpoint_c + margin) {
+            if (s2_hot > in->max_zone_setpoint_c + margin) {
                 state->s2_over_elapsed_s += in->dt_s;
                 float time_th = effective_f(cfg->overshoot_time_s, OVERSHOOT_TIME_S_DEFAULT);
                 if (state->s2_over_elapsed_s >= time_th) {
                     trip(state, SAFETY_TRIP_OVER_SETPOINT,
                          "%.1fC > max setpoint %.1fC + overshoot_margin_c %.1fC for %.0fs",
-                         (double)guard_hot_c(in), (double)in->max_zone_setpoint_c, (double)margin,
+                         (double)s2_hot, (double)in->max_zone_setpoint_c, (double)margin,
                          (double)state->s2_over_elapsed_s);
                     return true;
                 }
@@ -1180,8 +1357,8 @@ context_guards:
          * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section
          * 4, S10). Compares against the caller-supplied *nearest* valid zone
          * reading, never the mean -- kilns stratify. */
-        if (!tc_usable) {
-            /* bad TC read: hold the S10 state (F6) */
+        if (!guard_own_ok(in)) {
+            /* own TC unusable (S10 compares the own TC only): hold the S10 state (F6) */
         } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float disagree_c = effective_f(cfg->tc_disagreement_c, TC_DISAGREEMENT_C_DEFAULT);
@@ -1202,32 +1379,28 @@ context_guards:
             state->s10_warn = false;
         }
 
-        /* --- S13: borrowed channel not updating -- graduated, like S5 ---------
-         * BORROWED_ZONE/BOTH only. sample_counter_advancing is the caller's
-         * already-computed "did the zone's sample_counter move since last
-         * frame" fact (SAFETY_MODEL.md section 4, S13) -- this module only
-         * owns the elapsed-time accumulation and the two thresholds. */
-        if (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE || cfg->tc_source == SAFETY_TC_SOURCE_BOTH) {
-            if (!in->sample_counter_advancing) {
-                state->s13_stale_elapsed_s += in->dt_s;
-                float warn_th = effective_f(cfg->borrowed_stale_s, BORROWED_STALE_S_DEFAULT);
-                float trip_th = effective_f(cfg->borrowed_stale_trip_s, BORROWED_STALE_TRIP_S_DEFAULT);
-                if (state->s13_stale_elapsed_s >= warn_th) {
-                    state->s13_warn = true;
-                    if (state->s13_stale_elapsed_s >= trip_th) {
-                        trip(state, SAFETY_TRIP_BORROWED_STALE,
-                             "borrowed sample_counter stale for %.1fs (>= borrowed_stale_trip_s %.1fs)",
-                             (double)state->s13_stale_elapsed_s, (double)trip_th);
-                        return true;
-                    }
+        /* --- S13: zone TC channel stalled -- graduated, like S5 ----------------------
+         * AT (owner 2026-11-19): the zones are always in-chamber TCs. A zone whose
+         * sample_counter stops advancing is excluded from the reading (zone_stalled_any);
+         * while the own TC works that only warns. When the own TC is faulted and no zone
+         * works any more, with a zone stalled, the stall time accumulates and trips at
+         * borrowed_stale_trip_s (the S5 blind time normally trips first). */
+        if (guard_s13_condition(in)) {
+            state->s13_stale_elapsed_s += in->dt_s;
+            float warn_th = effective_f(cfg->borrowed_stale_s, BORROWED_STALE_S_DEFAULT);
+            float trip_th = effective_f(cfg->borrowed_stale_trip_s, BORROWED_STALE_TRIP_S_DEFAULT);
+            if (state->s13_stale_elapsed_s >= warn_th) {
+                state->s13_warn = true;
+                if (state->s13_stale_elapsed_s >= trip_th) {
+                    trip(state, SAFETY_TRIP_BORROWED_STALE,
+                         "zone sample_counter stale for %.1fs (>= borrowed_stale_trip_s %.1fs), no working TC left",
+                         (double)state->s13_stale_elapsed_s, (double)trip_th);
+                    return true;
                 }
-            } else {
-                state->s13_stale_elapsed_s = 0.0f;
-                state->s13_warn = false;
             }
         } else {
             state->s13_stale_elapsed_s = 0.0f;
-            state->s13_warn = false;
+            state->s13_warn = in->zone_stalled_any;
         }
 
         /* --- S14: zone current above its measured normal -- WARN only ---------

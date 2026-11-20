@@ -172,7 +172,6 @@ static bool run_implausible_ramp(const safety_guard_cfg_t *cfg)
     in.context_valid = false;
     in.link_up = true;
     in.current_sensing_commissioned = true;
-    in.sample_counter_advancing = true;
 
     bool tripped = false;
     for (int i = 0; i < 3 && !tripped; i++) {

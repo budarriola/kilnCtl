@@ -172,7 +172,7 @@ static void test_current_task_any_present_uses_shared_helper(void)
 // see it. safety_core.c is not host-compilable, so a source scan.
 static void test_safety_core_passes_tc_lead(void)
 {
-    TEST_SECTION("safety_core.c: guard input carries thermo.tc_lead_c (0 when borrowed or stale)");
+    TEST_SECTION("safety_core.c: guard input carries thermo.tc_lead_c (0 when stale)");
     static const char *candidates[] = {
         "../src/tasks/safety_core.c",
         "src/tasks/safety_core.c",
@@ -183,8 +183,8 @@ static void test_safety_core_passes_tc_lead(void)
         TEST_CHECK(false, "could not locate src/tasks/safety_core.c");
         return;
     }
-    TEST_CHECK(strstr(text, ".tc_lead_c = (use_borrowed_tc || !thermo_fresh) ? 0.0f : thermo.tc_lead_c,") != NULL,
-               "safety_core passes thermo.tc_lead_c to the guards, zeroed only for a borrowed or stale reading");
+    TEST_CHECK(strstr(text, ".tc_lead_c = (!thermo_fresh) ? 0.0f : thermo.tc_lead_c,") != NULL,
+               "safety_core passes thermo.tc_lead_c to the guards, zeroed only for a stale reading");
     free(text);
 }
 

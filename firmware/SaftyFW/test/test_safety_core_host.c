@@ -1077,55 +1077,169 @@ static void test_s16_config_corrupt(void)
     expect_trip(SAFETY_TRIP_CONFIG_CORRUPT, "S16", 0);
 }
 
-static void test_s13_borrowed_stale(void)
+// ---- AT (owner 2026-11-19): every TC is an in-chamber TC; own-IC fault tolerated while a zone works.
+static void at_zones(unsigned n, float c0, float c1, float c2)
 {
-    TEST_SECTION("Campaign 1: S13 borrowed-zone sample counter stalled");
-    world_reset_keep_clock();
-    W.cfg.fields_set |= CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX;
-    W.cfg.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
-    W.cfg.borrowed_zone_index = 0;
-    core_start();
-    arm_context(500.0f, 500.0f);
-    W.ctx.zones[0].sample_counter = 0;
-    steps(3);
-    // Counter advancing every tick: healthy.
-    for (int i = 0; i < 300; i++) {
-        W.ctx.zones[0].sample_counter++;
-        step();
+    W.ctx_published = true;
+    W.ctx_publish = true;
+    W.ctx.valid = true;
+    W.ctx.flags = CONTEXT_FLAG_CONTEXT_VALID | CONTEXT_FLAG_PROFILE_RUNNING;
+    W.ctx.zone_count = (uint8_t)n;
+    float c[3] = {c0, c1, c2};
+    for (unsigned i = 0; i < 3; i++) {
+        memset(&W.ctx.zones[i], 0, sizeof(W.ctx.zones[i]));
+        if (i >= n) {
+            continue;
+        }
+        W.ctx.zones[i].zone_index = (uint8_t)i;
+        W.ctx.zones[i].flags = CONTEXT_ZONE_FLAG_ACTIVE | CONTEXT_ZONE_FLAG_MEASURED_VALID;
+        W.ctx.zones[i].setpoint_c = 1000.0f;
+        W.ctx.zones[i].measured_c = c[i];
+        W.ctx.zones[i].tc_type = 3u; /* K */
     }
-    TEST_CHECK(!is_tripped(), "S13: advancing sample counter -> no trip");
-    // Counter frozen: trips after borrowed_stale_trip_s (60 s).
-    int n = steps_until_trip(700);
-    TEST_CHECK(n > 0, "S13: stalled counter trips");
-    expect_trip(SAFETY_TRIP_BORROWED_STALE, "S13", 0);
 }
 
-static void test_pn01_borrowed_zone_feeds_s1(void)
+static void at_step(unsigned n_zones_advancing)
 {
-    TEST_SECTION("PN-01: BORROWED_ZONE mode runs S1 on the borrowed zone's measured_c, not the Pico's J7");
+    for (unsigned i = 0; i < n_zones_advancing && i < 3; i++) {
+        W.ctx.zones[i].sample_counter++;
+    }
+    step();
+}
+
+static void at_own_open(void)
+{
+    W.thermo.valid = false;
+    W.thermo.fault_bits = SAFETY_THERMO_FAULT_OPEN;
+    W.thermo.tc_c = NAN;
+}
+
+static void at_run(unsigned n, unsigned adv)
+{
+    for (unsigned i = 0; i < n && !is_tripped(); i++) {
+        at_step(adv);
+    }
+}
+
+static void test_at_own_open_cool_zone_keeps_firing(void)
+{
+    TEST_SECTION("AT: own TC open, zone TC cool and working: firing continues past blind_grace (no time cap)");
     world_reset_keep_clock();
-    W.cfg.fields_set |= CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX;
-    W.cfg.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
-    W.cfg.borrowed_zone_index = 0;
     core_start();
-    arm_context(500.0f, 500.0f);
-    W.ctx.zones[0].sample_counter = 0;
+    at_zones(1, 800.0f, 0.0f, 0.0f);
     W.relay_energized = true;
-    W.thermo.tc_c = 25.0f; // J7 healthy and cold
-    for (int i = 0; i < 100; i++) {
-        W.ctx.zones[0].sample_counter++;
-        step();
+    at_run(50, 1);
+    at_own_open();
+    at_run(6000, 1); // 600 s, far beyond blind_grace_s
+    TEST_CHECK(!is_tripped(), "AT: own open + cool working zone: no S5 trip for the whole run");
+}
+
+static void test_at_own_open_hot_zone_trips_s1(void)
+{
+    TEST_SECTION("AT: own TC open, a zone over abs_max trips S1");
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    at_own_open();
+    at_run(20, 1);
+    TEST_CHECK(!is_tripped(), "AT: cool zone, own open: no trip yet");
+    W.ctx.zones[0].measured_c = 1350.0f;
+    at_run(20, 1);
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_OVERTEMP, "AT: zone above ceiling trips S1 while own TC is open");
+}
+
+static void test_at_hottest_of_three_zones(void)
+{
+    TEST_SECTION("AT: S1 follows the hottest of three zones; own J7 stays cold");
+    world_reset_keep_clock();
+    core_start();
+    at_zones(3, 800.0f, 800.0f, 800.0f);
+    at_run(50, 3);
+    TEST_CHECK(!is_tripped(), "AT: three sane zones, no trip");
+    W.ctx.zones[2].measured_c = 1350.0f;
+    at_run(20, 3);
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_OVERTEMP, "AT: hottest zone (idx 2) trips S1");
+}
+
+static void test_at_zone_tcrange_near_ceiling(void)
+{
+    TEST_SECTION("AT: zone TCRANGE right after a near-ceiling reading counts toward S1");
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 1250.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    TEST_CHECK(!is_tripped(), "AT: 1250 C zone below ceiling, no trip");
+    W.ctx.zones[0].tc_fault = 0x40u; /* TCRANGE */
+    at_run(20, 1);
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_OVERTEMP, "AT: zone TCRANGE near ceiling trips S1");
+}
+
+static void test_at_zone_rate_trip(void)
+{
+    TEST_SECTION("AT: S8 checks each zone separately");
+    world_reset_keep_clock();
+    W.cfg.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    W.cfg.max_rate_c_per_min = 100;
+    W.cfg.rate_window_s = 10;
+    core_start();
+    at_zones(2, 300.0f, 300.0f, 0.0f);
+    at_run(50, 2);
+    TEST_CHECK(!is_tripped(), "AT: flat zones, no S8 trip");
+    // zone 1 climbs 600 C/min (1 C per 100 ms tick); zone 0 flat; own J7 flat.
+    for (int i = 0; i < 400 && !is_tripped(); i++) {
+        W.ctx.zones[1].measured_c += 1.0f;
+        at_step(2);
     }
-    TEST_CHECK(!is_tripped(), "PN-01: sane borrowed reading, no trip");
-    W.ctx.zones[0].measured_c = 1400.0f; // borrowed zone over the ceiling, J7 still 25 C
-    int n = 0;
-    for (int i = 0; i < 50 && !is_tripped(); i++) {
-        W.ctx.zones[0].sample_counter++;
-        step();
-        n++;
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_RATE, "AT: zone 1 rate of rise trips S8 though J7 and zone 0 are flat");
+}
+
+static void at_negative_case(const char *label, int kind)
+{
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    at_own_open();
+    unsigned adv = 1;
+    switch (kind) {
+    case 0: adv = 0; break;                                    // frozen counter
+    case 1: W.ctx.zones[0].measured_c = NAN; break;            // NaN value
+    case 2: W.ctx.zones[0].measured_c = 5000.0f; break;        // implausible for type K
+    case 3: W.ctx.zones[0].tc_fault = SAFETY_THERMO_FAULT_OPEN; break; // zone faulted OPEN
+    case 4: W.ctx_publish = false; break;                      // stale context
+    default: W.link_up = false; break;                         // S6b active
     }
-    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_OVERTEMP,
-               "PN-01: S1 trips on the borrowed zone's over-ceiling reading");
+    at_run(2500, adv);
+    TEST_CHECK(is_tripped(), label);
+}
+
+static void test_at_no_working_tc_trips(void)
+{
+    TEST_SECTION("AT: own open and NO working zone trips");
+    at_negative_case("AT: zone counter frozen + own open trips", 0);
+    at_negative_case("AT: NaN zone + own open trips", 1);
+    at_negative_case("AT: implausible zone value + own open trips", 2);
+    at_negative_case("AT: zone faulted OPEN + own open trips", 3);
+    at_negative_case("AT: stale context + own open trips", 4);
+    at_negative_case("AT: link down (S6b) + own open trips", 5);
+}
+
+static void test_at_clear_refused_while_zone_over_ceiling(void)
+{
+    TEST_SECTION("AT: CLEAR_TRIP refused while any zone is above abs_max");
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    W.ctx.zones[0].measured_c = 1350.0f;
+    at_run(30, 1);
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_OVERTEMP, "AT: zone S1 trip latched");
+    for (int i = 0; i < 20; i++) {
+        at_step(1);
+    }
+    clear_bound_and_settle();
+    TEST_CHECK(is_tripped(), "AT: clear refused while the zone is still over abs_max");
 }
 
 static void test_clock_stall_blinds_not_trips_s1(void)
@@ -1241,8 +1355,13 @@ int main(void)
     test_s7_ct_masking();
     test_s9_ineffective_trip();
     test_s16_config_corrupt();
-    test_s13_borrowed_stale();
-    test_pn01_borrowed_zone_feeds_s1();
+    test_at_own_open_cool_zone_keeps_firing();
+    test_at_own_open_hot_zone_trips_s1();
+    test_at_hottest_of_three_zones();
+    test_at_zone_tcrange_near_ceiling();
+    test_at_zone_rate_trip();
+    test_at_no_working_tc_trips();
+    test_at_clear_refused_while_zone_over_ceiling();
     test_clock_stall_blinds_not_trips_s1();
     test_request_enable_gates();
     test_diag_states();

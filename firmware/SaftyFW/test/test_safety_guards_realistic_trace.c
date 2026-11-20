@@ -96,7 +96,6 @@ static safety_guard_input_t trace_base_input(void)
     in.heat_commanded = false;
     in.context_valid = false;
     in.current_sensing_commissioned = true;
-    in.sample_counter_advancing = true;
     in.link_up = true;
     return in;
 }
@@ -274,10 +273,60 @@ static void test_s8_closed_loop_fast_plant_trips(void)
     TEST_CHECK(s.reason == SAFETY_TRIP_RATE, "reason is SAFETY_TRIP_RATE (S8)");
 }
 
+// AT (owner 2026-11-19): the own J7 TC opens mid-firing while a stuck-on relay runs away. The zone TC
+// (same plant, second sensor) keeps the firing alive until the ceiling, where S1 trips on the zone
+// reading alone; the own-IC fault never trips S5 on the way (a zone works, no time cap).
+static void test_at_own_tc_open_zone_carries_s1(void)
+{
+    TEST_SECTION("AT realistic trace -- own TC open mid-run, zone TC trips S1 on a runaway");
+
+    trace_plant_cfg_t pcfg = {
+        .ambient_c = 20.0f,
+        .thermal_mass_j_per_c = 5000.0f,
+        .heater_power_w = 1500.0f,
+        .loss_coeff_w_per_c = 5.0f,
+        .delay_s = 3.0f,
+    };
+    trace_plant_state_t pst;
+    trace_plant_reset(&pst, &pcfg);
+
+    safety_guard_state_t s;
+    safety_guards_reset(&s);
+    safety_guard_cfg_t cfg = trace_base_cfg();
+    cfg.abs_max_temp_c = 300.0f;
+    safety_guard_input_t in = trace_base_input();
+    in.context_valid = true;
+    in.dt_s = 1.0f;
+
+    bool tripped = false;
+    int trip_tick = -1;
+    for (int i = 0; i < 7200 && !tripped; i++) {
+        float reading_c = trace_plant_step(&pst, &pcfg, 1.0f, in.dt_s);
+        if (i < 60) {
+            in.tc_c = reading_c;
+        } else { /* own TC opens after one minute */
+            in.tc_valid = false;
+            in.tc_c = NAN;
+            in.fault_bits = SAFETY_THERMO_FAULT_OPEN;
+        }
+        in.zone_ok[0] = true;
+        in.zone_c[0] = reading_c;
+        in.zone_working_count = 1;
+        in.zone_hot_max_c = reading_c;
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        if (tripped) {
+            trip_tick = i;
+        }
+    }
+    TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVERTEMP, "the zone TC trips S1 on the runaway with the own TC open (not S5)");
+    TEST_CHECK(trip_tick > 60, "the trip came well after the own TC opened");
+}
+
 void run_test_safety_guards_realistic_trace(void)
 {
     test_s1_closed_loop_no_nuisance();
     test_s1_closed_loop_stuck_relay_trips();
     test_s8_closed_loop_no_nuisance();
     test_s8_closed_loop_fast_plant_trips();
+    test_at_own_tc_open_zone_carries_s1();
 }

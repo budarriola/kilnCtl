@@ -436,6 +436,132 @@ static inline bool context_borrowed_type_mismatch(const context_snapshot_t *ctx,
     return false;
 }
 
+// --- AT: every thermocouple is an in-chamber TC (owner decision 2026-11-19) ---
+// tc_source is deprecated. The Pico's own J7 TC and EVERY zone reading in the
+// PUSH_CONTEXT frame (active or idle) feed the over-temperature guards. A zone
+// reading counts as WORKING only when ALL of these hold:
+//   - context_valid (the caller's CONTEXT_MAX_AGE_MS collapse);
+//   - S6b is not active (link up);
+//   - CONTEXT_ZONE_FLAG_MEASURED_VALID is set and measured_c is finite;
+//   - tc_fault has none of OPEN / OVUV / TCRANGE;
+//   - sample_counter advanced within stale_s (per-zone tracker below);
+//   - the value is inside the plausibility range for the zone's tc_type.
+// Anything else is NOT working: it is excluded from the hottest-of reduction
+// (never treated as a safe/cool value) and the guards treat it as "no reading".
+#define CONTEXT_ZONE_FAULT_OPEN    0x01u
+#define CONTEXT_ZONE_FAULT_OVUV    0x02u
+#define CONTEXT_ZONE_FAULT_TCRANGE 0x40u
+#define CONTEXT_ZONE_FAULT_MASK \
+    (CONTEXT_ZONE_FAULT_OPEN | CONTEXT_ZONE_FAULT_OVUV | CONTEXT_ZONE_FAULT_TCRANGE)
+
+typedef bool (*context_plausible_fn)(uint8_t tc_type, float tc_c);
+
+// Per-zone sample_counter tracker, indexed by zone_index (0..MAX-1), not by
+// array position. known is false until the zone has been seen once this boot.
+typedef struct {
+    uint8_t  last_counter;
+    bool     known;
+    bool     ever_advanced;
+    uint32_t last_advance_ms;
+} context_zone_track_t;
+
+typedef struct {
+    float   hot_max_c;     /* hottest WORKING zone reading; meaningless when working_count == 0 */
+    uint8_t working_count; /* zones passing every test above */
+    bool    stalled_any;   /* a zone is otherwise good but its sample_counter has not advanced in time */
+    bool    working[CONTEXT_SNAPSHOT_MAX_ZONES]; /* by zone_index */
+    float   c[CONTEXT_SNAPSHOT_MAX_ZONES];       /* measured_c where working[] */
+    bool    tcrange[CONTEXT_SNAPSHOT_MAX_ZONES]; /* fresh context and tc_fault has TCRANGE */
+} context_zone_reduction_t;
+
+// Pure single-zone verdict. counter_fresh is the tracker's "advanced within
+// stale_s" fact. plausible may be NULL only in tests that do not care.
+static inline bool context_zone_working(const context_zone_t *z, bool context_valid, bool s6b_active,
+                                         bool counter_fresh, context_plausible_fn plausible)
+{
+    if (z == NULL || !context_valid || s6b_active) {
+        return false;
+    }
+    if ((z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) == 0u || !isfinite(z->measured_c)) {
+        return false;
+    }
+    if ((z->tc_fault & CONTEXT_ZONE_FAULT_MASK) != 0u) {
+        return false;
+    }
+    if (!counter_fresh) {
+        return false;
+    }
+    if (plausible != NULL && !plausible(z->tc_type, z->measured_c)) {
+        return false;
+    }
+    return true;
+}
+
+// Updates every zone's sample_counter tracker from this tick's context and
+// reduces to the hottest working reading. Trackers are only touched for zones
+// present in the frame; a zone missing from a frame keeps its tracker (a
+// single-tick drop does not forge a fresh "just advanced"). stale_s <= 0 is
+// treated as 10 s.
+static inline void context_reduce_hottest(const context_snapshot_t *ctx, bool context_valid, bool s6b_active,
+                                           uint32_t now_ms, float stale_s,
+                                           context_zone_track_t track[CONTEXT_SNAPSHOT_MAX_ZONES],
+                                           context_plausible_fn plausible, context_zone_reduction_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    out->hot_max_c = 0.0f;
+    out->working_count = 0u;
+    out->stalled_any = false;
+    for (uint8_t i = 0; i < CONTEXT_SNAPSHOT_MAX_ZONES; i++) {
+        out->working[i] = false;
+        out->c[i] = 0.0f;
+        out->tcrange[i] = false;
+    }
+    if (ctx == NULL || track == NULL) {
+        return;
+    }
+    float stale = (stale_s > 0.0f) ? stale_s : 10.0f;
+    uint8_t n = ctx->zone_count;
+    if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
+        n = CONTEXT_SNAPSHOT_MAX_ZONES;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        const context_zone_t *z = &ctx->zones[i];
+        uint8_t zi = z->zone_index;
+        if (zi >= CONTEXT_SNAPSHOT_MAX_ZONES) {
+            continue;
+        }
+        context_zone_track_t *t = &track[zi];
+        if (context_valid && !t->known) {
+            t->last_counter = z->sample_counter;
+            t->known = true;
+        } else if (context_valid && t->last_counter != z->sample_counter) {
+            t->last_counter = z->sample_counter;
+            t->ever_advanced = true;
+            t->last_advance_ms = now_ms;
+        }
+        bool fresh = t->ever_advanced && (float)(uint32_t)(now_ms - t->last_advance_ms) <= stale * 1000.0f;
+        if (context_valid && (z->tc_fault & CONTEXT_ZONE_FAULT_TCRANGE) != 0u) {
+            out->tcrange[zi] = true;
+        }
+        if (context_zone_working(z, context_valid, s6b_active, fresh, plausible)) {
+            if (!out->working[zi]) {
+                out->working[zi] = true;
+                out->c[zi] = z->measured_c;
+                if (out->working_count == 0u || z->measured_c > out->hot_max_c) {
+                    out->hot_max_c = z->measured_c;
+                }
+                out->working_count++;
+            }
+        } else if (context_valid && !s6b_active && !fresh &&
+                   (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u && isfinite(z->measured_c) &&
+                   (z->tc_fault & CONTEXT_ZONE_FAULT_MASK) == 0u) {
+            out->stalled_any = true;
+        }
+    }
+}
+
 // --- Link-task boundary getters ---------------------------------------------
 // Declared here, not in link_task.h, for the same isolation reason as the
 // pure functions above -- these three are implemented in link_task.c (their
