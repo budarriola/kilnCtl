@@ -2332,6 +2332,13 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                         (unsigned)timing_profile_candidate_count);
                 return false;
             }
+            /* EA-12: same lock band vs guard 4 band rule as the zones POST (drift 0 = default 25 C). */
+            if (dramplock > 0.0 && dramplock > (ddrift > 0.0 ? ddrift : 25.0) - 5.0) {
+                snprintf(err_msg, err_cap,
+                         "timing profile entry %u: ramp_lock_band_c must be at most guard_drift_hysteresis_c - 5",
+                         (unsigned)timing_profile_candidate_count);
+                return false;
+            }
             tp->present = true;
             tp->progress_duty_min = (float)dduty;
             tp->progress_window_s = (float)dwindow;

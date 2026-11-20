@@ -317,6 +317,9 @@ typedef struct {
     /* EA C3 finish-short latch (owner 2026-11-19): guard 1 demands no rise from this zone. Guard 2,
      * guard 7 and every other guard are unchanged. The executor clears it per the latch rules. */
     bool finish_short;
+    /* EA-14: executor sets this while the arrival hold's stall window is still filling (bounded 300 s):
+     * a guard 1 rise shortfall is not tripped, the window just slides. Default false. */
+    bool g1_defer;
 
     /* Selects guards 1/2's RELAY-CYCLING discriminator for this tick, added
      * after review found the directional (climbing/falling) test from the

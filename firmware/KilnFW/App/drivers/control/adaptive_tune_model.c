@@ -187,6 +187,13 @@ bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tun
         adaptive_tune_set_refusal(z, "blended gain %.4f is not positive", (double)k_blended);
         return false;
     }
+    // EA-13: the freeze also covers an update whose RESULT would fall under the freeze ratio.
+    if (k_blended / baseline_k_dc < ADAPTIVE_TUNE_K_RATIO_FREEZE) {
+        adaptive_tune_set_refusal(z, "update to K_dc %.4f would be %.0f%% of its autotune baseline %.4f (< %.0f%%) -- learning frozen, re-autotune this zone",
+                    (double)k_blended, (double)(100.0f * k_blended / baseline_k_dc), (double)baseline_k_dc,
+                    (double)(ADAPTIVE_TUNE_K_RATIO_FREEZE * 100.0f));
+        return false;
+    }
     // Absolute physical ceiling -- see ADAPTIVE_TUNE_K_DC_ABS_MAX's own
     // comment. Independent of, and checked in addition to, the
     // baseline-relative envelope just above: that envelope bounds DRIFT from

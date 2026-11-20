@@ -8855,15 +8855,15 @@ static void test_ea_c1_drift_band_follows_ramp_lock(void)
     // arrival gate waits; otherwise guard 4 keeps its plain configured band.
     TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 1100.0f, 970.0f, true), 60.0f, 1e-4f,
                     "a 130 C actual-raw gap widens by at most 30 C: 25 + 5 + 30");
-    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 29.0f, 1e-4f,
-                    "lock not held, offset 4: base 25 + offset 4 = 29 C");
+    TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(0.0f, lock_band, 974.0f, 970.0f, false), 25.0f, 1e-4f,
+                    "EA-12: lock not held, offset 4: the plain base band (no offset widening)");
     TEST_CHECK_NEAR(profile_executor_guard_drift_band_c(40.0f, lock_band, 970.0f, 970.0f, false), 40.0f, 1e-4f,
                     "lock not held, no offset: the configured band as is");
-    // LOW-1: lock released, zone 22 C behind with +6 offset (actual 6 C above raw): raw error 28 C < 25+6.
+    // EA-12: lock released, +6 offset: guard 4 keeps its base band, so a raw error of 28 C trips.
     float band_rel = profile_executor_guard_drift_band_c(0.0f, lock_band, 976.0f, 970.0f, false);
-    TEST_CHECK_NEAR(band_rel, 31.0f, 1e-4f, "released lock, +6 offset: band 31 C");
-    TEST_CHECK(!ea_drift_trips(band_rel, 28.0f, 1300), "released lock, +6 offset, raw error 28 C: no DRIFT");
-    TEST_CHECK(ea_drift_trips(band_rel, band_rel + 6.0f, 1300), "well beyond the band still trips DRIFT");
+    TEST_CHECK_NEAR(band_rel, 25.0f, 1e-4f, "EA-12: released lock, +6 offset: band stays 25 C");
+    TEST_CHECK(ea_drift_trips(band_rel, 28.0f, 1300), "EA-12: released lock, raw error 28 C: DRIFT trips");
+    TEST_CHECK(!ea_drift_trips(band_rel, 20.0f, 1300), "released lock, raw error inside the base band: no DRIFT");
 }
 
 static void test_ea_c4_lag_flicker_and_stretch_sanity_rate(void)
@@ -8941,6 +8941,7 @@ static void test_ea_c7_slow_climb_floor_gates(void)
 }
 
 static void ea_make_heating_profile(s_exec_state_t *ex);
+static void ea_add_peer(s_exec_state_t *ex, float c);
 // Guard 1 with the finish-short flag: climbing zone flat for secs seconds at duty 1.0.
 static int ea_guard1_finish_short(bool finish_short, float start_c, float drop_after_s, float drop_c, int secs)
 {
@@ -8982,7 +8983,17 @@ static void test_ea_finish_short_latch(void)
     arrival_settle_tick(&z, 991.0f, 1.0f, 1.0f);
     TEST_CHECK(z.finish_short, "a 9 C drop keeps the latch");
     arrival_settle_tick(&z, 1000.0f, 0.4f, 1.0f);
-    TEST_CHECK(!z.finish_short, "duty below 0.5 clears the latch");
+    TEST_CHECK(z.finish_short, "EA-15: one tick of duty below 0.5 keeps the latch");
+    for (int i = 0; i < 30; i++) arrival_settle_tick(&z, 1000.0f, 0.4f, 1.0f);
+    arrival_settle_tick(&z, 1000.0f, 1.0f, 1.0f); // duty back up: the low-duty timer restarts
+    for (int i = 0; i < 30; i++) arrival_settle_tick(&z, 1000.0f, 0.4f, 1.0f);
+    TEST_CHECK(z.finish_short, "EA-15: a relay-cycling duty dip (30 s low, 1 s high, 30 s low) keeps the latch");
+    for (int i = 0; i < 31; i++) arrival_settle_tick(&z, 1000.0f, 0.4f, 1.0f);
+    TEST_CHECK(!z.finish_short, "EA-15: duty below 0.5 sustained 60 s clears the latch");
+    z.finish_short = true;
+    z.finish_short_low_duty_s = 0.0f;
+    arrival_settle_tick(&z, 988.0f, 1.0f, 1.0f);
+    TEST_CHECK(!z.finish_short, "EA-15: the 10 C fall still clears at once");
     z.finish_short = true;
     arrival_settle_tick(&z, NAN, 1.0f, 1.0f);
     TEST_CHECK(!z.finish_short, "an invalid reading clears the latch");
@@ -8994,10 +9005,11 @@ static void test_ea_finish_short_latch(void)
     ex.zones[0].actual_c = 960.0f;
     ex.zones[0].duty = 1.0f;
     (void)arrival_gate_tick(&ex, true, 100, 1.0f); // dwell entry restarts windows
+    ea_add_peer(&ex, 955.0f);
     for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
     TEST_CHECK(!arrival_gate_tick(&ex, true, 100, 1.0f), "stalled: gate opens");
     TEST_CHECK(ex.zones[0].finish_short && ex.finish_short_run, "stall-open latches finish-short and flags the run");
-    TEST_CHECK_NEAR(ex.target_shortfall_c, 40.0f, 1e-3f, "and records the shortfall");
+    TEST_CHECK_NEAR(ex.target_shortfall_c, 45.0f, 1e-3f, "and records the largest shortfall (the 955 C peer)");
     ex.arrival_gate_seg = -1; // next dwell / resume
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     TEST_CHECK(!ex.zones[0].finish_short, "the latch never outlives the dwell (windows restart, latch cleared)");
@@ -9013,6 +9025,7 @@ static void test_ea_finish_short_latch(void)
     ex.zones[0].actual_c = 960.0f;
     ex.zones[0].duty = 1.0f;
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    ea_add_peer(&ex, 955.0f);
     for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     TEST_CHECK(ex.zones[0].finish_short, "HIGH-1: latched on open");
@@ -9031,10 +9044,12 @@ static void test_ea_finish_short_latch(void)
     ex.zones[0].actual_c = 960.0f;
     ex.zones[0].duty = 1.0f;
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    ea_add_peer(&ex, 955.0f);
     for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
-    arrival_settle_tick(&ex.zones[0], 960.0f, 0.2f, 1.0f); // duty clear
-    TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: duty clears");
+    TEST_CHECK(ex.zones[0].finish_short, "latched before the duty clear");
+    for (int i = 0; i < 61; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 0.2f, 1.0f); // sustained duty clear
+    TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: duty clears after 60 s low");
     ex.zones[0].duty = 1.0f;
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     TEST_CHECK(!ex.zones[0].finish_short, "HIGH-1: gate tick after duty clear does not re-latch");
@@ -9082,6 +9097,84 @@ static void test_ea_finish_short_latch(void)
     for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
     (void)arrival_gate_tick(&ex, false, 100, 1.0f);
     TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "stretch off: no latch");
+}
+
+static void ea_add_peer(s_exec_state_t *ex, float c)
+{
+    ex->zones[1].active = true;
+    ex->zones[1].actual_valid = true;
+    ex->zones[1].actual_c = c;
+    ex->zones[1].duty = 1.0f;
+    ex->zones[1].settle_stalled = true;
+}
+
+static void test_ea_finish_short_cross_check_and_g1_defer(void)
+{
+    TEST_SECTION("EA-11 cross-check: latch only with a corroborating zone within 25 C; EA-14: guard 1 deferred "
+                 "while the stall window fills");
+    s_exec_state_t ex;
+    // Lone zone (single TC): no latch.
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "single-TC kiln: no latch");
+    // Slipped TC: other zone far above (40 C): no latch.
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    ea_add_peer(&ex, 1000.0f);
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short, "lone zone 40 C below the others: no latch (guard 1 stays)");
+    // Peer within 25 C but still climbing (not stalled, not in band): no latch.
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    ea_add_peer(&ex, 950.0f);
+    ex.zones[1].settle_stalled = false;
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(!ex.zones[0].finish_short, "peer within 25 C but not stalled: no latch");
+    // Peer stalled within 25 C: latch (positive control).
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    ea_add_peer(&ex, 950.0f);
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f);
+    TEST_CHECK(ex.zones[0].finish_short, "stalled peer within 25 C: latch");
+
+    // EA-14 pure predicate and guard 1 deferral.
+    TEST_CHECK(arrival_g1_defer(true, 3), "arrival wait with a filling window defers guard 1");
+    TEST_CHECK(!arrival_g1_defer(true, EXEC_ARRIVAL_SETTLE_BUCKETS), "window filled: no deferral");
+    TEST_CHECK(!arrival_g1_defer(false, 0), "no arrival wait: no deferral");
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    for (int defer = 0; defer < 2; defer++) {
+        thermal_guard_state_t gs;
+        thermal_guard_reset(&gs);
+        thermal_guard_input_t in = {.sensor_ok = true, .setpoint_c = 1100.0f, .commanded_duty = 1.0f, .dt_s = 1.0f,
+                                    .g1_defer = defer != 0};
+        int trip = 0;
+        for (int i = 0; i < 400 && !trip; i++) {
+            in.measurement_c = 1000.0f + ((i % 2) ? 0.1f : -0.1f);
+            trip = thermal_guard_tick(&gs, &cfg, &in) ? (int)gs.reason : 0;
+        }
+        if (defer) {
+            TEST_CHECK(trip == 0, "g1_defer: flat zone does not trip guard 1 while deferred");
+        } else {
+            TEST_CHECK(trip == (int)THERMAL_GUARD_TRIP_HEATING_FAILED, "no defer: flat zone trips guard 1");
+        }
+    }
 }
 
 static void ea_make_heating_profile(s_exec_state_t *ex)
@@ -13989,6 +14082,7 @@ void run_test_profile_executor_prestart(void)
     test_ea_c4_lag_flicker_and_stretch_sanity_rate();
     test_ea_c7_slow_climb_floor_gates();
     test_ea_finish_short_latch();
+    test_ea_finish_short_cross_check_and_g1_defer();
     test_ea_c3_arrival_gate();
     test_stretch_rate_returns_sentinel_when_assist_disabled();
     test_stretch_rate_returns_sentinel_when_no_zone_sustained();

@@ -393,6 +393,31 @@ void arrival_settle_reset(zone_runtime_t *z)
     z->settle_acc_s = 0.0f;
     z->settle_stalled = false;
     z->finish_short = false;
+    z->finish_short_low_duty_s = 0.0f;
+}
+
+/* EA-14: while the arrival hold's stall window is still filling (settle_nb < full, so at most 300 s
+ * per dwell), guard 1 must not trip on a rise shortfall; the window slides instead. */
+bool arrival_g1_defer(bool arrival_waiting, uint8_t settle_nb)
+{
+    return arrival_waiting && settle_nb < EXEC_ARRIVAL_SETTLE_BUCKETS;
+}
+
+/* EA-11 cross-check (owner 2026-11-19): a stalled zone latches finish-short only if at least one
+ * OTHER valid zone reading is within EXEC_FINISH_SHORT_PEER_C of it and is itself stalled or in
+ * the arrival band. A lone low zone (slipped TC) or a single-TC kiln never latches. The Pico TC
+ * reading is not available to the executor, so only other zones corroborate. */
+bool arrival_finish_short_corroborated(const s_exec_state_t *ex, uint8_t zi, float target_c)
+{
+    const zone_runtime_t *self = &ex->zones[zi];
+    for (uint8_t pi = 0; pi < MAX31856_CHANNEL_COUNT; pi++) {
+        const zone_runtime_t *p = &ex->zones[pi];
+        if (pi == zi || !p->active || p->faulted || isnan(p->actual_c)) continue;
+        if (fabsf(p->actual_c - self->actual_c) > EXEC_FINISH_SHORT_PEER_C) continue;
+        float band_c = (p->guard_cfg.progress_band_c > 0.0f) ? p->guard_cfg.progress_band_c : 3.0f;
+        if (arrival_zone_ok(p->actual_c, target_c, band_c, p->settle_stalled)) return true;
+    }
+    return false;
 }
 
 void arrival_finish_short_clear_all(s_exec_state_t *ex)
@@ -407,9 +432,13 @@ void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt
 {
     /* No duty threshold for the stall rule (cone-10 kilns run ~100% healthy). Duty only matters to
      * the finish-short latch: below 0.5 it clears. */
-    if (z->finish_short && !isnan(actual_c) &&
-        (actual_c < z->finish_short_c - EXEC_FINISH_SHORT_DROP_C || duty < EXEC_FINISH_SHORT_DUTY_MIN)) {
-        z->finish_short = false;
+    if (z->finish_short && !isnan(actual_c)) {
+        /* The 10 C fall clears at once; low duty must persist (EA-15, relay-cycling zones dip). */
+        z->finish_short_low_duty_s = (duty < EXEC_FINISH_SHORT_DUTY_MIN) ? z->finish_short_low_duty_s + dt_s : 0.0f;
+        if (actual_c < z->finish_short_c - EXEC_FINISH_SHORT_DROP_C ||
+            z->finish_short_low_duty_s >= EXEC_FINISH_SHORT_LOW_DUTY_CLEAR_S) {
+            z->finish_short = false;
+        }
     }
     if (isnan(actual_c)) {
         arrival_settle_reset(z);
@@ -557,7 +586,7 @@ bool arrival_gate_tick(s_exec_state_t *ex, bool stretch_on, uint16_t stretch_max
             if (!all_ok || !z->active || z->faulted || !profile_executor_zone_drives_run(zi)) continue;
             float band_c = (z->guard_cfg.progress_band_c > 0.0f) ? z->guard_cfg.progress_band_c : 3.0f;
             if (z->settle_stalled && !isnan(z->actual_c) && z->actual_c < target_c - band_c &&
-                z->duty >= EXEC_FINISH_SHORT_DUTY_MIN) {
+                z->duty >= EXEC_FINISH_SHORT_DUTY_MIN && arrival_finish_short_corroborated(ex, zi, target_c)) {
                 z->finish_short = true;
                 z->finish_short_seg = ex->segment_index;
                 z->finish_short_c = z->actual_c;

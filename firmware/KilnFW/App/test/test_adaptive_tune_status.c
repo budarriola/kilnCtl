@@ -1056,6 +1056,26 @@ static void test_c6_ratio_above_freeze_still_applies(void)
     TEST_CHECK(fabsf(s_fake_zone_cfg[1].k_dc - 10.0f) > 1e-3f, "K_dc must have moved");
 }
 
+// EA-13: K_dc 10.3 / baseline 17 = 0.606 passes the live-ratio freeze, but the blended update would land
+// under 0.6, so it must be refused. MUST GO RED if the post-blend freeze check is removed.
+static void test_c6_freeze_refuses_update_below_ratio(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.3f;
+    s_fake_zone_cfg[1].autotune_baseline_k_dc = 17.0f; // live ratio 0.606
+    const float true_k = 5.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(32, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "EA-13: an update that would go below 0.6 is refused");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.3f, 1e-6, "EA-13: K_dc unchanged");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "frozen") != NULL, "EA-13: refusal says frozen");
+}
+
 static void test_c6_status_ratio_weak_and_frozen(void)
 {
     adaptive_tune_zone_status_t st;

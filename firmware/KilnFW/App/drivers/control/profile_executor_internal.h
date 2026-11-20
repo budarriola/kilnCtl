@@ -708,6 +708,7 @@ typedef struct {
     bool     finish_short;
     uint8_t  finish_short_seg;
     float    finish_short_c;
+    float    finish_short_low_duty_s; /* EA-15: seconds duty has been under EXEC_FINISH_SHORT_DUTY_MIN while latched */
     bool     finish_short_used; /* gate already opened this dwell: no (re)latch until dwell entry/resume/run start */
 
     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. Heat-work-weighted
@@ -1483,8 +1484,12 @@ void ramp_assist_zone_lag_tick_ex(zone_runtime_t *z, bool lagging_now, float dt_
 #define EXEC_ARRIVAL_STALL_RATE_C_PER_MIN THERMAL_GUARD_SLOW_CLIMB_RATE_C_PER_MIN
 void arrival_settle_reset(zone_runtime_t *z);
 void arrival_finish_short_clear_all(s_exec_state_t *ex);
+bool arrival_g1_defer(bool arrival_waiting, uint8_t settle_nb);
+bool arrival_finish_short_corroborated(const s_exec_state_t *ex, uint8_t zi, float target_c);
 #define EXEC_FINISH_SHORT_DROP_C   10.0f
 #define EXEC_FINISH_SHORT_DUTY_MIN 0.5f
+#define EXEC_FINISH_SHORT_LOW_DUTY_CLEAR_S 60.0f /* duty must stay low this long to clear the latch (EA-15) */
+#define EXEC_FINISH_SHORT_PEER_C   25.0f /* another valid zone reading must be within this of the stalled zone (EA-11 cross-check) */
 void arrival_settle_tick(zone_runtime_t *z, float actual_c, float duty, float dt_s);
 bool arrival_zone_ok(float actual_c, float target_c, float band_c, bool settled);
 bool arrival_segment_is_heating(const profile_segment_t *segs, uint8_t count, uint8_t index, float run_start_c);

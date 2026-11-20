@@ -1859,6 +1859,7 @@ void executor_task_entry(void *arg)
                 /* EA C7: slow-climb floor only with stretch on and the lock held
                  * or a stretch active (thermal_guard.c adds duty/temperature gates). */
                 .finish_short = ramp_assist_on && z->finish_short && z->finish_short_seg == s_exec.segment_index,
+                .g1_defer = ramp_assist_on && arrival_g1_defer(arrival_waiting_this_tick, z->settle_nb),
                 .slow_climb_ok = ramp_assist_on && (s_exec.ramp_lock_held || stretched_this_tick || arrival_waiting_this_tick),
                 .dt_s = dt_s,
                 /* SR-10: positive duty rendered as relay OFF for the whole

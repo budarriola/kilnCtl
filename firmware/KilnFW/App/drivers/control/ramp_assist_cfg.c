@@ -127,7 +127,7 @@ esp_err_t ramp_assist_cfg_start(void)
                 // truthy-cast-avoidance guard, not an `== 1` shortcut --
                 // without it a corrupted byte like 0xAA would cast to true
                 // (enabled) rather than fail closed.
-                ESP_LOGW(TAG, "stored ramp_assist value %u is out of range -- defaulting to disabled",
+                ESP_LOGW(TAG, "stored ramp_assist value %u is out of range -- ignored, default (stretch ON) stands",
                          (unsigned)raw);
             }
         } else if (rerr != HAL_NOT_FOUND) {

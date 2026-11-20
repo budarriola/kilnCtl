@@ -675,6 +675,7 @@ void run_test_adaptive_tune(void)
     TEST_SECTION("adaptive_tune: ELEMENT_AGING C6 (k_dc ratio guards, stretch exclusion, one-shot enable)");
     test_c6_ratio_freeze_skips_writes();
     test_c6_ratio_above_freeze_still_applies();
+    test_c6_freeze_refuses_update_below_ratio();
     test_c6_status_ratio_weak_and_frozen();
     test_c6_stretch_predicate();
     test_c6_stretched_run_not_training_data();

@@ -1955,6 +1955,10 @@ static void test_zones_post_rejects_ramp_lock_band_too_close_to_drift(void)
                    "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=25&"
                    "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=20");
     TEST_CHECK(!s_test_err_called, "ramp lock 20 with drift 25 (== 25 - 5) is the boundary and must be accepted");
+    run_zones_post("thermo_count=0&relay_count=0&"
+                   "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=0&"
+                   "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=21");
+    TEST_CHECK(s_test_err_called, "EA-12: drift 0 means the 25 C default, so ramp lock 21 is rejected too");
 }
 
 static void test_zones_post_accepts_clean_minimal_body(void)
