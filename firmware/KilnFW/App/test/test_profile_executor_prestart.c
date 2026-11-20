@@ -9049,6 +9049,20 @@ static void test_ea_finish_short_latch(void)
     for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 950.0f, 1.0f, 1.0f);
     (void)arrival_gate_tick(&ex, true, 100, 1.0f);
     TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "LOW-1: stall after budget opening does not latch");
+    // Budget opens while zone 0 is already stalled short and zone 1 is still climbing: not an arrival/stall opening, no latch.
+    ea_make_heating_profile(&ex);
+    ex.arrival_gate_seg = -1;
+    ex.zones[0].actual_c = 960.0f;
+    ex.zones[0].duty = 1.0f;
+    ex.zones[1].active = true;
+    ex.zones[1].actual_valid = true;
+    ex.zones[1].actual_c = 900.0f;
+    ex.zones[1].duty = 1.0f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f); // dwell entry
+    for (int i = 0; i < 320; i++) arrival_settle_tick(&ex.zones[0], 960.0f, 1.0f, 1.0f);
+    ex.arrival_wait_s = 1.0e9f;
+    (void)arrival_gate_tick(&ex, true, 100, 1.0f); // budget opens, zone 0 stalled
+    TEST_CHECK(!ex.zones[0].finish_short && !ex.finish_short_run, "budget opening with a stalled zone does not latch");
     // In band at open, then sags during the dwell: no latch.
     ea_make_heating_profile(&ex);
     ex.arrival_gate_seg = -1;
