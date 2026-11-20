@@ -283,6 +283,18 @@ void boot_reason_latch_trip(uint32_t reason)
     W.latch_trip_calls++;
     W.last_latched_reason = reason;
 }
+static bool g_own_ok_restored; // AT-15 test seam: what the boot read of slot 5 returned
+static bool g_own_ok_written;
+static int  g_own_ok_write_calls;
+bool own_ok_persist_restored(void)
+{
+    return g_own_ok_restored;
+}
+void own_ok_persist_write(bool on)
+{
+    g_own_ok_written = on;
+    g_own_ok_write_calls++;
+}
 void clear_trip_diag_mark(uint8_t stage, uint8_t a, uint8_t b, bool c, bool d, bool e, uint8_t f)
 {
     (void)stage; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
@@ -1147,8 +1159,8 @@ static void test_at_own_fault_run_scope(void)
     at_zones(1, 800.0f, 0.0f, 0.0f);
     at_run(50, 1);
     at_own_open();
-    at_run(5, 1);
-    TEST_CHECK(!safety_core_request_enable(true), "AT-10: enable refused while own TC faulted (fault before start)");
+    at_run(100, 1); // 10 s: past S5's count and time bars, before blind_grace_s
+    TEST_CHECK(!safety_core_request_enable(true), "AT-10: enable refused while own TC persistently faulted (fault before start)");
     // Fault mid-run: rides through; after the run ends the next enable is refused.
     world_reset_keep_clock();
     core_start();
@@ -1162,6 +1174,54 @@ static void test_at_own_fault_run_scope(void)
     TEST_CHECK(safety_core_request_enable(false), "AT-10: run ends");
     at_run(5, 1);
     TEST_CHECK(!safety_core_request_enable(true), "AT-10: after the run ends the next enable is refused");
+}
+
+static void test_at_enable_gating_and_resume(void)
+{
+    TEST_SECTION("AT-15/AT-16: enable needs one own sample, refuses only persistent faults; benign reboot keeps the allowance");
+    // No own-TC sample yet since boot: refused. One tick later: accepted.
+    world_reset_keep_clock();
+    g_own_ok_restored = false;
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    TEST_CHECK(!safety_core_request_enable(true), "AT-16: enable before the first own-TC sample is refused");
+    at_run(2, 1);
+    TEST_CHECK(safety_core_request_enable(true), "AT-16: enable after one good own-TC sample is accepted");
+    // One glitch does not refuse a start.
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    at_own_open();
+    at_run(2, 1);
+    TEST_CHECK(safety_core_request_enable(true), "AT-16: a 2-sample glitch does not refuse the start");
+    // Benign reboot mid-firing: allowance restored from scratch, own TC faulted from boot, zones working.
+    world_reset_keep_clock();
+    g_own_ok_restored = true;
+    g_own_ok_written = false;
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_own_open();
+    at_run(150, 1); // 15 s of fault while K4 still off: persistent, but the allowance holds it
+    TEST_CHECK(!is_tripped(), "AT-15: restored allowance, K4 still off, no trip");
+    TEST_CHECK(g_own_ok_written, "AT-15: the restored allowance is written back to scratch after the boot clear");
+    TEST_CHECK(safety_core_request_enable(true), "AT-15: resume enable accepted despite the persistent own fault");
+    W.relay_energized = true;
+    at_run(1000, 1);
+    TEST_CHECK(!is_tripped(), "AT-15: firing continues on the zones after a benign reboot");
+    TEST_CHECK(safety_core_request_enable(false), "AT-15: run ends");
+    W.relay_energized = false;
+    at_run(5, 1);
+    TEST_CHECK(!g_own_ok_written, "AT-15/AT-3: run end clears the persisted allowance");
+    TEST_CHECK(!safety_core_request_enable(true), "AT-15/AT-3: the next run does not inherit the allowance");
+    // Not restored (fatal reboot / power-on): the same fault is refused.
+    world_reset_keep_clock();
+    g_own_ok_restored = false;
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_own_open();
+    at_run(150, 1);
+    TEST_CHECK(!safety_core_request_enable(true), "AT-15: no restored allowance: persistent own fault refuses enable");
 }
 
 static void test_at_stale_window_capped(void)
@@ -1415,6 +1475,7 @@ int main(void)
     test_s16_config_corrupt();
     test_at_own_open_cool_zone_keeps_firing();
     test_at_own_fault_run_scope();
+    test_at_enable_gating_and_resume();
     test_at_stale_window_capped();
     test_at_stale_own_snapshot_no_tolerance();
     test_at_own_open_hot_zone_trips_s1();

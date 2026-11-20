@@ -31,7 +31,8 @@
 
 #include "board_pins.h"
 #include "boot_reason.h"
-#include "hal_scratch.h" // HAL Phase 3 item 1 -- claims for every real scratch owner, see the block in main() below
+#include "hal_scratch.h"
+#include "own_ok_persist.h" // HAL Phase 3 item 1 -- claims for every real scratch owner, see the block in main() below
 #include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints, see its own header comment
 #include "watchdog_overdue_diag.h" // 2026-08-23, the CLEAR_TRIP investigation's actual conclusion, see its own header comment
 #include "startup_diag.h"
@@ -300,6 +301,7 @@ int main(void)
     (void)hal_scratch_claim(3u, "startup_diag", HAL_SCRATCH_TAG_NONE);
     (void)hal_scratch_claim(5u, "watchdog_overdue_diag", 0xD9u);
     (void)hal_scratch_claim(5u, "stack_overflow_hook", 0xE3u);
+    (void)hal_scratch_claim(5u, "own_ok_persist", 0xC7u); // AT-15: S5 ride-through allowance across a benign reboot
     // 2026-09-09: slot 5's two other legitimate co-owners -- see
     // watchdog_fatal_diag_t's doc comment (watchdog_overdue_diag_codec.h).
     // Both write raw MMIO (vApplicationMallocFailedHook() in this file;
@@ -448,6 +450,9 @@ int main(void)
     }
     (void)watchdog_overflow_diag; // fully absorbed into watchdog_fatal_diag above; kept as its own read/cache for existing callers of watchdog_overflow_diag_get_cached()
 
+    // AT-15: a benign reboot (no watchdog timeout, no latched trip) of an active firing keeps the
+    // own-TC ride-through allowance; read it before the shared register is cleared below.
+    own_ok_persist_boot_read(!boot_reason.watchdog_caused_reboot && !boot_reason.trip_reason_valid);
     watchdog_overdue_diag_clear(); // clears the one shared register regardless of which format was present
 
     // --- Step 4: config from flash. ------------------------------------------

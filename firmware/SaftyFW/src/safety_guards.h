@@ -676,6 +676,10 @@ typedef struct {
     uint16_t s5_bad_streak;
     float    s5_bad_elapsed_s;
     bool     s5_own_ok_in_run; /* AT-10: own TC was good while K4 energized this run; clears at run end */
+    bool     s5_seen_read;     /* AT-16: S5 has evaluated at least one own-TC sample since reset */
+    bool     s5_resume_pending; /* AT-15: ride-through allowance restored after a benign reboot; waits for K4 */
+    float    s5_resume_age_s;   /* AT-15: seconds the restored allowance has waited for K4 to energize */
+    float    s5_nozone_s;       /* AT-18: seconds of own-fault ride-through with no working zone */
     bool     s5_warn; /* WARN state active -- caller clears TEMP_VALID while this is true */
     bool     s5_not_installed; /* true while blind_grace_s has been exceeded
                                  * AND in->safety_tc_not_installed_declared was
@@ -823,6 +827,16 @@ typedef struct {
 } safety_guard_state_t;
 
 void safety_guards_reset(safety_guard_state_t *state);
+
+/* AT-15: restore the own-TC ride-through allowance after a BENIGN Pico reboot of an active firing
+ * (the caller decides benign; a fatal reboot or a trip never calls this). It survives until K4
+ * energizes again, or SAFETY_GUARD_RESUME_WAIT_S passes without that. */
+#define SAFETY_GUARD_RESUME_WAIT_S 120.0f
+void safety_guards_restore_ride_through(safety_guard_state_t *state);
+
+/* AT-16: true when the own TC has been bad for both S5 bars (count and time), i.e. persistently,
+ * not one glitch. Used by the enable refusal. */
+bool safety_guards_s5_persistently_bad(const safety_guard_state_t *state, const safety_guard_cfg_t *cfg);
 
 /* Explicit operator acknowledgement -- the only way out of a latched trip
  * (SAFETY_MODEL.md section 2, "latching is not auto-recovery"). Resets

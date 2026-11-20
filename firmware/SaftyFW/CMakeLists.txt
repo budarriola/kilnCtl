@@ -58,6 +58,7 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW kilnlink)
 set(SAFTYFW_APP_SOURCES
     src/main.c
     src/boot_reason.c
+    src/own_ok_persist.c
     src/clear_trip_diag.c
     src/clear_trip_diag_codec.c
     src/watchdog_overdue_diag.c

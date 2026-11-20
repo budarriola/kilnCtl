@@ -23,6 +23,7 @@
 
 #include "../src/boot_reason.h"
 #include "../src/clear_trip_diag.h"
+#include "../src/own_ok_persist.h"
 #include "../src/watchdog_overdue_diag.h"
 #include "../src/watchdog_overdue_diag_codec.h"
 #include "fake_scratch.h"
@@ -259,8 +260,34 @@ static void test_recovered_notify_never_clears_a_fatal_tag(void)
                "watchdog_overdue_diag_notify_recovered() must never clear a genuine fatal latch");
 }
 
+static void test_own_ok_persist(void)
+{
+    TEST_SECTION("AT-15: own_ok_persist survives a benign reboot only; fatal latch or power loss drops it");
+    fake_scratch_reset_all();
+    own_ok_persist_write(true);
+    own_ok_persist_boot_read(true);
+    TEST_CHECK(own_ok_persist_restored(), "benign reboot after a written allowance restores it");
+    own_ok_persist_boot_read(false);
+    TEST_CHECK(!own_ok_persist_restored(), "a non-benign boot (watchdog timeout / latched trip) never restores");
+    own_ok_persist_write(false);
+    own_ok_persist_boot_read(true);
+    TEST_CHECK(!own_ok_persist_restored(), "run end (write false) clears it");
+    own_ok_persist_write(true);
+    (void)hal_scratch_write_u32(SCRATCH_OVERDUE, 0xE3010203u); /* a fatal latch overwrites slot 5 */
+    own_ok_persist_boot_read(true);
+    TEST_CHECK(!own_ok_persist_restored(), "a fatal latch in slot 5 means no restore");
+    own_ok_persist_write(false);
+    uint32_t raw = 0u;
+    (void)hal_scratch_read_u32(SCRATCH_OVERDUE, &raw, SCRATCH_OVERDUE, 0u, NULL);
+    TEST_CHECK(raw == 0xE3010203u, "write(false) never erases a fatal latch");
+    fake_scratch_reset_all();
+    own_ok_persist_boot_read(true);
+    TEST_CHECK(!own_ok_persist_restored(), "power-on (zeroed scratch) restores nothing");
+}
+
 void run_test_scratch_migration(void)
 {
+    test_own_ok_persist();
     test_boot_reason_round_trips_through_hal_scratch();
     test_boot_reason_unlatched_reads_invalid();
     test_boot_reason_forced_reboot_is_not_watchdog();

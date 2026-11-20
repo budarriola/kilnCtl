@@ -3464,6 +3464,117 @@ static void test_at_review2_fixes(void)
     }
 }
 
+/* AT-18: during ride-through a no-working-zone gap gets a 10 s grace before S5 trips. */
+static bool at18_gap(float gap_s)
+{
+    safety_guard_state_t s;
+    safety_guards_reset(&s);
+    safety_guard_cfg_t cfg = base_cfg();
+    safety_guard_input_t in = base_input();
+    in.context_valid = true;
+    in.dt_s = 1.0f;
+    at_own_open_run(&s, &cfg, &in);
+    at_zone(&in, 0, 600.0f);
+    for (int i = 0; i < 90; i++) { /* past blind_grace_s with a zone working */
+        if (safety_guards_tick(&s, &cfg, &in)) {
+            return true;
+        }
+    }
+    in.zone_ok[0] = false;
+    in.zone_working_count = 0;
+    in.zone_hot_max_c = NAN;
+    for (int i = 0; i < (int)gap_s; i++) {
+        if (safety_guards_tick(&s, &cfg, &in)) {
+            return true;
+        }
+    }
+    at_zone(&in, 0, 600.0f); /* zone back */
+    return safety_guards_tick(&s, &cfg, &in);
+}
+
+static void test_at_ride_grace_and_restore(void)
+{
+    TEST_SECTION("AT-18/AT-15 -- 10 s no-zone grace during ride-through; restored allowance");
+    TEST_CHECK(!at18_gap(9.0f), "AT-18: 9 s with no working zone does not trip S5");
+    TEST_CHECK(at18_gap(11.0f), "AT-18: 11 s with no working zone trips S5");
+    {
+        /* A gap that ends resets the counter: two 9 s gaps do not add up. */
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.dt_s = 1.0f;
+        at_own_open_run(&s, &cfg, &in);
+        at_zone(&in, 0, 600.0f);
+        bool tripped = false;
+        for (int i = 0; i < 90 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        for (int rep = 0; rep < 2 && !tripped; rep++) {
+            safety_guard_input_t gap = in;
+            gap.zone_ok[0] = false;
+            gap.zone_working_count = 0;
+            gap.zone_hot_max_c = NAN;
+            for (int i = 0; i < 9 && !tripped; i++) {
+                tripped = safety_guards_tick(&s, &cfg, &gap);
+            }
+            tripped = tripped || safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "AT-18: the grace counter resets when a zone works again");
+    }
+    {
+        /* AT-15: restored allowance holds across K4-off ticks, expires after the wait, and is
+         * consumed by K4 energizing. */
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guards_restore_ride_through(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.relay_deenergized = true;
+        in.dt_s = 1.0f;
+        at_own_open(&in);
+        at_zone(&in, 0, 600.0f);
+        for (int i = 0; i < 100; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s5_own_ok_in_run, "AT-15: restored allowance survives K4-off ticks");
+        in.relay_deenergized = false;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s5_own_ok_in_run && !s.s5_resume_pending, "AT-15: K4 energizing consumes the pending flag, keeps the allowance");
+        in.relay_deenergized = true;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s5_own_ok_in_run, "AT-15: after the run ends the allowance is gone");
+        safety_guards_reset(&s);
+        safety_guards_restore_ride_through(&s);
+        in.relay_deenergized = true;
+        in.tc_valid = true;
+        in.tc_c = 100.0f;
+        in.fault_bits = 0u;
+        in.dt_s = 10.0f;
+        for (int i = 0; i < 13; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s5_own_ok_in_run && !s.s5_resume_pending, "AT-15: unused restored allowance expires");
+    }
+    {
+        /* AT-16: a persistent own fault is reported by the helper, one glitch is not. */
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        at_own_open(&in);
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!safety_guards_s5_persistently_bad(&s, &cfg), "AT-16: one bad sample is not persistent");
+        for (int i = 0; i < 12; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(safety_guards_s5_persistently_bad(&s, &cfg), "AT-16: 13 s of bad samples is persistent");
+    }
+}
+
 /* AT (owner 2026-11-19): own-IC fault tolerated while a zone works; S1/S2/S8 on every TC. */
 static void test_at_all_tc_guards(void)
 {
@@ -6136,6 +6247,7 @@ void run_test_safety_guards(void)
     test_at_all_tc_guards();
     test_at_review_fixes();
     test_at_review2_fixes();
+    test_at_ride_grace_and_restore();
     test_s6_s13_split();
     test_context_gating();
     test_independence_invariant();

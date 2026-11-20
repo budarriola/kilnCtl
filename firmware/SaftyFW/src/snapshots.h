@@ -532,6 +532,20 @@ static inline void context_reduce_hottest_ex(const context_snapshot_t *ctx, bool
         n = CONTEXT_SNAPSHOT_MAX_ZONES;
     }
     bool have_hot = false;
+    /* AT-14: a zone_index appearing more than once in one frame shares one tracker, so two
+     * alternating frozen counters would look fresh forever. Such a zone never counts as working
+     * (its values still feed the S1 over-range path below). */
+    uint32_t seen_mask = 0u, dup_mask = 0u;
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t zi0 = ctx->zones[i].zone_index;
+        if (zi0 < CONTEXT_SNAPSHOT_MAX_ZONES) {
+            uint32_t bit = 1u << zi0;
+            if ((seen_mask & bit) != 0u) {
+                dup_mask |= bit;
+            }
+            seen_mask |= bit;
+        }
+    }
     for (uint8_t i = 0; i < n; i++) {
         const context_zone_t *z = &ctx->zones[i];
         uint8_t zi = z->zone_index;
@@ -548,6 +562,9 @@ static inline void context_reduce_hottest_ex(const context_snapshot_t *ctx, bool
             t->last_advance_ms = now_ms;
         }
         bool fresh = t->ever_advanced && (float)(uint32_t)(now_ms - t->last_advance_ms) <= stale * 1000.0f;
+        if ((dup_mask & (1u << zi)) != 0u) {
+            fresh = false;
+        }
         if (context_valid && (z->tc_fault & CONTEXT_ZONE_FAULT_TCRANGE) != 0u) {
             out->tcrange[zi] = true;
         }
@@ -566,7 +583,10 @@ static inline void context_reduce_hottest_ex(const context_snapshot_t *ctx, bool
             }
         } else if (above_max != NULL && context_valid && !s6b_active &&
                    (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u && isfinite(z->measured_c) &&
-                   (z->tc_fault & CONTEXT_ZONE_FAULT_MASK) == 0u && above_max(z->tc_type, z->measured_c)) {
+                   (z->tc_fault & (CONTEXT_ZONE_FAULT_MASK & ~CONTEXT_ZONE_FAULT_TCRANGE)) == 0u &&
+                   above_max(z->tc_type, z->measured_c)) {
+            /* AT-17: a TCRANGE-flagged zone above its max still feeds S1 (a converter running out
+             * of range upward is the hot case); OPEN/OVUV zones stay excluded. */
             /* MED-2: implausibly HIGH is not dropped; S1 sees it (freshness not required: a
              * high value is never made safer by being old). */
             if (!out->over_any || z->measured_c > out->over_c) {

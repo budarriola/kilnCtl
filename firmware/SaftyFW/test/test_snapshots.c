@@ -627,17 +627,31 @@ static void test_at_duplicate_zone_index(void)
     context_snapshot_t ctx;
     context_zone_track_t tr[CONTEXT_SNAPSHOT_MAX_ZONES];
     context_zone_reduction_t r;
-    for (int order = 0; order < 2; order++) {
-        memset(tr, 0, sizeof(tr));
-        at_make_ctx(&ctx, order ? 700.0f : 500.0f, order ? 500.0f : 700.0f);
-        ctx.zones[1].zone_index = 0; /* duplicate */
-        context_reduce_hottest_ex(&ctx, true, false, 1000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
-        ctx.zones[0].sample_counter++;
-        ctx.zones[1].sample_counter++;
-        context_reduce_hottest_ex(&ctx, true, false, 1100u, 10.0f, tr, at_plausible_k, at_above_k, &r);
-        TEST_CHECK(r.working_count == 1u && r.c[0] == 700.0f && r.hot_max_c == 700.0f,
-                   "AT-11: duplicate zone_index keeps the hotter working value in either order");
+    /* AT-14: a duplicate zone_index is never "working" (shared tracker): alternating frozen
+     * counters must not look fresh. */
+    memset(tr, 0, sizeof(tr));
+    at_make_ctx(&ctx, 500.0f, 700.0f);
+    ctx.zones[1].zone_index = 0; /* duplicate */
+    for (uint32_t k = 0; k < 20u; k++) {
+        ctx.zones[0].sample_counter = (uint8_t)(k & 1u); /* alternating, frozen in effect */
+        ctx.zones[1].sample_counter = (uint8_t)((k & 1u) ^ 1u);
+        context_reduce_hottest_ex(&ctx, true, false, 1000u + k * 1000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
     }
+    TEST_CHECK(r.working_count == 0u && !r.working[0], "AT-14: duplicate zone_index is not working");
+    /* Still feeds the over-range path with the hotter of the values. */
+    at_make_ctx(&ctx, 1380.0f, 1400.0f);
+    ctx.zones[1].zone_index = 0;
+    context_reduce_hottest_ex(&ctx, true, false, 50000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+    TEST_CHECK(r.over_any && r.over_c == 1400.0f && r.working_count == 0u,
+               "AT-14: duplicate over-range values still feed S1 (max)");
+    /* AT-17: TCRANGE-flagged zone above max feeds S1; OPEN-flagged does not. */
+    at_make_ctx(&ctx, 1380.0f, 900.0f);
+    ctx.zones[0].tc_fault = CONTEXT_ZONE_FAULT_TCRANGE;
+    context_reduce_hottest_ex(&ctx, true, false, 51000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+    TEST_CHECK(r.over_any && r.over_c == 1380.0f, "AT-17: TCRANGE-flagged zone above max feeds S1");
+    ctx.zones[0].tc_fault = CONTEXT_ZONE_FAULT_OPEN;
+    context_reduce_hottest_ex(&ctx, true, false, 52000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+    TEST_CHECK(!r.over_any, "AT-17: OPEN-flagged zone above max stays excluded");
 }
 
 static void test_at_zone_reduction(void)

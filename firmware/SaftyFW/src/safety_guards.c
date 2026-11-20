@@ -93,6 +93,13 @@ void safety_guards_reset(safety_guard_state_t *state)
     memset(state, 0, sizeof(*state));
 }
 
+void safety_guards_restore_ride_through(safety_guard_state_t *state)
+{
+    state->s5_own_ok_in_run = true;
+    state->s5_resume_pending = true;
+    state->s5_resume_age_s = 0.0f;
+}
+
 void safety_guards_clear(safety_guard_state_t *state)
 {
     safety_guards_reset(state);
@@ -165,6 +172,23 @@ static bool guard_zones_work(const safety_guard_input_t *in)
 /* An own-IC fault (OPEN/OVUV/TCRANGE bits, SPI itself fine) is tolerated for the rest of the
  * firing while at least one zone TC works. A stale/NaN own reading with no fault bit, an SPI
  * failure, or zero working zones is not tolerated (S5 trips as before). */
+bool safety_guards_s5_persistently_bad(const safety_guard_state_t *state, const safety_guard_cfg_t *cfg)
+{
+    uint16_t count_th = effective_u16(cfg->bad_read_count_threshold, BAD_READ_COUNT_DEFAULT);
+    float time_th = effective_f(cfg->bad_read_time_s, BAD_READ_TIME_S_DEFAULT);
+    return state->s5_bad_streak >= count_th && state->s5_bad_elapsed_s >= time_th;
+}
+
+#define S5_RIDE_NO_ZONE_GRACE_S 10.0f
+
+/* AT-10/AT-18: the own-fault ride-through preconditions, without the zone requirement. */
+static bool guard_ride_candidate(const safety_guard_state_t *state, const safety_guard_input_t *in)
+{
+    return state->s5_own_ok_in_run && s5_bad_read_now(in) && !in->spi_failed &&
+           ((in->fault_bits & (SAFETY_THERMO_FAULT_OPEN | SAFETY_THERMO_FAULT_OVUV |
+                                SAFETY_THERMO_FAULT_TCRANGE)) != 0u);
+}
+
 static bool guard_own_fault_tolerated(const safety_guard_state_t *state, const safety_guard_input_t *in)
 {
     /* AT-10: only a fault that began while a run was enabled and the own TC had been good. */
@@ -1026,12 +1050,33 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     /* AT-10: per-run ride-through latch. Set while K4 is energized and the own TC reads good;
      * cleared the moment the run ends (relay de-energized). A fault present before the run, or
      * during a run that never saw a good own read, is never tolerated. */
+    state->s5_seen_read = true;
     if (in->relay_deenergized) {
-        state->s5_own_ok_in_run = false;
-    } else if (!bad_read) {
-        state->s5_own_ok_in_run = true;
+        if (state->s5_resume_pending) {
+            /* AT-15: allowance restored after a benign reboot; hold it while K4 is still off. */
+            state->s5_resume_age_s += in->dt_s;
+            if (state->s5_resume_age_s >= SAFETY_GUARD_RESUME_WAIT_S) {
+                state->s5_resume_pending = false;
+                state->s5_own_ok_in_run = false;
+            }
+        } else {
+            state->s5_own_ok_in_run = false;
+        }
+    } else {
+        state->s5_resume_pending = false;
+        if (!bad_read) {
+            state->s5_own_ok_in_run = true;
+        }
     }
     bool tc_usable = true; /* false on a bad read: S2/S10 hold, see context_guards */
+
+    /* AT-18 (owner 2026-11-19): during own-fault ride-through a no-working-zone gap (link blip, ESP
+     * reboot, OTA) gets S5_RIDE_NO_ZONE_GRACE_S before S5 trips. */
+    if (guard_ride_candidate(state, in) && !guard_zones_work(in)) {
+        state->s5_nozone_s += in->dt_s;
+    } else {
+        state->s5_nozone_s = 0.0f;
+    }
 
     if (bad_read) {
         if (state->s5_bad_streak < UINT16_MAX) {
@@ -1098,6 +1143,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                      * works. Warn only (s5_warn above); S1/S2/S8 keep running on the zones
                      * below. The elapsed time keeps accumulating, so the moment no TC works
                      * any more this trips at once. */
+                } else if (guard_ride_candidate(state, in) && state->s5_nozone_s < S5_RIDE_NO_ZONE_GRACE_S) {
+                    /* AT-18: ride-through, no working zone yet but inside the 10 s grace. */
                 } else {
                     trip(state, SAFETY_TRIP_SENSOR_INVALID,
                          "blind for %.1fs (>= blind_grace_s %.1fs), %u consecutive bad reads",

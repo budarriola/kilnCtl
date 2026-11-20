@@ -45,6 +45,7 @@
 #include "watchdog_task.h"
 
 #include "boot_reason.h"
+#include "own_ok_persist.h"
 #include "clock_health.h" // 2026-08-23 stalled-get_absolute_time() detector, see its own header comment
 #include "tick_timing.h" // 2026-08-27 audit items 1/2: measured dt_s and snapshot freshness -- see its own header comment
 #include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints that survive the reboot -- see its own header comment
@@ -1486,6 +1487,11 @@ static void safety_core_task(void *arg)
     (void)arg;
 
     safety_guards_reset(&s_guard_state);
+    // AT-15: benign reboot of an active firing keeps the own-TC ride-through allowance.
+    bool own_ok_persisted = false;
+    if (own_ok_persist_restored()) {
+        safety_guards_restore_ride_through(&s_guard_state);
+    }
     s_have_good_guard_cfg = false;
     s_last_good_tc_not_installed_declared = false;
 
@@ -1497,6 +1503,10 @@ static void safety_core_task(void *arg)
         safety_guard_input_t input = safety_core_build_input();
 
         bool newly_tripped = safety_guards_tick(&s_guard_state, &s_guard_cfg, &input);
+        if (s_guard_state.s5_own_ok_in_run != own_ok_persisted) {
+            own_ok_persisted = s_guard_state.s5_own_ok_in_run; // AT-15: persist on change only
+            own_ok_persist_write(own_ok_persisted);
+        }
         if (newly_tripped) {
             // SAFETY_MODEL.md section 6's 4-step trip order: (1) relay_owner
             // de-energizes K4 first, before anything else, before logging;
@@ -1976,9 +1986,15 @@ bool safety_core_request_enable(bool enable)
         if (cfg_rec.safety_tc_installed == 0u) {
             return false;
         }
-        // AT-10 (owner 2026-11-19): a faulted own TC never STARTS a firing. Ride-through
+        // AT-10 (owner 2026-11-19): a persistently faulted own TC never STARTS a firing. Ride-through
         // (safety_guards.c s5_own_ok_in_run) covers only a fault that began mid-run.
-        if (s_guard_state.s5_bad_streak > 0u) {
+        // AT-16: refuse only on a PERSISTENT own-TC fault (S5's own count and time bars), not one
+        // glitch; and not before the guard has seen one own-TC sample since boot / trip clear.
+        if (!s_guard_state.s5_seen_read) {
+            log_task_log(LOG_LEVEL_WARN, "request_enable", "refused: no own TC sample yet");
+            return false;
+        }
+        if (safety_guards_s5_persistently_bad(&s_guard_state, &s_guard_cfg) && !s_guard_state.s5_own_ok_in_run) {
             log_task_log(LOG_LEVEL_WARN, "request_enable", "refused: safety TC faulted");
             return false;
         }

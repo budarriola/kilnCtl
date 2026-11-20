@@ -191,6 +191,7 @@ try {
         # firmware/hwAbstraction/test/test_fake_scratch.c exercises directly.
         # hal_status.c is already linked in below (relay_owner.c's block).
         (Join-Path $srcDir "boot_reason.c"),
+        (Join-Path $srcDir "own_ok_persist.c"),
         (Join-Path $srcDir "clear_trip_diag.c"),
         (Join-Path $srcDir "watchdog_overdue_diag.c"),
         (Join-Path $hwAbstractionHostDir "fake_scratch.c"),
