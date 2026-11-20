@@ -3277,6 +3277,19 @@ static void at_own_open(safety_guard_input_t *in)
     in->fault_bits = SAFETY_THERMO_FAULT_OPEN;
 }
 
+/* AT-10: ride-through needs the own TC good during the run first; prime two good ticks, then open. */
+static void at_own_open_run(safety_guard_state_t *s, const safety_guard_cfg_t *cfg, safety_guard_input_t *in)
+{
+    safety_guard_input_t g = *in;
+    g.tc_valid = true;
+    g.tc_c = 100.0f;
+    g.fault_bits = 0u;
+    g.relay_deenergized = false;
+    safety_guards_tick(s, cfg, &g);
+    safety_guards_tick(s, cfg, &g);
+    at_own_open(in);
+}
+
 /* AT helper: zone z working at c degC. */
 static void at_zone(safety_guard_input_t *in, int z, float c)
 {
@@ -3379,6 +3392,78 @@ static void test_s13(void)
     }
 }
 
+/* AT-09/AT-10 (review of 8398fbad8): S8 window clock across short zone gaps; own-fault ride-through
+ * only for a fault that began mid-run. */
+static bool at09_run(float rate_c_per_min, int miss_every)
+{
+    safety_guard_state_t s;
+    safety_guards_reset(&s);
+    safety_guard_cfg_t cfg = base_cfg();
+    cfg.max_rate_c_per_min = 100.0f;
+    cfg.rate_window_s = 10.0f;
+    safety_guard_input_t in = base_input();
+    in.context_valid = true;
+    in.max_zone_setpoint_c = 1300.0f;
+    in.dt_s = 1.0f;
+    float c = 300.0f;
+    for (int t = 0; t < 200; t++) {
+        c += rate_c_per_min / 60.0f;
+        at_zone(&in, 0, c);
+        if (miss_every > 0 && (t % miss_every) == (miss_every - 1)) {
+            in.zone_ok[0] = false;
+            in.zone_working_count = 0;
+            in.zone_hot_max_c = NAN;
+        }
+        if (safety_guards_tick(&s, &cfg, &in)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_at_review2_fixes(void)
+{
+    TEST_SECTION("AT-09/AT-10 -- S8 zone gaps and per-run own-fault ride-through");
+    TEST_CHECK(!at09_run(80.0f, 4), "AT-09: 80 C/min zone (max 100) missing 1 tick in 4 does not trip S8");
+    TEST_CHECK(at09_run(150.0f, 4), "AT-09: 150 C/min zone with dropouts still trips S8");
+    TEST_CHECK(at09_run(150.0f, 0), "AT-09: 150 C/min zone without dropouts trips S8");
+    /* AT-10: own TC open from the very first tick (never good this run): not tolerated. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open(&in);
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "AT-10: fault present before the run is not ridden through");
+    }
+    /* AT-10: fault mid-run rides through; once the run ends (relay de-energized) it no longer does. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        at_own_open_run(&s, &cfg, &in);
+        at_zone(&in, 0, 600.0f);
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "AT-10: fault that began mid-run is ridden through");
+        in.relay_deenergized = true; /* run ends */
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s5_own_ok_in_run, "AT-10: run end clears the ride-through latch");
+    }
+}
+
 /* AT (owner 2026-11-19): own-IC fault tolerated while a zone works; S1/S2/S8 on every TC. */
 static void test_at_all_tc_guards(void)
 {
@@ -3391,7 +3476,7 @@ static void test_at_all_tc_guards(void)
         safety_guard_cfg_t cfg = base_cfg();
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 0, 600.0f);
         in.dt_s = 10.0f;
         bool tripped = false;
@@ -3408,7 +3493,7 @@ static void test_at_all_tc_guards(void)
         safety_guard_cfg_t cfg = base_cfg();
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 0, 600.0f);
         in.dt_s = 10.0f;
         for (int i = 0; i < 20; i++) {
@@ -3427,7 +3512,7 @@ static void test_at_all_tc_guards(void)
         safety_guard_cfg_t cfg = base_cfg();
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         in.dt_s = 10.0f;
         bool tripped = false;
         for (int i = 0; i < 20 && !tripped; i++) {
@@ -3442,7 +3527,7 @@ static void test_at_all_tc_guards(void)
         safety_guard_cfg_t cfg = base_cfg();
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         in.spi_failed = true;
         at_zone(&in, 0, 600.0f);
         in.dt_s = 10.0f;
@@ -3477,7 +3562,7 @@ static void test_at_all_tc_guards(void)
         safety_guard_cfg_t cfg = base_cfg();
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 0, 500.0f);
         at_zone(&in, 1, cfg.abs_max_temp_c + 20.0f);
         at_zone(&in, 2, 400.0f);
@@ -3599,7 +3684,7 @@ static void test_at_all_tc_guards(void)
         in.context_valid = true;
         in.zone_count = 1;
         in.max_zone_setpoint_c = 300.0f;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 0, 300.0f + 200.0f); /* well over setpoint + margin */
         in.dt_s = 10.0f;
         bool tripped = false;
@@ -3638,7 +3723,7 @@ static void test_at_all_tc_guards(void)
             safety_guards_tick(&s, &cfg, &in);
         }
         TEST_CHECK(s.is_tripped, "AT: sanity, own S1 latched");
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "AT: clear refused when no TC works");
     }
 }
@@ -3679,7 +3764,7 @@ static void test_at_review_fixes(void)
         in.context_valid = true;
         in.zone_count = 1;
         in.max_zone_setpoint_c = 300.0f;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 0, 500.0f); /* S2 over setpoint + margin */
         in.dt_s = 10.0f;
         for (int i = 0; i < 40 && !s.is_tripped; i++) {
@@ -3716,7 +3801,7 @@ static void test_at_review_fixes(void)
         cfg.abs_max_temp_c = 1300.0f;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 1, 900.0f); /* zone B works */
         in.zone_over_any = true; /* zone A: 1380 C type K, no TCRANGE bit */
         in.zone_over_c = 1380.0f;
@@ -3770,7 +3855,7 @@ static void test_at_review_fixes(void)
         safety_guard_input_t in = base_input();
         in.context_valid = true;
         in.heat_commanded = true;
-        at_own_open(&in);
+        at_own_open_run(&s, &cfg, &in);
         at_zone(&in, 0, 600.0f);
         in.dt_s = 10.0f;
         bool tripped = false;
@@ -3780,6 +3865,7 @@ static void test_at_review_fixes(void)
         TEST_CHECK(tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "LOW-4: frozen zone value trips S11");
         safety_guard_state_t s2;
         safety_guards_reset(&s2);
+        at_own_open_run(&s2, &cfg, &in);
         tripped = false;
         for (int i = 0; i < 20 && !tripped; i++) {
             at_zone(&in, 0, 600.0f + (float)i * 0.25f);
@@ -3827,7 +3913,7 @@ static void test_s6_s13_split(void)
         safety_guard_input_t in = base_input();
         in.link_up = true;
         in.context_valid = true;
-        at_own_open(&in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
+        at_own_open_run(&s, &cfg, &in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
         in.dt_s = 61.0f;
         bool tripped = safety_guards_tick(&s, &cfg, &in);
         TEST_CHECK(tripped, "channel-stale-only: S13 trips");
@@ -3850,7 +3936,7 @@ static void test_s6_s13_split(void)
         safety_guard_input_t in = base_input();
         in.link_up = false;
         in.context_valid = true;          /* deliberately stale-caller edge case */
-        at_own_open(&in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
+        at_own_open_run(&s, &cfg, &in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f;
         in.any_current_present = true;
         in.dt_s = 11.0f;
         bool tripped = safety_guards_tick(&s, &cfg, &in);
@@ -4789,7 +4875,7 @@ static void test_context_gating(void)
         in.nearest_zone_measured_c = 50.0f; /* huge disagreement -- would warn S10 */
         in.any_current_present = true; /* with nothing commanded -- would trip S3 */
         in.relay_commanded_recently = false;
-        at_own_open(&in); in.safety_tc_not_installed_declared = true; in.zone_stalled_any = true; /* would eventually trip S13 */
+        at_own_open_run(&s, &cfg, &in); in.safety_tc_not_installed_declared = true; in.zone_stalled_any = true; /* would eventually trip S13 */
         in.dt_s = 61.0f; /* one tick alone exceeds S3's stuck_on_time_s (20s) and S13's borrowed_stale_trip_s (60s) if context were valid */
         bool tripped = false;
         for (int i = 0; i < 10 && !tripped; i++) {
@@ -5445,7 +5531,7 @@ static void test_test_trip_loses_to_every_real_guard(void)
         case 3: in.cj_c = 90.0f; in.dt_s = 61.0f; want = SAFETY_TRIP_ENCLOSURE_TEMP; name = "S12"; break;
         default:
             cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE; in.context_valid = true;
-            at_own_open(&in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f; in.dt_s = 61.0f;
+            at_own_open_run(&s, &cfg, &in); in.zone_stalled_any = true; cfg.blind_grace_s = 1000.0f; in.dt_s = 61.0f;
             want = SAFETY_TRIP_BORROWED_STALE; name = "S13 (last guard)"; break;
         }
         /* Twin run without a request finds the tick the real guard fires on. */
@@ -6049,6 +6135,7 @@ void run_test_safety_guards(void)
     test_s13();
     test_at_all_tc_guards();
     test_at_review_fixes();
+    test_at_review2_fixes();
     test_s6_s13_split();
     test_context_gating();
     test_independence_invariant();

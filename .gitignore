@@ -146,3 +146,6 @@ build_sim_*_obj/
 
 # make_release.ps1 output (assets, notes, gate record); never committed.
 logs/release/
+
+# Scratch host-test build output (never committed).
+/wttcfix_out/

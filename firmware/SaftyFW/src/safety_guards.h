@@ -675,6 +675,7 @@ typedef struct {
      * WARN toward blind_grace_s for the TRIP promotion). */
     uint16_t s5_bad_streak;
     float    s5_bad_elapsed_s;
+    bool     s5_own_ok_in_run; /* AT-10: own TC was good while K4 energized this run; clears at run end */
     bool     s5_warn; /* WARN state active -- caller clears TEMP_VALID while this is true */
     bool     s5_not_installed; /* true while blind_grace_s has been exceeded
                                  * AND in->safety_tc_not_installed_declared was

@@ -1138,6 +1138,47 @@ static void test_at_stale_own_snapshot_no_tolerance(void)
                "LOW-5: stale own snapshot is not tolerated (S5 trips)");
 }
 
+static void test_at_own_fault_run_scope(void)
+{
+    TEST_SECTION("AT-10: own-TC ride-through is per run; faulted own TC refuses enable");
+    // Fault before start: enable refused.
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    at_own_open();
+    at_run(5, 1);
+    TEST_CHECK(!safety_core_request_enable(true), "AT-10: enable refused while own TC faulted (fault before start)");
+    // Fault mid-run: rides through; after the run ends the next enable is refused.
+    world_reset_keep_clock();
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    at_run(50, 1);
+    TEST_CHECK(safety_core_request_enable(true), "AT-10: enable accepted with a good own TC");
+    at_run(5, 1);
+    at_own_open();
+    at_run(1000, 1);
+    TEST_CHECK(!is_tripped(), "AT-10: fault that began mid-run is ridden through");
+    TEST_CHECK(safety_core_request_enable(false), "AT-10: run ends");
+    at_run(5, 1);
+    TEST_CHECK(!safety_core_request_enable(true), "AT-10: after the run ends the next enable is refused");
+}
+
+static void test_at_stale_window_capped(void)
+{
+    TEST_SECTION("AT-12: zone freshness window capped at 10 s whatever borrowed_stale_s holds");
+    world_reset_keep_clock();
+    W.cfg.borrowed_stale_s = 120;
+    core_start();
+    at_zones(1, 800.0f, 0.0f, 0.0f);
+    W.relay_energized = true;
+    at_run(50, 1);
+    at_own_open();
+    at_run(900, 0); // 90 s frozen: capped stale at 10 s, own blind 60 s -> S5 trips (uncapped 120 s would not)
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_SENSOR_INVALID,
+               "AT-12: borrowed_stale_s=120 does not keep a frozen zone working past 10 s");
+}
+
 static void test_at_own_open_cool_zone_keeps_firing(void)
 {
     TEST_SECTION("AT: own TC open, zone TC cool and working: firing continues past blind_grace (no time cap)");
@@ -1373,6 +1414,8 @@ int main(void)
     test_s9_ineffective_trip();
     test_s16_config_corrupt();
     test_at_own_open_cool_zone_keeps_firing();
+    test_at_own_fault_run_scope();
+    test_at_stale_window_capped();
     test_at_stale_own_snapshot_no_tolerance();
     test_at_own_open_hot_zone_trips_s1();
     test_at_hottest_of_three_zones();

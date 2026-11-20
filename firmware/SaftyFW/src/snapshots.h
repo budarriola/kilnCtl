@@ -531,6 +531,7 @@ static inline void context_reduce_hottest_ex(const context_snapshot_t *ctx, bool
     if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
         n = CONTEXT_SNAPSHOT_MAX_ZONES;
     }
+    bool have_hot = false;
     for (uint8_t i = 0; i < n; i++) {
         const context_zone_t *z = &ctx->zones[i];
         uint8_t zi = z->zone_index;
@@ -551,13 +552,17 @@ static inline void context_reduce_hottest_ex(const context_snapshot_t *ctx, bool
             out->tcrange[zi] = true;
         }
         if (context_zone_working(z, context_valid, s6b_active, fresh, plausible)) {
+            /* AT-11: a duplicate zone_index keeps the hotter working value. */
             if (!out->working[zi]) {
                 out->working[zi] = true;
                 out->c[zi] = z->measured_c;
-                if (out->working_count == 0u || z->measured_c > out->hot_max_c) {
-                    out->hot_max_c = z->measured_c;
-                }
                 out->working_count++;
+            } else if (z->measured_c > out->c[zi]) {
+                out->c[zi] = z->measured_c;
+            }
+            if (!have_hot || z->measured_c > out->hot_max_c) {
+                out->hot_max_c = z->measured_c;
+                have_hot = true;
             }
         } else if (above_max != NULL && context_valid && !s6b_active &&
                    (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u && isfinite(z->measured_c) &&

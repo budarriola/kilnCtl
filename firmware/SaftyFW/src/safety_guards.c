@@ -165,9 +165,10 @@ static bool guard_zones_work(const safety_guard_input_t *in)
 /* An own-IC fault (OPEN/OVUV/TCRANGE bits, SPI itself fine) is tolerated for the rest of the
  * firing while at least one zone TC works. A stale/NaN own reading with no fault bit, an SPI
  * failure, or zero working zones is not tolerated (S5 trips as before). */
-static bool guard_own_fault_tolerated(const safety_guard_input_t *in)
+static bool guard_own_fault_tolerated(const safety_guard_state_t *state, const safety_guard_input_t *in)
 {
-    return s5_bad_read_now(in) && !in->spi_failed &&
+    /* AT-10: only a fault that began while a run was enabled and the own TC had been good. */
+    return state->s5_own_ok_in_run && s5_bad_read_now(in) && !in->spi_failed &&
            ((in->fault_bits & (SAFETY_THERMO_FAULT_OPEN | SAFETY_THERMO_FAULT_OVUV |
                                 SAFETY_THERMO_FAULT_TCRANGE)) != 0u) &&
            guard_zones_work(in);
@@ -279,6 +280,10 @@ static bool zone_guards_eval(safety_guard_state_t *state, const safety_guard_cfg
             /* LOW-3: survive short freshness misses; reset only after the zone has been
              * not-working for more than borrowed_stale_s continuously. */
             state->s8z_notok_elapsed_s[z] += in->dt_s;
+            /* AT-09: keep the window's wall clock honest across a short gap (as A11 does). */
+            if (state->s8z_window_active[z] && state->s8z_notok_elapsed_s[z] <= effective_f(cfg->borrowed_stale_s, 10.0f)) {
+                state->s8z_window_elapsed_s[z] += in->dt_s;
+            }
             if (state->s8z_notok_elapsed_s[z] > effective_f(cfg->borrowed_stale_s, 10.0f)) {
                 state->s8z_window_active[z] = false;
                 state->s8z_window_elapsed_s[z] = 0.0f;
@@ -522,7 +527,7 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
          * one. (S9 is not listed: it escalates by itself in the tripped path.) */
         return test_trip_masks_real_condition(cfg, in, state);
     case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
-        return s5_bad_read_now(in) && !guard_own_fault_tolerated(in);
+        return s5_bad_read_now(in) && !guard_own_fault_tolerated(state, in);
     case SAFETY_TRIP_OVERTEMP: /* S1 -- reading still above the absolute ceiling right now
                                 * (REVIEW_SAFTYFW_TRIP_PATH T1: the S1 debounce counts exactly
                                 * this level; refusing here never loosens the guard). */
@@ -1018,6 +1023,14 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * falling through to S1/S11/S12 below with an un-flagged garbage
      * value. */
     bool bad_read = s5_bad_read_now(in);
+    /* AT-10: per-run ride-through latch. Set while K4 is energized and the own TC reads good;
+     * cleared the moment the run ends (relay de-energized). A fault present before the run, or
+     * during a run that never saw a good own read, is never tolerated. */
+    if (in->relay_deenergized) {
+        state->s5_own_ok_in_run = false;
+    } else if (!bad_read) {
+        state->s5_own_ok_in_run = true;
+    }
     bool tc_usable = true; /* false on a bad read: S2/S10 hold, see context_guards */
 
     if (bad_read) {
@@ -1080,7 +1093,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * been blind" -- are unaffected. */
                 if (in->safety_tc_not_installed_declared) {
                     state->s5_not_installed = true;
-                } else if (guard_own_fault_tolerated(in)) {
+                } else if (guard_own_fault_tolerated(state, in)) {
                     /* AT (owner 2026-11-19): the own IC reports a fault but a zone TC still
                      * works. Warn only (s5_warn above); S1/S2/S8 keep running on the zones
                      * below. The elapsed time keeps accumulating, so the moment no TC works

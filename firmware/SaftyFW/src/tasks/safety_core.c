@@ -1091,7 +1091,8 @@ static safety_guard_input_t safety_core_build_input(void)
     // S1/S2/S8/S13. s6b_active is the link-dead condition S6b trips on.
     context_zone_reduction_t zone_red;
     context_reduce_hottest_ex(&ctx, context_valid, !link_task_link_up(), now_ms,
-                              cfg_rec.borrowed_stale_s > 0u ? (float)cfg_rec.borrowed_stale_s : 10.0f,
+                              (cfg_rec.borrowed_stale_s > 0u && cfg_rec.borrowed_stale_s <= 10u)
+                                  ? (float)cfg_rec.borrowed_stale_s : 10.0f, /* AT-12: cap at 10 s */
                               s_zone_track, max31856_tc_range_is_plausible, max31856_tc_range_is_above_max,
                               &zone_red);
 
@@ -1973,6 +1974,12 @@ bool safety_core_request_enable(bool enable)
         config_store_record_t cfg_rec;
         config_store_get_full_record(&cfg_rec);
         if (cfg_rec.safety_tc_installed == 0u) {
+            return false;
+        }
+        // AT-10 (owner 2026-11-19): a faulted own TC never STARTS a firing. Ride-through
+        // (safety_guards.c s5_own_ok_in_run) covers only a fault that began mid-run.
+        if (s_guard_state.s5_bad_streak > 0u) {
+            log_task_log(LOG_LEVEL_WARN, "request_enable", "refused: safety TC faulted");
             return false;
         }
 

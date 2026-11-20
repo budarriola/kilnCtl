@@ -622,6 +622,24 @@ static void test_at_over_range_zone(void)
     TEST_CHECK(!r.over_any, "MED-2: an implausibly LOW zone value stays excluded");
 }
 
+static void test_at_duplicate_zone_index(void)
+{
+    context_snapshot_t ctx;
+    context_zone_track_t tr[CONTEXT_SNAPSHOT_MAX_ZONES];
+    context_zone_reduction_t r;
+    for (int order = 0; order < 2; order++) {
+        memset(tr, 0, sizeof(tr));
+        at_make_ctx(&ctx, order ? 700.0f : 500.0f, order ? 500.0f : 700.0f);
+        ctx.zones[1].zone_index = 0; /* duplicate */
+        context_reduce_hottest_ex(&ctx, true, false, 1000u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+        ctx.zones[0].sample_counter++;
+        ctx.zones[1].sample_counter++;
+        context_reduce_hottest_ex(&ctx, true, false, 1100u, 10.0f, tr, at_plausible_k, at_above_k, &r);
+        TEST_CHECK(r.working_count == 1u && r.c[0] == 700.0f && r.hot_max_c == 700.0f,
+                   "AT-11: duplicate zone_index keeps the hotter working value in either order");
+    }
+}
+
 static void test_at_zone_reduction(void)
 {
     context_snapshot_t ctx;
@@ -673,6 +691,7 @@ void run_test_snapshots(void)
 {
     test_at_over_range_zone();
     test_at_zone_reduction();
+    test_at_duplicate_zone_index();
     test_reduce_zones_invalid_context();
     test_reduce_zones_non_finite_floats_ineligible();
     test_reduce_zones_null_context();
