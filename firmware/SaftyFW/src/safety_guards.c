@@ -1050,7 +1050,11 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     /* AT-10: per-run ride-through latch. Set while K4 is energized and the own TC reads good;
      * cleared the moment the run ends (relay de-energized). A fault present before the run, or
      * during a run that never saw a good own read, is never tolerated. */
-    state->s5_seen_read = true;
+    /* AT-22: only a real own-TC read counts (valid sample or a MAX31856 fault-bit read); an SPI
+     * failure or a not-yet-sampled NaN does not unlock enable. */
+    if (!in->spi_failed && (in->tc_valid || in->fault_bits != 0u)) {
+        state->s5_seen_read = true;
+    }
     if (in->relay_deenergized) {
         if (state->s5_resume_pending) {
             /* AT-15: allowance restored after a benign reboot; hold it while K4 is still off. */

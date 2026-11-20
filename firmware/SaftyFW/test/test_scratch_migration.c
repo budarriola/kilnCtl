@@ -285,9 +285,32 @@ static void test_own_ok_persist(void)
     TEST_CHECK(!own_ok_persist_restored(), "power-on (zeroed scratch) restores nothing");
 }
 
+static void test_own_ok_persist_guards(void)
+{
+    TEST_SECTION("AT-20/21: own_ok_persist never clobbers a fatal or overdue tag; survives overdue recover");
+    uint32_t raw = 0u;
+    fake_scratch_reset_all();
+    (void)hal_scratch_write_u32(SCRATCH_OVERDUE, 0xB4000000u);
+    own_ok_persist_write(true);
+    (void)hal_scratch_read_u32(SCRATCH_OVERDUE, &raw, SCRATCH_OVERDUE, 0u, NULL);
+    TEST_CHECK(raw == 0xB4000000u, "AT-20: write(true) leaves a fatal tag alone");
+    fake_scratch_reset_all();
+    watchdog_overdue_diag_mark(0x01u, 0u, 50u);
+    own_ok_persist_write(true);
+    TEST_CHECK(watchdog_overdue_diag_read().magic_ok, "AT-20: write(true) leaves the 0xD9 overdue mark alone");
+    fake_scratch_reset_all();
+    own_ok_persist_write(true);
+    watchdog_overdue_diag_mark(0x01u, 0u, 50u);
+    watchdog_overdue_diag_notify_recovered();
+    own_ok_persist_write(true); /* the per-tick re-assert */
+    own_ok_persist_boot_read(true);
+    TEST_CHECK(own_ok_persist_restored(), "AT-23: mark -> recover -> re-assert leaves the allowance present");
+}
+
 void run_test_scratch_migration(void)
 {
     test_own_ok_persist();
+    test_own_ok_persist_guards();
     test_boot_reason_round_trips_through_hal_scratch();
     test_boot_reason_unlatched_reads_invalid();
     test_boot_reason_forced_reboot_is_not_watchdog();

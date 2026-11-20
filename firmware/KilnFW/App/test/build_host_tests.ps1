@@ -155,6 +155,7 @@ try {
         (Join-Path $testDir "test_setup_wizard_progress.c"),
         (Join-Path $testDir "test_display_power_wiring.c"),
         (Join-Path $testDir "test_diagnostics_safety_tc_state.c"),
+        (Join-Path $testDir "test_own_tc_start_gate.c"),
         (Join-Path $testDir "test_dashboard_protocol_version.c"),
         (Join-Path $testDir "test_estop_verification.c"),
         (Join-Path $testDir "test_dualwrite_window.c"),

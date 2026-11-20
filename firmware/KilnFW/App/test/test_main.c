@@ -93,6 +93,7 @@ void run_test_zone_aux_convert_core(void);
 void run_test_setup_wizard_progress(void);
 void run_test_display_power_wiring(void);
 void run_test_diagnostics_safety_tc_state(void);
+void run_test_own_tc_start_gate(void);
 void run_test_dashboard_protocol_version(void);
 /* run_test_crash_report() moved to its own executable, see build_host_tests.ps1's
  * "exe41" comment (2026-09-15, uart_bridge_ext_run_on_flash_worker() stub collision
@@ -239,6 +240,7 @@ int main(void)
     run_test_setup_wizard_progress();
     run_test_display_power_wiring();
     run_test_diagnostics_safety_tc_state();
+    run_test_own_tc_start_gate();
     run_test_dashboard_protocol_version();
     run_test_estop_verification();
     run_test_dualwrite_window();

@@ -1503,6 +1503,9 @@ static void safety_core_task(void *arg)
         safety_guard_input_t input = safety_core_build_input();
 
         bool newly_tripped = safety_guards_tick(&s_guard_state, &s_guard_cfg, &input);
+        if (s_guard_state.s5_own_ok_in_run && own_ok_persisted) {
+            own_ok_persist_write(true); // AT-23: idempotent re-assert; a recovered 0xD9 mark clears slot 5
+        }
         if (s_guard_state.s5_own_ok_in_run != own_ok_persisted) {
             own_ok_persisted = s_guard_state.s5_own_ok_in_run; // AT-15: persist on change only
             own_ok_persist_write(own_ok_persisted);

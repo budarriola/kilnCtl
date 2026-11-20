@@ -3573,6 +3573,26 @@ static void test_at_ride_grace_and_restore(void)
         }
         TEST_CHECK(safety_guards_s5_persistently_bad(&s, &cfg), "AT-16: 13 s of bad samples is persistent");
     }
+    {
+        /* AT-22: ticks without a real own-TC read do not unlock enable. */
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_valid = false;
+        in.tc_c = NAN;
+        in.fault_bits = 0u;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s5_seen_read, "AT-22: not-yet-sampled tick does not set s5_seen_read");
+        in.spi_failed = true;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s5_seen_read, "AT-22: SPI failure does not set s5_seen_read");
+        in.spi_failed = false;
+        at_own_open(&in);
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s5_seen_read, "AT-22: a fault-bit read counts as a real read");
+    }
 }
 
 /* AT (owner 2026-11-19): own-IC fault tolerated while a zone works; S1/S2/S8 on every TC. */

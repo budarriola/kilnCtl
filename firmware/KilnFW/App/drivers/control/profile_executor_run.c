@@ -30,6 +30,7 @@
 #include "relay_authority.h"
 #include "relay_off_tracker.h"
 #include "safety_trip_words.h"
+#include "own_tc_start_gate.h"
 #include "sim_backend.h"
 #include "system_mode_gate.h"
 #include "thermo_channel_read.h"
@@ -303,6 +304,18 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         ESP_LOGW(PE_TAG, "profile_executor_run() called before profile_executor_start() -- refused");
         if (err_msg) snprintf(err_msg, err_cap, "profile executor not started");
         return false;
+    }
+
+    /* AT-24: the Pico keeps its own-TC ride-through allowance across a benign reboot and cannot tell
+     * a resume from a new start; refuse a NEW start here while its own TC reports faulted. */
+    if (s_exec.safety != NULL) {
+        safety_link_status_t own_tc_st;
+        if (safety_link_get_status(s_exec.safety, &own_tc_st) == ESP_OK &&
+            own_tc_start_must_refuse(own_tc_st.link_up, own_tc_st.flags, own_tc_st.tc_fault)) {
+            if (err_msg) snprintf(err_msg, err_cap, "%s", OWN_TC_START_REFUSAL_MSG);
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused: safety thermocouple faulted", (unsigned)profile_id);
+            return false;
+        }
     }
 
     /* L23 residual: capture the slot's save revision BEFORE the copy. */
