@@ -67,7 +67,7 @@ rates and faster SPI is not needed. Use **4 MHz** in **SPI mode 1**
 
 The MAX31856 supports B/E/J/K/N/R/S/T. `KilnFW` ships **type K** for the zone
 thermocouples. **The safety thermocouple should not automatically match**, and
-which type is right depends on `tc_placement_mode` (`SAFETY_MODEL.md` §3).
+which type is right depends on where the probe sits (`tc_placement_mode` is deprecated and ignored since 2026-11-19; the own TC is always in-chamber).
 
 ### If `CHAMBER_AGREED` and the kiln fires above ~1200 °C, type K is the wrong choice
 
@@ -190,6 +190,11 @@ per-sample cost is one cached boolean read (`max31856_tc_type_verified()`).
 ---
 
 ## 3. Borrowing a main-board thermocouple
+
+> **2026-11-19: this section is historical.** `tc_source`, `tc_placement_mode` and `borrowed_zone_index` are deprecated
+> and ignored. Over-temperature (S1/S2/S10) uses the hottest of the own J7 reading and every working zone reading; an
+> own-TC fault (OPEN/OVUV/TCRANGE) is ridden through while at least one zone TC works, and S5 trips when none does.
+> The own TC is always treated as in-chamber. See `SAFETY_MODEL.md` section 3.
 
 `tc_source` (`SAFETY_MODEL.md` §3) allows the safety processor to use one of the
 **main board's** zone thermocouples instead of, or alongside, its own:

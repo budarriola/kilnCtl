@@ -159,6 +159,24 @@ two, not a percent. See `CURRENT_SENSE.md` §2.
 
 ### Where the safety temperature comes from
 
+> **2026-11-19 (owner decision, AT-01/AT-02): `tc_source`, `tc_placement_mode` and `borrowed_zone_index` are
+> DEPRECATED and ignored.** The tables and prose below this banner describe the pre-2026-11-19 model and are kept
+> as history only. Current behaviour:
+>
+> - **All-TC over-temp.** S1, S2 and S10 use the hottest of the Pico's own J7 reading and every *working* ESP zone
+>   reading. A zone is working only with a valid context frame, link up, a finite plausible value, no
+>   OPEN/OVUV/TCRANGE bits and a `sample_counter` that advanced within `borrowed_stale_s` (a zone is not working until
+>   its counter advanced once, so there is a startup delay).
+> - **Per-zone S8 and SR-33.** The rate guard and the SR-33 check run per zone as well as on the own TC. The strict
+>   two-window post-trip S8 clear streak stays own-TC only; zones use the whole-hold average in the clear check.
+> - **Own-TC fault ride-through.** An own-IC fault (OPEN/OVUV/TCRANGE with SPI ok) is tolerated for the rest of the
+>   firing, with no time cap, while at least one zone TC works. S5 keeps accumulating and trips at once when no TC
+>   works at all. S13 trips only for: own TC bad and no working zone, or a zone stalled (S5 normally trips first).
+> - **Placement.** The own TC is always treated as in-chamber (`CHAMBER_AGREED`); `EXTERNAL_OVERHEAT` no longer exists.
+>   `LINK_FLAG2_BORROWED` is always false; protocol stays 18.
+> - **Commissioning bits.** The three deprecated fields still carry `fields_set` bits that the commissioning gate
+>   requires, so KilnFW writes them as fixed 0 (server-side forced) -- values are never meaningful.
+
 Two commissioning decisions, both required, both statements about physical
 reality rather than preferences. Full driver detail in `THERMOCOUPLE.md` §3.
 

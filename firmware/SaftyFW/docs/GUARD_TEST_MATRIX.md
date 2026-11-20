@@ -95,6 +95,19 @@ live.
 
 ## 2. Host tests
 
+> **2026-11-19 (AT-01/AT-02): `tc_source`, `tc_placement_mode` and `borrowed_zone_index` are deprecated and ignored.**
+> Rows below that arm S2/S10/S13 through them are historical. Current guard matrix additions:
+>
+> | Guard | Case | Host test |
+> |---|---|---|
+> | S1/S2/S10 | hottest of own TC and every working zone TC drives the check; a hot zone trips with a cool own TC | `test_safety_guards.c`, `test_safety_core_host.c` |
+> | S8 / SR-33 | run per zone as well as on the own TC | `test_safety_guards.c` |
+> | S5 | own-TC fault ridden through while a zone TC works; trips at once when no TC works | `test_safety_guards.c`, `test_safety_core_host.c` |
+> | S13 | trips only for own bad with no working zone, or a stalled zone | `test_safety_guards.c` |
+> | Context | zone not working until `sample_counter` advanced once | `test_snapshots.c` |
+>
+> Bench (pending): hot-zone-only trip with the J7 sensor cool; J7 unplugged mid-firing with a zone TC working (no trip), then zone TCs also lost (S5 trip).
+
 Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 `firmware/KilnFW/App/test/`. These are cheap, so they should be exhaustive.
 

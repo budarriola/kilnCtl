@@ -38,13 +38,21 @@ default (K) rather than shipping disabled, but is *also* required for
 
 | Field | Unit | Affects | Risk | Notes |
 |---|---|---|---|---|
-| `tc_source` | enum | **everything thermal** | 🔴 | `OWN_J7` \| `BORROWED_ZONE` \| `BOTH`. `BORROWED_ZONE` trades away sensor independence — see `SAFETY_MODEL.md` §3 before choosing it |
-| `borrowed_zone_index` | 0–2 | S13, and the reading itself | 🔴 | Only meaningful when `tc_source` ≠ `OWN_J7`. Must name a zone the ESP actually reports |
-| `tc_placement_mode` | enum | S1 ceiling mode, **S2**, **S10** | 🔴🟠 | `CHAMBER_AGREED` \| `EXTERNAL_OVERHEAT`. A statement about where the sensor physically is, not a preference. Wrong in one direction silences the only cross-check; wrong in the other makes S10 fire constantly on correct readings. **Forced to `CHAMBER_AGREED` when `tc_source` is `BORROWED_ZONE`** |
+| `tc_source` (**DEPRECATED 2026-11-19, ignored**) | enum | **everything thermal** | 🔴 | `OWN_J7` \| `BORROWED_ZONE` \| `BOTH`. `BORROWED_ZONE` trades away sensor independence — see `SAFETY_MODEL.md` §3 before choosing it |
+| `borrowed_zone_index` (**DEPRECATED 2026-11-19, ignored**) | 0–2 | S13, and the reading itself | 🔴 | Only meaningful when `tc_source` ≠ `OWN_J7`. Must name a zone the ESP actually reports |
+| `tc_placement_mode` (**DEPRECATED 2026-11-19, ignored**) | enum | S1 ceiling mode, **S2**, **S10** | 🔴🟠 | `CHAMBER_AGREED` \| `EXTERNAL_OVERHEAT`. A statement about where the sensor physically is, not a preference. Wrong in one direction silences the only cross-check; wrong in the other makes S10 fire constantly on correct readings. **Forced to `CHAMBER_AGREED` when `tc_source` is `BORROWED_ZONE`** |
 | `abs_max_temp_c` | °C | **S1** | 🔴 | In `CHAMBER_AGREED`, what the furniture and elements survive (~1300 for cone 10). In `EXTERNAL_OVERHEAT`, what *that location* must never exceed — unrelated to any firing temperature |
 | `tc_type` | enum | the **own** sensor's readings | 🔴 | Must match the thermocouple physically fitted to J7. A mismatch reads **plausible and wrong**, usually low. **Per-thermocouple, not global** — each zone has its own, configured on the ESP and reported in the context frame. See `THERMOCOUPLE.md` §2. **Unlike the other rows in this table, `tc_type` keeps a real compiled default (K)** — an uncommissioned board still runs a real, usable type, it is not left disabled. As of 2026-08-24 it is *also* `fields_set`-gated (`CONFIG_STORE_SET_TC_TYPE`), for a narrower reason than "no safe default": a commissioned K and a never-touched, defaulted-to-K record are the identical byte, and the per-type plausibility band (`THERMOCOUPLE.md` §2/§5, `max31856_tc_range_policy.h`) needs to tell them apart. Uncommissioned ⇒ that band widens to the union of all eight types' ranges instead of applying K's alone, and `calibration_missing` stays true until this field is committed too (folded into §7's existing required-set check) |
 | `ct_channel_map[3]` | zone/relay ids | **S3**, **S4** | 🔴🟠 | Which relay each CT actually watches. Confirmed by the one-relay-at-a-time check in `CURRENT_SENSE.md` §5 step 2. S3/S4 stay disabled until it passes |
 | `tc_offset_c` | °C | **every guard that reads the safety processor's own thermocouple** | 🔴 | Owner request 2026-09-08. A calibration correction ADDED to the safety board's own MAX31856 hot-junction reading (`thermo_task.c`, applied before any guard or the wire telemetry sees the value) — distinct from `tc_expected_offset_c` (§2 below), which only ever compares against a zone reading and is never applied. Default 0.0 (no correction); NOT `fields_set`-gated (0.0 is a safe default, unlike `tc_type`/`abs_max_temp_c`). Writes are bounded to ±50 °C (`CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C`); a finite stored value beyond that is clamped to ±50 °C at load rather than rejected (a rejected record would boot the safety processor on defaults). NaN is still rejected. No MAX31856 hardware trim register backs this (it is a software correction), and no magnitude/sign constraint is documented, so none is invented (same reasoning as `tc_expected_offset_c`'s own note in §2) |
+
+> **Deprecated 2026-11-19 (AT-01/AT-02):** the three rows above (`tc_source`, `borrowed_zone_index`,
+> `tc_placement_mode`) no longer change any behaviour; their descriptions are history. S1/S2/S10 always use the hottest
+> of the own J7 reading and every working zone reading, S8 and SR-33 run per zone, and an own-TC fault is ridden
+> through while a zone TC works. The fields remain writable and their `fields_set` bits are still required by the
+> commissioning gate, so KilnFW sends fixed 0 for all three (and forces 0 server-side). Old backups containing them are
+> accepted and the values ignored. `borrowed_stale_s` / `borrowed_stale_trip_s` still define when a zone TC stops
+> counting as working.
 
 ## 2. Temperature guards
 
